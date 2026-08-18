@@ -297,6 +297,70 @@ TEST_CASE("IntervalCompressor - compression is amortized, not per-row", "[interv
 	REQUIRE(total == static_cast<int64_t>(n) * 5);
 }
 
+TEST_CASE("IntervalCompressor - a loop of Add() bounds the state on its own", "[interval_compressor]") {
+	// This is exactly what compress_intervals' Combine does: replay the source state's
+	// intervals into the target through Add(). Add() checks the growing compression floor on
+	// EVERY push, so when the loop ends the state is already bounded -- which is why Combine
+	// must NOT follow it with an unconditional Compress(). Doing so reclaimed nothing on
+	// disjoint input and cost O(m log m) per combine -- about 25% of the aggregate on 500k
+	// rows / 50 groups, at either thread count -- and it could compress twice in a row when
+	// the loop had just crossed the floor itself.
+	//
+	// The DuckDB glue is not reachable from this binary (it links no libduckdb), so this
+	// pins the class-level invariant the removal rests on rather than the Combine call.
+	IntervalCompressor target;
+	IntervalCompressor source;
+
+	// Disjoint, so compression can reclaim nothing -- the shape that made the old policy
+	// pathological, and the shape compress_intervals is normally fed.
+	for (int i = 0; i < 5000; i++) {
+		source.Add(i * 10, i * 10 + 5);
+	}
+	REQUIRE(source.CompressionCount() == 0);
+
+	for (size_t i = 0; i < source.Size(); i++) {
+		target.Add(source.starts[i], source.stops[i]);
+	}
+
+	// Well under the floor, so no compression was needed and none happened.
+	REQUIRE(target.CompressionCount() == 0);
+	REQUIRE(target.Size() == 5000);
+
+	// And the answer is intact once the caller does compress, which Finalize always does.
+	target.Compress();
+	REQUIRE(target.Size() == 5000);
+	int64_t total = 0;
+	for (size_t i = 0; i < target.Size(); i++) {
+		total += target.stops[i] - target.starts[i];
+	}
+	REQUIRE(total == 5000 * 5);
+}
+
+TEST_CASE("IntervalCompressor - repeated merges stay bounded without an external Compress", "[interval_compressor]") {
+	// Many combines, as a parallel GROUP BY produces. The state must stay bounded from
+	// Add()'s floor alone, with the caller never compressing: this is what makes dropping
+	// Combine's Compress() safe rather than merely faster.
+	IntervalCompressor target;
+	for (int round = 0; round < 40; round++) {
+		for (int i = 0; i < 30000; i++) {
+			const int64_t base = (static_cast<int64_t>(round) * 30000 + i) * 10;
+			target.Add(base, base + 5);
+		}
+	}
+
+	// 1.2M disjoint intervals: the floor is crossed once at 1e6 and then doubles past the
+	// total, so the whole run costs a small constant number of compressions.
+	REQUIRE(target.CompressionCount() <= 3);
+
+	target.Compress();
+	REQUIRE(target.Size() == 40 * 30000);
+	int64_t total = 0;
+	for (size_t i = 0; i < target.Size(); i++) {
+		total += target.stops[i] - target.starts[i];
+	}
+	REQUIRE(total == 40LL * 30000LL * 5LL);
+}
+
 TEST_CASE("IntervalCompressor - mix of positive and negative", "[interval_compressor]") {
 	IntervalCompressor compressor;
 	compressor.Add(-50, -10);
