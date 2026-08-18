@@ -116,6 +116,29 @@ groupings.
 
 DuckDB's sort-key normalization is exposed at SQL level as `create_sort_key()`.
 
+### Worker threads get a small stack — never recurse per input element
+
+DuckDB worker threads are created with a **544 KB stack**; the main thread has the usual
+8 MB. Whether a given table function body runs on a worker or on the main thread depends
+on how the scheduler happens to place the pipeline, so an algorithm whose stack depth
+scales with input size **crashes nondeterministically on identical input** — and it
+crashes with a signal (SIGBUS/SIGSEGV), not a catchable exception, so the query does not
+fail with an error: a multi-statement script simply dies partway, leaving a
+partially-populated database and no message. That makes it far worse than an error.
+
+Consequently, anything whose depth is driven by data — tree/graph traversal, nested
+parsing, divide-and-conquer — must use an explicit heap-allocated work stack. `Newick`
+parsing and serialization (`src/NewickTree.cpp`) and all `NewickTree` traversals
+(`postorder()`, `preorder()`) are iterative for exactly this reason; the parser was
+originally recursive and crashed on ordinary fragment-insertion phylogenies, which nest
+~8,600 levels deep (issue #249).
+
+A Catch2 test does **not** catch this by default: it runs on the main thread's 8 MB
+stack. Tests for depth-sensitive code must pin a small stack explicitly via
+`pthread_attr_setstacksize` (`std::thread` gives no control over stack size, and on Linux
+inherits the 8 MB default) — see the `[depth]`-tagged cases in
+`test/cpp/test_NewickParser.cpp`.
+
 ## Optimizer
 
 **Passes run once each, in a fixed order, never to fixpoint.** v1.5 has 30+ passes with a

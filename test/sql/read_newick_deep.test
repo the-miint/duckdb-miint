@@ -1,0 +1,69 @@
+# name: test/sql/read_newick_deep.test
+# description: read_newick must not overflow the stack on deeply nested trees (issue #249)
+# group: [sql]
+
+require miint
+
+# Ladder-like phylogenies (fragment insertion, placement) nest thousands of levels
+# deep, which is ordinary input for this project rather than a pathological case.
+# A recursive parser burns one stack frame pair per level, so such trees crashed the
+# process with SIGBUS/SIGSEGV -- a signal, not a SQL error, so a multi-statement
+# script died partway with no message and a partially-populated database.
+#
+# This is a backstop, not the primary guard: DuckDB decides whether a table function
+# runs on the main thread (8 MB stack) or a worker (544 KB), so SQL cannot pin the
+# small stack that makes the crash deterministic. test/cpp/test_NewickParser.cpp does
+# that. The depth here is chosen to exceed even the main thread's 8 MB, so this file
+# still fails if the parser ever goes back to recursing.
+
+# A caterpillar with 200,000 tips: 199,999 levels of nesting, 399,999 nodes.
+# "(((t0,t1),t2),t3)...;"
+statement ok
+CREATE TABLE deep_newick AS
+SELECT repeat('(', 199999) || 't0,t1' || string_agg('),t' || i, '' ORDER BY i) || ');' AS nwk
+FROM generate_series(2, 199999) AS s(i);
+
+statement ok
+COPY deep_newick TO '__TEST_DIR__/deep_caterpillar.nwk' (FORMAT csv, HEADER false, DELIMITER E'\t');
+
+# Reading it must succeed, not crash. 2n - 1 nodes for a caterpillar of n tips.
+query II
+SELECT COUNT(*), COUNT(*) FILTER (WHERE is_tip) FROM read_newick('__TEST_DIR__/deep_caterpillar.nwk');
+----
+399999	200000
+
+# Exactly one root, and every other node has a parent -- confirms the whole ladder
+# was linked up, not just that the row count came out right.
+query II
+SELECT COUNT(*) FILTER (WHERE parent_index IS NULL), COUNT(*) FILTER (WHERE parent_index IS NOT NULL)
+FROM read_newick('__TEST_DIR__/deep_caterpillar.nwk');
+----
+1	399998
+
+# The deepest tips are the first two, and the ladder ends at the last tip.
+query T
+SELECT name FROM read_newick('__TEST_DIR__/deep_caterpillar.nwk')
+WHERE name IN ('t0', 't1', 't199999') ORDER BY name;
+----
+t0
+t1
+t199999
+
+# COPY ... (FORMAT NEWICK) then re-reading is the other path through the parser
+# (serialization was already iterative; this guards the pair of them).
+statement ok
+CREATE TABLE deep_tree AS SELECT * FROM read_newick('__TEST_DIR__/deep_caterpillar.nwk');
+
+statement ok
+COPY deep_tree TO '__TEST_DIR__/deep_roundtrip.nwk' (FORMAT NEWICK);
+
+query II
+SELECT COUNT(*), COUNT(*) FILTER (WHERE is_tip) FROM read_newick('__TEST_DIR__/deep_roundtrip.nwk');
+----
+399999	200000
+
+statement ok
+DROP TABLE deep_tree;
+
+statement ok
+DROP TABLE deep_newick;

@@ -7,6 +7,9 @@
 #include <limits>
 #include <set>
 #include <string>
+#if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
+#include <pthread.h> // parse-depth tests pin a stack size; std::thread cannot
+#endif
 #include "NewickTree.hpp"
 
 using Catch::Matchers::ContainsSubstring;
@@ -561,6 +564,134 @@ TEST_CASE("NewickTree serialize deep caterpillar tree", "[NewickTree][serialize]
 	REQUIRE(tree2.num_nodes() == tree.num_nodes());
 	REQUIRE(tree2.num_tips() == tree.num_tips());
 }
+
+// ============================================================================
+// Parse depth: stack consumption must not scale with nesting depth (issue #249)
+//
+// DuckDB worker threads get a 544 KB stack while the main thread gets 8 MB, so a
+// recursive parser crashes the process with SIGBUS only when the table function
+// happens to be scheduled on a worker -- nondeterministic on identical input. A
+// plain Catch2 test runs on the main thread and passes while the bug is live (the
+// 1,000-tip test above is exactly that), so these tests pin a small stack
+// explicitly. std::thread cannot do that, hence pthread.
+// ============================================================================
+
+#if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
+
+namespace {
+
+// Build "(((t0,t1),t2),t3)...;" -- maximally unbalanced, so nesting depth is
+// tips - 1 and node count is 2 * tips - 1. Built in a single pass: the
+// `s = "(" + s + ",tN)"` idiom used by the smaller tests above is O(n^2) and does
+// not reach the depths needed here. Requires tips >= 2.
+std::string make_caterpillar_newick(size_t tips) {
+	std::string s;
+	s.reserve(tips * 14);
+	s.append(tips - 1, '(');
+	s += "t0,t1";
+	for (size_t i = 2; i < tips; ++i) {
+		s += "),t";
+		s += std::to_string(i);
+	}
+	s += ");";
+	return s;
+}
+
+struct SmallStackParse {
+	bool ok = false;
+	std::string error;
+	size_t num_nodes = 0;
+	size_t num_tips = 0;
+};
+
+// Parse on a thread whose stack is pinned to `stack_bytes`, mimicking a DuckDB
+// worker. Catch2's assertion macros are not thread-safe, so the worker only
+// records the outcome and the caller asserts on it.
+SmallStackParse parse_on_pinned_stack(const std::string &newick, size_t stack_bytes) {
+	struct Payload {
+		const std::string *newick;
+		SmallStackParse result;
+	};
+	Payload payload {&newick, {}};
+
+	pthread_attr_t attr;
+	REQUIRE(pthread_attr_init(&attr) == 0);
+	REQUIRE(pthread_attr_setstacksize(&attr, stack_bytes) == 0);
+
+	auto entry = [](void *arg) -> void * {
+		auto *p = static_cast<Payload *>(arg);
+		try {
+			auto tree = miint::NewickTree::parse(*p->newick);
+			p->result.num_nodes = tree.num_nodes();
+			p->result.num_tips = tree.num_tips();
+			p->result.ok = true;
+		} catch (const std::exception &e) {
+			p->result.error = e.what();
+		}
+		return nullptr;
+	};
+
+	pthread_t thread;
+	int rc = pthread_create(&thread, &attr, entry, &payload);
+	pthread_attr_destroy(&attr);
+	REQUIRE(rc == 0);
+	REQUIRE(pthread_join(thread, nullptr) == 0);
+
+	return payload.result;
+}
+
+// A DuckDB worker thread stack. Real fragment-insertion phylogenies nest ~8,600
+// levels deep, which needs far more than this if one frame is pushed per level.
+constexpr size_t WORKER_STACK_BYTES = 512 * 1024;
+
+} // namespace
+
+TEST_CASE("NewickTree parse deep caterpillar on a worker-sized stack", "[NewickTree][parse][scale][depth]") {
+	// 10,000 tips => 9,999 levels of nesting. This is the depth class of a real
+	// fragment-insertion tree (issue #249 measured 8,624 on a 3.45M-tip phylogeny),
+	// not a pathological input: ladder-like placement trees are normal.
+	const size_t tips = 10000;
+	std::string newick = make_caterpillar_newick(tips);
+
+	auto parsed = parse_on_pinned_stack(newick, WORKER_STACK_BYTES);
+
+	INFO("parse error: " << parsed.error);
+	REQUIRE(parsed.ok);
+	REQUIRE(parsed.num_tips == tips);
+	REQUIRE(parsed.num_nodes == 2 * tips - 1);
+}
+
+TEST_CASE("NewickTree parse very deep caterpillar uses O(1) stack", "[NewickTree][parse][scale][depth]") {
+	// 1,000,000 levels of nesting in the same 512 KB stack. Two orders of magnitude
+	// past the previous case, so this fails unless per-level state lives on the heap
+	// -- it pins O(1) stack use rather than merely "deeper than before".
+	const size_t tips = 1000000;
+	std::string newick = make_caterpillar_newick(tips);
+
+	auto parsed = parse_on_pinned_stack(newick, WORKER_STACK_BYTES);
+
+	INFO("parse error: " << parsed.error);
+	REQUIRE(parsed.ok);
+	REQUIRE(parsed.num_tips == tips);
+	REQUIRE(parsed.num_nodes == 2 * tips - 1);
+}
+
+TEST_CASE("NewickTree deep caterpillar round-trips on a worker-sized stack", "[NewickTree][parse][scale][depth]") {
+	// Serialization was already iterative; this guards the pair of them, since
+	// COPY ... (FORMAT NEWICK) followed by read_newick exercises both directions.
+	const size_t tips = 10000;
+	auto tree = miint::NewickTree::parse(make_caterpillar_newick(tips));
+	std::string serialized = tree.to_newick();
+
+	auto reparsed = parse_on_pinned_stack(serialized, WORKER_STACK_BYTES);
+
+	INFO("parse error: " << reparsed.error);
+	REQUIRE(reparsed.ok);
+	REQUIRE(reparsed.num_nodes == tree.num_nodes());
+	REQUIRE(reparsed.num_tips == tree.num_tips());
+}
+
+#endif // !_WIN32 && !__EMSCRIPTEN__
 
 TEST_CASE("NewickTree find_node_by_name", "[NewickTree][query]") {
 	auto tree = miint::NewickTree::parse("((A,B)AB,(C,D)CD)root;");
