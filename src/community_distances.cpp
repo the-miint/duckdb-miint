@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <stdexcept>
 #include <system_error>
@@ -26,6 +27,41 @@ enum class Metric { BrayCurtis, Euclidean, Jaccard, Soergel, MorisitaHorn, Pears
 static_assert(kMetrics.size() == static_cast<size_t>(Metric::Gower) + 1,
               "kMetrics and enum class Metric must have the same number of entries");
 
+// Whether each kMetrics entry is PAIRWISE-LOCAL, in the same order.
+//
+// Pairwise-local means d(i,j) is a function of samples i and j alone: it reads
+// no statistic taken over the other rows, and it is unchanged by dropping
+// feature columns that are zero in both i and j. Only such a metric can be
+// computed one block of samples at a time (progressive_pcoa_from_features),
+// because a block carries an arbitrary subset of the samples and only the
+// features that subset happens to use.
+//
+// The three false entries each fail for a different reason, and all three fail
+// SILENTLY — they return a plausible number that simply is not the same metric
+// from block to block:
+//   pearson  the per-sample mean is rowsum/f, and features zero in both samples
+//            still contribute mi*mj to the covariance and mi^2/mj^2 to the
+//            variances, so both the mean and the sums move with f
+//   chisq    weights every term by grand_total/colsum[k]
+//   gower    divides every term by colrange[k] = max_i M[i][k] - min_i M[i][k]
+//
+// Parallel-array rather than a field on the enum so that adding a metric to
+// kMetrics without classifying it FAILS TO BUILD on the static_assert below,
+// rather than defaulting to some answer nobody chose.
+constexpr std::array<bool, 8> kPairwiseLocal = {
+    true,  // bray_curtis    Sum|x-y| / Sum(x+y)          -- per-pair sums only
+    true,  // euclidean      sqrt(Sum(x-y)^2)             -- per-pair sums only
+    true,  // jaccard        (b+c)/(a+b+c)                -- per-pair counts only
+    true,  // soergel        Sum|x-y| / Sum max(x,y)      -- per-pair sums only
+    true,  // morisita_horn  normalizes by PER-SAMPLE totals, not column ones
+    false, // pearson        feature-space dependent (see above)
+    false, // chisq          needs column sums + grand total
+    false, // gower          needs per-feature ranges
+};
+static_assert(kPairwiseLocal.size() == kMetrics.size(),
+              "kPairwiseLocal must classify every kMetrics entry -- a new metric has to be "
+              "declared pairwise-local or not before it can be used anywhere");
+
 // Index of `metric` in kMetrics, or -1 if unknown.
 int MetricIndex(const std::string &metric) {
 	for (size_t i = 0; i < kMetrics.size(); ++i) {
@@ -42,16 +78,25 @@ size_t PairCount(uint32_t n) {
 	return static_cast<size_t>(static_cast<uint64_t>(n) * static_cast<uint64_t>(n - 1) / 2);
 }
 
-} // namespace
-
-bool IsValidCommunityMetric(const std::string &metric) {
-	return MetricIndex(metric) >= 0;
+// Base offset of row i's block in the condensed upper-triangle output: rows 0..i-1
+// contribute sum_{t<i}(n-1-t) pairs. Every pair (i,j) therefore has a FIXED
+// destination slot, independent of which thread computes it — which is what makes
+// both pair loops bit-identical for any thread count.
+//
+// i*(2n-i-1) is always even (i and 2n-i-1 have opposite parity), so the halving is
+// exact, and the whole product is formed in uint64 so it cannot wrap.
+size_t RowBase(uint32_t n, uint32_t i) {
+	return static_cast<size_t>(static_cast<uint64_t>(i) * (2ull * n - i - 1) / 2);
 }
 
-std::string CommunityMetricList() {
+// Comma-separated metric names, either all of them or only the pairwise-local ones.
+std::string JoinMetricNames(bool pairwise_local_only) {
 	std::string out;
 	for (size_t i = 0; i < kMetrics.size(); ++i) {
-		if (i != 0) {
+		if (pairwise_local_only && !kPairwiseLocal[i]) {
+			continue;
+		}
+		if (!out.empty()) {
 			out += ", ";
 		}
 		out += kMetrics[i];
@@ -59,23 +104,113 @@ std::string CommunityMetricList() {
 	return out;
 }
 
-std::vector<double> CommunityDistancesCondensed(const std::vector<double> &matrix, uint32_t n_samples,
-                                                uint32_t n_features, const std::string &metric, unsigned n_threads) {
+// Validate the sample count and resolve a metric name, optionally requiring that it
+// be pairwise-local. Shared so the dense and sparse entry points cannot drift on the
+// message a caller sees for the same bad input.
+Metric ResolveMetricOrThrow(uint32_t n_samples, const std::string &metric, bool require_pairwise_local) {
 	if (n_samples < 2) {
 		throw std::invalid_argument("community_distances requires at least 2 samples (got " +
 		                            std::to_string(n_samples) + ")");
 	}
+	const int i = MetricIndex(metric);
+	if (i < 0) {
+		throw std::invalid_argument("community_distances: unknown metric '" + metric + "' (must be one of " +
+		                            JoinMetricNames(/*pairwise_local_only=*/false) + ")");
+	}
+	if (require_pairwise_local && !kPairwiseLocal[static_cast<size_t>(i)]) {
+		throw std::invalid_argument("community_distances: metric '" + metric +
+		                            "' is not pairwise-local and cannot be computed from a single block of samples; "
+		                            "it depends on statistics over the whole matrix. Pairwise-local metrics: " +
+		                            JoinMetricNames(/*pairwise_local_only=*/true));
+	}
+	return static_cast<Metric>(i);
+}
+
+// Worker fan-out shared by both condensed pair loops. `compute_row(i)` must fill
+// only row i's slots; every pair has a fixed destination (see RowBase), so which
+// thread computes it cannot change a bit of the result and `n_threads` is purely a
+// performance knob.
+//
+// Row i does (n-1-i) pairs, so a static contiguous split would overload the
+// low-index threads; an atomic row cursor keeps the load balanced instead. The
+// thread count is capped two ways — never more than there are rows with pairs
+// (n-1), and never more than the hardware can run concurrently, since extra threads
+// on a CPU-bound loop only add context switches and spawning thousands risks a
+// pids/ulimit hit. hardware_concurrency() reports 0 when it cannot detect; fall back
+// to the requested count, leaving only the n-1 cap.
+void RunPairLoop(uint32_t n, unsigned n_threads, const std::function<void(uint32_t)> &compute_row) {
+	if (n_threads <= 1) {
+		for (uint32_t i = 0; i + 1 < n; ++i) {
+			compute_row(i);
+		}
+		return;
+	}
+	unsigned hw = std::thread::hardware_concurrency();
+	if (hw == 0) {
+		hw = n_threads;
+	}
+	unsigned nt = std::min<unsigned>(n_threads, n - 1);
+	nt = std::min(nt, hw);
+	std::atomic<uint32_t> next_row {0};
+	auto worker = [&]() {
+		for (;;) {
+			const uint32_t i = next_row.fetch_add(1);
+			if (i + 1 >= n) {
+				break;
+			}
+			compute_row(i);
+		}
+	};
+	std::vector<std::thread> pool;
+	pool.reserve(nt - 1);
+	try {
+		for (unsigned t = 1; t < nt; ++t) {
+			pool.emplace_back(worker);
+		}
+	} catch (const std::system_error &) {
+		// A thread constructor failed (e.g. EAGAIN under a pids/ulimit cap). Do NOT
+		// let it unwind past the joinable threads already in `pool` — a joinable
+		// std::thread's destructor calls std::terminate() and would take the whole
+		// process down. Swallow it and degrade: the threads already spawned keep
+		// draining rows through the atomic cursor and the calling thread finishes the
+		// remainder below, so the full result is still computed, just with fewer
+		// workers. (`pool` is pre-reserved, so emplace_back itself cannot throw.)
+	}
+	worker();
+	for (auto &th : pool) {
+		th.join();
+	}
+}
+
+} // namespace
+
+bool IsValidCommunityMetric(const std::string &metric) {
+	return MetricIndex(metric) >= 0;
+}
+
+std::string PairwiseLocalCommunityMetricList() {
+	return JoinMetricNames(/*pairwise_local_only=*/true);
+}
+
+bool IsPairwiseLocalCommunityMetric(const std::string &metric) {
+	const int i = MetricIndex(metric);
+	// An unknown name is not admissible: refusing it here is what makes a typo
+	// an error at bind rather than a metric silently computed per block.
+	return i >= 0 && kPairwiseLocal[static_cast<size_t>(i)];
+}
+
+std::string CommunityMetricList() {
+	return JoinMetricNames(/*pairwise_local_only=*/false);
+}
+
+std::vector<double> CommunityDistancesCondensed(const std::vector<double> &matrix, uint32_t n_samples,
+                                                uint32_t n_features, const std::string &metric, unsigned n_threads) {
+	const Metric m = ResolveMetricOrThrow(n_samples, metric, /*require_pairwise_local=*/false);
 	if (matrix.size() != static_cast<size_t>(n_samples) * static_cast<size_t>(n_features)) {
 		throw std::invalid_argument("community_distances: matrix size (" + std::to_string(matrix.size()) +
 		                            ") does not match n_samples*n_features (" + std::to_string(n_samples) + "*" +
 		                            std::to_string(n_features) + ")");
 	}
-	const int metric_index = MetricIndex(metric);
-	if (metric_index < 0) {
-		throw std::invalid_argument("community_distances: unknown metric '" + metric + "' (must be one of " +
-		                            CommunityMetricList() + ")");
-	}
-	const Metric m = static_cast<Metric>(metric_index);
 
 	const uint32_t n = n_samples;
 	const uint32_t f = n_features;
@@ -130,21 +265,10 @@ std::vector<double> CommunityDistancesCondensed(const std::vector<double> &matri
 
 	std::vector<double> out(PairCount(n));
 
-	// Base offset of row i's block in the condensed upper-triangle output: rows
-	// 0..i-1 contribute sum_{t<i}(n-1-t) = i*(n-1) - i*(i-1)/2 pairs. Every pair
-	// (i,j) thus has a FIXED destination slot, independent of which thread
-	// computes it, so the result is bit-identical for any n_threads.
-	auto row_base = [n](uint32_t i) -> size_t {
-		// For i == 0 the (i - 1) subterm underflows to UINT32_MAX in uint32_t, but
-		// its leading static_cast<size_t>(i) factor is 0, so the whole term is
-		// exactly 0. Do NOT "simplify" the (i - 1) away as an overflow fix.
-		return static_cast<size_t>(i) * (n - 1) - static_cast<size_t>(i) * (i - 1) / 2;
-	};
-
 	// All pairs (i, j>i) of one outer row, each written to its fixed slot.
 	auto compute_row = [&](uint32_t i) {
 		const double *xi = row(i);
-		size_t o = row_base(i);
+		size_t o = RowBase(n, i);
 		for (uint32_t j = i + 1; j < n; ++j) {
 			const double *yj = row(j);
 			double d = 0.0;
@@ -292,58 +416,156 @@ std::vector<double> CommunityDistancesCondensed(const std::vector<double> &matri
 		}
 	};
 
-	if (n_threads <= 1) {
-		for (uint32_t i = 0; i + 1 < n; ++i) {
-			compute_row(i);
+	RunPairLoop(n, n_threads, compute_row);
+	return out;
+}
+
+std::vector<double> CommunityDistancesCondensedSparse(const std::vector<uint32_t> &indptr,
+                                                      const std::vector<uint32_t> &indices,
+                                                      const std::vector<double> &values, uint32_t n_samples,
+                                                      uint32_t n_features, const std::string &metric,
+                                                      unsigned n_threads) {
+	const Metric m = ResolveMetricOrThrow(n_samples, metric, /*require_pairwise_local=*/true);
+
+	if (indptr.size() != static_cast<size_t>(n_samples) + 1) {
+		throw std::invalid_argument("community_distances: indptr must have n_samples+1 (" +
+		                            std::to_string(n_samples + 1) + ") entries, got " + std::to_string(indptr.size()));
+	}
+	if (indices.size() != values.size()) {
+		throw std::invalid_argument("community_distances: indices (" + std::to_string(indices.size()) +
+		                            ") and values (" + std::to_string(values.size()) + ") must be the same length");
+	}
+	if (indptr.front() != 0 || indptr.back() != indices.size()) {
+		throw std::invalid_argument("community_distances: indptr must start at 0 and end at indices.size()");
+	}
+	for (uint32_t i = 0; i < n_samples; ++i) {
+		if (indptr[i] > indptr[i + 1]) {
+			throw std::invalid_argument("community_distances: indptr must be non-decreasing (row " + std::to_string(i) +
+			                            ")");
 		}
-	} else {
-		// Dynamic row-stealing: row i does (n-1-i) pairs, so a static contiguous
-		// split would overload the low-index threads. An atomic row cursor keeps
-		// the load balanced while the fixed output slots keep the result
-		// deterministic. Cap the OS-thread count two ways: never more than there
-		// are rows with pairs (n-1), and never more than the hardware can run
-		// concurrently — extra threads on this CPU-bound loop only add
-		// context-switch overhead, and spawning thousands risks a pids/ulimit
-		// hit. hardware_concurrency() reports 0 when it cannot detect; fall back
-		// to the requested count (leaving only the n-1 cap) in that case.
-		unsigned hw = std::thread::hardware_concurrency();
-		if (hw == 0) {
-			hw = n_threads;
-		}
-		unsigned nt = std::min<unsigned>(n_threads, n - 1);
-		nt = std::min(nt, hw);
-		std::atomic<uint32_t> next_row {0};
-		auto worker = [&]() {
-			for (;;) {
-				const uint32_t i = next_row.fetch_add(1);
-				if (i + 1 >= n) {
-					break;
-				}
-				compute_row(i);
+		for (uint32_t p = indptr[i]; p < indptr[i + 1]; ++p) {
+			if (indices[p] >= n_features) {
+				throw std::invalid_argument("community_distances: feature index " + std::to_string(indices[p]) +
+				                            " is out of range for n_features=" + std::to_string(n_features));
 			}
-		};
-		std::vector<std::thread> pool;
-		pool.reserve(nt - 1);
-		try {
-			for (unsigned t = 1; t < nt; ++t) {
-				pool.emplace_back(worker);
+			if (p > indptr[i] && indices[p] <= indices[p - 1]) {
+				throw std::invalid_argument("community_distances: feature indices must be strictly ascending within "
+				                            "each row (row " +
+				                            std::to_string(i) + ")");
 			}
-		} catch (const std::system_error &) {
-			// A thread constructor failed (e.g. EAGAIN under a pids/ulimit cap).
-			// Do NOT let it unwind past the joinable threads already in `pool` —
-			// a joinable std::thread's destructor calls std::terminate() and
-			// would crash the entire process. Swallow it and degrade gracefully:
-			// the threads already spawned keep draining rows through the atomic
-			// cursor and the calling thread finishes the remainder below, so the
-			// full result is still computed, just with fewer workers. (The vector
-			// is pre-reserved, so emplace_back itself cannot throw bad_alloc; the
-			// only exception here is the thread constructor's.)
-		}
-		worker(); // the calling thread participates as one worker
-		for (auto &th : pool) {
-			th.join();
 		}
 	}
+
+	const uint32_t n = n_samples;
+
+	// Per-sample aggregates, accumulated in ascending feature order exactly as the
+	// dense pre-pass does (its extra zero terms add nothing).
+	std::vector<double> rowsum(n, 0.0);
+	std::vector<double> rowsumsq(n, 0.0);
+	std::vector<uint32_t> present(n, 0); // nonzero count, for jaccard's presence sets
+	for (uint32_t i = 0; i < n; ++i) {
+		double s = 0.0, ss = 0.0;
+		uint32_t np = 0;
+		for (uint32_t p = indptr[i]; p < indptr[i + 1]; ++p) {
+			const double v = values[p];
+			s += v;
+			ss += v * v;
+			if (v > 0.0) {
+				++np;
+			}
+		}
+		rowsum[i] = s;
+		rowsumsq[i] = ss;
+		present[i] = np;
+	}
+
+	std::vector<double> out(PairCount(n));
+
+	auto compute_row = [&](uint32_t i) {
+		size_t o = RowBase(n, i);
+		for (uint32_t j = i + 1; j < n; ++j, ++o) {
+			// Every guard below compares against 0.0 with the SAME operator the dense
+			// loop uses (`> 0.0` for a denominator or a presence test, `<= 0.0` for an
+			// empty community) rather than testing equality. Nothing rejects negative
+			// abundances on the way in — the feature-table filter drops only NULL, zero
+			// and NaN — so `== 0.0` would let a negative denominator through and emit a
+			// NEGATIVE distance, and would count a negative cell as "present". Both make
+			// this function disagree with community_distances on the same table.
+			//
+			// Merge the two rows' nonzeros in ascending feature order. Every term the
+			// dense loop would add for a feature absent from both is exactly 0.0, so
+			// visiting only the union reproduces its sum bit for bit.
+			uint32_t pi = indptr[i], pj = indptr[j];
+			const uint32_t ei = indptr[i + 1], ej = indptr[j + 1];
+			double abs_diff = 0.0; // Sum|x-y|
+			double sq_diff = 0.0;  // Sum(x-y)^2
+			double max_sum = 0.0;  // Sum max(x,y)
+			double dot = 0.0;      // Sum x*y
+			uint32_t shared = 0;   // features nonzero in BOTH (jaccard's a)
+			while (pi < ei || pj < ej) {
+				double x = 0.0, y = 0.0;
+				if (pj >= ej || (pi < ei && indices[pi] < indices[pj])) {
+					x = values[pi++];
+				} else if (pi >= ei || indices[pj] < indices[pi]) {
+					y = values[pj++];
+				} else {
+					x = values[pi++];
+					y = values[pj++];
+				}
+				const double d = x - y;
+				abs_diff += std::fabs(d);
+				sq_diff += d * d;
+				max_sum += std::max(x, y);
+				dot += x * y;
+				if (x > 0.0 && y > 0.0) {
+					++shared;
+				}
+			}
+
+			double dist = 0.0;
+			switch (m) {
+			case Metric::BrayCurtis: {
+				const double den = rowsum[i] + rowsum[j];
+				dist = den > 0.0 ? abs_diff / den : 0.0;
+				break;
+			}
+			case Metric::Euclidean:
+				dist = std::sqrt(sq_diff);
+				break;
+			case Metric::Jaccard: {
+				// a = shared, b + c = the rest of the union.
+				const uint32_t uni = present[i] + present[j] - shared;
+				dist = uni == 0 ? 0.0 : static_cast<double>(uni - shared) / static_cast<double>(uni);
+				break;
+			}
+			case Metric::Soergel:
+				dist = max_sum > 0.0 ? abs_diff / max_sum : 0.0;
+				break;
+			case Metric::MorisitaHorn: {
+				const double X = rowsum[i], Y = rowsum[j];
+				if (X <= 0.0 && Y <= 0.0) {
+					dist = 0.0;
+				} else if (X <= 0.0 || Y <= 0.0) {
+					dist = 1.0;
+				} else {
+					dist = 1.0 - 2 * dot / ((rowsumsq[i] / (X * X) + rowsumsq[j] / (Y * Y)) * X * Y);
+				}
+				break;
+			}
+			case Metric::Pearson:
+			case Metric::Chisq:
+			case Metric::Gower:
+				// Unreachable: ResolveMetricOrThrow refused these above. Listed rather
+				// than folded into a `default` so that a metric newly classified
+				// pairwise-local has to be handled here instead of silently yielding a
+				// block of zeros.
+				break;
+			}
+			out[o] = dist;
+		}
+	};
+
+	RunPairLoop(n, n_threads, compute_row);
 	return out;
 }
 

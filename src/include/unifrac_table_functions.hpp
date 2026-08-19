@@ -11,6 +11,7 @@ void RegisterUnifracDistances(ExtensionLoader &loader);
 void RegisterPcoaFromDistances(ExtensionLoader &loader);
 void RegisterProgressivePcoaFromDistances(ExtensionLoader &loader);
 void RegisterProgressivePcoaFromUnifrac(ExtensionLoader &loader);
+void RegisterProgressivePcoaFromFeatures(ExtensionLoader &loader);
 void RegisterPermanovaFromDistances(ExtensionLoader &loader);
 void RegisterRarefyFeatureTable(ExtensionLoader &loader);
 // RegisterPickAnchors lives in pick_anchors.hpp: it consumes ordination
