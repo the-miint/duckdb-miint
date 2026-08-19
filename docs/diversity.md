@@ -18,6 +18,7 @@ Methods to estimate alpha and beta diversity, and supporting statistics.
 - [PCoA (from a distance table)](#pcoa-from-a-distance-table) - metric-agnostic PCoA over any condensed distance table
 - [Progressive PCoA (from a distance table)](#progressive-pcoa-from-a-distance-table) - scalable reference-anchored PCoA without a dense N×N decomposition
 - [Progressive PCoA (from UniFrac)](#progressive-pcoa-from-unifrac) - scalable UniFrac PCoA computing distances on the fly per batch (true-10M path)
+- [Progressive PCoA (from community distances)](#progressive-pcoa-from-community-distances) - the same, tree-free: block-wise Bray-Curtis/Jaccard/… straight from a feature table
 - [PERMANOVA (from a distance table)](#permanova-from-a-distance-table) - metric-agnostic PERMANOVA over any condensed distance table
 - [Two-sample Kolmogorov-Smirnov test](#two-sample-kolmogorov-smirnov-test) - `ks_2samp` over two numeric lists, with SciPy-exact p-values
 - [Sample clustering (k-means and UPGMA)](#sample-clustering-k-means-and-upgma) - group samples from ordination coordinates or a distance table
@@ -265,16 +266,18 @@ SELECT * FROM pcoa('dm', n_dims := 3, seed := 42);
 
 **Metrics.** With `x`, `y` two sample rows, sums over features, `X = Σx`, `Y = Σy`:
 
-| metric | formula | range | notes | primary source |
-|---|---|---|---|---|
-| `bray_curtis` | `Σ\|xₖ−yₖ\| / Σ(xₖ+yₖ)` | [0,1] | empty pair → 0 | Bray & Curtis 1957 |
-| `euclidean` | `sqrt(Σ(xₖ−yₖ)²)` | [0,∞) | | |
-| `jaccard` | binary presence/absence `(b+c)/(a+b+c)` | [0,1] | **presence/absence**, not abundance; empty pair → 0 | Jaccard 1912 |
-| `soergel` | `Σ\|xₖ−yₖ\| / Σ max(xₖ,yₖ)` | [0,1] | empty pair → 0 | |
-| `morisita_horn` | `1 − 2Σ(xₖyₖ) / ((Σxₖ²/X² + Σyₖ²/Y²)·X·Y)` | [0,1] | Horn's Cλ on relative abundances; both-empty → 0, one-empty → 1 | Morisita 1959; Horn 1966; Magurran 2004 p.246 |
-| `pearson` | `1 − r` over features | [0,2] | constant row → 0 vs another constant row, 1 vs a non-constant one | |
-| `chisq` | `sqrt(Σₖ (GT/colₖ)(xₖ/X − yₖ/Y)²)` | [0,∞) | correspondence-analysis χ²; `GT` = grand total; zero-sum row → 0 vs another empty row, 1 otherwise | Faith, Minchin & Belbin 1987 |
-| `gower` | `Σₖ \|xₖ−yₖ\| / rangeₖ` | [0,∞) | un-normalized; `rangeₖ` over all samples | Gower 1971; Faith, Minchin & Belbin 1987 |
+| metric | formula | range | block-wise? | notes | primary source |
+|---|---|---|---|---|---|
+| `bray_curtis` | `Σ\|xₖ−yₖ\| / Σ(xₖ+yₖ)` | [0,1] | ✅ | empty pair → 0 | Bray & Curtis 1957 |
+| `euclidean` | `sqrt(Σ(xₖ−yₖ)²)` | [0,∞) | ✅ | | |
+| `jaccard` | binary presence/absence `(b+c)/(a+b+c)` | [0,1] | ✅ | **presence/absence**, not abundance; empty pair → 0 | Jaccard 1912 |
+| `soergel` | `Σ\|xₖ−yₖ\| / Σ max(xₖ,yₖ)` | [0,1] | ✅ | empty pair → 0 | |
+| `morisita_horn` | `1 − 2Σ(xₖyₖ) / ((Σxₖ²/X² + Σyₖ²/Y²)·X·Y)` | [0,1] | ✅ | Horn's Cλ on relative abundances; both-empty → 0, one-empty → 1 | Morisita 1959; Horn 1966; Magurran 2004 p.246 |
+| `pearson` | `1 − r` over features | [0,2] | ❌ | the per-sample mean is `Σx / n_features`, and features zero in *both* samples still enter the covariance — so the value moves with the feature space | |
+| `chisq` | `sqrt(Σₖ (GT/colₖ)(xₖ/X − yₖ/Y)²)` | [0,∞) | ❌ | needs column sums and the grand total | Faith, Minchin & Belbin 1987 |
+| `gower` | `Σₖ \|xₖ−yₖ\| / rangeₖ` | [0,∞) | ❌ | needs each feature's range over all samples | Gower 1971; Faith, Minchin & Belbin 1987 |
+
+**"Block-wise?"** marks the metrics that [`progressive_pcoa_from_features`](#progressive-pcoa-from-community-distances) accepts. A ✅ metric is *pairwise-local*: `d(i,j)` depends only on samples `i` and `j`, reads no statistic taken over the other rows, and is unchanged by dropping features that are zero in both — so it can be computed one block of samples at a time and get exactly the answer the full matrix would give. The three ❌ metrics read the whole matrix, so a per-block value would silently be a *different distance in every block*; they are refused at bind rather than computed. All eight remain available from `community_distances` itself, which always sees the whole table.
 
 The zero-variance and zero-row-sum conventions (the `pearson` and `chisq` notes
 above) follow `cogent3.maths.distance_transform`, the reference implementation of
@@ -545,6 +548,57 @@ COPY (SELECT * FROM read_biom('table.biom') ORDER BY sample_id)
 **With a BIGINT `sample_id`, sort by the text form.** Samples are enumerated and batched by `sample_id::VARCHAR`, so batches are *lexical* ranges (`1, 10, 100, 1000, …, 2, 20`) and a numerically sorted table will not line up with them — use `ORDER BY sample_id::VARCHAR`. VARCHAR and UUID ids sort identically either way (see [Sample identifier types](#sample-identifier-types)).
 
 Sort order affects only how much a run reads — never the coordinates it produces.
+
+---
+
+### Progressive PCoA (from community distances)
+
+`progressive_pcoa_from_features(feature_table, metric, ...)` is the tree-free counterpart to [`progressive_pcoa_from_unifrac`](#progressive-pcoa-from-unifrac): the same reference-anchored progressive PCoA, but each batch's block is a [`community_distances`](#community-distances-non-phylogenetic) matrix computed on the fly over `(anchors + batch)`, so the full N×N matrix is never formed. Before this existed, a non-phylogenetic analysis could only reach [`progressive_pcoa_from_distances`](#progressive-pcoa-from-a-distance-table), which needs every one of the N²/2 pairs materialized first — the very cost progressive PCoA exists to avoid.
+
+```sql
+CREATE TABLE observations AS
+    SELECT * FROM read_biom('table.biom') ORDER BY sample_id;
+
+SELECT * FROM progressive_pcoa_from_features('observations', 'bray_curtis',
+    n_dims := 10, n_anchors := 1000, batch_size := 1000, seed := 42, threads := 8);
+```
+
+**Parameters:**
+- `feature_table` (VARCHAR): name of the feature relation exposing `(sample_id, feature_id, value)` (see [Feature table](#feature-table))
+- `metric` (VARCHAR): one of `bray_curtis`, `euclidean`, `jaccard`, `soergel`, `morisita_horn` (case-insensitive). See below for why the other three `community_distances` metrics are not accepted.
+- `n_dims` (3), `n_anchors` (100), `batch_size` (1000), `seed` (-1), `threads` (0), `anchors`: exactly as in [`progressive_pcoa_from_distances`](#progressive-pcoa-from-a-distance-table). [`pick_anchors`](#pick-anchors) applies here too.
+
+**Output schema:** identical to the other two progressive functions — `(iteration, sample_id, axis, coordinate, eigenvalue, proportion_explained, batch, batch_anchor_m2)`, with `iteration` always `0` and anchor rows reporting `NULL` for both diagnostics (see [Reading `batch` / `batch_anchor_m2`](#progressive-batch-diagnostics)). `eigenvalue`/`proportion_explained` describe the *anchor* reference ordination, the same documented caveat as the sibling functions.
+
+<a name="progressive-features-admissible"></a>**Only pairwise-local metrics are accepted, and the rest are refused rather than approximated.** A block carries an arbitrary subset of the samples and only the features that subset happens to use. A metric can be computed that way if and only if `d(i,j)` depends on samples `i` and `j` alone — no statistic over the other rows, and no sensitivity to features that are zero in both. `pearson`, `chisq` and `gower` all fail that test (see the block-wise column under [Community distances](#community-distances-non-phylogenetic)), and the failure is silent: each block would quietly measure a *different* distance and the ordination would come out wrong with no error raised. So they are rejected when the query is bound, with a message naming the metric and pointing at `progressive_pcoa_from_distances` over `community_distances(...)`, which forms the whole matrix and is therefore limited to sample counts that fit in memory.
+
+That admissibility is asserted, not assumed: for every accepted metric the test suite checks that `progressive_pcoa_from_features` reproduces `progressive_pcoa_from_distances` over `community_distances(...)` *coordinate for coordinate*, at two different `batch_size` values and with both seeded and explicit anchors.
+
+**Behavior:**
+- **Accuracy:** as [`progressive_pcoa_from_distances`](#progressive-pcoa-from-a-distance-table) — reproduces the full ordination up to a similarity transform, with alignment error that does not compound across batches.
+- **`threads` buys concurrent blocks**, as on the UniFrac path: each worker computes one block's pair loop, and the per-block width is divided out of `threads` so the two levels cannot oversubscribe.
+- **Reproducibility:** seeded runs are byte-reproducible only at `threads := 1`; above that the ordination is preserved but coordinates shift in their last bits. The full explanation under [`progressive_pcoa_from_unifrac`](#progressive-repro) applies here unchanged — compare ordinations with [`procrustes`](#procrustes-align-two-ordinations), not coordinates.
+- **Store the feature table sorted by `sample_id`** — batches are contiguous id ranges, and an unsorted table makes every batch scan the whole relation. Same rule, same warning, and the same measurements as [under `progressive_pcoa_from_unifrac`](#feature-table-sort-order).
+- **Samples with no nonzero feature are dropped**, matching `community_distances` and `unifrac_distances`; the sparse contract cannot distinguish an all-zero sample from an absent one.
+- **Cancellable** — checked before every batch, so a long run stops within about one block.
+- **Errors:** an unknown or non-pairwise-local metric, fewer than two samples, `n_anchors` outside `[n_dims + 1, n_samples]`, `n_dims > n_samples - 1`, or `batch_size < 1`. Parameter and schema problems surface at bind; a failure inside a block surfaces when the run reaches it.
+
+<a name="progressive-features-perf"></a>**Measured scaling.** On a 1,212,988-sample table (3,251,297 features, 128M nonzero cells, rarefied to even 1k), `n_dims := 10`, `n_anchors := 1000`, `batch_size := 1000`, `bray_curtis`, on a 32-core host with `memory_limit=16GB`:
+
+| samples | 1 thread | 2 | 4 | 8 | speedup at 8 | peak RSS at 8 |
+|---|---|---|---|---|---|---|
+| 10,000 | 7.6 s | 4.3 s | 2.7 s | 1.9 s | 4.0× | 1.0 GB |
+| 50,000 | 41.3 s | 21.6 s | 11.4 s | 6.7 s | 6.2× | 1.4 GB |
+| 200,000 | 175.6 s | 90.7 s | 47.1 s | 26.6 s | 6.6× | 2.3 GB |
+| **1,212,988** | **1093.9 s** | **569.0 s** | **296.9 s** | **165.1 s** | **6.6×** | **5.3 GB** |
+
+Cost is linear in N (5.00× the samples cost 3.51× the time from 10k to 50k — sublinear while the fixed 1000-anchor cost is still being amortized — then 4.00× → 3.99× and 6.06× → 6.20×). Memory is set by `threads`, not by N or by the feature space: live memory is one block per worker. `jaccard` tracks `bray_curtis` within 2% throughout.
+
+For scale, a dense `community_distances` matrix over that same table would be roughly 4 TB, so it is not a slow query but an impossible one.
+
+**Blocks are sparse, which is why the feature count does not matter.** A block's pair loop merges each pair's nonzeros rather than walking the whole feature space. On this table a default block spans ~11k features but averages only ~89 nonzeros per sample, so the merge does roughly 62× less arithmetic than a dense loop would — and the block's memory is bounded by nonzeros, not by the 3.25M-feature dictionary.
+
+**Against the phylogenetic path.** Same 10,000-sample subset, same parameters, 8 threads, `unweighted` UniFrac over a 3.45M-tip tree: `progressive_pcoa_from_unifrac` took 14.5 s and 4.1 GB, `progressive_pcoa_from_features` with `bray_curtis` took 1.9 s and 1.0 GB. Choosing a tree-free metric is not a scale compromise here — it is the cheaper path.
 
 ---
 

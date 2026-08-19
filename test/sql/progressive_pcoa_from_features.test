@@ -1,0 +1,396 @@
+# name: test/sql/progressive_pcoa_from_features.test
+# description: progressive_pcoa_from_features — scalable reference-anchored PCoA that computes non-phylogenetic community distances on the fly per batch from a feature table; admissible only for pairwise-local metrics.
+# group: [sql]
+
+require miint
+
+require-env UNIFRAC_AVAILABLE
+
+# ── fixture: 40 samples over 12 features, ~75% occupancy. Community distances for
+#    the admissible metrics are pairwise-local — d(i,j) reads only rows i and j,
+#    and dropping features that are zero in both changes nothing — so a block
+#    computed over (anchors + batch) equals the corresponding slice of the full
+#    matrix. That is the property this whole function rests on.
+#
+#    The occupancy filter is not decoration. A table with every cell filled gives
+#    every sample the SAME presence/absence profile, so every jaccard distance is
+#    0 and the ordination is degenerate ("input matrices must contain >1 unique
+#    points"). The hash-based filter yields 22 distinct presence patterns over the
+#    40 samples and 642 of 780 jaccard pairs nonzero, so the binary metric is
+#    exercised on real variation rather than on a constant. Stored sorted by
+#    sample_id, the layout the docs ask for. ──
+statement ok
+CREATE TABLE ft AS
+SELECT 's' || lpad(s::VARCHAR, 3, '0') AS sample_id, 'F_' || lpad((f + 1)::VARCHAR, 2, '0') AS feature_id,
+       (1 + (s * 7 + f * 13) % 11)::DOUBLE AS value
+FROM range(40) t(s), range(12) u(f)
+WHERE ((s * 2654435761 + f * 40503) % 100) >= 25
+ORDER BY sample_id;
+
+# ── availability ──
+query I
+SELECT count(*) FROM duckdb_functions() WHERE function_name = 'progressive_pcoa_from_features';
+----
+1
+
+# ══════════════════════════════════════════════════════════════════════════════
+# REJECTION of metrics that are NOT pairwise-local.
+#
+# These three read statistics over the whole matrix, so computing them one block
+# at a time would silently measure a DIFFERENT distance in every block — no
+# error, just a wrong ordination. Rejecting at bind is the whole point: the
+# failure they replace is invisible.
+#   pearson  the per-sample mean is rowsum/n_features, and features zero in both
+#            samples still contribute to the covariance/variances, so the value
+#            moves with the block's feature space
+#   chisq    weights each term by grand_total/column_sum
+#   gower    divides each term by the per-feature range over all samples
+# ══════════════════════════════════════════════════════════════════════════════
+
+statement error
+SELECT * FROM progressive_pcoa_from_features('ft', 'pearson', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+----
+pearson
+
+statement error
+SELECT * FROM progressive_pcoa_from_features('ft', 'chisq', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+----
+chisq
+
+statement error
+SELECT * FROM progressive_pcoa_from_features('ft', 'gower', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+----
+gower
+
+# The rejection must say WHY and where to go instead, not merely refuse.
+statement error
+SELECT * FROM progressive_pcoa_from_features('ft', 'gower');
+----
+progressive_pcoa_from_distances
+
+# An unknown metric is rejected as unknown, not as inadmissible.
+statement error
+SELECT * FROM progressive_pcoa_from_features('ft', 'manhattan');
+----
+manhattan
+
+# ── parameter guards, mirroring progressive_pcoa_from_unifrac ──
+
+statement error
+SELECT * FROM progressive_pcoa_from_features('', 'bray_curtis');
+----
+must not be empty
+
+statement error
+SELECT * FROM progressive_pcoa_from_features('ft', 'bray_curtis', n_dims := 0);
+----
+n_dims must be >= 1
+
+statement error
+SELECT * FROM progressive_pcoa_from_features('ft', 'bray_curtis', batch_size := 0);
+----
+batch_size must be >= 1
+
+statement error
+SELECT * FROM progressive_pcoa_from_features('ft', 'bray_curtis', n_dims := 3, n_anchors := 3);
+----
+n_anchors
+
+statement error
+SELECT * FROM progressive_pcoa_from_features('ft', 'bray_curtis', n_anchors := 41);
+----
+exceeds
+
+statement error
+SELECT * FROM progressive_pcoa_from_features('ft', 'bray_curtis', n_dims := 40);
+----
+n_samples - 1
+
+statement error
+SELECT * FROM progressive_pcoa_from_features('no_such_table', 'bray_curtis');
+----
+no_such_table
+
+# A feature table with fewer than 2 samples carrying signal cannot be ordinated.
+statement ok
+CREATE TABLE ft_one AS SELECT 's1' AS sample_id, 'F_1' AS feature_id, 3.0 AS value;
+
+statement error
+SELECT * FROM progressive_pcoa_from_features('ft_one', 'bray_curtis');
+----
+at least 2
+
+statement error
+SELECT * FROM progressive_pcoa_from_features('ft', 'bray_curtis', anchors := [NULL]);
+----
+must not contain NULL
+
+# ══════════════════════════════════════════════════════════════════════════════
+# POSITIVE PATH — shape
+# ══════════════════════════════════════════════════════════════════════════════
+
+# 40 samples * 3 axes, one axis set, one iteration -- all from a single run.
+query IIIII
+SELECT count(*), count(DISTINCT sample_id), count(DISTINCT axis), min(iteration), max(iteration)
+FROM progressive_pcoa_from_features('ft', 'bray_curtis', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1);
+----
+120	40	3	0	0
+
+# Anchors report batch = NULL and batch_anchor_m2 = NULL -- they DEFINE the frame
+# rather than being fitted into it, so a 0.0 there would be a fabricated perfect
+# fit. Every other sample is placed by a numbered batch; 25 non-anchor samples over
+# batch_size 12 is 3 batches: 0, 1, 2.
+query II
+SELECT batch, count(DISTINCT sample_id) FROM progressive_pcoa_from_features('ft', 'bray_curtis', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1)
+GROUP BY batch ORDER BY batch;
+----
+0	12
+1	12
+2	1
+NULL	15
+
+query I
+SELECT count(*) FROM progressive_pcoa_from_features('ft', 'bray_curtis', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1)
+WHERE batch IS NULL AND batch_anchor_m2 IS NOT NULL;
+----
+0
+
+# ══════════════════════════════════════════════════════════════════════════════
+# THE SHARED REFERENCE FRAME
+#
+# The parity oracle below is only meaningful if both functions ordinate against
+# the SAME anchor set. They enumerate the same sorted sample ids and run the same
+# seeded draw, so they must -- assert it directly rather than trusting it. The
+# anchors are exactly the batch IS NULL rows.
+# ══════════════════════════════════════════════════════════════════════════════
+
+statement ok
+CREATE TABLE cd_bray AS SELECT * FROM community_distances('ft', 'bray_curtis');
+
+query I
+SELECT count(*) FROM (
+  SELECT sample_id FROM (
+    SELECT DISTINCT sample_id FROM progressive_pcoa_from_features('ft', 'bray_curtis', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1) WHERE batch IS NULL
+    UNION ALL
+    SELECT DISTINCT sample_id FROM progressive_pcoa_from_distances('cd_bray', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1) WHERE batch IS NULL
+  ) GROUP BY sample_id HAVING count(*) <> 2
+);
+----
+0
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CORRECTNESS ORACLE — block-exactness, proven per metric.
+#
+# Computing the metric one block at a time over (anchors + batch) must give the
+# same ordination as slicing a PRECOMPUTED full distance matrix. If a metric were
+# not pairwise-local, the blocks would carry different distances than the full
+# matrix and this would diverge -- so this is the assertion that the admissibility
+# table is a fact rather than a claim. One case per admissible metric, because
+# each has its own normalization and each could fail independently.
+#
+# The assertion is EXACT coordinate equality, not merely a small procrustes
+# disparity. Both paths hand the core the same samples in the same row order with
+# the same fp32 distances, so a pairwise-local metric must make the two runs
+# bit-identical here; anything less means the blocks differed. (The fixture uses
+# integer abundances, which are exactly representable, so the feature-column
+# ordering noted in ComputeCommunityBlock cannot perturb the sums.) The procrustes disparity
+# is asserted alongside it because it is the frame-invariant statement and the
+# idiom the sibling progressive tests use.
+#
+# threads := 1 on BOTH sides: above one thread, skbb's centering reduction sums in
+# thread-count-dependent order and coordinates drift in their last bits (see the
+# reproducibility note in docs/diversity.md). That drift is unrelated to
+# block-exactness and would only blunt this oracle.
+# ══════════════════════════════════════════════════════════════════════════════
+
+statement ok
+CREATE TABLE pf_bray AS SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_features('ft', 'bray_curtis', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1);
+
+statement ok
+CREATE TABLE pd_bray AS SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_distances('cd_bray', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1);
+
+query TT
+SELECT max(abs(a.coordinate - b.coordinate)) = 0.0, count(*) = 120
+FROM pf_bray a JOIN pd_bray b USING (sample_id, axis);
+----
+true	true
+
+statement ok
+CREATE TABLE cd_eucl AS SELECT * FROM community_distances('ft', 'euclidean');
+
+statement ok
+CREATE TABLE pf_eucl AS SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_features('ft', 'euclidean', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1);
+
+statement ok
+CREATE TABLE pd_eucl AS SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_distances('cd_eucl', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1);
+
+query TT
+SELECT max(abs(a.coordinate - b.coordinate)) = 0.0, count(*) = 120
+FROM pf_eucl a JOIN pd_eucl b USING (sample_id, axis);
+----
+true	true
+
+statement ok
+CREATE TABLE cd_jac AS SELECT * FROM community_distances('ft', 'jaccard');
+
+statement ok
+CREATE TABLE pf_jac AS SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_features('ft', 'jaccard', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1);
+
+statement ok
+CREATE TABLE pd_jac AS SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_distances('cd_jac', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1);
+
+query TT
+SELECT max(abs(a.coordinate - b.coordinate)) = 0.0, count(*) = 120
+FROM pf_jac a JOIN pd_jac b USING (sample_id, axis);
+----
+true	true
+
+statement ok
+CREATE TABLE cd_soer AS SELECT * FROM community_distances('ft', 'soergel');
+
+statement ok
+CREATE TABLE pf_soer AS SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_features('ft', 'soergel', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1);
+
+statement ok
+CREATE TABLE pd_soer AS SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_distances('cd_soer', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1);
+
+query TT
+SELECT max(abs(a.coordinate - b.coordinate)) = 0.0, count(*) = 120
+FROM pf_soer a JOIN pd_soer b USING (sample_id, axis);
+----
+true	true
+
+statement ok
+CREATE TABLE cd_mh AS SELECT * FROM community_distances('ft', 'morisita_horn');
+
+statement ok
+CREATE TABLE pf_mh AS SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_features('ft', 'morisita_horn', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1);
+
+statement ok
+CREATE TABLE pd_mh AS SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_distances('cd_mh', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1);
+
+query TT
+SELECT max(abs(a.coordinate - b.coordinate)) = 0.0, count(*) = 120
+FROM pf_mh a JOIN pd_mh b USING (sample_id, axis);
+----
+true	true
+
+# ── The same oracle with an EXPLICIT anchor set, so the result does not depend on
+#    the seeded draw agreeing between the two functions. ──
+
+statement ok
+CREATE TABLE pf_mh_x AS SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_features('ft', 'morisita_horn',
+    n_dims := 3, batch_size := 12, seed := 42, threads := 1,
+    anchors := ['s000','s004','s008','s012','s016','s020','s024','s028','s032','s036']);
+
+statement ok
+CREATE TABLE pd_mh_x AS SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_distances('cd_mh',
+    n_dims := 3, batch_size := 12, seed := 42, threads := 1,
+    anchors := ['s000','s004','s008','s012','s016','s020','s024','s028','s032','s036']);
+
+query TT
+SELECT max(abs(a.coordinate - b.coordinate)) = 0.0, count(*) = 120
+FROM pf_mh_x a JOIN pd_mh_x b USING (sample_id, axis);
+----
+true	true
+
+# ── A different batch_size changes which samples share a block. For a
+#    pairwise-local metric the DISTANCES are unaffected, so this must still track
+#    the matching from_distances run exactly. A metric that read its block would
+#    drift here even though it matched at batch_size 12. ──
+
+statement ok
+CREATE TABLE pf_bray_b5 AS SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_features('ft', 'bray_curtis', n_dims := 3, n_anchors := 15, batch_size := 5, seed := 42, threads := 1);
+
+statement ok
+CREATE TABLE pd_bray_b5 AS SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_distances('cd_bray', n_dims := 3, n_anchors := 15, batch_size := 5, seed := 42, threads := 1);
+
+query TT
+SELECT max(abs(a.coordinate - b.coordinate)) = 0.0, count(*) = 120
+FROM pf_bray_b5 a JOIN pd_bray_b5 b USING (sample_id, axis);
+----
+true	true
+
+# ── Samples carrying no signal are dropped identically on both paths: the sparse
+#    feature-table contract cannot tell an all-zero sample from an absent one. ──
+
+statement ok
+CREATE TABLE ft_hole AS
+SELECT * FROM ft
+UNION ALL
+SELECT 'szzz' AS sample_id, 'F_01' AS feature_id, 0.0 AS value;
+
+query I
+SELECT count(DISTINCT sample_id) FROM progressive_pcoa_from_features('ft_hole', 'bray_curtis', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1);
+----
+40
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CONCURRENCY — a wave's blocks are computed by several workers at once, each
+# opening its own connection and reading the shared anchor-row cache read-only.
+# Raising `threads` must change only how fast the run goes, never where the
+# samples land. Compared as an ORDINATION rather than coordinate-for-coordinate:
+# skbb's centering reduction sums in thread-count-dependent order, so the last
+# bits legitimately move (see docs/diversity.md). batch_size := 5 gives 5 batches,
+# so there is genuinely something for the workers to overlap.
+# ══════════════════════════════════════════════════════════════════════════════
+
+statement ok
+CREATE TABLE pf_bray_t4 AS SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_features('ft', 'bray_curtis', n_dims := 3, n_anchors := 15, batch_size := 5, seed := 42, threads := 4);
+
+query T
+SELECT DISTINCT m2 < 1e-9 FROM procrustes('pf_bray_b5', 'pf_bray_t4', permutations := 0);
+----
+true
+
+query I
+SELECT count(DISTINCT sample_id) FROM pf_bray_t4;
+----
+40
+
+# ══════════════════════════════════════════════════════════════════════════════
+# NEGATIVE ABUNDANCES — the two paths must still agree.
+#
+# Nothing rejects a negative value: the feature-table contract drops NULL, zero and
+# NaN only. They are not biologically meaningful for a count table, but they are
+# accepted input, and they are where a presence test or a denominator guard written
+# as `!= 0` silently parts company with community_distances' `> 0` — including by
+# emitting a NEGATIVE distance into the ordination. Measured before the guards were
+# matched: this comparison read 1.019 instead of 0.0.
+# ══════════════════════════════════════════════════════════════════════════════
+
+statement ok
+CREATE TABLE ft_neg AS
+SELECT sample_id, feature_id,
+       CASE WHEN (abs(hash(sample_id || feature_id)) % 5) = 0 THEN -value ELSE value END AS value
+FROM ft;
+
+statement ok
+CREATE TABLE cd_neg AS SELECT * FROM community_distances('ft_neg', 'bray_curtis');
+
+statement ok
+CREATE TABLE pf_neg AS SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_features('ft_neg', 'bray_curtis', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1);
+
+statement ok
+CREATE TABLE pd_neg AS SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_distances('cd_neg', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1);
+
+query TT
+SELECT max(abs(a.coordinate - b.coordinate)) = 0.0, count(*) = 120
+FROM pf_neg a JOIN pd_neg b USING (sample_id, axis);
+----
+true	true
+
+statement ok
+CREATE TABLE cd_neg_j AS SELECT * FROM community_distances('ft_neg', 'jaccard');
+
+statement ok
+CREATE TABLE pf_neg_j AS SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_features('ft_neg', 'jaccard', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1);
+
+statement ok
+CREATE TABLE pd_neg_j AS SELECT sample_id, axis, coordinate FROM progressive_pcoa_from_distances('cd_neg_j', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42, threads := 1);
+
+query TT
+SELECT max(abs(a.coordinate - b.coordinate)) = 0.0, count(*) = 120
+FROM pf_neg_j a JOIN pd_neg_j b USING (sample_id, axis);
+----
+true	true

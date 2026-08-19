@@ -365,6 +365,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RegisterPcoaFromDistances(loader);
 	RegisterProgressivePcoaFromDistances(loader);
 	RegisterProgressivePcoaFromUnifrac(loader);
+	RegisterProgressivePcoaFromFeatures(loader);
 	RegisterPermanovaFromDistances(loader);
 	RegisterRarefyFeatureTable(loader);
 #endif

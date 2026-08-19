@@ -23,6 +23,24 @@ namespace miint {
 //! figure metrics of Kuczynski 2010.
 bool IsValidCommunityMetric(const std::string &metric);
 
+//! True iff `metric` can be computed one BLOCK of samples at a time: d(i,j)
+//! depends only on samples i and j — never on which other samples share the
+//! matrix, and never on which features that matrix happens to carry. That is
+//! what lets progressive_pcoa_from_features compute a block over
+//! (anchors + batch) and get exactly the distances the full matrix would give.
+//!
+//! False for `pearson` (the per-sample mean is rowsum/n_features, and the
+//! features that are zero in both samples still contribute to the covariance and
+//! the variances, so the value moves with the block's feature space), `chisq`
+//! (column sums and grand total) and `gower` (per-feature ranges). Computed per
+//! block, those three would silently measure a DIFFERENT distance in every
+//! block — no error, just a wrong ordination. Also false for an unknown metric.
+bool IsPairwiseLocalCommunityMetric(const std::string &metric);
+
+//! Human-readable comma-separated list of the PAIRWISE-LOCAL metrics only (for
+//! errors that have to tell a caller which metrics a block-wise path accepts).
+std::string PairwiseLocalCommunityMetricList();
+
 //! Human-readable comma-separated list of accepted metric names (for errors).
 std::string CommunityMetricList();
 
@@ -79,6 +97,40 @@ std::string CommunityMetricList();
 //! n_samples*n_features; or an unknown metric.
 std::vector<double> CommunityDistancesCondensed(const std::vector<double> &matrix, uint32_t n_samples,
                                                 uint32_t n_features, const std::string &metric, unsigned n_threads = 1);
+
+//! The same distances from a CSR (sample-major) sparse matrix, for callers that
+//! hold one block of a large, sparse feature table.
+//!
+//! WHY: the dense entry point above costs `pairs * n_features` because it walks
+//! the whole feature space for every pair. On a real block that space is mostly
+//! zeros — measured on a 1.2M-sample table, one 1100-sample block spans 11,018
+//! features but averages 89 nonzeros per sample — so a merge over the union of
+//! two samples' nonzeros does roughly 62x less arithmetic for the same answer.
+//!
+//! Layout: `indptr` has n_samples+1 entries, starts at 0, never decreases, and
+//! ends at indices.size(); `indices` and `values` are parallel; within each row
+//! the indices must be STRICTLY ASCENDING and less than n_features. Ascending is
+//! not a convenience — the merge relies on it, and an unsorted row would yield a
+//! wrong distance rather than an error, so it is validated.
+//!
+//! Results are BIT-IDENTICAL to CommunityDistancesCondensed on the same matrix.
+//! Both accumulate in ascending feature order, and the terms the dense loop adds
+//! for features absent from both samples are exactly 0.0. Also bit-identical for
+//! any `n_threads`, on the same grounds as the dense loop.
+//!
+//! Only PAIRWISE-LOCAL metrics are accepted (see IsPairwiseLocalCommunityMetric).
+//! chisq/gower/pearson are REFUSED rather than computed: this entry point exists
+//! to serve one block at a time, and those read statistics over the whole table,
+//! so a per-block value would silently be a different metric. Refusing in the
+//! pure core puts that guarantee below every caller.
+//!
+//! Throws std::invalid_argument on: n_samples < 2; a malformed CSR (any of the
+//! layout rules above); an unknown metric; or a metric that is not pairwise-local.
+std::vector<double> CommunityDistancesCondensedSparse(const std::vector<uint32_t> &indptr,
+                                                      const std::vector<uint32_t> &indices,
+                                                      const std::vector<double> &values, uint32_t n_samples,
+                                                      uint32_t n_features, const std::string &metric,
+                                                      unsigned n_threads = 1);
 
 } // namespace miint
 
