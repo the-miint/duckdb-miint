@@ -322,6 +322,21 @@ size_t Condensed(uint32_t n, uint32_t i, uint32_t j) {
 }
 
 constexpr const char *kPairwiseLocalMetrics[] = {"bray_curtis", "euclidean", "jaccard", "soergel", "morisita_horn"};
+
+// A tail cache of recognisable sentinels rather than the real distances. The point of
+// a cached tail is that the caller's values end up in the right slots, so values that
+// could not have been computed from the data prove placement in a way real distances
+// cannot -- a splice off by one row would still look plausible with real numbers.
+std::vector<double> SentinelTail(uint32_t tail_n) {
+	std::vector<double> cache(static_cast<size_t>(tail_n) * (tail_n > 0 ? tail_n - 1 : 0) / 2);
+	size_t k = 0;
+	for (uint32_t p = 0; p + 1 < tail_n; ++p) {
+		for (uint32_t q = p + 1; q < tail_n; ++q, ++k) {
+			cache[k] = -1000.0 - (p * 100.0 + q); // negative: no metric here can produce it
+		}
+	}
+	return cache;
+}
 constexpr const char *kMatrixWideMetrics[] = {"pearson", "chisq", "gower"};
 
 } // namespace
@@ -618,9 +633,10 @@ TEST_CASE("sparse skips a cached tail square without changing any other pair", "
 		INFO("metric: " << metric);
 		const auto full = miint::CommunityDistancesCondensedSparse(b.indptr, b.indices, b.values, b.n, b.f, metric);
 		for (uint32_t tail : {0u, 1u, 2u, 7u, 29u, 30u}) {
-			INFO("n_cached_tail: " << tail);
+			INFO("cached tail: " << tail);
+			const auto cache = SentinelTail(tail);
 			const auto part = miint::CommunityDistancesCondensedSparse(b.indptr, b.indices, b.values, b.n, b.f, metric,
-			                                                           /*n_threads=*/1, tail);
+			                                                           /*n_threads=*/1, {tail, cache.data()});
 			REQUIRE(part.size() == full.size());
 			const uint32_t head = b.n - tail;
 			size_t p = 0;
@@ -628,8 +644,8 @@ TEST_CASE("sparse skips a cached tail square without changing any other pair", "
 				for (uint32_t j = i + 1; j < b.n; ++j, ++p) {
 					INFO("pair (" << i << "," << j << ")");
 					if (i >= head) {
-						// Entirely inside the tail: left untouched for the caller to fill.
-						CHECK(part[p] == 0.0);
+						// Inside the tail: the caller's own value, in the right slot.
+						CHECK(part[p] == cache[Condensed(tail, i - head, j - head)]);
 					} else {
 						CHECK(part[p] == full[p]); // exact, not Approx
 					}
@@ -645,14 +661,16 @@ TEST_CASE("sparse tail skip stays bit-identical for every thread count", "[commu
 	// which thread reached it.
 	const auto b = MakeSparse(40, 200, 0.15, /*seed=*/8675u, /*force_empty_rows=*/true, /*allow_negative=*/true);
 	const uint32_t tail = 13;
+	const auto cache = SentinelTail(tail);
+	const miint::CachedTail ct {tail, cache.data()};
 	for (const auto *metric : kPairwiseLocalMetrics) {
 		INFO("metric: " << metric);
 		const auto serial =
-		    miint::CommunityDistancesCondensedSparse(b.indptr, b.indices, b.values, b.n, b.f, metric, 1, tail);
+		    miint::CommunityDistancesCondensedSparse(b.indptr, b.indices, b.values, b.n, b.f, metric, 1, ct);
 		for (unsigned nt : {2u, 4u, 8u, 1000u}) {
 			INFO("threads: " << nt);
 			const auto par =
-			    miint::CommunityDistancesCondensedSparse(b.indptr, b.indices, b.values, b.n, b.f, metric, nt, tail);
+			    miint::CommunityDistancesCondensedSparse(b.indptr, b.indices, b.values, b.n, b.f, metric, nt, ct);
 			REQUIRE(par.size() == serial.size());
 			for (size_t p = 0; p < serial.size(); ++p) {
 				CHECK(par[p] == serial[p]);
@@ -666,9 +684,17 @@ TEST_CASE("sparse rejects a cached tail larger than the block", "[community_dist
 	// idea of which samples are cached disagrees with the block it passed, and
 	// clamping would silently compute a different set of pairs than it asked for.
 	const auto b = MakeSparse(6, 20, 0.4, /*seed=*/7u, /*force_empty_rows=*/false);
-	CHECK_THROWS_AS(
-	    miint::CommunityDistancesCondensedSparse(b.indptr, b.indices, b.values, b.n, b.f, "bray_curtis", 1, 7u),
-	    std::invalid_argument);
+	const auto cache = SentinelTail(7);
+	CHECK_THROWS_AS(miint::CommunityDistancesCondensedSparse(b.indptr, b.indices, b.values, b.n, b.f, "bray_curtis", 1,
+	                                                         {7u, cache.data()}),
+	                std::invalid_argument);
+
+	// And a tail COUNT with no values behind it, which is the mistake the CachedTail
+	// type exists to make hard: it would otherwise leave 0.0 -- a valid distance -- for
+	// every cached pair, and an ordination of that would look plausible.
+	CHECK_THROWS_AS(miint::CommunityDistancesCondensedSparse(b.indptr, b.indices, b.values, b.n, b.f, "bray_curtis", 1,
+	                                                         {3u, nullptr}),
+	                std::invalid_argument);
 }
 
 // An independent oracle for the three Gram-expressible metrics, written straight
@@ -676,16 +702,6 @@ TEST_CASE("sparse rejects a cached tail larger than the block", "[community_dist
 // dense-Gram path are internal, so comparing them to each other is not possible
 // from here — and comparing a kernel to itself would prove nothing anyway.
 namespace {
-
-// Condensed upper-triangle row base, mirroring the kernel's own layout: pair (i,j)
-// with j > i lives at RowBase(n,i) + (j-i-1).
-// The exported helper rather than a local copy. Safe because nothing here VERIFIES the
-// index formula — these uses only need to locate a known pair while asserting something
-// else about its value. The independent check on the layout is NaiveCondensed, which
-// walks the pairs in order and never computes an index at all.
-size_t RowBaseForTest(uint32_t n, uint32_t i) {
-	return miint::CondensedRowBase(n, i);
-}
 
 std::vector<double> NaiveCondensed(const std::vector<double> &dense, uint32_t n, uint32_t f, const char *metric) {
 	std::vector<double> out;
@@ -818,9 +834,10 @@ TEST_CASE("dense-Gram honours a cached tail, on the Gram path itself", "[communi
 		REQUIRE(miint::CommunityDistancesUsesGramPath(metric, b.n, b.f, b.indices.size()));
 		const auto naive = NaiveCondensed(b.dense, b.n, b.f, metric);
 		for (uint32_t tail : {1u, 2u, 13u, 64u, 95u, 96u}) {
-			INFO("n_cached_tail: " << tail);
+			INFO("cached tail: " << tail);
+			const auto cache = SentinelTail(tail);
 			const auto part = miint::CommunityDistancesCondensedSparse(b.indptr, b.indices, b.values, b.n, b.f, metric,
-			                                                           /*n_threads=*/1, tail);
+			                                                           /*n_threads=*/1, {tail, cache.data()});
 			REQUIRE(part.size() == naive.size());
 			const uint32_t head = b.n - tail;
 			size_t p = 0;
@@ -828,7 +845,8 @@ TEST_CASE("dense-Gram honours a cached tail, on the Gram path itself", "[communi
 				for (uint32_t j = i + 1; j < b.n; ++j, ++p) {
 					INFO("pair (" << i << "," << j << ")");
 					if (i >= head) {
-						CHECK(part[p] == 0.0); // inside the tail: the caller fills it
+						// The caller's own value, in the slot the block's layout puts it.
+						CHECK(part[p] == cache[Condensed(tail, i - head, j - head)]);
 					} else {
 						// Every pair with a foot outside the tail is still computed, and
 						// still correct — including the cross pairs, whose tail-side
@@ -839,12 +857,14 @@ TEST_CASE("dense-Gram honours a cached tail, on the Gram path itself", "[communi
 			}
 		}
 		// Threading must not move a value, on this path as on the merge.
-		const auto serial = miint::CommunityDistancesCondensedSparse(b.indptr, b.indices, b.values, b.n, b.f, metric,
-		                                                             /*n_threads=*/1, /*n_cached_tail=*/13);
+		const auto cache13 = SentinelTail(13);
+		const miint::CachedTail ct {13u, cache13.data()};
+		const auto serial =
+		    miint::CommunityDistancesCondensedSparse(b.indptr, b.indices, b.values, b.n, b.f, metric, 1, ct);
 		for (unsigned nt : {2u, 4u, 8u}) {
 			INFO("threads: " << nt);
-			const auto par = miint::CommunityDistancesCondensedSparse(b.indptr, b.indices, b.values, b.n, b.f, metric,
-			                                                          nt, /*n_cached_tail=*/13);
+			const auto par =
+			    miint::CommunityDistancesCondensedSparse(b.indptr, b.indices, b.values, b.n, b.f, metric, nt, ct);
 			REQUIRE(par.size() == serial.size());
 			for (size_t p = 0; p < serial.size(); ++p) {
 				INFO("pair index " << p);
@@ -854,19 +874,21 @@ TEST_CASE("dense-Gram honours a cached tail, on the Gram path itself", "[communi
 	}
 }
 
-TEST_CASE("a fully cached block computes nothing and returns zeros", "[community_distances]") {
+TEST_CASE("a fully cached block computes nothing and returns the cache", "[community_distances]") {
 	// progressive_pcoa_from_features' reference block IS the anchor list, so it arrives
-	// with n_cached_tail == n_samples and every pair already in hand. That must be an
-	// early return, not a full densify-and-GEMM whose every result is then overwritten:
-	// on a wide block the discarded operand alone can be hundreds of MB.
+	// with the whole block cached and every pair already in hand. That must short-circuit
+	// rather than densify, GEMM and then overwrite every result: on a wide block the
+	// discarded operand alone can be hundreds of MB. Sentinels make "returned the cache"
+	// distinguishable from "recomputed and happened to agree".
 	const auto b = MakeSparse(96, 250, 0.30, /*seed=*/4242u, /*force_empty_rows=*/true, /*allow_negative=*/true);
+	const auto cache = SentinelTail(b.n);
 	for (const auto *metric : kPairwiseLocalMetrics) {
 		INFO("metric: " << metric);
 		const auto all = miint::CommunityDistancesCondensedSparse(b.indptr, b.indices, b.values, b.n, b.f, metric,
-		                                                          /*n_threads=*/1, /*n_cached_tail=*/b.n);
-		REQUIRE(all.size() == static_cast<size_t>(b.n) * (b.n - 1) / 2);
+		                                                          /*n_threads=*/1, {b.n, cache.data()});
+		REQUIRE(all.size() == cache.size());
 		for (size_t p = 0; p < all.size(); ++p) {
-			CHECK(all[p] == 0.0);
+			CHECK(all[p] == cache[p]);
 		}
 	}
 }
@@ -953,14 +975,14 @@ TEST_CASE("dense-Gram euclidean survives catastrophic cancellation", "[community
 	// nearest double (ulp ~4.7e-10 there), so the two stored rows really are separated
 	// by kDelta*(1 +/- 2.4e-7). The tolerance is still three hundred times tighter
 	// than the ~0.3 an unguarded product returns, which is the thing being detected.
-	CHECK(d[RowBaseForTest(n, 0) + (1 - 0 - 1)] == Approx(kDelta).epsilon(1e-6));
-	CHECK(d[RowBaseForTest(n, 0) + (3 - 0 - 1)] == Approx(kDelta).epsilon(1e-6));
-	CHECK(d[RowBaseForTest(n, 0) + (5 - 0 - 1)] == 0.0);
+	CHECK(d[Condensed(n, 0, 1)] == Approx(kDelta).epsilon(1e-6));
+	CHECK(d[Condensed(n, 0, 3)] == Approx(kDelta).epsilon(1e-6));
+	CHECK(d[Condensed(n, 0, 5)] == 0.0);
 	// Every pair, near or far, matches the definition -- the guard must not have
 	// flattened the distant ones.
 	for (size_t p = 0; p < naive.size(); ++p) {
 		INFO("pair index " << p);
 		CHECK(d[p] == Approx(naive[p]).epsilon(1e-9).margin(1e-12));
 	}
-	CHECK(d[RowBaseForTest(n, 0) + (2 - 0 - 1)] > 1.0);
+	CHECK(d[Condensed(n, 0, 2)] > 1.0);
 }

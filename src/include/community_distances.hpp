@@ -44,19 +44,24 @@ std::string PairwiseLocalCommunityMetricList();
 //! Human-readable comma-separated list of accepted metric names (for errors).
 std::string CommunityMetricList();
 
-//! Index of pair (i, j), j > i, in the condensed upper-triangle layout every entry
-//! point here returns: `CondensedRowBase(n, i) + (j - i - 1)`.
+//! The dense-operand ceiling a call spends when `max_operand_bytes` is left at 0.
 //!
-//! WHY THIS IS PUBLIC: the layout is part of the return contract, so callers that
-//! splice into or read out of a condensed vector have to reproduce
-//! `i * (2n - i - 1) / 2`. Four independent copies of that expression existed before
-//! this was exported, and an off-by-one in any of them silently mis-PAIRS samples
-//! rather than failing — the worst possible failure mode for a distance matrix.
+//! Published so a caller that runs several blocks CONCURRENTLY can divide it, rather
+//! than restating the number: the cap governs one call and knows nothing about how many
+//! are in flight, so W workers would otherwise be entitled to W times it. Restating it
+//! would also silently pin that caller to today's value forever.
+size_t CommunityDistancesDefaultOperandBytes();
+
+//! Mutual distances a caller already holds for the LAST `n` samples of a block, in the
+//! same condensed upper-triangle layout the entry points return — so `condensed` has
+//! n(n-1)/2 entries covering only that square.
 //!
-//! Computed in 64-bit and returned as size_t: at n = 100,000 the last row base is
-//! ~5e9, which overflows uint32 and, on a 32-bit size_t, the caller's own arithmetic
-//! too — so a caller near that scale must check the result fits its index type.
-size_t CondensedRowBase(uint32_t n_samples, uint32_t i);
+//! Its own type rather than two loose parameters so the count and the data cannot be
+//! passed independently, which is the whole point (see CommunityDistancesCondensedSparse).
+struct CachedTail {
+	uint32_t n = 0;
+	const double *condensed = nullptr;
+};
 
 //! True iff a block of this shape is evaluated by the dense Gram (GEMM) fast path
 //! rather than the per-pair loop.
@@ -93,12 +98,7 @@ size_t CondensedRowBase(uint32_t n_samples, uint32_t i);
 //! is ~9.7x faster. The two kernels cost the same at ~0.96% density (measured on a
 //! ladder that varies only density), and the threshold is set above that -- the
 //! constant in community_distances.cpp carries the full table.
-//! `max_operand_bytes` overrides the dense-operand ceiling for this one question;
-//! 0 means the library default. A caller that runs several blocks AT ONCE must divide
-//! its own budget by that concurrency, because this cap governs a single call and
-//! knows nothing about how many are in flight.
-bool CommunityDistancesUsesGramPath(const std::string &metric, uint32_t n_samples, uint32_t n_features, size_t nnz,
-                                    size_t max_operand_bytes = 0);
+bool CommunityDistancesUsesGramPath(const std::string &metric, uint32_t n_samples, uint32_t n_features, size_t nnz);
 
 //! All pairwise community distances over a dense sample×feature abundance
 //! matrix, returned condensed in row-major upper-triangle order: with i the
@@ -193,11 +193,18 @@ std::vector<double> CommunityDistancesCondensed(const std::vector<double> &matri
 //!
 //! Throws std::invalid_argument on: n_samples < 2; a malformed CSR (any of the
 //! layout rules above); an unknown metric; or a metric that is not pairwise-local.
-//! `n_cached_tail` lets a caller that already HOLDS the mutual distances of the
-//! last `n_cached_tail` samples skip re-deriving them: pairs with both indices in
-//! that trailing square are left at 0.0 for the caller to fill, and every other
-//! pair is computed exactly as it would have been (bit-identical, for any thread
-//! count). 0 computes every pair.
+//! `cached_tail` lets a caller that already HOLDS the mutual distances of the last
+//! `cached_tail.n` samples supply them instead of paying to re-derive them: those
+//! pairs are copied from `cached_tail.condensed`, and every other pair is computed
+//! exactly as it would have been (bit-identical, for any thread count). A default
+//! CachedTail computes every pair.
+//!
+//! The cached values are passed IN rather than the skipped slots being left for the
+//! caller to fill afterwards, because 0.0 is a perfectly valid distance: a caller that
+//! asked for the skip and forgot the fill would get a well-formed matrix that is
+//! silently zero across the cached quadrant, and an ordination of it would look
+//! plausible. Handing the data over makes asking for the skip and asking for the fill
+//! the same request.
 //!
 //! WHY: progressive_pcoa_from_features asks for one block per batch over (that
 //! batch's samples ++ ALL anchors), so the anchor x anchor quadrant is identical in
@@ -210,17 +217,17 @@ std::vector<double> CommunityDistancesCondensed(const std::vector<double> &matri
 //! The trailing position is not arbitrary: the core builds each request as the
 //! batch's ids followed by the anchors, so the shared square is a SUFFIX, and
 //! because j > i in the condensed layout the skipped pairs are exactly the rows
-//! i >= n_samples - n_cached_tail. Skipping them is therefore a loop bound, not a
+//! i >= n_samples - cached_tail.n. Skipping them is therefore a loop bound, not a
 //! per-pair test.
 //!
-//! Throws std::invalid_argument if `n_cached_tail` exceeds `n_samples` — a tail
-//! larger than the block means the caller's idea of what is cached disagrees with
-//! the block it passed.
+//! Throws std::invalid_argument if `cached_tail.n` exceeds `n_samples` (the caller's
+//! idea of what is cached disagrees with the block it passed), or if `condensed` is
+//! not exactly the n(n-1)/2 values that tail needs.
 std::vector<double> CommunityDistancesCondensedSparse(const std::vector<uint32_t> &indptr,
                                                       const std::vector<uint32_t> &indices,
                                                       const std::vector<double> &values, uint32_t n_samples,
                                                       uint32_t n_features, const std::string &metric,
-                                                      unsigned n_threads = 1, uint32_t n_cached_tail = 0,
+                                                      unsigned n_threads = 1, CachedTail cached_tail = {},
                                                       size_t max_operand_bytes = 0);
 
 } // namespace miint

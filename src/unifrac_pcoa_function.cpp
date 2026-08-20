@@ -724,12 +724,11 @@ struct ProgressivePcoaData : public TableFunctionData {
 // with W concurrent blocks would be entitled to W times that cap. This is the run's
 // total allowance for dense operands, split the same way `block_threads` is; a block
 // that does not fit its share stays on the sparse merge, which needs only CSR.
-constexpr size_t kRunGramOperandBudgetBytes = 512ull << 20;
 
 struct BlockConcurrency {
 	uint32_t workers = 1;
 	int block_threads = 1;
-	size_t gram_operand_bytes = kRunGramOperandBudgetBytes;
+	size_t gram_operand_bytes = 0;
 };
 
 BlockConcurrency ResolveBlockConcurrency(int n_threads, size_t n_batches) {
@@ -737,7 +736,7 @@ BlockConcurrency ResolveBlockConcurrency(int n_threads, size_t n_batches) {
 	c.workers = static_cast<uint32_t>(n_threads);
 	const auto active = std::max<size_t>(1, std::min<size_t>(c.workers, n_batches));
 	c.block_threads = std::max<int>(1, n_threads / static_cast<int>(active));
-	c.gram_operand_bytes = kRunGramOperandBudgetBytes / active;
+	c.gram_operand_bytes = miint::CommunityDistancesDefaultOperandBytes() / active;
 	return c;
 }
 
@@ -1743,32 +1742,35 @@ public:
 		}
 	}
 
-	uint32_t size() const {
-		return static_cast<uint32_t>(anchors_.size());
-	}
-
-	// True iff `requested` really ends with the anchor list, in anchor order — the
-	// only arrangement under which the cached quadrant belongs where it would be
-	// spliced. Checked per block rather than assumed: getting it wrong would not
-	// raise, it would silently place every sample against the wrong anchors. O(a)
-	// string compares against ~a*k distance computations is free.
-	bool MatchesTailOf(const std::vector<std::string> &requested) const {
-		if (condensed_.empty() || requested.size() < anchors_.size()) {
-			return false;
+	// The cached quadrant, as the core's CachedTail, iff `requested` really ends with
+	// the anchor list in anchor order — the only arrangement under which those values
+	// belong where the core will put them. Verified per block rather than assumed:
+	// getting it wrong would not raise, it would place every sample against the wrong
+	// anchors. O(a) string compares against ~a*k distance computations is free.
+	miint::CachedTail TailOf(const std::vector<std::string> &requested) const {
+		if (condensed_.empty()) {
+			return {}; // fewer than two anchors: nothing mutual to cache
+		}
+		// Every request the core builds is (batch ids ++ ALL anchors), so one that does
+		// not end with the anchors means that contract changed. Fail loud: quietly
+		// reporting "no cache" would leave a correct run that is 25-64% slower, with
+		// every test still green and nothing to point at.
+		if (requested.size() < anchors_.size()) {
+			throw InternalException("progressive_pcoa_from_features: block of %llu samples is smaller than the "
+			                        "%llu-anchor set it must contain",
+			                        static_cast<unsigned long long>(requested.size()),
+			                        static_cast<unsigned long long>(anchors_.size()));
 		}
 		const size_t head = requested.size() - anchors_.size();
 		for (size_t p = 0; p < anchors_.size(); ++p) {
 			if (requested[head + p] != anchors_[p]) {
-				return false;
+				throw InternalException("progressive_pcoa_from_features: block does not carry the anchor set as "
+				                        "its tail (position %llu is '%s', expected '%s')",
+				                        static_cast<unsigned long long>(head + p), requested[head + p].c_str(),
+				                        anchors_[p].c_str());
 			}
 		}
-		return true;
-	}
-
-	// Anchor pair (p, q), p < q, in the condensed upper-triangle layout the pure
-	// core uses.
-	double At(uint32_t p, uint32_t q) const {
-		return condensed_[miint::CondensedRowBase(static_cast<uint32_t>(anchors_.size()), p) + (q - p - 1)];
+		return {static_cast<uint32_t>(anchors_.size()), condensed_.data()};
 	}
 
 private:
@@ -1776,49 +1778,12 @@ private:
 	std::vector<double> condensed_;
 };
 
-miint::progressive::DistanceBlock
-ComputeCommunityBlock(ClientContext &context, const std::string &qname, const std::vector<std::string> &requested,
-                      const std::string &metric, int n_threads, const AnchorFeatureRowCache &anchor_cache,
-                      const AnchorCommunityCorner &corner, size_t gram_operand_bytes) {
-	const auto rows = anchor_cache.RowsFor(context, qname, requested);
-	const auto n = static_cast<uint32_t>(requested.size());
-	const auto csr = BuildBlockCsr(rows, requested);
-	const uint32_t f = csr.n_features;
-
-	// Skip the anchor quadrant when this request really carries it as its tail;
-	// it is spliced back in from the cache below.
-	const bool use_corner = corner.MatchesTailOf(requested);
-	const uint32_t cached_tail = use_corner ? corner.size() : 0;
-
-	std::vector<double> condensed;
-	try {
-		condensed =
-		    miint::CommunityDistancesCondensedSparse(csr.indptr, csr.indices, csr.values, n, f, metric,
-		                                             static_cast<unsigned>(n_threads), cached_tail, gram_operand_bytes);
-	} catch (const std::invalid_argument &e) {
-		throw InvalidInputException("progressive_pcoa_from_features: %s", e.what());
-	}
-	if (use_corner) {
-		// Anchor pair (p, q) sits at block indices (head + p, head + q); the condensed
-		// slot for (i, j) is RowBase(n, i) + (j - i - 1).
-		const uint32_t head = n - cached_tail;
-		for (uint32_t p = 0; p + 1 < cached_tail; ++p) {
-			const size_t row_base = miint::CondensedRowBase(n, head + p);
-			for (uint32_t q = p + 1; q < cached_tail; ++q) {
-				condensed[row_base + (q - p - 1)] = corner.At(p, q);
-			}
-		}
-	}
-
-	// Condensed upper triangle -> dense symmetric fp32, zero diagonal. The fp32
-	// narrowing is the same one progressive_pcoa_from_distances applies to the
-	// DOUBLE it reads back out of a community_distances table, so for exactly
-	// representable abundances the two paths hand the core identical blocks (the
-	// SQL parity test asserts the coordinates match to the bit); see the note on
-	// feature-dictionary order above for the one case that is only identical after
-	// the narrowing.
+// Condensed upper triangle -> the dense symmetric fp32 block the core consumes, zero
+// diagonal.
+miint::progressive::DistanceBlock CondensedToDenseBlock(const std::vector<std::string> &ids, const double *condensed,
+                                                        uint32_t n) {
 	miint::progressive::DistanceBlock block;
-	block.ids = requested;
+	block.ids = ids;
 	block.matrix.assign(static_cast<size_t>(n) * n, 0.0f);
 	size_t k = 0;
 	for (uint32_t i = 0; i + 1 < n; ++i) {
@@ -1829,6 +1794,47 @@ ComputeCommunityBlock(ClientContext &context, const std::string &qname, const st
 		}
 	}
 	return block;
+}
+
+miint::progressive::DistanceBlock
+ComputeCommunityBlock(ClientContext &context, const std::string &qname, const std::vector<std::string> &requested,
+                      const std::string &metric, int n_threads, const AnchorFeatureRowCache &anchor_cache,
+                      const AnchorCommunityCorner &corner, size_t gram_operand_bytes) {
+	const auto n = static_cast<uint32_t>(requested.size());
+	// The cached anchor quadrant, when this request really carries it as its tail. The
+	// core copies it in for us — asking to skip those pairs and supplying them is one
+	// request, so there is no way to skip and forget to fill.
+	const miint::CachedTail cached_tail = corner.TailOf(requested);
+
+	// The reference block IS the anchor list, so every pair is already cached and the
+	// feature data is not needed at all. Tested before fetching rather than after,
+	// because fetching it means copying every anchor row and rebuilding the whole
+	// feature dictionary for a block whose result is known.
+	if (cached_tail.n == n) {
+		return CondensedToDenseBlock(requested, cached_tail.condensed, n);
+	}
+
+	const auto rows = anchor_cache.RowsFor(context, qname, requested);
+	const auto csr = BuildBlockCsr(rows, requested);
+	const uint32_t f = csr.n_features;
+
+	std::vector<double> condensed;
+	try {
+		condensed =
+		    miint::CommunityDistancesCondensedSparse(csr.indptr, csr.indices, csr.values, n, f, metric,
+		                                             static_cast<unsigned>(n_threads), cached_tail, gram_operand_bytes);
+	} catch (const std::invalid_argument &e) {
+		throw InvalidInputException("progressive_pcoa_from_features: %s", e.what());
+	}
+
+	// Condensed upper triangle -> dense symmetric fp32, zero diagonal. The fp32
+	// narrowing is the same one progressive_pcoa_from_distances applies to the
+	// DOUBLE it reads back out of a community_distances table, so for exactly
+	// representable abundances the two paths hand the core identical blocks (the
+	// SQL parity test asserts the coordinates match to the bit); see the note on
+	// feature-dictionary order above for the one case that is only identical after
+	// the narrowing.
+	return CondensedToDenseBlock(requested, condensed.data(), n);
 }
 
 unique_ptr<FunctionData> ProgressivePcoaFromUnifracBind(ClientContext &context, TableFunctionBindInput &input,
@@ -2017,7 +2023,8 @@ unique_ptr<FunctionData> ProgressivePcoaFromUnifracBind(ClientContext &context, 
 	data->bypass_tips = bypass_tips;
 	data->normalize_sample_counts = normalize_sample_counts;
 	data->block_threads = concurrency.block_threads;
-	data->gram_operand_bytes = concurrency.gram_operand_bytes;
+	// gram_operand_bytes deliberately unset: UniFrac blocks come from ComputeUnifracBlock,
+	// which has no dense-operand path to budget for.
 	data->workers = concurrency.workers;
 
 	DeclarePcoaOutputSchema(data->sample_id_type, return_types, names, /*with_batch_diagnostics=*/true);
@@ -2207,8 +2214,6 @@ struct ProgressivePcoaGlobalState : public GlobalTableFunctionState {
 	unique_ptr<ColumnDataCollection> staged;
 	ColumnDataScanState staged_scan;
 	DataChunk staged_chunk;
-	bool staged_scan_started = false;
-	unique_ptr<miint::progressive::PrincipalAxisAccumulator> axes;
 	std::vector<double> rotation; // d*d row-major
 	std::vector<double> centroid; // d
 	// Copied out of the run so it can be destroyed before the emit phase, which frees
@@ -2501,7 +2506,8 @@ vector<LogicalType> StagedRowTypes(uint32_t d) {
 // within a wave (a wave emits whole batches, and AppendPcoaRows walks coords in
 // sample-major order), which is what lets this gather d at a time without a carry
 // buffer between calls — asserted rather than assumed.
-void StageWave(const ProgressivePcoaData &data, ProgressivePcoaGlobalState &gstate, DataChunk &append_chunk) {
+void StageWave(const ProgressivePcoaData &data, ProgressivePcoaGlobalState &gstate, DataChunk &append_chunk,
+               miint::progressive::PrincipalAxisAccumulator &axes) {
 	const auto d = data.n_dims;
 	if (gstate.rows.size() % d != 0) {
 		throw InternalException("%s: staged %llu rows for d = %u; a sample's axes must arrive together",
@@ -2533,7 +2539,7 @@ void StageWave(const ProgressivePcoaData &data, ProgressivePcoaGlobalState &gsta
 			append_chunk.SetValue(3 + a, row, Value::DOUBLE(pr.coordinate));
 		}
 		append_chunk.SetCardinality(row + 1);
-		gstate.axes->Add(coords.data(), 1);
+		axes.Add(coords.data(), 1);
 	}
 }
 
@@ -2547,7 +2553,7 @@ void StageRotatedRun(ClientContext &context, const ProgressivePcoaData &data, Pr
 	// unable to spill. Since this holds the WHOLE run, that is the difference between
 	// a large run getting slower and the process being OOM-killed.
 	gstate.staged = make_uniq<ColumnDataCollection>(BufferManager::GetBufferManager(context), types);
-	gstate.axes = make_uniq<miint::progressive::PrincipalAxisAccumulator>(data.n_dims);
+	miint::progressive::PrincipalAxisAccumulator axes(data.n_dims);
 	DataChunk append_chunk;
 	append_chunk.Initialize(Allocator::Get(context), types);
 
@@ -2555,13 +2561,17 @@ void StageRotatedRun(ClientContext &context, const ProgressivePcoaData &data, Pr
 		if (context.interrupted) {
 			throw InterruptException();
 		}
-		StageWave(data, gstate, append_chunk);
+		StageWave(data, gstate, append_chunk, axes);
 	}
 	if (append_chunk.size() > 0) {
 		gstate.staged->Append(append_chunk);
 	}
 	gstate.rows.clear();
 	gstate.cursor = 0;
+	// Set up here rather than lazily on first refill: `staged` is complete and is never
+	// appended to again, so there is no state left for a flag to track.
+	gstate.staged->InitializeScan(gstate.staged_scan);
+	gstate.staged->InitializeScanChunk(gstate.staged_chunk);
 
 	// Held past the run so the emit phase can report them, and captured HERE so the
 	// run — and with it the anchor row cache and the anchor-distance corner — can be
@@ -2569,12 +2579,11 @@ void StageRotatedRun(ClientContext &context, const ProgressivePcoaData &data, Pr
 	gstate.eigvals = gstate.run->eigvals();
 	gstate.proportions = gstate.run->proportion_explained();
 	try {
-		gstate.rotation = gstate.axes->Rotation();
-		gstate.centroid = gstate.axes->Mean();
+		gstate.rotation = axes.Rotation();
+		gstate.centroid = axes.Mean();
 	} catch (const std::invalid_argument &e) {
 		throw InvalidInputException("%s: %s", data.CallerName(), e.what());
 	}
-	gstate.axes.reset();
 	gstate.run.reset();
 }
 
@@ -2582,11 +2591,6 @@ void StageRotatedRun(ClientContext &context, const ProgressivePcoaData &data, Pr
 // already knows how to drain.
 bool RefillFromStaged(const ProgressivePcoaData &data, ProgressivePcoaGlobalState &gstate) {
 	const auto d = data.n_dims;
-	if (!gstate.staged_scan_started) {
-		gstate.staged->InitializeScan(gstate.staged_scan);
-		gstate.staged->InitializeScanChunk(gstate.staged_chunk);
-		gstate.staged_scan_started = true;
-	}
 	gstate.rows.clear();
 	gstate.cursor = 0;
 	if (!gstate.staged->Scan(gstate.staged_scan, gstate.staged_chunk)) {
@@ -2596,7 +2600,7 @@ bool RefillFromStaged(const ProgressivePcoaData &data, ProgressivePcoaGlobalStat
 	gstate.rows.reserve(static_cast<size_t>(n) * d);
 	std::vector<double> raw(d), rotated(d);
 	for (idx_t r = 0; r < n; ++r) {
-		const auto id_val = gstate.staged_chunk.data[0].GetValue(r);
+		const std::string sample_id = gstate.staged_chunk.data[0].GetValue(r).ToString();
 		const auto batch_val = gstate.staged_chunk.data[1].GetValue(r);
 		const auto m2_val = gstate.staged_chunk.data[2].GetValue(r);
 		for (uint32_t a = 0; a < d; ++a) {
@@ -2614,7 +2618,7 @@ bool RefillFromStaged(const ProgressivePcoaData &data, ProgressivePcoaGlobalStat
 		for (uint32_t a = 0; a < d; ++a) {
 			PcoaRow row;
 			row.iteration = 0;
-			row.sample_id = id_val.ToString();
+			row.sample_id = sample_id;
 			row.axis = static_cast<int32_t>(a);
 			row.coordinate = rotated[a];
 			row.eigenvalue = gstate.eigvals[a];
@@ -2639,34 +2643,27 @@ unique_ptr<GlobalTableFunctionState> ProgressivePcoaInitGlobal(ClientContext &, 
 void ProgressivePcoaExecute(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
 	auto &gstate = input.global_state->Cast<ProgressivePcoaGlobalState>();
 	const auto &data = input.bind_data->Cast<ProgressivePcoaData>();
-	if (data.global_rotation) {
-		// The whole run happens inside this first call — the rotation is a property of
-		// the finished configuration, so there is nothing correct to emit before then.
-		if (!gstate.staged) {
-			// AdvanceProgressiveRun builds the run and emits the anchor frame on its
-			// first call; creating it here instead would skip that and lose the anchors.
-			StageRotatedRun(context, data, gstate);
-		}
-		while (gstate.cursor >= gstate.rows.size()) {
-			if (context.interrupted) {
-				throw InterruptException();
-			}
-			if (!RefillFromStaged(data, gstate)) {
-				output.SetCardinality(0);
-				return;
-			}
-		}
-		EmitPcoaChunk(gstate.rows, gstate.cursor, gstate.sample_id_type, /*with_batch_diagnostics=*/true, output);
-		return;
+	// With rotation on, the whole run happens inside this first call — the transform is a
+	// property of the finished configuration, so there is nothing correct to emit before
+	// then. AdvanceProgressiveRun (inside StageRotatedRun) is what builds the run and
+	// emits the anchor frame; creating the run here instead would skip that and lose the
+	// anchor coordinates.
+	if (data.global_rotation && !gstate.staged) {
+		StageRotatedRun(context, data, gstate);
 	}
 	while (gstate.cursor >= gstate.rows.size()) {
-		// Also polled here, not only inside the run: a cancellation that arrives while
-		// DuckDB is draining the wave already produced is noticed on the next refill
-		// rather than after another wave's worth of work.
+		// Polled here as well as inside the run: a cancellation arriving while DuckDB
+		// drains the rows already produced is noticed on the next refill rather than
+		// after another wave's worth of work.
 		if (context.interrupted) {
 			throw InterruptException();
 		}
-		if (!AdvanceProgressiveRun(context, data, gstate)) {
+		// Same contract either way — "false" means there is nothing left to emit. Only
+		// where the rows come from differs: a staged, rotated configuration, or the next
+		// wave of the streaming run.
+		const bool refilled =
+		    data.global_rotation ? RefillFromStaged(data, gstate) : AdvanceProgressiveRun(context, data, gstate);
+		if (!refilled) {
 			output.SetCardinality(0);
 			return;
 		}
