@@ -1480,8 +1480,9 @@ std::vector<miint::unifrac::CooRow> QueryFeatureRows(ClientContext &context, con
 // behind a plain `loaded_` bool, which is a data race the moment blocks run
 // concurrently — several workers would write anchor_rows_ while others read it,
 // and a vector being resized under a reader is a use-after-free, not a stale
-// read. Loading before any fan-out makes every later RowsFor a read-only use of
-// shared state, which is what lets all workers share one cache with no lock.
+// read. Loading before any fan-out makes every later read of the cache a read-only
+// use of shared state, which is what lets all workers share one with no lock — and
+// is also what makes it safe to hand anchor_rows() out by reference.
 class AnchorFeatureRowCache {
 public:
 	AnchorFeatureRowCache(ClientContext &context, const char *caller, const std::string &qname,
@@ -1490,10 +1491,16 @@ public:
 	      anchor_rows_(QueryFeatureRows(context, caller, qname, anchors)) {
 	}
 
+	// This block's non-anchor samples only. The anchors are held separately (see
+	// anchor_rows()), so a caller that can read two ranges never copies them: every
+	// block requests the WHOLE anchor set, so merging them in costs (anchors x their
+	// features) row copies per block, for every block of the run. Two ranges is
+	// therefore the cheap form and RowsFor below is the one that pays.
+	//
 	// Safe to call concurrently: reads only, and QueryFeatureRows opens its own
 	// Connection per call (see docs/internals/reading-tables-views.md).
-	std::vector<miint::unifrac::CooRow> RowsFor(ClientContext &context, const std::string &qname,
-	                                            const std::vector<std::string> &requested) const {
+	std::vector<miint::unifrac::CooRow> NonAnchorRowsFor(ClientContext &context, const std::string &qname,
+	                                                     const std::vector<std::string> &requested) const {
 		std::vector<std::string> non_anchor;
 		non_anchor.reserve(requested.size());
 		for (const auto &id : requested) {
@@ -1502,9 +1509,18 @@ public:
 			}
 		}
 		if (non_anchor.empty()) {
-			return anchor_rows_; // the anchors-only reference block
+			return {}; // the anchors-only reference block: every row is already cached
 		}
-		auto rows = QueryFeatureRows(context, caller_, qname, non_anchor);
+		return QueryFeatureRows(context, caller_, qname, non_anchor);
+	}
+
+	// The same rows merged into ONE owned vector, non-anchors first. For a caller that
+	// must hand ownership on rather than read two ranges --
+	// UnifracSupportBiomView::FromCoo consumes a whole vector. Prefer
+	// NonAnchorRowsFor + anchor_rows() wherever two ranges will do.
+	std::vector<miint::unifrac::CooRow> RowsFor(ClientContext &context, const std::string &qname,
+	                                            const std::vector<std::string> &requested) const {
+		auto rows = NonAnchorRowsFor(context, qname, requested);
 		rows.insert(rows.end(), anchor_rows_.begin(), anchor_rows_.end());
 		return rows;
 	}
@@ -1615,8 +1631,8 @@ ComputeUnifracBlock(ClientContext &context, const std::string &qname, const std:
 // from the block, which is what the metrics' empty-community conventions expect
 // and what keeps the core's block-coverage check from firing spuriously.
 //
-// Thread safety: reads only, and RowsFor opens its own Connection per call, so
-// blocks may run concurrently.
+// Thread safety: reads only, and NonAnchorRowsFor opens its own Connection per call,
+// so blocks may run concurrently.
 // One block's cells as CSR, in `requested` order. Split out of
 // ComputeCommunityBlock so the anchor-corner cache below can build the anchors'
 // own CSR with exactly the same code — a second implementation of the dictionary
@@ -1628,7 +1644,14 @@ struct BlockCsr {
 	uint32_t n_features = 0;
 };
 
-BlockCsr BuildBlockCsr(const std::vector<miint::unifrac::CooRow> &rows, const std::vector<std::string> &requested) {
+// Two ranges rather than one, because the caller holds this block's cells in two
+// pieces -- its own samples' rows and the shared anchor rows -- and merging them into
+// one vector would copy the anchor rows once per block. They are visited head first,
+// then tail, and that order is part of the result: the feature dictionary below is in
+// first-seen order.
+BlockCsr BuildBlockCsr(const std::vector<miint::unifrac::CooRow> &head, const std::vector<miint::unifrac::CooRow> &tail,
+                       const std::vector<std::string> &requested) {
+	const std::vector<miint::unifrac::CooRow> *const ranges[2] = {&head, &tail};
 	const auto n = static_cast<uint32_t>(requested.size());
 	std::unordered_map<std::string, uint32_t> s_index;
 	s_index.reserve(n);
@@ -1650,9 +1673,11 @@ BlockCsr BuildBlockCsr(const std::vector<miint::unifrac::CooRow> &rows, const st
 	// merge below depends on it.)
 	std::unordered_map<std::string, uint32_t> f_index;
 	uint32_t f = 0;
-	for (const auto &r : rows) {
-		if (f_index.emplace(r.feature_id, f).second) {
-			++f;
+	for (const auto *range : ranges) {
+		for (const auto &r : *range) {
+			if (f_index.emplace(r.feature_id, f).second) {
+				++f;
+			}
 		}
 	}
 
@@ -1660,12 +1685,14 @@ BlockCsr BuildBlockCsr(const std::vector<miint::unifrac::CooRow> &rows, const st
 	// coalesce duplicate cells (summed, as the dense path summed them) so the CSR
 	// rows are strictly ascending.
 	std::vector<std::vector<std::pair<uint32_t, double>>> per_sample(n);
-	for (const auto &r : rows) {
-		const auto it = s_index.find(r.sample_id);
-		if (it == s_index.end()) {
-			continue; // not part of this block (the anchor cache is shared across blocks)
+	for (const auto *range : ranges) {
+		for (const auto &r : *range) {
+			const auto it = s_index.find(r.sample_id);
+			if (it == s_index.end()) {
+				continue; // not part of this block (the anchor cache is shared across blocks)
+			}
+			per_sample[it->second].emplace_back(f_index.at(r.feature_id), r.count);
 		}
-		per_sample[it->second].emplace_back(f_index.at(r.feature_id), r.count);
 	}
 	BlockCsr csr;
 	csr.n_features = f;
@@ -1673,8 +1700,8 @@ BlockCsr BuildBlockCsr(const std::vector<miint::unifrac::CooRow> &rows, const st
 	auto &indices = csr.indices;
 	auto &values = csr.values;
 	indptr.reserve(static_cast<size_t>(n) + 1);
-	indices.reserve(rows.size());
-	values.reserve(rows.size());
+	indices.reserve(head.size() + tail.size());
+	values.reserve(head.size() + tail.size());
 	indptr.push_back(0);
 	for (uint32_t i = 0; i < n; ++i) {
 		auto &row = per_sample[i];
@@ -1732,7 +1759,7 @@ public:
 		if (anchors_.size() < 2) {
 			return; // no pairs to cache
 		}
-		const auto csr = BuildBlockCsr(anchor_rows, anchors_);
+		const auto csr = BuildBlockCsr(anchor_rows, {}, anchors_);
 		const auto a = static_cast<uint32_t>(anchors_.size());
 		try {
 			condensed_ = miint::CommunityDistancesCondensedSparse(
@@ -1814,8 +1841,11 @@ ComputeCommunityBlock(ClientContext &context, const std::string &qname, const st
 		return CondensedToDenseBlock(requested, cached_tail.condensed, n);
 	}
 
-	const auto rows = anchor_cache.RowsFor(context, qname, requested);
-	const auto csr = BuildBlockCsr(rows, requested);
+	// The anchor rows are read in place, not merged in: they are identical in every
+	// block, and (non-anchors, then anchors) is the order the merged vector had, which
+	// is what keeps the feature dictionary -- and so the last bits -- unchanged.
+	const auto rows = anchor_cache.NonAnchorRowsFor(context, qname, requested);
+	const auto csr = BuildBlockCsr(rows, anchor_cache.anchor_rows(), requested);
 	const uint32_t f = csr.n_features;
 
 	std::vector<double> condensed;
