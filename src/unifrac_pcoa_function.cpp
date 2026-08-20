@@ -670,6 +670,11 @@ struct ProgressivePcoaData : public TableFunctionData {
 	Source source = Source::DISTANCES;
 	// Output type for sample_id — mirrors the input id type. See UnifracPcoaData.
 	LogicalType sample_id_type = LogicalType::VARCHAR;
+	// What the per-block queries compare the id column(s) against. NOT
+	// sample_id_type: that is the OUTPUT type, and an INTEGER column outputs BIGINT,
+	// whose literals would make DuckDB cast the column and lose the pushdown. See
+	// unifrac_internal::NativeIdPredicateType.
+	LogicalType sample_id_predicate_type = LogicalType::VARCHAR;
 	std::string qname; // quoted source relation (distance table or feature table)
 	AnchorPartition part;
 	uint32_t n_dims = 3;
@@ -741,7 +746,8 @@ BlockConcurrency ResolveBlockConcurrency(int n_threads, size_t n_batches) {
 }
 
 miint::progressive::DistanceBlock QueryDistanceBlock(ClientContext &context, const std::string &qname,
-                                                     const std::vector<std::string> &requested);
+                                                     const std::vector<std::string> &requested,
+                                                     const LogicalType &id_predicate_type);
 
 // Fill EVERY block of one wave from a single pass over the relation.
 //
@@ -766,8 +772,10 @@ miint::progressive::DistanceBlock QueryDistanceBlock(ClientContext &context, con
 // caller sizes the wave from its memory budget.
 class WaveDistanceBlockSource {
 public:
-	WaveDistanceBlockSource(ClientContext &context, std::string qname, const std::vector<std::string> &anchors)
+	WaveDistanceBlockSource(ClientContext &context, std::string qname, const std::vector<std::string> &anchors,
+	                        LogicalType id_predicate_type)
 	    : context_(context), qname_(std::move(qname)), anchors_(anchors),
+	      id_predicate_type_(std::move(id_predicate_type)),
 	      // The staging tables below are created on a connection that inherits the
 	      // caller's TEMP catalog — needed so a TEMP distance relation resolves —
 	      // which means they land in the USER's session rather than in a private
@@ -838,8 +846,9 @@ public:
 		// no block and are dropped by the join itself.
 		RunRoutedQuery(conn,
 		               "SELECT b1.block, b1.pos, b2.pos, d.distance::DOUBLE FROM " + qname_ + " d JOIN " +
-		                   wave_batch_quoted_ + " b1 ON d.sample_a::VARCHAR = b1.id JOIN " + wave_batch_quoted_ +
-		                   " b2 ON d.sample_b::VARCHAR = b2.id"
+		                   wave_batch_quoted_ + " b1 ON " + JoinKey("sample_a") + " = b1.id JOIN " +
+		                   wave_batch_quoted_ + " b2 ON " + JoinKey("sample_b") +
+		                   " = b2.id"
 		                   " WHERE b1.block = b2.block AND d.distance IS NOT NULL AND"
 		                   " NOT isnan(d.distance::DOUBLE)",
 		               /*a_is_anchor_ord=*/false, /*b_is_anchor_ord=*/false);
@@ -847,14 +856,16 @@ public:
 		// alone determines the block, so the anchor map needs no block column.
 		RunRoutedQuery(conn,
 		               "SELECT b.block, an.ord, b.pos, d.distance::DOUBLE FROM " + qname_ + " d JOIN " +
-		                   wave_anchor_quoted_ + " an ON d.sample_a::VARCHAR = an.id JOIN " + wave_batch_quoted_ +
-		                   " b ON d.sample_b::VARCHAR = b.id"
+		                   wave_anchor_quoted_ + " an ON " + JoinKey("sample_a") + " = an.id JOIN " +
+		                   wave_batch_quoted_ + " b ON " + JoinKey("sample_b") +
+		                   " = b.id"
 		                   " WHERE d.distance IS NOT NULL AND NOT isnan(d.distance::DOUBLE)",
 		               /*a_is_anchor_ord=*/true, /*b_is_anchor_ord=*/false);
 		RunRoutedQuery(conn,
 		               "SELECT b.block, b.pos, an.ord, d.distance::DOUBLE FROM " + qname_ + " d JOIN " +
-		                   wave_batch_quoted_ + " b ON d.sample_a::VARCHAR = b.id JOIN " + wave_anchor_quoted_ +
-		                   " an ON d.sample_b::VARCHAR = an.id"
+		                   wave_batch_quoted_ + " b ON " + JoinKey("sample_a") + " = b.id JOIN " + wave_anchor_quoted_ +
+		                   " an ON " + JoinKey("sample_b") +
+		                   " = an.id"
 		                   " WHERE d.distance IS NOT NULL AND NOT isnan(d.distance::DOUBLE)",
 		               /*a_is_anchor_ord=*/false, /*b_is_anchor_ord=*/true);
 		// Case 4 — anchor×anchor. This corner is IDENTICAL in every block of every
@@ -893,7 +904,7 @@ public:
 				return blocks_[it->second];
 			}
 		}
-		return QueryDistanceBlock(context_, qname_, requested);
+		return QueryDistanceBlock(context_, qname_, requested, id_predicate_type_);
 	}
 
 private:
@@ -909,11 +920,32 @@ private:
 	// dropped for the same reason — see the constructor). The batch map holds one
 	// row per non-anchor sample of the wave; the anchor map holds one row per
 	// anchor, with NO block column — that is what keeps the joins from exploding.
+	// One id, as the map tables' `id` column type. The strings came out of the
+	// relation through ::VARCHAR, so the cast back is exact for every type
+	// NativeIdPredicateType admits.
+	Value MapId(const std::string &id) const {
+		return id_predicate_type_.id() == LogicalTypeId::VARCHAR ? Value(id)
+		                                                         : Value(id).DefaultCastAs(id_predicate_type_);
+	}
+
+	// `d.<column>` as the joins below must spell it: bare when the map's id column
+	// carries the relation's own type, cast when both sides are VARCHAR.
+	std::string JoinKey(const char *column) const {
+		return id_predicate_type_.id() == LogicalTypeId::VARCHAR ? "d." + std::string(column) + "::VARCHAR"
+		                                                         : "d." + std::string(column);
+	}
+
 	void StageWaveMaps(Connection &conn, const std::vector<std::vector<std::string>> &requests) {
-		auto create = conn.Query("CREATE TEMPORARY TABLE " + wave_batch_quoted_ +
-		                         " (id VARCHAR, block INTEGER, pos INTEGER);"
+		// The map's `id` column is declared in the RELATION's id type, not VARCHAR, so
+		// the joins below compare like with like. Declaring it VARCHAR would force
+		// `d.sample_a::VARCHAR = m.id` on every routed query, which turns the join key
+		// into an expression -- the same lost-pushdown cost the slice predicates pay
+		// (see unifrac_internal::NativeIdPredicateType), on a join instead of a filter.
+		const std::string id_sql_type = id_predicate_type_.ToString();
+		auto create = conn.Query("CREATE TEMPORARY TABLE " + wave_batch_quoted_ + " (id " + id_sql_type +
+		                         ", block INTEGER, pos INTEGER);"
 		                         "CREATE TEMPORARY TABLE " +
-		                         wave_anchor_quoted_ + " (id VARCHAR, ord INTEGER)");
+		                         wave_anchor_quoted_ + " (id " + id_sql_type + ", ord INTEGER)");
 		if (create->HasError()) {
 			throw InvalidInputException("progressive_pcoa_from_distances: failed to stage the wave map: %s",
 			                            create->GetError());
@@ -922,7 +954,7 @@ private:
 			Appender appender(conn, wave_batch_table_);
 			for (size_t k = 0; k < requests.size(); ++k) {
 				for (uint32_t p = 0; p < batch_len_[k]; ++p) {
-					appender.AppendRow(Value(requests[k][p]), Value::INTEGER(static_cast<int32_t>(k)),
+					appender.AppendRow(MapId(requests[k][p]), Value::INTEGER(static_cast<int32_t>(k)),
 					                   Value::INTEGER(static_cast<int32_t>(p)));
 				}
 			}
@@ -931,7 +963,7 @@ private:
 		{
 			Appender appender(conn, wave_anchor_table_);
 			for (uint32_t j = 0; j < anchors_.size(); ++j) {
-				appender.AppendRow(Value(anchors_[j]), Value::INTEGER(static_cast<int32_t>(j)));
+				appender.AppendRow(MapId(anchors_[j]), Value::INTEGER(static_cast<int32_t>(j)));
 			}
 			appender.Close();
 		}
@@ -1018,13 +1050,13 @@ private:
 		if (anchor_corner_loaded_) {
 			return;
 		}
-		auto res =
-		    RunWaveQuery(conn,
-		                 "SELECT a1.ord, a2.ord, d.distance::DOUBLE FROM " + qname_ + " d JOIN " + wave_anchor_quoted_ +
-		                     " a1 ON d.sample_a::VARCHAR = a1.id JOIN " + wave_anchor_quoted_ +
-		                     " a2 ON d.sample_b::VARCHAR = a2.id"
-		                     " WHERE d.distance IS NOT NULL AND NOT isnan(d.distance::DOUBLE)",
-		                 "anchor block scan");
+		auto res = RunWaveQuery(conn,
+		                        "SELECT a1.ord, a2.ord, d.distance::DOUBLE FROM " + qname_ + " d JOIN " +
+		                            wave_anchor_quoted_ + " a1 ON " + JoinKey("sample_a") + " = a1.id JOIN " +
+		                            wave_anchor_quoted_ + " a2 ON " + JoinKey("sample_b") +
+		                            " = a2.id"
+		                            " WHERE d.distance IS NOT NULL AND NOT isnan(d.distance::DOUBLE)",
+		                        "anchor block scan");
 		while (auto chunk = res->Fetch()) {
 			const idx_t rn = chunk->size();
 			if (rn == 0) {
@@ -1053,6 +1085,7 @@ private:
 	ClientContext &context_;
 	std::string qname_;
 	std::vector<std::string> anchors_;
+	const LogicalType id_predicate_type_;
 	// Per-provider unique names for the two wave staging tables, plus their quoted
 	// forms for embedding in SQL. See the constructor for why they are not fixed.
 	std::string wave_batch_table_;
@@ -1075,22 +1108,15 @@ private:
 // throw), rather than a weaker hand-rolled reimplementation. A batch needs its
 // full (anchors + batch)² block present in the relation; a gap fails loud.
 miint::progressive::DistanceBlock QueryDistanceBlock(ClientContext &context, const std::string &qname,
-                                                     const std::vector<std::string> &requested) {
+                                                     const std::vector<std::string> &requested,
+                                                     const LogicalType &id_predicate_type) {
 	auto conn = MakeReadOnlyHelperConnection(context);
-	// Filter by a literal IN-list. Value::ToSQLString escapes quotes; an id
-	// containing an embedded NUL would be truncated in the SQL text and fail to
-	// match — but that degrades to the completeness check below (a "missing pair"
-	// error), never silent wrong output.
-	std::string in_list;
-	in_list.reserve(requested.size() * 8);
-	for (size_t i = 0; i < requested.size(); ++i) {
-		if (i) {
-			in_list += ',';
-		}
-		in_list += Value(requested[i]).ToSQLString();
-	}
-	const std::string sql = "SELECT sample_a::VARCHAR, sample_b::VARCHAR, distance::DOUBLE FROM " + qname +
-	                        " WHERE sample_a::VARCHAR IN (" + in_list + ") AND sample_b::VARCHAR IN (" + in_list + ")";
+	// Filter by a literal IN-list, in the id columns' own type where that is exact
+	// (unifrac_internal::NativeIdPredicateType) so the scan can prune. The projection
+	// still casts: the block is keyed by the string form.
+	const std::string sql = "SELECT sample_a::VARCHAR, sample_b::VARCHAR, distance::DOUBLE FROM " + qname + " WHERE " +
+	                        unifrac_internal::IdInPredicate("sample_a", requested, id_predicate_type) + " AND " +
+	                        unifrac_internal::IdInPredicate("sample_b", requested, id_predicate_type);
 	auto res = conn.Query(sql);
 	if (res->HasError()) {
 		throw InvalidInputException("progressive_pcoa_from_distances: block query failed: %s", res->GetError());
@@ -1238,6 +1264,7 @@ unique_ptr<FunctionData> ProgressivePcoaFromDistancesBind(ClientContext &context
 	auto data = make_uniq<ProgressivePcoaData>();
 	data->source = ProgressivePcoaData::Source::DISTANCES;
 	data->sample_id_type = ids.sample_id_type;
+	data->sample_id_predicate_type = ids.sample_id_predicate_type;
 	data->qname = KeywordHelper::WriteOptionallyQuoted(table_name);
 	data->part = std::move(part);
 	data->n_dims = static_cast<uint32_t>(n_dims);
@@ -1272,6 +1299,12 @@ struct FeatureTableIds {
 	std::vector<std::string> sorted_sample_ids;
 	std::vector<std::string> feature_ids;
 	LogicalType sample_id_type = LogicalType::VARCHAR;
+	//! What to compare sample_id against in the per-batch slice, from
+	//! NativeIdPredicateType. Distinct from sample_id_type, which is the OUTPUT type:
+	//! an INTEGER column outputs BIGINT, and BIGINT literals would make DuckDB cast
+	//! the INTEGER column -- forfeiting the pushdown. The predicate needs the
+	//! column's own type.
+	LogicalType sample_id_predicate_type = LogicalType::VARCHAR;
 };
 
 std::vector<std::string> CollectStringColumn(QueryResult &result) {
@@ -1316,6 +1349,7 @@ FeatureTableIds EnumerateFeatureTableIds(ClientContext &context, const std::stri
 			}
 		}
 		out.sample_id_type = ResolveSampleIdOutputType(sid_type);
+		out.sample_id_predicate_type = unifrac_internal::NativeIdPredicateType(sid_type);
 	}
 
 	// A row enters a biom only if it survives ReadFeatureTable's exact drop rules:
@@ -1413,22 +1447,18 @@ void WarnIfFeatureTableUnsorted(ClientContext &context, const char *caller, cons
 // COO form, applying ReadFeatureTable's NULL/zero/NaN drops.
 std::vector<miint::unifrac::CooRow> QueryFeatureRows(ClientContext &context, const char *caller,
                                                      const std::string &qname,
-                                                     const std::vector<std::string> &requested) {
+                                                     const std::vector<std::string> &requested,
+                                                     const LogicalType &id_predicate_type) {
 	// Called concurrently from block workers, one connection per call. Safe: the
 	// inherit only copies the caller's temporary_objects shared_ptr (a read of a
 	// pointer nobody is writing) into this thread's own fresh context, and the
 	// shared catalog is then only read from.
 	auto conn = MakeReadOnlyHelperConnection(context);
-	std::string in_list;
-	in_list.reserve(requested.size() * 8);
-	for (size_t i = 0; i < requested.size(); ++i) {
-		if (i) {
-			in_list += ',';
-		}
-		in_list += Value(requested[i]).ToSQLString();
-	}
-	const std::string sql = "SELECT sample_id::VARCHAR, feature_id::VARCHAR, value::DOUBLE FROM " + qname +
-	                        " WHERE sample_id::VARCHAR IN (" + in_list + ")";
+	// The PROJECTION still casts -- everything downstream keys on the string form --
+	// but the PREDICATE must not, or DuckDB cannot push it into the scan. See
+	// unifrac_internal::NativeIdPredicateType for the 86x that costs.
+	const std::string sql = "SELECT sample_id::VARCHAR, feature_id::VARCHAR, value::DOUBLE FROM " + qname + " WHERE " +
+	                        unifrac_internal::IdInPredicate("sample_id", requested, id_predicate_type);
 	auto res = conn.Query(sql);
 	if (res->HasError()) {
 		throw InvalidInputException("%s: feature slice query failed: %s", caller, res->GetError());
@@ -1486,9 +1516,10 @@ std::vector<miint::unifrac::CooRow> QueryFeatureRows(ClientContext &context, con
 class AnchorFeatureRowCache {
 public:
 	AnchorFeatureRowCache(ClientContext &context, const char *caller, const std::string &qname,
-	                      const std::vector<std::string> &anchors)
-	    : caller_(caller), anchor_set_(anchors.begin(), anchors.end()),
-	      anchor_rows_(QueryFeatureRows(context, caller, qname, anchors)) {
+	                      const std::vector<std::string> &anchors, LogicalType id_predicate_type)
+	    : caller_(caller), id_predicate_type_(std::move(id_predicate_type)),
+	      anchor_set_(anchors.begin(), anchors.end()),
+	      anchor_rows_(QueryFeatureRows(context, caller, qname, anchors, id_predicate_type_)) {
 	}
 
 	// This block's non-anchor samples only. The anchors are held separately (see
@@ -1511,7 +1542,7 @@ public:
 		if (non_anchor.empty()) {
 			return {}; // the anchors-only reference block: every row is already cached
 		}
-		return QueryFeatureRows(context, caller_, qname, non_anchor);
+		return QueryFeatureRows(context, caller_, qname, non_anchor, id_predicate_type_);
 	}
 
 	// The same rows merged into ONE owned vector, non-anchors first. For a caller that
@@ -1534,6 +1565,10 @@ public:
 
 private:
 	const char *caller_;
+	// Declared before anchor_set_/anchor_rows_ on purpose: the constructor's
+	// initializer for anchor_rows_ reads it, and members initialize in declaration
+	// order.
+	const LogicalType id_predicate_type_;
 	std::unordered_set<std::string> anchor_set_;
 	std::vector<miint::unifrac::CooRow> anchor_rows_;
 };
@@ -2039,6 +2074,7 @@ unique_ptr<FunctionData> ProgressivePcoaFromUnifracBind(ClientContext &context, 
 	auto data = make_uniq<ProgressivePcoaData>();
 	data->source = ProgressivePcoaData::Source::UNIFRAC;
 	data->sample_id_type = ids.sample_id_type;
+	data->sample_id_predicate_type = ids.sample_id_predicate_type;
 	data->qname = qname;
 	data->part = std::move(part);
 	data->n_dims = static_cast<uint32_t>(n_dims);
@@ -2195,6 +2231,7 @@ unique_ptr<FunctionData> ProgressivePcoaFromFeaturesBind(ClientContext &context,
 	auto data = make_uniq<ProgressivePcoaData>();
 	data->source = ProgressivePcoaData::Source::FEATURES;
 	data->sample_id_type = ids.sample_id_type;
+	data->sample_id_predicate_type = ids.sample_id_predicate_type;
 	data->qname = qname;
 	data->part = std::move(part);
 	data->n_dims = static_cast<uint32_t>(n_dims);
@@ -2339,7 +2376,8 @@ unique_ptr<miint::progressive::ProgressivePcoaRun> MakeProgressiveRun(ClientCont
 		// (its anchor rows are loaded eagerly, before any fan-out) so every concurrent
 		// block reads the same one. The run holds the provider, so the provider owning
 		// the cache is what keeps it alive exactly as long as the run.
-		auto cache = std::make_shared<AnchorFeatureRowCache>(context, data.CallerName(), data.qname, data.part.anchors);
+		auto cache = std::make_shared<AnchorFeatureRowCache>(context, data.CallerName(), data.qname, data.part.anchors,
+		                                                     data.sample_id_predicate_type);
 		const miint::progressive::BlockProvider provider = [&context, &data,
 		                                                    cache](const std::vector<std::string> &requested) {
 			return ComputeUnifracBlock(context, data.qname, requested, *data.tree, data.variant_fp32,
@@ -2410,7 +2448,8 @@ unique_ptr<miint::progressive::ProgressivePcoaRun> MakeProgressiveRun(ClientCont
 		// than an fsvd, so — as with UniFrac — the machine is used by running several
 		// blocks at once; `data.block_threads` is the per-block share bind already
 		// divided out of `threads`, so the two levels cannot oversubscribe.
-		auto cache = std::make_shared<AnchorFeatureRowCache>(context, data.CallerName(), data.qname, data.part.anchors);
+		auto cache = std::make_shared<AnchorFeatureRowCache>(context, data.CallerName(), data.qname, data.part.anchors,
+		                                                     data.sample_id_predicate_type);
 		// Built here, on the calling thread, before any fan-out — like the row cache
 		// above it is read-only afterwards, which is what lets every concurrent block
 		// share one. It costs one a x a distance computation up front and removes the
@@ -2427,7 +2466,8 @@ unique_ptr<miint::progressive::ProgressivePcoaRun> MakeProgressiveRun(ClientCont
 		return MakeComputedBlockRun(data, provider, interrupt);
 	}
 
-	auto source = std::make_shared<WaveDistanceBlockSource>(context, data.qname, data.part.anchors);
+	auto source = std::make_shared<WaveDistanceBlockSource>(context, data.qname, data.part.anchors,
+	                                                        data.sample_id_predicate_type);
 	const miint::progressive::BlockProvider provider = [source](const std::vector<std::string> &requested) {
 		return source->Get(requested);
 	};

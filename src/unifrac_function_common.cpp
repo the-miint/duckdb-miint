@@ -116,8 +116,69 @@ std::vector<miint::unifrac::CooRow> ReadFeatureTable(ClientContext &context, con
 	return rows;
 }
 
+LogicalType NativeIdPredicateType(const LogicalType &column_type) {
+	// WHY this exists: `WHERE sample_id::VARCHAR IN (...)` against a non-VARCHAR
+	// column is a filter over an EXPRESSION, so DuckDB cannot push it into the scan.
+	// It evaluates the whole IN list per row instead of pruning row groups, and
+	// EXPLAIN shows the difference plainly -- `optional: sample_id IN (...)` (a table
+	// filter) versus `(CAST(sample_id AS VARCHAR) IN (...))`. Measured on a 5.2M-row
+	// BIGINT-keyed feature table, one 1000-id batch slice, threads=1: 11.65 G
+	// instructions cast against 0.136 G native, i.e. 86x, or ~2,240 instructions per
+	// scanned row. On a VARCHAR column the cast is a no-op and is elided, which is
+	// why this never hurt before ids became integers.
+	//
+	// Only the integer types and UUID qualify, and the restriction is the point. Ids
+	// are carried through these readers as the STRINGS the enumeration produced
+	// (`sample_id::VARCHAR`), so comparing natively means casting those strings back
+	// -- safe only where the round-trip is exact and order-preserving. It is for
+	// integers and UUID. It is not for FLOAT/DOUBLE/DECIMAL, whose text rendering is
+	// lossy, nor for types whose VARCHAR collation and native collation could
+	// disagree; those keep the cast and lose only speed, never rows.
+	switch (column_type.id()) {
+	case LogicalTypeId::TINYINT:
+	case LogicalTypeId::SMALLINT:
+	case LogicalTypeId::INTEGER:
+	case LogicalTypeId::BIGINT:
+	case LogicalTypeId::HUGEINT:
+	case LogicalTypeId::UTINYINT:
+	case LogicalTypeId::USMALLINT:
+	case LogicalTypeId::UINTEGER:
+	case LogicalTypeId::UBIGINT:
+	case LogicalTypeId::UHUGEINT:
+	case LogicalTypeId::UUID:
+		return column_type;
+	default:
+		return LogicalType::VARCHAR;
+	}
+}
+
+std::string IdInPredicate(const std::string &column, const std::vector<std::string> &ids,
+                          const LogicalType &predicate_type) {
+	const bool native = predicate_type.id() != LogicalTypeId::VARCHAR;
+	std::string out = column;
+	if (!native) {
+		out += "::VARCHAR";
+	}
+	out += " IN (";
+	// Value::ToSQLString escapes quotes; an id containing an embedded NUL would be
+	// truncated in the SQL text and fail to match. That degrades to the caller's own
+	// completeness check (a "missing pair"/empty-slice error), never to silent wrong
+	// output.
+	for (size_t i = 0; i < ids.size(); ++i) {
+		if (i != 0) {
+			out += ',';
+		}
+		// The strings came OUT of this column via ::VARCHAR, so the cast back cannot
+		// fail for a native-eligible type. If it somehow does, let it throw here
+		// rather than emit a literal that quietly matches nothing.
+		out += native ? Value(ids[i]).DefaultCastAs(predicate_type).ToSQLString() : Value(ids[i]).ToSQLString();
+	}
+	out += ')';
+	return out;
+}
+
 LogicalType ProbeDistanceTableIdType(ClientContext &context, const std::string &table_name,
-                                     const std::string &caller_name) {
+                                     const std::string &caller_name, LogicalType *predicate_type) {
 	auto conn = MakeReadOnlyHelperConnection(context);
 	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
 
@@ -156,13 +217,21 @@ LogicalType ProbeDistanceTableIdType(ClientContext &context, const std::string &
 		                      "both must map to the same output type (BIGINT, UUID, or VARCHAR)",
 		                      caller_name, table_name, sample_a_type.ToString(), sample_b_type.ToString());
 	}
+	// Native comparison needs the two columns to be the SAME native type, not merely
+	// to resolve to the same output type: an INTEGER sample_a beside a BIGINT
+	// sample_b both resolve to BIGINT, but BIGINT literals would make DuckDB cast the
+	// INTEGER column and forfeit exactly the pushdown this buys.
+	if (predicate_type != nullptr) {
+		*predicate_type =
+		    (sample_a_type == sample_b_type) ? NativeIdPredicateType(sample_a_type) : LogicalType::VARCHAR;
+	}
 	return ResolveSampleIdOutputType(sample_a_type);
 }
 
 DistanceRelationIds EnumerateDistanceIds(ClientContext &context, const std::string &table_name,
                                          const std::string &caller_name) {
 	DistanceRelationIds out;
-	out.sample_id_type = ProbeDistanceTableIdType(context, table_name, caller_name);
+	out.sample_id_type = ProbeDistanceTableIdType(context, table_name, caller_name, &out.sample_id_predicate_type);
 
 	auto conn = MakeReadOnlyHelperConnection(context);
 	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
