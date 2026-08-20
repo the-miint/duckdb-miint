@@ -27,6 +27,7 @@
 #include "unifrac_support_biom.hpp"
 
 #include "duckdb/common/types/uuid.hpp"
+#include "duckdb/common/types/column/column_data_collection.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -645,6 +646,12 @@ AnchorPartition PartitionWithExplicitAnchors(const std::vector<std::string> &sor
 // executor then copies again — and offers nowhere to poll for cancellation. See
 // ProgressivePcoaGlobalState.
 struct ProgressivePcoaData : public TableFunctionData {
+	// Rotate the finished configuration onto its own principal axes before emitting.
+	// ON by default, because without it the emitted axes are the ANCHOR block's
+	// principal axes and "PC1" is not the leading axis of the output. It costs the
+	// ability to stream — see StageRotatedRun — so it is a named parameter rather
+	// than unconditional.
+	bool global_rotation = true;
 	// Which block source serves this run. The UNIFRAC-only and FEATURES-only
 	// fields below are read only when the source is that one.
 	enum class Source { DISTANCES, UNIFRAC, FEATURES };
@@ -675,6 +682,10 @@ struct ProgressivePcoaData : public TableFunctionData {
 	// Resolved together at bind (ResolveBlockConcurrency) so their product cannot
 	// oversubscribe, and read by MakeComputedBlockRun for either source.
 	int block_threads = 1;
+	// Per-block dense-operand allowance, already divided by the concurrent workers —
+	// see ResolveBlockConcurrency. 0 would mean "library default", which is per call and
+	// would therefore be W times too generous.
+	size_t gram_operand_bytes = 0;
 	uint32_t workers = 1;
 
 	// ── FEATURES only ──
@@ -708,9 +719,17 @@ struct ProgressivePcoaData : public TableFunctionData {
 // Shared by the UniFrac and community-distance binds for the same reason
 // MakeComputedBlockRun is shared: the two halves of the oversubscription contract
 // must not drift apart.
+// The same division applies to MEMORY, not only to threads. community_distances caps
+// the dense operand PER CALL and cannot see how many calls are in flight, so a run
+// with W concurrent blocks would be entitled to W times that cap. This is the run's
+// total allowance for dense operands, split the same way `block_threads` is; a block
+// that does not fit its share stays on the sparse merge, which needs only CSR.
+constexpr size_t kRunGramOperandBudgetBytes = 512ull << 20;
+
 struct BlockConcurrency {
 	uint32_t workers = 1;
 	int block_threads = 1;
+	size_t gram_operand_bytes = kRunGramOperandBudgetBytes;
 };
 
 BlockConcurrency ResolveBlockConcurrency(int n_threads, size_t n_batches) {
@@ -718,6 +737,7 @@ BlockConcurrency ResolveBlockConcurrency(int n_threads, size_t n_batches) {
 	c.workers = static_cast<uint32_t>(n_threads);
 	const auto active = std::max<size_t>(1, std::min<size_t>(c.workers, n_batches));
 	c.block_threads = std::max<int>(1, n_threads / static_cast<int>(active));
+	c.gram_operand_bytes = kRunGramOperandBudgetBytes / active;
 	return c;
 }
 
@@ -1140,6 +1160,7 @@ unique_ptr<FunctionData> ProgressivePcoaFromDistancesBind(ClientContext &context
 	int32_t batch_size = 1000;
 	int32_t seed = -1;
 	int32_t threads = 0;             // 0 = follow DuckDB's TaskScheduler::NumberOfThreads()
+	bool global_rotation = true;     // see ProgressivePcoaData::global_rotation
 	vector<string> explicit_anchors; // if non-empty: override seeded random anchor selection
 	for (const auto &kv : input.named_parameters) {
 		const auto key = StringUtil::Lower(kv.first);
@@ -1153,6 +1174,8 @@ unique_ptr<FunctionData> ProgressivePcoaFromDistancesBind(ClientContext &context
 			seed = kv.second.GetValue<int32_t>();
 		} else if (key == "threads") {
 			threads = kv.second.GetValue<int32_t>();
+		} else if (key == "global_rotation") {
+			global_rotation = kv.second.GetValue<bool>();
 		} else if (key == "anchors") {
 			for (const auto &child : ListValue::GetChildren(kv.second)) {
 				if (child.IsNull()) {
@@ -1222,6 +1245,7 @@ unique_ptr<FunctionData> ProgressivePcoaFromDistancesBind(ClientContext &context
 	data->batch_size = static_cast<uint32_t>(batch_size);
 	data->seed = seed;
 	data->n_threads = n_threads;
+	data->global_rotation = global_rotation;
 
 	DeclarePcoaOutputSchema(data->sample_id_type, return_types, names, /*with_batch_diagnostics=*/true);
 	return std::move(data);
@@ -1486,6 +1510,13 @@ public:
 		return rows;
 	}
 
+	// The anchors' own cells, for a caller that needs to build something over just
+	// them (the anchor-corner cache). By reference: on a dense table this is
+	// anchors x features rows and copying it would undo the point of caching.
+	const std::vector<miint::unifrac::CooRow> &anchor_rows() const {
+		return anchor_rows_;
+	}
+
 private:
 	const char *caller_;
 	std::unordered_set<std::string> anchor_set_;
@@ -1587,12 +1618,18 @@ ComputeUnifracBlock(ClientContext &context, const std::string &qname, const std:
 //
 // Thread safety: reads only, and RowsFor opens its own Connection per call, so
 // blocks may run concurrently.
-miint::progressive::DistanceBlock ComputeCommunityBlock(ClientContext &context, const std::string &qname,
-                                                        const std::vector<std::string> &requested,
-                                                        const std::string &metric, int n_threads,
-                                                        const AnchorFeatureRowCache &anchor_cache) {
-	const auto rows = anchor_cache.RowsFor(context, qname, requested);
+// One block's cells as CSR, in `requested` order. Split out of
+// ComputeCommunityBlock so the anchor-corner cache below can build the anchors'
+// own CSR with exactly the same code — a second implementation of the dictionary
+// and duplicate-coalescing rules would be a second place for them to drift.
+struct BlockCsr {
+	std::vector<uint32_t> indptr;
+	std::vector<uint32_t> indices;
+	std::vector<double> values;
+	uint32_t n_features = 0;
+};
 
+BlockCsr BuildBlockCsr(const std::vector<miint::unifrac::CooRow> &rows, const std::vector<std::string> &requested) {
 	const auto n = static_cast<uint32_t>(requested.size());
 	std::unordered_map<std::string, uint32_t> s_index;
 	s_index.reserve(n);
@@ -1631,9 +1668,11 @@ miint::progressive::DistanceBlock ComputeCommunityBlock(ClientContext &context, 
 		}
 		per_sample[it->second].emplace_back(f_index.at(r.feature_id), r.count);
 	}
-	std::vector<uint32_t> indptr;
-	std::vector<uint32_t> indices;
-	std::vector<double> values;
+	BlockCsr csr;
+	csr.n_features = f;
+	auto &indptr = csr.indptr;
+	auto &indices = csr.indices;
+	auto &values = csr.values;
 	indptr.reserve(static_cast<size_t>(n) + 1);
 	indices.reserve(rows.size());
 	values.reserve(rows.size());
@@ -1658,13 +1697,117 @@ miint::progressive::DistanceBlock ComputeCommunityBlock(ClientContext &context, 
 		}
 		indptr.push_back(static_cast<uint32_t>(indices.size()));
 	}
+	return csr;
+}
+
+// The anchor x anchor quadrant of every block, computed once.
+//
+// WHY: the core requests each batch as (batch ids ++ ALL anchors), so that quadrant
+// is re-derived in every block of the run, and re-derived to the SAME VALUE — that is
+// exactly what IsPairwiseLocalCommunityMetric guarantees, and what
+// test_CommunityDistances' "unchanged by the block a pair lands in" case pins — so
+// the recomputation buys nothing.
+//
+// "Same value" here means mathematically, not to the last bit. This block's feature
+// dictionary is built over the anchor rows alone, so it is a different permutation of
+// the same features than a batch block's (which sees the batch's features first), and
+// every metric's inner sum is accumulated in ascending dictionary order. See
+// BuildBlockCsr's note on exactly this: the difference is at the last ulp of a double,
+// below the fp32 narrowing the core applies before it sees any of it, and it was
+// checked rather than assumed. It is a(a-1)/2 of a block's (a+k)(a+k-1)/2
+// pairs: 25% of the work at the documented defaults (a = k = 1000), 44% at
+// k = 500, and 64% at a = 200, k = 50, which is the small-batch regime the
+// accuracy guidance recommends when only the leading axes will be interpreted.
+//
+// Held as the condensed upper triangle in ANCHOR order and narrowed to fp32 at
+// the splice, the same single narrowing the uncached path applies — so a cached
+// block and a recomputed one hand the core identical fp32 matrices. 4 MB at
+// 1000 anchors.
+//
+// Read-only after construction, so every concurrent block shares one.
+class AnchorCommunityCorner {
+public:
+	AnchorCommunityCorner(const std::vector<miint::unifrac::CooRow> &anchor_rows,
+	                      const std::vector<std::string> &anchors, const std::string &metric, int n_threads)
+	    : anchors_(anchors) { // copied, not aliased: a few tens of KB buys one less lifetime rule
+		if (anchors_.size() < 2) {
+			return; // no pairs to cache
+		}
+		const auto csr = BuildBlockCsr(anchor_rows, anchors_);
+		const auto a = static_cast<uint32_t>(anchors_.size());
+		try {
+			condensed_ = miint::CommunityDistancesCondensedSparse(
+			    csr.indptr, csr.indices, csr.values, a, csr.n_features, metric, static_cast<unsigned>(n_threads));
+		} catch (const std::invalid_argument &e) {
+			throw InvalidInputException("progressive_pcoa_from_features: %s", e.what());
+		}
+	}
+
+	uint32_t size() const {
+		return static_cast<uint32_t>(anchors_.size());
+	}
+
+	// True iff `requested` really ends with the anchor list, in anchor order — the
+	// only arrangement under which the cached quadrant belongs where it would be
+	// spliced. Checked per block rather than assumed: getting it wrong would not
+	// raise, it would silently place every sample against the wrong anchors. O(a)
+	// string compares against ~a*k distance computations is free.
+	bool MatchesTailOf(const std::vector<std::string> &requested) const {
+		if (condensed_.empty() || requested.size() < anchors_.size()) {
+			return false;
+		}
+		const size_t head = requested.size() - anchors_.size();
+		for (size_t p = 0; p < anchors_.size(); ++p) {
+			if (requested[head + p] != anchors_[p]) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	// Anchor pair (p, q), p < q, in the condensed upper-triangle layout the pure
+	// core uses.
+	double At(uint32_t p, uint32_t q) const {
+		return condensed_[miint::CondensedRowBase(static_cast<uint32_t>(anchors_.size()), p) + (q - p - 1)];
+	}
+
+private:
+	const std::vector<std::string> anchors_;
+	std::vector<double> condensed_;
+};
+
+miint::progressive::DistanceBlock
+ComputeCommunityBlock(ClientContext &context, const std::string &qname, const std::vector<std::string> &requested,
+                      const std::string &metric, int n_threads, const AnchorFeatureRowCache &anchor_cache,
+                      const AnchorCommunityCorner &corner, size_t gram_operand_bytes) {
+	const auto rows = anchor_cache.RowsFor(context, qname, requested);
+	const auto n = static_cast<uint32_t>(requested.size());
+	const auto csr = BuildBlockCsr(rows, requested);
+	const uint32_t f = csr.n_features;
+
+	// Skip the anchor quadrant when this request really carries it as its tail;
+	// it is spliced back in from the cache below.
+	const bool use_corner = corner.MatchesTailOf(requested);
+	const uint32_t cached_tail = use_corner ? corner.size() : 0;
 
 	std::vector<double> condensed;
 	try {
-		condensed = miint::CommunityDistancesCondensedSparse(indptr, indices, values, n, f, metric,
-		                                                     static_cast<unsigned>(n_threads));
+		condensed =
+		    miint::CommunityDistancesCondensedSparse(csr.indptr, csr.indices, csr.values, n, f, metric,
+		                                             static_cast<unsigned>(n_threads), cached_tail, gram_operand_bytes);
 	} catch (const std::invalid_argument &e) {
 		throw InvalidInputException("progressive_pcoa_from_features: %s", e.what());
+	}
+	if (use_corner) {
+		// Anchor pair (p, q) sits at block indices (head + p, head + q); the condensed
+		// slot for (i, j) is RowBase(n, i) + (j - i - 1).
+		const uint32_t head = n - cached_tail;
+		for (uint32_t p = 0; p + 1 < cached_tail; ++p) {
+			const size_t row_base = miint::CondensedRowBase(n, head + p);
+			for (uint32_t q = p + 1; q < cached_tail; ++q) {
+				condensed[row_base + (q - p - 1)] = corner.At(p, q);
+			}
+		}
 	}
 
 	// Condensed upper triangle -> dense symmetric fp32, zero diagonal. The fp32
@@ -1709,6 +1852,7 @@ unique_ptr<FunctionData> ProgressivePcoaFromUnifracBind(ClientContext &context, 
 	double alpha = 1.0;
 	bool bypass_tips = false;
 	bool normalize_sample_counts = true;
+	bool global_rotation = true;     // see ProgressivePcoaData::global_rotation
 	vector<string> explicit_anchors; // if non-empty: override seeded random anchor selection
 	for (const auto &kv : input.named_parameters) {
 		const auto key = StringUtil::Lower(kv.first);
@@ -1732,6 +1876,8 @@ unique_ptr<FunctionData> ProgressivePcoaFromUnifracBind(ClientContext &context, 
 			bypass_tips = kv.second.GetValue<bool>();
 		} else if (key == "normalize_sample_counts") {
 			normalize_sample_counts = kv.second.GetValue<bool>();
+		} else if (key == "global_rotation") {
+			global_rotation = kv.second.GetValue<bool>();
 		} else if (key == "anchors") {
 			for (const auto &child : ListValue::GetChildren(kv.second)) {
 				if (child.IsNull()) {
@@ -1863,6 +2009,7 @@ unique_ptr<FunctionData> ProgressivePcoaFromUnifracBind(ClientContext &context, 
 	data->batch_size = static_cast<uint32_t>(batch_size);
 	data->seed = seed;
 	data->n_threads = n_threads;
+	data->global_rotation = global_rotation;
 	data->tree = make_uniq<miint::NewickTree>(std::move(tree));
 	data->variant_fp32 = variant_fp32;
 	data->variance_adjust = variance_adjust;
@@ -1870,6 +2017,7 @@ unique_ptr<FunctionData> ProgressivePcoaFromUnifracBind(ClientContext &context, 
 	data->bypass_tips = bypass_tips;
 	data->normalize_sample_counts = normalize_sample_counts;
 	data->block_threads = concurrency.block_threads;
+	data->gram_operand_bytes = concurrency.gram_operand_bytes;
 	data->workers = concurrency.workers;
 
 	DeclarePcoaOutputSchema(data->sample_id_type, return_types, names, /*with_batch_diagnostics=*/true);
@@ -1921,6 +2069,7 @@ unique_ptr<FunctionData> ProgressivePcoaFromFeaturesBind(ClientContext &context,
 	int32_t batch_size = 1000;
 	int32_t seed = -1;
 	int32_t threads = 0;             // 0 = follow DuckDB's TaskScheduler::NumberOfThreads()
+	bool global_rotation = true;     // see ProgressivePcoaData::global_rotation
 	vector<string> explicit_anchors; // if non-empty: override seeded random anchor selection
 	for (const auto &kv : input.named_parameters) {
 		const auto key = StringUtil::Lower(kv.first);
@@ -1934,6 +2083,8 @@ unique_ptr<FunctionData> ProgressivePcoaFromFeaturesBind(ClientContext &context,
 			seed = kv.second.GetValue<int32_t>();
 		} else if (key == "threads") {
 			threads = kv.second.GetValue<int32_t>();
+		} else if (key == "global_rotation") {
+			global_rotation = kv.second.GetValue<bool>();
 		} else if (key == "anchors") {
 			for (const auto &child : ListValue::GetChildren(kv.second)) {
 				if (child.IsNull()) {
@@ -2013,8 +2164,10 @@ unique_ptr<FunctionData> ProgressivePcoaFromFeaturesBind(ClientContext &context,
 	data->batch_size = static_cast<uint32_t>(batch_size);
 	data->seed = seed;
 	data->n_threads = n_threads;
+	data->global_rotation = global_rotation;
 	data->metric = metric;
 	data->block_threads = concurrency.block_threads;
+	data->gram_operand_bytes = concurrency.gram_operand_bytes;
 	data->workers = concurrency.workers;
 
 	DeclarePcoaOutputSchema(data->sample_id_type, return_types, names, /*with_batch_diagnostics=*/true);
@@ -2036,10 +2189,32 @@ struct ProgressivePcoaGlobalState : public GlobalTableFunctionState {
 	// closures hold it), so this is also what bounds the source's lifetime.
 	unique_ptr<miint::progressive::ProgressivePcoaRun> run;
 	// The current wave's rows and how far Execute has paged into them. One wave, not
-	// the run — that is the whole point.
+	// the run — that is the whole point. With global_rotation on this holds one
+	// STAGED chunk's rows instead of one wave's; either way it is bounded and
+	// EmitPcoaChunk drains it the same way.
 	std::vector<PcoaRow> rows;
 	size_t cursor = 0;
 	LogicalType sample_id_type = LogicalType::VARCHAR;
+
+	// ── global_rotation staging ──────────────────────────────────────────────
+	// The whole configuration, one row per sample with d coordinate columns, held in
+	// a buffer-managed ColumnDataCollection rather than extension heap: that draws
+	// against memory_limit and SPILLS to temp_directory, so a run that no longer fits
+	// gets slower instead of dying. It has to be constructed from the BufferManager to
+	// get that — see StageRotatedRun. The blocks themselves are still fetched and released
+	// per batch — what has to be held is the finished coordinates, because applying
+	// the rotation means revisiting rows that would otherwise already be gone.
+	unique_ptr<ColumnDataCollection> staged;
+	ColumnDataScanState staged_scan;
+	DataChunk staged_chunk;
+	bool staged_scan_started = false;
+	unique_ptr<miint::progressive::PrincipalAxisAccumulator> axes;
+	std::vector<double> rotation; // d*d row-major
+	std::vector<double> centroid; // d
+	// Copied out of the run so it can be destroyed before the emit phase, which frees
+	// the anchor row cache and distance-corner cache for the whole of it.
+	std::vector<double> eigvals;
+	std::vector<double> proportions;
 	// The run is stepped from one place, in order; a parallel scan would interleave
 	// waves and reorder rows.
 	idx_t MaxThreads() const override {
@@ -2201,9 +2376,18 @@ unique_ptr<miint::progressive::ProgressivePcoaRun> MakeProgressiveRun(ClientCont
 		// blocks at once; `data.block_threads` is the per-block share bind already
 		// divided out of `threads`, so the two levels cannot oversubscribe.
 		auto cache = std::make_shared<AnchorFeatureRowCache>(context, data.CallerName(), data.qname, data.part.anchors);
-		const miint::progressive::BlockProvider provider = [&context, &data,
-		                                                    cache](const std::vector<std::string> &requested) {
-			return ComputeCommunityBlock(context, data.qname, requested, data.metric, data.block_threads, *cache);
+		// Built here, on the calling thread, before any fan-out — like the row cache
+		// above it is read-only afterwards, which is what lets every concurrent block
+		// share one. It costs one a x a distance computation up front and removes the
+		// same computation from every block of the run.
+		// data.n_threads, not data.block_threads: nothing else is running yet, so the
+		// per-block share would leave the machine idle through the whole serial phase.
+		auto corner = std::make_shared<AnchorCommunityCorner>(cache->anchor_rows(), data.part.anchors, data.metric,
+		                                                      data.n_threads);
+		const miint::progressive::BlockProvider provider = [&context, &data, cache,
+		                                                    corner](const std::vector<std::string> &requested) {
+			return ComputeCommunityBlock(context, data.qname, requested, data.metric, data.block_threads, *cache,
+			                             *corner, data.gram_operand_bytes);
 		};
 		return MakeComputedBlockRun(data, provider, interrupt);
 	}
@@ -2299,6 +2483,152 @@ bool AdvanceProgressiveRun(ClientContext &context, const ProgressivePcoaData &da
 	return !gstate.rows.empty();
 }
 
+// Types of the staging collection: the sample id as the core produced it (a string;
+// EmitIdCell converts to the caller's id type at emit), the batch diagnostics, and
+// one DOUBLE per axis. Wide rather than long — one row per sample instead of d —
+// because rotating needs a sample's d coordinates together, and a wide row cannot be
+// split across a chunk boundary.
+vector<LogicalType> StagedRowTypes(uint32_t d) {
+	vector<LogicalType> types {LogicalType::VARCHAR, LogicalType::INTEGER, LogicalType::DOUBLE};
+	for (uint32_t a = 0; a < d; ++a) {
+		types.push_back(LogicalType::DOUBLE);
+	}
+	return types;
+}
+
+// Fold one wave's long-format rows into staged wide rows, accumulating the second
+// moments as they pass. Every sample's d axis rows are consecutive and complete
+// within a wave (a wave emits whole batches, and AppendPcoaRows walks coords in
+// sample-major order), which is what lets this gather d at a time without a carry
+// buffer between calls — asserted rather than assumed.
+void StageWave(const ProgressivePcoaData &data, ProgressivePcoaGlobalState &gstate, DataChunk &append_chunk) {
+	const auto d = data.n_dims;
+	if (gstate.rows.size() % d != 0) {
+		throw InternalException("%s: staged %llu rows for d = %u; a sample's axes must arrive together",
+		                        data.CallerName(), static_cast<unsigned long long>(gstate.rows.size()), d);
+	}
+	std::vector<double> coords(d);
+	for (size_t r = 0; r < gstate.rows.size(); r += d) {
+		if (append_chunk.size() == STANDARD_VECTOR_SIZE) {
+			gstate.staged->Append(append_chunk);
+			append_chunk.Reset();
+		}
+		const idx_t row = append_chunk.size();
+		const auto &first = gstate.rows[r];
+		append_chunk.SetValue(0, row, Value(first.sample_id));
+		if (first.batch < 0) {
+			append_chunk.SetValue(1, row, Value(LogicalType::INTEGER));
+			append_chunk.SetValue(2, row, Value(LogicalType::DOUBLE));
+		} else {
+			append_chunk.SetValue(1, row, Value::INTEGER(first.batch));
+			append_chunk.SetValue(2, row, Value::DOUBLE(first.batch_anchor_m2));
+		}
+		for (uint32_t a = 0; a < d; ++a) {
+			const auto &pr = gstate.rows[r + a];
+			if (static_cast<uint32_t>(pr.axis) != a || pr.sample_id != first.sample_id) {
+				throw InternalException("%s: staged rows for '%s' are not axis-ordered", data.CallerName(),
+				                        first.sample_id.c_str());
+			}
+			coords[a] = pr.coordinate;
+			append_chunk.SetValue(3 + a, row, Value::DOUBLE(pr.coordinate));
+		}
+		append_chunk.SetCardinality(row + 1);
+		gstate.axes->Add(coords.data(), 1);
+	}
+}
+
+// Run the WHOLE run, staging it, then solve for the rotation. This is where
+// global_rotation costs streaming: nothing can be emitted until the last batch has
+// been placed, because the transform is a property of the finished configuration.
+void StageRotatedRun(ClientContext &context, const ProgressivePcoaData &data, ProgressivePcoaGlobalState &gstate) {
+	const auto types = StagedRowTypes(data.n_dims);
+	// BufferManager, not Allocator: the Allocator overload selects
+	// IN_MEMORY_ALLOCATOR, which is plain heap — uncharged against memory_limit and
+	// unable to spill. Since this holds the WHOLE run, that is the difference between
+	// a large run getting slower and the process being OOM-killed.
+	gstate.staged = make_uniq<ColumnDataCollection>(BufferManager::GetBufferManager(context), types);
+	gstate.axes = make_uniq<miint::progressive::PrincipalAxisAccumulator>(data.n_dims);
+	DataChunk append_chunk;
+	append_chunk.Initialize(Allocator::Get(context), types);
+
+	while (AdvanceProgressiveRun(context, data, gstate)) {
+		if (context.interrupted) {
+			throw InterruptException();
+		}
+		StageWave(data, gstate, append_chunk);
+	}
+	if (append_chunk.size() > 0) {
+		gstate.staged->Append(append_chunk);
+	}
+	gstate.rows.clear();
+	gstate.cursor = 0;
+
+	// Held past the run so the emit phase can report them, and captured HERE so the
+	// run — and with it the anchor row cache and the anchor-distance corner — can be
+	// released before the emit phase allocates anything.
+	gstate.eigvals = gstate.run->eigvals();
+	gstate.proportions = gstate.run->proportion_explained();
+	try {
+		gstate.rotation = gstate.axes->Rotation();
+		gstate.centroid = gstate.axes->Mean();
+	} catch (const std::invalid_argument &e) {
+		throw InvalidInputException("%s: %s", data.CallerName(), e.what());
+	}
+	gstate.axes.reset();
+	gstate.run.reset();
+}
+
+// One staged chunk, rotated, expanded back into the long-format rows EmitPcoaChunk
+// already knows how to drain.
+bool RefillFromStaged(const ProgressivePcoaData &data, ProgressivePcoaGlobalState &gstate) {
+	const auto d = data.n_dims;
+	if (!gstate.staged_scan_started) {
+		gstate.staged->InitializeScan(gstate.staged_scan);
+		gstate.staged->InitializeScanChunk(gstate.staged_chunk);
+		gstate.staged_scan_started = true;
+	}
+	gstate.rows.clear();
+	gstate.cursor = 0;
+	if (!gstate.staged->Scan(gstate.staged_scan, gstate.staged_chunk)) {
+		return false;
+	}
+	const idx_t n = gstate.staged_chunk.size();
+	gstate.rows.reserve(static_cast<size_t>(n) * d);
+	std::vector<double> raw(d), rotated(d);
+	for (idx_t r = 0; r < n; ++r) {
+		const auto id_val = gstate.staged_chunk.data[0].GetValue(r);
+		const auto batch_val = gstate.staged_chunk.data[1].GetValue(r);
+		const auto m2_val = gstate.staged_chunk.data[2].GetValue(r);
+		for (uint32_t a = 0; a < d; ++a) {
+			raw[a] = gstate.staged_chunk.data[3 + a].GetValue(r).GetValue<double>();
+		}
+		// y' = R (y - centroid): centred as well as rotated, so the emitted
+		// configuration is a centred principal-axis one like a real PCoA's.
+		for (uint32_t a = 0; a < d; ++a) {
+			double acc = 0.0;
+			for (uint32_t k = 0; k < d; ++k) {
+				acc += gstate.rotation[static_cast<size_t>(a) * d + k] * (raw[k] - gstate.centroid[k]);
+			}
+			rotated[a] = acc;
+		}
+		for (uint32_t a = 0; a < d; ++a) {
+			PcoaRow row;
+			row.iteration = 0;
+			row.sample_id = id_val.ToString();
+			row.axis = static_cast<int32_t>(a);
+			row.coordinate = rotated[a];
+			row.eigenvalue = gstate.eigvals[a];
+			row.proportion_explained = gstate.proportions[a];
+			row.batch = batch_val.IsNull() ? -1 : batch_val.GetValue<int32_t>();
+			if (!m2_val.IsNull()) {
+				row.batch_anchor_m2 = m2_val.GetValue<double>();
+			}
+			gstate.rows.push_back(std::move(row));
+		}
+	}
+	return true;
+}
+
 unique_ptr<GlobalTableFunctionState> ProgressivePcoaInitGlobal(ClientContext &, TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<ProgressivePcoaData>();
 	auto gstate = make_uniq<ProgressivePcoaGlobalState>();
@@ -2309,6 +2639,26 @@ unique_ptr<GlobalTableFunctionState> ProgressivePcoaInitGlobal(ClientContext &, 
 void ProgressivePcoaExecute(ClientContext &context, TableFunctionInput &input, DataChunk &output) {
 	auto &gstate = input.global_state->Cast<ProgressivePcoaGlobalState>();
 	const auto &data = input.bind_data->Cast<ProgressivePcoaData>();
+	if (data.global_rotation) {
+		// The whole run happens inside this first call — the rotation is a property of
+		// the finished configuration, so there is nothing correct to emit before then.
+		if (!gstate.staged) {
+			// AdvanceProgressiveRun builds the run and emits the anchor frame on its
+			// first call; creating it here instead would skip that and lose the anchors.
+			StageRotatedRun(context, data, gstate);
+		}
+		while (gstate.cursor >= gstate.rows.size()) {
+			if (context.interrupted) {
+				throw InterruptException();
+			}
+			if (!RefillFromStaged(data, gstate)) {
+				output.SetCardinality(0);
+				return;
+			}
+		}
+		EmitPcoaChunk(gstate.rows, gstate.cursor, gstate.sample_id_type, /*with_batch_diagnostics=*/true, output);
+		return;
+	}
 	while (gstate.cursor >= gstate.rows.size()) {
 		// Also polled here, not only inside the run: a cancellation that arrives while
 		// DuckDB is draining the wave already produced is noticed on the next refill
@@ -2361,6 +2711,7 @@ void RegisterProgressivePcoaFromDistances(ExtensionLoader &loader) {
 	fn.named_parameters["seed"] = LogicalType::INTEGER;
 	fn.named_parameters["threads"] = LogicalType::INTEGER;
 	fn.named_parameters["anchors"] = LogicalType::LIST(LogicalType::VARCHAR);
+	fn.named_parameters["global_rotation"] = LogicalType::BOOLEAN;
 	loader.RegisterFunction(fn);
 }
 
@@ -2373,6 +2724,7 @@ void RegisterProgressivePcoaFromFeatures(ExtensionLoader &loader) {
 	fn.named_parameters["seed"] = LogicalType::INTEGER;
 	fn.named_parameters["threads"] = LogicalType::INTEGER;
 	fn.named_parameters["anchors"] = LogicalType::LIST(LogicalType::VARCHAR);
+	fn.named_parameters["global_rotation"] = LogicalType::BOOLEAN;
 	loader.RegisterFunction(fn);
 }
 
@@ -2390,6 +2742,7 @@ void RegisterProgressivePcoaFromUnifrac(ExtensionLoader &loader) {
 	fn.named_parameters["bypass_tips"] = LogicalType::BOOLEAN;
 	fn.named_parameters["normalize_sample_counts"] = LogicalType::BOOLEAN;
 	fn.named_parameters["anchors"] = LogicalType::LIST(LogicalType::VARCHAR);
+	fn.named_parameters["global_rotation"] = LogicalType::BOOLEAN;
 	loader.RegisterFunction(fn);
 }
 

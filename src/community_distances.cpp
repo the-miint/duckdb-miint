@@ -1,5 +1,7 @@
 #include "community_distances.hpp"
 
+#include <Eigen/Core>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -11,6 +13,10 @@
 #include <thread>
 
 namespace miint {
+
+size_t CondensedRowBase(uint32_t n_samples, uint32_t i) {
+	return static_cast<size_t>(static_cast<uint64_t>(i) * (2ull * n_samples - i - 1) / 2);
+}
 
 namespace {
 
@@ -86,7 +92,7 @@ size_t PairCount(uint32_t n) {
 // i*(2n-i-1) is always even (i and 2n-i-1 have opposite parity), so the halving is
 // exact, and the whole product is formed in uint64 so it cannot wrap.
 size_t RowBase(uint32_t n, uint32_t i) {
-	return static_cast<size_t>(static_cast<uint64_t>(i) * (2ull * n - i - 1) / 2);
+	return CondensedRowBase(n, i);
 }
 
 // Comma-separated metric names, either all of them or only the pairwise-local ones.
@@ -133,14 +139,24 @@ Metric ResolveMetricOrThrow(uint32_t n_samples, const std::string &metric, bool 
 //
 // Row i does (n-1-i) pairs, so a static contiguous split would overload the
 // low-index threads; an atomic row cursor keeps the load balanced instead. The
-// thread count is capped two ways — never more than there are rows with pairs
-// (n-1), and never more than the hardware can run concurrently, since extra threads
+// thread count is capped two ways — never more than there are rows to compute,
+// and never more than the hardware can run concurrently, since extra threads
 // on a CPU-bound loop only add context switches and spawning thousands risks a
 // pids/ulimit hit. hardware_concurrency() reports 0 when it cannot detect; fall back
-// to the requested count, leaving only the n-1 cap.
-void RunPairLoop(uint32_t n, unsigned n_threads, const std::function<void(uint32_t)> &compute_row) {
+// to the requested count, leaving only the row cap.
+//
+// `row_end` is the number of rows to visit, normally n-1 (every row that has a
+// pair). A caller that already holds the mutual distances of a trailing block of
+// samples passes a smaller bound: because j > i, the pairs entirely inside that
+// trailing block are exactly the rows at or after it, so skipping them is a loop
+// bound rather than a per-pair test. Which thread reaches a row still cannot
+// change a value — every pair has a fixed destination (see RowBase).
+void RunPairLoop(uint32_t row_end, unsigned n_threads, const std::function<void(uint32_t)> &compute_row) {
+	if (row_end == 0) {
+		return;
+	}
 	if (n_threads <= 1) {
-		for (uint32_t i = 0; i + 1 < n; ++i) {
+		for (uint32_t i = 0; i < row_end; ++i) {
 			compute_row(i);
 		}
 		return;
@@ -149,13 +165,13 @@ void RunPairLoop(uint32_t n, unsigned n_threads, const std::function<void(uint32
 	if (hw == 0) {
 		hw = n_threads;
 	}
-	unsigned nt = std::min<unsigned>(n_threads, n - 1);
+	unsigned nt = std::min<unsigned>(n_threads, row_end);
 	nt = std::min(nt, hw);
 	std::atomic<uint32_t> next_row {0};
 	auto worker = [&]() {
 		for (;;) {
 			const uint32_t i = next_row.fetch_add(1);
-			if (i + 1 >= n) {
+			if (i >= row_end) {
 				break;
 			}
 			compute_row(i);
@@ -182,6 +198,243 @@ void RunPairLoop(uint32_t n, unsigned n_threads, const std::function<void(uint32
 	}
 }
 
+// ── Dense Gram (GEMM) fast path ──────────────────────────────────────────────
+//
+// Three of the five pairwise-local metrics are a function of ONE inner product
+// plus per-sample scalars, so all n(n-1)/2 of them can come out of a single
+// matrix product instead of n(n-1)/2 independent merges:
+//
+//   euclidean      d^2   = Sx2_i + Sx2_j - 2*<x_i,x_j>
+//   jaccard        a     = <1_i, 1_j> over the binary indicator, and
+//                  d     = (|X|+|Y|-2a) / (|X|+|Y|-a)
+//   morisita_horn  the numerator IS <x_i,x_j>
+//
+// bray_curtis and soergel are NOT expressible this way -- Sum|x-y| and
+// Sum max(x,y) are not bilinear -- so they always take the merge. That is worth
+// knowing rather than rediscovering: bray_curtis is the most-used microbiome
+// metric and gets nothing from this path.
+//
+// WHY GATE IT: the merge visits the union of two samples' nonzeros; the GEMM
+// visits the whole feature space. On real microbiome blocks that is a disaster,
+// not a trade -- measured on a 2000-sample block, sub10k spans 56,142 features at
+// 0.19% density, where the GEMM would do 4.5e11 flops against a merge that measures
+// 0.8 s, and would need 898 MB for the dense operand against 2.6 MB of CSR. On a
+// 38.8%-dense image block (673 features) the same comparison inverts and the GEMM is
+// ~9.7x cheaper. So the dispatch is on DENSITY -- the work ratio is m*f/nnz =
+// 1/density, with no n and no f in it -- and the crossover is MEASURED rather than
+// argued from those two endpoints; see kGramDensityThreshold below for the ladder it
+// was fitted on and the 0.96% it came out at.
+//
+// Eigen's GEMM is deterministic here because EIGEN_DONT_PARALLELIZE is set
+// globally (see CMakeLists.txt) -- so this is bit-reproducible run to run for a
+// given binary, and independent of `n_threads`, which only fans out the fill loop
+// below. Across MACHINES it is not guaranteed: Eigen picks its blocking from
+// runtime-queried cache sizes, so a different cache hierarchy can reassociate the
+// sums. No test asserts an absolute distance to the bit (they use Catch2 Approx),
+// and the tests that DO assert bits compare two paths inside one binary.
+bool GemmEligible(Metric m) {
+	return m == Metric::Euclidean || m == Metric::Jaccard || m == Metric::MorisitaHorn;
+}
+
+// Dispatch threshold, as a fraction of the block's cells that are nonzero.
+//
+// Fitted on a synthetic ladder that holds n, f, cluster structure and value
+// distribution fixed and moves ONLY density, then validated on tables it was not
+// fitted on -- so it is not tuned to whichever dataset was convenient. Measured at
+// 20,000 samples over 2,000 features, one thread, as (merge wall) / (Gram wall):
+//
+//     density   0.8%   1.0%   1.2%   1.5%   2%    5%    15%    40%
+//     speedup   0.83x  1.04x  1.25x  1.56x  2.1x  5.1x  13.0x  25.3x
+//
+// so the two kernels cost the same at about 0.96% and the Gram path is only worth
+// taking some way above that. This is set at 1.5%, the lowest rung where the win is
+// unambiguous rather than inside the noise, which leaves a 1.6x margin on the
+// crossover -- because near it the trade is all cost and no benefit: equal time for
+// a dense n x f operand the merge never allocates.
+//
+// Density is the whole rule because the work ratio is m*f/nnz = 1/density, with no n
+// and no f in it. That is a theoretical claim, so it is measured rather than assumed:
+// the same threshold was checked against 673 features (EMNIST, 9.7x at 38.8%) and
+// 56,142 (a real microbiome table) and the crossover does not move with f.
+constexpr double kGramDensityThreshold = 0.015;
+// A hard ceiling on the dense OPERAND regardless of density: an optimization must
+// never be the reason a query runs out of memory. It does not cover the n x n Gram,
+// which is deliberately uncapped -- see CommunityDistancesUsesGramPath for why (it is
+// 2x the result the caller already asked for, so it is a bounded factor, not a
+// separate risk).
+constexpr size_t kGramMaxOperandBytes = 512ull << 20;
+// Below this the GEMM cannot pay for its own allocation, and staying on the merge
+// keeps every small test fixture on the exactly-summed path.
+constexpr uint32_t kGramMinSamples = 64;
+
+bool UseGramPath(Metric m, uint32_t n, uint32_t f, size_t nnz, size_t max_operand_bytes) {
+	if (!GemmEligible(m) || n < kGramMinSamples || f == 0) {
+		return false;
+	}
+	if (max_operand_bytes == 0) {
+		max_operand_bytes = kGramMaxOperandBytes;
+	}
+	// uint64 deliberately, not size_t: size_t is 32 bits on wasm32, which is a
+	// first-class target here, and n * f overflows it for a whole-table feature
+	// dictionary (millions of features). A wrapped product could land UNDER the cap and
+	// then be used to size the dense operand — admitting the path and undersizing the
+	// buffer at once. Same reason PairCount/RowBase promote to uint64 above.
+	const uint64_t cells = static_cast<uint64_t>(n) * f;
+	if (cells > max_operand_bytes / sizeof(double) || cells > std::numeric_limits<size_t>::max() / sizeof(double)) {
+		return false;
+	}
+	return static_cast<double>(nnz) > kGramDensityThreshold * static_cast<double>(cells);
+}
+
+// `Sx2_i + Sx2_j - 2<x_i,x_j>` is a difference of large, nearly equal numbers when
+// two rows are close, so it keeps almost none of its significant digits: the
+// absolute error is about eps * (Sx2_i + Sx2_j) regardless of how small the true
+// distance is. EXACT duplicates are safe by construction -- all three terms are the
+// same sum over the same values, so they cancel to exactly 0 -- but NEAR duplicates
+// with large magnitudes are destroyed. Measured on rows of ~1e6 differing in one
+// feature by 1e-3: the true distance is 1e-3 and the product gives ~0.3.
+//
+// So any pair whose squared distance falls below this fraction of the row norms is
+// recomputed exactly. At 1e-8 the residual relative error in d^2 is about
+// eps/1e-8 ~ 2e-8, which is far below the fp32 narrowing every block gets anyway,
+// and the guard only fires when d/||x|| < 1e-4 -- rare enough on real data to cost
+// nothing, and exactly the regime where it must fire.
+constexpr double kGramCancelRel = 1e-8;
+
+// All pairwise distances for a GEMM-eligible metric, from a dense row-major
+// operand. `n_cached_tail` has the same meaning as in the sparse entry point, and
+// is honoured in the PRODUCT as well as the fill loop: the tail x tail triangle is
+// never formed, which is the whole point of caching it.
+std::vector<double> CondensedViaGram(const double *M, uint32_t n, uint32_t f, Metric m, unsigned n_threads,
+                                     uint32_t n_cached_tail, bool operand_prebinarized = false) {
+	using RowMajor = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
+
+	// Jaccard's operand is the binary indicator, and presence is `> 0.0` -- the same
+	// test the merge uses, so a negative cell counts as ABSENT in both. A caller that
+	// materialized the operand itself can binarize while doing so and say so, which
+	// saves holding a SECOND n x f matrix; the jaccard branch below reads only the Gram
+	// and its diagonal, never the raw values, so a binarized operand loses it nothing.
+	RowMajor binary;
+	const double *operand = M;
+	if (m == Metric::Jaccard && !operand_prebinarized) {
+		binary.resize(n, f);
+		for (uint32_t i = 0; i < n; ++i) {
+			const double *xi = M + static_cast<size_t>(i) * f;
+			for (uint32_t k = 0; k < f; ++k) {
+				binary(i, k) = xi[k] > 0.0 ? 1.0 : 0.0;
+			}
+		}
+		operand = binary.data();
+	}
+	const Eigen::Map<const RowMajor> X(operand, n, f);
+
+	// Only the lower triangle is ever read (pair (i,j) with j > i reads S(j,i)), so
+	// only the lower triangle is formed. With a cached tail the product splits into
+	// the head triangle and the tail x head rectangle, leaving the tail's own
+	// triangle uncomputed.
+	Eigen::MatrixXd S = Eigen::MatrixXd::Zero(n, n);
+	const uint32_t head = n - n_cached_tail;
+	if (n_cached_tail == 0) {
+		S.selfadjointView<Eigen::Lower>().rankUpdate(X);
+	} else if (head > 0) {
+		// Reached only when n_cached_tail != 0 (the branch above takes 0), so the tail
+		// rectangle is mandatory here, not optional. `head > 0` is defensive: the sparse
+		// entry point returns early when the whole block is cached, so a zero head does
+		// not arrive from there.
+		S.topLeftCorner(head, head).selfadjointView<Eigen::Lower>().rankUpdate(X.topRows(head));
+		S.bottomLeftCorner(n_cached_tail, head).noalias() =
+		    X.bottomRows(n_cached_tail) * X.topRows(head).transpose();
+	}
+
+	// The Gram diagonal already holds Sum_k x_k^2 for euclidean and the presence
+	// count for jaccard, so neither needs its own pass. Only morisita's Sum_k x_k
+	// does -- and only when the tail was not cached, since a cached tail's own
+	// diagonal was never formed.
+	std::vector<double> diag(n, 0.0);
+	for (uint32_t i = 0; i < head; ++i) {
+		diag[i] = S(i, i);
+	}
+	for (uint32_t i = head; i < n; ++i) {
+		const double *xi = operand + static_cast<size_t>(i) * f;
+		double ss = 0.0;
+		for (uint32_t k = 0; k < f; ++k) {
+			ss += xi[k] * xi[k];
+		}
+		diag[i] = ss;
+	}
+	std::vector<double> rowsum;
+	if (m == Metric::MorisitaHorn) {
+		rowsum.assign(n, 0.0);
+		for (uint32_t i = 0; i < n; ++i) {
+			const double *xi = M + static_cast<size_t>(i) * f;
+			double sv = 0.0;
+			for (uint32_t k = 0; k < f; ++k) {
+				sv += xi[k];
+			}
+			rowsum[i] = sv;
+		}
+	}
+
+	std::vector<double> out(PairCount(n));
+	auto compute_row = [&](uint32_t i) {
+		size_t o = RowBase(n, i);
+		const double *xi = M + static_cast<size_t>(i) * f;
+		for (uint32_t j = i + 1; j < n; ++j, ++o) {
+			const double dot = S(j, i);
+			double dist = 0.0;
+			switch (m) {
+			case Metric::Euclidean: {
+				double sq = diag[i] + diag[j] - 2.0 * dot;
+				if (sq <= kGramCancelRel * (diag[i] + diag[j])) {
+					// Cancellation territory -- recompute this pair exactly, in the same
+					// ascending feature order the merge would use.
+					const double *xj = M + static_cast<size_t>(j) * f;
+					sq = 0.0;
+					for (uint32_t k = 0; k < f; ++k) {
+						const double dk = xi[k] - xj[k];
+						sq += dk * dk;
+					}
+				}
+				dist = sq > 0.0 ? std::sqrt(sq) : 0.0;
+				break;
+			}
+			case Metric::Jaccard: {
+				// diag holds |X| and |Y| (presence counts) off the binary Gram.
+				const double union_sz = diag[i] + diag[j] - dot;
+				dist = union_sz > 0.0 ? (union_sz - dot) / union_sz : 0.0;
+				break;
+			}
+			case Metric::MorisitaHorn: {
+				const double X_ = rowsum[i], Y_ = rowsum[j];
+				if (X_ <= 0.0 && Y_ <= 0.0) {
+					dist = 0.0;
+				} else if (X_ <= 0.0 || Y_ <= 0.0) {
+					dist = 1.0;
+				} else {
+					// No denominator guard, because the merge branch has none either: the
+					// two paths have to agree on every input, including the ones where a
+					// negative abundance makes this ill-conditioned.
+					dist = 1.0 - 2 * dot / ((diag[i] / (X_ * X_) + diag[j] / (Y_ * Y_)) * X_ * Y_);
+				}
+				break;
+			}
+			case Metric::BrayCurtis:
+			case Metric::Soergel:
+			case Metric::Pearson:
+			case Metric::Chisq:
+			case Metric::Gower:
+				// Unreachable: UseGramPath admits only the three above. Listed rather
+				// than defaulted so a metric newly shown to be Gram-expressible has to
+				// be handled here instead of silently yielding zeros.
+				break;
+			}
+			out[o] = dist;
+		}
+	};
+	RunPairLoop(n - std::max<uint32_t>(n_cached_tail, 1), n_threads, compute_row);
+	return out;
+}
+
 } // namespace
 
 bool IsValidCommunityMetric(const std::string &metric) {
@@ -197,6 +450,15 @@ bool IsPairwiseLocalCommunityMetric(const std::string &metric) {
 	// An unknown name is not admissible: refusing it here is what makes a typo
 	// an error at bind rather than a metric silently computed per block.
 	return i >= 0 && kPairwiseLocal[static_cast<size_t>(i)];
+}
+
+bool CommunityDistancesUsesGramPath(const std::string &metric, uint32_t n_samples, uint32_t n_features, size_t nnz,
+                                    size_t max_operand_bytes) {
+	const int i = MetricIndex(metric);
+	if (i < 0) {
+		return false;
+	}
+	return UseGramPath(static_cast<Metric>(i), n_samples, n_features, nnz, max_operand_bytes);
 }
 
 std::string CommunityMetricList() {
@@ -218,6 +480,24 @@ std::vector<double> CommunityDistancesCondensed(const std::vector<double> &matri
 	auto row = [&](uint32_t i) {
 		return M + static_cast<size_t>(i) * f;
 	};
+
+	// One matrix product instead of n(n-1)/2 pair scans, when the block is dense
+	// enough for that to be cheaper (see UseGramPath). Dispatched on the SAME
+	// (metric, n, f, nnz) rule as the sparse entry point below and on the same dense
+	// values, which is what keeps the two bit-identical on this path as they are on
+	// the merge path. The nonzero count costs one O(n*f) pass, the same order as the
+	// per-sample pre-pass just below it.
+	if (GemmEligible(m)) {
+		size_t nnz = 0;
+		for (size_t c = 0; c < matrix.size(); ++c) {
+			nnz += (matrix[c] != 0.0) ? 1 : 0;
+		}
+		// This entry point does not materialize an operand -- `matrix` is the caller's --
+		// so it spends only the library default, never a caller's per-block budget.
+		if (UseGramPath(m, n, f, nnz, /*max_operand_bytes=*/0)) {
+			return CondensedViaGram(M, n, f, m, n_threads, /*n_cached_tail=*/0);
+		}
+	}
 
 	// Per-sample aggregates reused across pairs.
 	std::vector<double> rowsum(n, 0.0);   // Sum_k M[i][k]     (X, Y; bray denom; morisita/chisq)
@@ -416,7 +696,7 @@ std::vector<double> CommunityDistancesCondensed(const std::vector<double> &matri
 		}
 	};
 
-	RunPairLoop(n, n_threads, compute_row);
+	RunPairLoop(n - 1, n_threads, compute_row);
 	return out;
 }
 
@@ -424,8 +704,14 @@ std::vector<double> CommunityDistancesCondensedSparse(const std::vector<uint32_t
                                                       const std::vector<uint32_t> &indices,
                                                       const std::vector<double> &values, uint32_t n_samples,
                                                       uint32_t n_features, const std::string &metric,
-                                                      unsigned n_threads) {
+                                                      unsigned n_threads, uint32_t n_cached_tail,
+                                                      size_t max_operand_bytes) {
 	const Metric m = ResolveMetricOrThrow(n_samples, metric, /*require_pairwise_local=*/true);
+
+	if (n_cached_tail > n_samples) {
+		throw std::invalid_argument("community_distances: n_cached_tail (" + std::to_string(n_cached_tail) +
+		                            ") exceeds n_samples (" + std::to_string(n_samples) + ")");
+	}
 
 	if (indptr.size() != static_cast<size_t>(n_samples) + 1) {
 		throw std::invalid_argument("community_distances: indptr must have n_samples+1 (" +
@@ -457,6 +743,45 @@ std::vector<double> CommunityDistancesCondensedSparse(const std::vector<uint32_t
 	}
 
 	const uint32_t n = n_samples;
+
+	// Every pair is in the caller's cache, so there is nothing to compute. Worth an
+	// early return rather than falling through: progressive_pcoa_from_features asks for
+	// exactly this when it fetches the anchor-only reference block, and without it that
+	// block densifies n*f doubles, forms an n x n Gram and walks every pre-pass -- and
+	// then has all PairCount(n) of its results overwritten from the cache.
+	if (n_cached_tail == n) {
+		return std::vector<double>(PairCount(n), 0.0);
+	}
+
+	// Same dispatch as the dense entry point, on the same rule, so both agree.
+	// Densifying costs n*f doubles -- which is exactly what UseGramPath's operand cap
+	// bounds, and why that cap is applied on both sides even though the dense entry
+	// point does not allocate.
+	// VALUE nonzeros, not indices.size(). BuildBlockCsr coalesces duplicate cells by
+	// SUMMING them, so a CSR can legitimately store an explicit 0.0 — and the dense
+	// entry point counts `matrix[c] != 0.0`. Counting structural entries here would let
+	// the same logical matrix take different kernels through the two entry points,
+	// which is exactly the bit-identity the header promises.
+	size_t nnz = 0;
+	if (GemmEligible(m)) {
+		for (size_t k = 0; k < values.size(); ++k) {
+			nnz += (values[k] != 0.0) ? 1 : 0;
+		}
+	}
+	if (UseGramPath(m, n, n_features, nnz, max_operand_bytes)) { // its own first test is !GemmEligible
+		// Binarize WHILE densifying for jaccard, so the indicator does not cost a second
+		// n x f matrix on top of this one -- which the operand cap does not budget for.
+		const bool binarize = (m == Metric::Jaccard);
+		std::vector<double> dense(static_cast<size_t>(n) * n_features, 0.0);
+		for (uint32_t i = 0; i < n; ++i) {
+			for (uint32_t pos = indptr[i]; pos < indptr[i + 1]; ++pos) {
+				const double v = values[pos];
+				dense[static_cast<size_t>(i) * n_features + indices[pos]] = binarize ? (v > 0.0 ? 1.0 : 0.0) : v;
+			}
+		}
+		return CondensedViaGram(dense.data(), n, n_features, m, n_threads, n_cached_tail,
+		                        /*operand_prebinarized=*/binarize);
+	}
 
 	// Per-sample aggregates, accumulated in ascending feature order exactly as the
 	// dense pre-pass does (its extra zero terms add nothing).
@@ -565,7 +890,12 @@ std::vector<double> CommunityDistancesCondensedSparse(const std::vector<uint32_t
 		}
 	};
 
-	RunPairLoop(n, n_threads, compute_row);
+	// Rows i >= n - n_cached_tail hold only pairs whose partner is also in the tail
+	// (j > i), so stopping here is exactly the cached square and nothing else. The
+	// per-sample pre-pass above deliberately still covers those samples — they are
+	// still one endpoint of every cross pair. max(n_cached_tail, 1) keeps the
+	// no-cache case at the usual n-1.
+	RunPairLoop(n - std::max<uint32_t>(n_cached_tail, 1), n_threads, compute_row);
 	return out;
 }
 

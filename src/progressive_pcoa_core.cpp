@@ -17,6 +17,10 @@
 #include "procrustes_core.hpp"   // FitProcrustes / ApplyToReference / ApplyToOther
 #include "unifrac_omp_scope.hpp" // ComputeCallScope — per-call OpenMP pin + non-negative seed
 
+#include <Eigen/Core>
+#include <Eigen/Eigenvalues>
+#include <Eigen/LU> // determinant(), for the parity check in Rotation()
+
 namespace miint::progressive {
 
 namespace {
@@ -206,6 +210,106 @@ std::vector<std::string> ProgressivePcoaRun::BuildRequest(size_t start, size_t e
 	req.insert(req.end(), remaining_ids_.begin() + start, remaining_ids_.begin() + end);
 	req.insert(req.end(), anchor_ids_.begin(), anchor_ids_.end());
 	return req;
+}
+
+// ── Principal axes of the assembled configuration ────────────────────────────────
+PrincipalAxisAccumulator::PrincipalAxisAccumulator(uint32_t d)
+    : d_(d), sum_(d, 0.0), sum_xx_(static_cast<size_t>(d) * d, 0.0) {
+	if (d == 0) {
+		throw std::invalid_argument("progressive_pcoa: principal-axis accumulator needs d >= 1");
+	}
+}
+
+void PrincipalAxisAccumulator::Add(const double *coords, size_t n_rows) {
+	for (size_t r = 0; r < n_rows; ++r) {
+		const double *y = coords + r * d_;
+		for (uint32_t a = 0; a < d_; ++a) {
+			sum_[a] += y[a];
+			// Upper triangle only; symmetrized when the covariance is formed.
+			for (uint32_t b = a; b < d_; ++b) {
+				sum_xx_[static_cast<size_t>(a) * d_ + b] += y[a] * y[b];
+			}
+		}
+	}
+	n_ += n_rows;
+}
+
+std::vector<double> PrincipalAxisAccumulator::Mean() const {
+	if (n_ == 0) {
+		return {};
+	}
+	std::vector<double> mean(d_);
+	for (uint32_t a = 0; a < d_; ++a) {
+		mean[a] = sum_[a] / static_cast<double>(n_);
+	}
+	return mean;
+}
+
+std::vector<double> PrincipalAxisAccumulator::Rotation() const {
+	if (n_ < 2) {
+		throw std::invalid_argument("progressive_pcoa: principal axes need at least 2 samples, got " +
+		                            std::to_string(n_));
+	}
+	const auto mean = Mean();
+	const double n = static_cast<double>(n_);
+	// C = E[yy^T] - mean mean^T. Start() standardizes the anchor frame to unit
+	// Frobenius norm and every batch is mapped INTO that frame, so a coordinate is
+	// O(1/sqrt(a*d)) and near-centred no matter how many samples the run has. Both
+	// terms are therefore the same small size and the subtraction cannot cancel the
+	// way it would on raw, off-origin data.
+	Eigen::MatrixXd C(d_, d_);
+	for (uint32_t a = 0; a < d_; ++a) {
+		for (uint32_t b = a; b < d_; ++b) {
+			const double v = sum_xx_[static_cast<size_t>(a) * d_ + b] / n - mean[a] * mean[b];
+			C(a, b) = v;
+			C(b, a) = v;
+		}
+	}
+	// Symmetric by construction, so a self-adjoint solver — which also guarantees
+	// real eigenvalues in ASCENDING order, hence the reversal below.
+	Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(C);
+	if (es.info() != Eigen::Success) {
+		throw std::invalid_argument("progressive_pcoa: principal-axis eigendecomposition did not converge");
+	}
+	const Eigen::MatrixXd &V = es.eigenvectors();
+
+	// R's rows are orthonormal by construction, so det(R) = +/-1. Both are orthogonal,
+	// but only +1 is a ROTATION: reversing the eigenvector columns for descending
+	// variance is an odd permutation whenever d_ is even, and the per-axis sign pinning
+	// below is free to flip an odd number of them, so nothing so far rules out -1 — a
+	// MIRRORED configuration. Procrustes M2 would not notice (it admits reflection) but
+	// anything chirality-sensitive would, and "rotation" would be the wrong word for
+	// what this returns. Parity is therefore corrected at the end, on the LAST axis:
+	// its sign is the least consequential to flip, and doing it there leaves the
+	// leading axes' sign convention exactly as pinned.
+	std::vector<double> R(static_cast<size_t>(d_) * d_);
+	for (uint32_t a = 0; a < d_; ++a) {
+		const uint32_t src = d_ - 1 - a; // descending variance
+		// Pin the sign: largest-magnitude component positive, lowest index on a tie.
+		uint32_t pivot = 0;
+		double best = std::abs(V(0, src));
+		for (uint32_t k = 1; k < d_; ++k) {
+			if (std::abs(V(k, src)) > best) {
+				best = std::abs(V(k, src));
+				pivot = k;
+			}
+		}
+		const double sign = (V(pivot, src) < 0.0) ? -1.0 : 1.0;
+		// Row a of R is principal direction a, so y' = R (y - mean) is a plain matvec.
+		for (uint32_t k = 0; k < d_; ++k) {
+			R[static_cast<size_t>(a) * d_ + k] = sign * V(k, src);
+		}
+	}
+	// Make it a proper rotation (see above). Deterministic: the parity is a property of
+	// the data, not of evaluation order.
+	if (Eigen::Map<const Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>>(R.data(), d_, d_)
+	        .determinant() < 0.0) {
+		const size_t last = static_cast<size_t>(d_ - 1) * d_;
+		for (uint32_t k = 0; k < d_; ++k) {
+			R[last + k] = -R[last + k];
+		}
+	}
+	return R;
 }
 
 // ── Phase 0: reference PCoA on the anchors — defines the common frame ────────────

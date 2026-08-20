@@ -67,16 +67,26 @@ SELECT count(*) FROM pcoa('tmp_dm', n_dims := 3, seed := 42);
 # Not merely the right shape: the TEMP read must produce the SAME ordination as
 # the persistent one. A pass-2 read that returned an empty or partial matrix could
 # still emit 120 rows.
+#
+# threads := 1 on both, and the reason matters. pcoa's fp32 randomized FSVD sums its
+# reductions in thread-order, so two runs of the SAME query at a high thread count
+# can differ: measured on this fixture, two identical pcoa calls on one table came
+# out at M² = 4.9e-09 once in five tries, with coordinates 6.9e-05 apart. This test
+# is about TEMP-relation resolution, so that noise is pure confound — pinning one
+# thread removes it and lets the assertion be bit equality, which is what "the same
+# matrix was read" actually means. Comparing the two reads any other way cannot
+# distinguish a bad TEMP read from the FSVD.
 statement ok
-CREATE TABLE ord_reg AS SELECT sample_id, axis, coordinate FROM pcoa('reg_dm', n_dims := 3, seed := 42);
+CREATE TABLE ord_reg AS SELECT sample_id, axis, coordinate FROM pcoa('reg_dm', n_dims := 3, seed := 42, threads := 1);
 
 statement ok
-CREATE TABLE ord_tmp AS SELECT sample_id, axis, coordinate FROM pcoa('tmp_dm', n_dims := 3, seed := 42);
+CREATE TABLE ord_tmp AS SELECT sample_id, axis, coordinate FROM pcoa('tmp_dm', n_dims := 3, seed := 42, threads := 1);
 
-query T
-SELECT DISTINCT m2 < 1e-12 FROM procrustes('ord_reg', 'ord_tmp', permutations := 0);
+query II
+SELECT max(abs(a.coordinate - b.coordinate)) = 0.0, count(*) = 120
+FROM ord_reg a JOIN ord_tmp b USING (sample_id, axis);
 ----
-true
+true	true
 
 # permanova reaches the same pass-2 site through a different caller. Its metadata
 # reader already inherited, so a TEMP metadata relation is the control that says

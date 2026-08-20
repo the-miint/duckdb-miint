@@ -92,17 +92,51 @@ true
 # The two layouts hold identical data, so with the same anchors and seed they must
 # ordinate to the same points. This is what makes the warning safe to ignore: it is
 # advice about cost, not a correctness signal.
+#
+# Asserted at TWO thread settings, because "the same points" means something
+# different at each and only one of them is a statement about sort order:
+#
+#   threads := 1 -- coordinates must match EXACTLY. Bit equality is the real claim,
+#   and pinning threads is what makes it testable: it removes the fp32 FSVD's
+#   thread-order noise, leaving row order as the only difference between the runs.
+#
+#   default threads -- coordinates DO drift (measured up to ~1e-6 on this fixture),
+#   so only the ordination can be compared, via procrustes M². That drift is
+#   documented behaviour, not a sort-order effect: it reproduces with both tables
+#   sorted, and docs/diversity.md says to compare ordinations rather than
+#   coordinates for exactly this reason. An earlier version of this test asserted
+#   max |Δcoordinate| < 1e-12 at the default thread count and failed intermittently
+#   on high-core machines — it was measuring the FSVD, not what it claimed to.
 statement ok
 CREATE TABLE ord_sorted AS SELECT sample_id, axis, coordinate
-FROM progressive_pcoa_from_unifrac('ft_sorted', 'tree', n_dims := 3, n_anchors := 15, batch_size := 5, seed := 42);
+FROM progressive_pcoa_from_unifrac('ft_sorted', 'tree', n_dims := 3, n_anchors := 15, batch_size := 5, seed := 42,
+                                   threads := 1);
 
 statement ok
 CREATE TABLE ord_shuffled AS SELECT sample_id, axis, coordinate
+FROM progressive_pcoa_from_unifrac('ft_shuffled', 'tree', n_dims := 3, n_anchors := 15, batch_size := 5, seed := 42,
+                                   threads := 1);
+
+# Not "small" — identical. Same data, same anchors, same seed, one thread.
+query II
+SELECT max(abs(a.coordinate - b.coordinate)) = 0.0, count(*) = 120
+FROM ord_sorted a JOIN ord_shuffled b USING (sample_id, axis);
+----
+true	true
+
+# And at whatever thread count the engine chooses, the ORDINATION still matches:
+# M² measured at or below 1e-12 across repeated runs here, so 1e-9 leaves three
+# orders of margin without asserting a determinism the FSVD does not provide.
+statement ok
+CREATE TABLE ord_sorted_mt AS SELECT sample_id, axis, coordinate
+FROM progressive_pcoa_from_unifrac('ft_sorted', 'tree', n_dims := 3, n_anchors := 15, batch_size := 5, seed := 42);
+
+statement ok
+CREATE TABLE ord_shuffled_mt AS SELECT sample_id, axis, coordinate
 FROM progressive_pcoa_from_unifrac('ft_shuffled', 'tree', n_dims := 3, n_anchors := 15, batch_size := 5, seed := 42);
 
 query I
-SELECT max(abs(a.coordinate - b.coordinate)) < 1e-12
-FROM ord_sorted a JOIN ord_shuffled b USING (sample_id, axis);
+SELECT DISTINCT m2 < 1e-9 FROM procrustes('ord_sorted_mt', 'ord_shuffled_mt', permutations := 0);
 ----
 true
 
