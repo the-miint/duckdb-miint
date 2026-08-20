@@ -469,3 +469,84 @@ query T
 SELECT max(abs(a.coordinate - b.coordinate)) < 1e-6 FROM pf_mt a JOIN pf_st b USING (sample_id, axis);
 ----
 true
+
+# ── an INTEGER key is enumerated and batched in its own order ──────────────────
+#
+# The sample list this function builds does two jobs: PickAnchors indexes into it,
+# and batches are cut from it as consecutive runs. So the order it is built in
+# decides which samples anchor the frame AND whether a batch is a contiguous run of
+# the stored table. Ordering an integer key as text breaks the second job silently:
+# 0..39 as text runs 0,1,10,11,...,19,2,20, so each batch is scattered across the
+# whole id range and its slice query touches most of the table's row groups instead
+# of a few.
+#
+# Asserted as the property rather than as coordinates: every batch's id range must
+# be disjoint from and below the next batch's. Measured on the pre-fix build, the
+# three batches came out [2,20] [3,33] [4,39] -- three overlapping pairs; they are
+# now [2,13] [14,27] [28,39]. The same fixture as `ft` above, keyed by BIGINT.
+statement ok
+CREATE TABLE ft_bi AS
+SELECT s::BIGINT AS sample_id, 'F_' || lpad((f + 1)::VARCHAR, 2, '0') AS feature_id,
+       (1 + (s * 7 + f * 13) % 11)::DOUBLE AS value
+FROM range(40) t(s), range(12) u(f)
+WHERE ((s * 2654435761 + f * 40503) % 100) >= 25
+ORDER BY sample_id;
+
+query I
+WITH r AS (
+    SELECT batch, min(sample_id) AS lo, max(sample_id) AS hi
+    FROM progressive_pcoa_from_features('ft_bi', 'bray_curtis', n_dims := 3, n_anchors := 10,
+                                        batch_size := 10, seed := 42, threads := 1)
+    WHERE batch IS NOT NULL GROUP BY batch)
+SELECT count(*) FROM r a JOIN r b ON a.batch < b.batch WHERE a.hi >= b.lo;
+----
+0
+
+# ...and the batches must cover every non-anchor sample exactly once, so that
+# "disjoint and ascending" cannot be satisfied by dropping samples.
+query II
+SELECT count(*), count(DISTINCT sample_id)
+FROM progressive_pcoa_from_features('ft_bi', 'bray_curtis', n_dims := 3, n_anchors := 10,
+                                    batch_size := 10, seed := 42, threads := 1)
+WHERE batch IS NOT NULL AND axis = 1;
+----
+30	30
+
+# ── both progressive paths must agree on an INTEGER key, not just a VARCHAR one ──
+#
+# The feature-table and distance-table id dictionaries are built by two different
+# queries, and each decides its own batch cuts. They have to sort the same way or
+# these two runs ordinate different partitions of the same samples -- so this is the
+# case that pins the two enumerations together. It passes trivially while both sort
+# as text; it is the fixture that would catch only ONE of them being moved to native
+# order. Exact equality, one thread, for the reason given in the oracle above.
+statement ok
+CREATE TABLE cd_bi AS SELECT * FROM community_distances('ft_bi', 'bray_curtis');
+
+query T
+SELECT typeof(sample_a) FROM cd_bi LIMIT 1;
+----
+BIGINT
+
+statement ok
+CREATE TABLE pf_bi AS SELECT sample_id, axis, coordinate
+FROM progressive_pcoa_from_features('ft_bi', 'bray_curtis', n_dims := 3, n_anchors := 10, batch_size := 10,
+                                    seed := 42, threads := 1);
+
+statement ok
+CREATE TABLE pd_bi AS SELECT sample_id, axis, coordinate
+FROM progressive_pcoa_from_distances('cd_bi', n_dims := 3, n_anchors := 10, batch_size := 10,
+                                     seed := 42, threads := 1);
+
+query TT
+SELECT max(abs(a.coordinate - b.coordinate)) = 0.0, count(*) = 120
+FROM pf_bi a JOIN pd_bi b USING (sample_id, axis);
+----
+true	true
+
+# The id type must survive the round trip on both paths, or the equality above
+# could be comparing two VARCHAR-keyed runs.
+query TT
+SELECT (SELECT DISTINCT typeof(sample_id) FROM pf_bi), (SELECT DISTINCT typeof(sample_id) FROM pd_bi);
+----
+BIGINT	BIGINT

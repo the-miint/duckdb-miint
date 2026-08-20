@@ -69,6 +69,65 @@ SELECT count(*) >= 1 FROM miint_warnings() WHERE message LIKE '%ft_grouped%';
 ----
 true
 
+# ── an INTEGER key is judged in its own order, not as text ─────────────────────
+#
+# These two hold the same 40 samples and differ only in physical order, and the
+# names say which is which. What makes them worth their own case is that judging an
+# integer key as text inverts the answer, so the old behaviour told the user with a
+# correctly stored table to re-sort it, and told the user with a bizarrely stored
+# one that all was well:
+#
+#   ft_int_numeric -- stored ORDER BY sample_id, the layout a person would write and
+#   the one whose batches ARE contiguous runs of the table. Compared as text it
+#   "descends" at "9">"10", so it used to warn.
+#
+#   ft_int_lex -- stored ORDER BY sample_id::VARCHAR, i.e. 0,1,10,11,...,19,2,20.
+#   Batches are numeric ranges, so this layout prunes nothing. Compared as text it
+#   never descends, so it used to stay silent.
+#
+# Measured on the pre-fix build: it warned about ft_int_numeric and not about
+# ft_int_lex — exactly backwards. Both directions are asserted here because either
+# one alone would pass with the probe still comparing text.
+statement ok
+CREATE TABLE ft_int_numeric AS
+SELECT s::BIGINT AS sample_id, 'GG_OTU_' || (f + 1) AS feature_id,
+       (1 + (s * 7 + f * 13) % 11)::DOUBLE AS value
+FROM range(40) t(s), range(5) u(f)
+ORDER BY sample_id;
+
+statement ok
+CREATE TABLE ft_int_lex AS
+SELECT s::BIGINT AS sample_id, 'GG_OTU_' || (f + 1) AS feature_id,
+       (1 + (s * 7 + f * 13) % 11)::DOUBLE AS value
+FROM range(40) t(s), range(5) u(f)
+ORDER BY s::VARCHAR;
+
+statement ok
+SELECT count(*) FROM progressive_pcoa_from_unifrac('ft_int_numeric', 'tree',
+    n_dims := 3, n_anchors := 15, batch_size := 5, seed := 42);
+
+query I
+SELECT count(*) FROM miint_warnings() WHERE message LIKE '%ft_int_numeric%';
+----
+0
+
+statement ok
+SELECT count(*) FROM progressive_pcoa_from_unifrac('ft_int_lex', 'tree',
+    n_dims := 3, n_anchors := 15, batch_size := 5, seed := 42);
+
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE '%ft_int_lex%' AND message LIKE '%sample_id order%';
+----
+true
+
+# The advice must be followable: it cannot tell an integer-keyed user to sort by the
+# text form, which is the layout that prunes nothing.
+query I
+SELECT count(*) FROM miint_warnings() WHERE message LIKE '%ORDER BY sample_id::VARCHAR%';
+----
+0
+
 # ── the warning is about the cost of RE-scanning, so a single-batch run is silent
 #    even on the same unsorted table: there is nothing to re-scan. Counted before
 #    and after, because ft_shuffled has already warned above — asserting on a

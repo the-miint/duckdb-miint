@@ -236,8 +236,23 @@ DistanceRelationIds EnumerateDistanceIds(ClientContext &context, const std::stri
 	auto conn = MakeReadOnlyHelperConnection(context);
 	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
 
-	auto res = conn.Query("SELECT id FROM (SELECT sample_a::VARCHAR AS id FROM " + qname +
-	                      " UNION SELECT sample_b::VARCHAR FROM " + qname + ") WHERE id IS NOT NULL ORDER BY id");
+	// Ordered by the id columns' OWN order where that is native (see
+	// NativeIdPredicateType), because this list is what fixes the anchor set and the
+	// batch cuts for progressive_pcoa_from_distances -- and the FEATURE-table
+	// enumeration orders the same way. They have to agree: the two paths are asserted
+	// to produce bit-identical ordinations of the same samples, which they cannot do
+	// if one cuts batches in text order and the other numerically.
+	//
+	// `raw` rides along only to sort by. VARCHAR ids keep the original query, where
+	// the two orders are the same one.
+	const bool native_ids = out.sample_id_predicate_type.id() != LogicalTypeId::VARCHAR;
+	const std::string id_query =
+	    native_ids
+	        ? "SELECT id FROM (SELECT sample_a::VARCHAR AS id, sample_a AS raw FROM " + qname +
+	              " UNION SELECT sample_b::VARCHAR, sample_b FROM " + qname + ") WHERE id IS NOT NULL ORDER BY raw"
+	        : "SELECT id FROM (SELECT sample_a::VARCHAR AS id FROM " + qname + " UNION SELECT sample_b::VARCHAR FROM " +
+	              qname + ") WHERE id IS NOT NULL ORDER BY id";
+	auto res = conn.Query(id_query);
 	if (res->HasError()) {
 		throw InvalidInputException("%s: failed to enumerate ids of distance-table '%s': %s", caller_name, table_name,
 		                            res->GetError());

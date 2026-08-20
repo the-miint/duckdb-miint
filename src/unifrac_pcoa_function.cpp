@@ -1360,10 +1360,29 @@ FeatureTableIds EnumerateFeatureTableIds(ClientContext &context, const std::stri
 	// `isnan()`/`!= 0` on the raw column. An enumerated sample thus always
 	// materializes in its block, so the core's block-coverage check never fires
 	// for a row this filter should have dropped.
+	const bool native_ids = out.sample_id_predicate_type.id() != LogicalTypeId::VARCHAR;
 	const std::string filtered =
-	    "(SELECT sample_id::VARCHAR AS sid, feature_id::VARCHAR AS fid, value::DOUBLE AS v FROM " + qname +
+	    "(SELECT sample_id::VARCHAR AS sid, " + std::string(native_ids ? "sample_id AS raw, " : "") +
+	    "feature_id::VARCHAR AS fid, value::DOUBLE AS v FROM " + qname +
 	    ") t WHERE t.sid IS NOT NULL AND t.fid IS NOT NULL AND t.v IS NOT NULL AND t.v != 0 AND NOT isnan(t.v)";
-	auto sres = conn.Query("SELECT DISTINCT t.sid AS id FROM " + filtered + " ORDER BY id");
+	// Ordered by the id column's OWN order, not by its text. The list this returns
+	// defines both which samples are anchors (PickAnchors indexes into it) and how
+	// batches are cut, and a batch is only a contiguous run of the stored table if
+	// the two orders agree. For an integer key they do not: 0..9999 as text goes
+	// 0,1,10,100,1000,... so batches drawn from a text-ordered list are scattered
+	// across a numerically stored table, and the per-batch slice touches most of its
+	// row groups instead of a few. Measured on 50,000 BIGINT-keyed samples, one
+	// batch's slice: 1,793 instructions per returned row from a text-ordered list
+	// against 845 from a native-ordered one.
+	//
+	// `raw` rides along only to sort by; DISTINCT over (sid, raw) is DISTINCT over
+	// raw, since sid is a function of it. VARCHAR ids keep the old query exactly --
+	// there the two orders are the same one, and adding a column would change the
+	// plan for no reason.
+	const std::string sample_query =
+	    native_ids ? "SELECT sid FROM (SELECT DISTINCT t.sid AS sid, t.raw AS raw FROM " + filtered + ") ORDER BY raw"
+	               : "SELECT DISTINCT t.sid AS id FROM " + filtered + " ORDER BY id";
+	auto sres = conn.Query(sample_query);
 	if (sres->HasError()) {
 		throw InvalidInputException("%s: failed to enumerate samples of feature-table '%s': %s", caller, table_name,
 		                            sres->GetError());
@@ -1402,7 +1421,7 @@ FeatureTableIds EnumerateFeatureTableIds(ClientContext &context, const std::stri
 // every row group still spans the whole id range, so pruning is dead and the run
 // pays in full. Exactness costs nothing here, so take it.
 void WarnIfFeatureTableUnsorted(ClientContext &context, const char *caller, const std::string &qname,
-                                const std::string &table_name, size_t n_batches) {
+                                const std::string &table_name, size_t n_batches, const LogicalType &id_predicate_type) {
 	auto conn = MakeReadOnlyHelperConnection(context);
 	// lag() over the whole relation with no ORDER BY reads it in physical order,
 	// which is the order the slice queries will have to prune against. That relies on
@@ -1411,9 +1430,15 @@ void WarnIfFeatureTableUnsorted(ClientContext &context, const char *caller, cons
 	// either way), since a single scan feeding one unpartitioned window has nothing to
 	// reorder. A future plan that broke that would over-report, i.e. warn about a
 	// sorted table — noise, never a wrong result.
+	// Compared in the id column's OWN order, matching how the ids are enumerated and
+	// therefore how batches are cut. Comparing an integer key as text would report a
+	// numerically sorted table as unsorted -- and it did: 0..9999 as text descends at
+	// "9">"10", "99">"100", "999">"1000", three descents that made this warn about a
+	// table stored exactly the way it should be.
+	const std::string sid_expr = id_predicate_type.id() == LogicalTypeId::VARCHAR ? "sample_id::VARCHAR" : "sample_id";
 	auto res = conn.Query("SELECT count(*), count(*) FILTER (WHERE t.prev IS NOT NULL AND t.sid < t.prev) FROM "
-	                      "(SELECT sample_id::VARCHAR AS sid, lag(sample_id::VARCHAR) OVER () AS prev FROM " +
-	                      qname + ") t");
+	                      "(SELECT " +
+	                      sid_expr + " AS sid, lag(" + sid_expr + ") OVER () AS prev FROM " + qname + ") t");
 	if (res->HasError()) {
 		// A diagnostic must not fail a valid run. Say so rather than swallowing it —
 		// silence would be indistinguishable from "your table is fine".
@@ -1437,7 +1462,7 @@ void WarnIfFeatureTableUnsorted(ClientContext &context, const char *caller, cons
 	                   "%s: feature-table '%s' is not stored in sample_id order (%lld of "
 	                   "%lld rows step backwards). Batches are contiguous sample_id ranges, so each of the %llu "
 	                   "batches reads the whole table instead of only its own rows. Store it sorted — e.g. CREATE "
-	                   "TABLE t AS SELECT * FROM ... ORDER BY sample_id::VARCHAR — which changes only what the run "
+	                   "TABLE t AS SELECT * FROM ... ORDER BY sample_id — which changes only what the run "
 	                   "reads, never the coordinates it produces.",
 	                   caller, table_name, static_cast<long long>(descents), static_cast<long long>(rows),
 	                   static_cast<unsigned long long>(n_batches));
@@ -2068,7 +2093,8 @@ unique_ptr<FunctionData> ProgressivePcoaFromUnifracBind(ClientContext &context, 
 	// than one batch: a single batch reads the table once whatever its order, so
 	// sorting it would save nothing and the warning would be noise.
 	if (n_batches > 1) {
-		WarnIfFeatureTableUnsorted(context, "progressive_pcoa_from_unifrac", qname, table_name, n_batches);
+		WarnIfFeatureTableUnsorted(context, "progressive_pcoa_from_unifrac", qname, table_name, n_batches,
+		                           ids.sample_id_predicate_type);
 	}
 
 	auto data = make_uniq<ProgressivePcoaData>();
@@ -2225,7 +2251,8 @@ unique_ptr<FunctionData> ProgressivePcoaFromFeaturesBind(ClientContext &context,
 	// Only worth warning about with more than one batch: a single batch reads the
 	// table once whatever its order.
 	if (n_batches > 1) {
-		WarnIfFeatureTableUnsorted(context, "progressive_pcoa_from_features", qname, table_name, n_batches);
+		WarnIfFeatureTableUnsorted(context, "progressive_pcoa_from_features", qname, table_name, n_batches,
+		                           ids.sample_id_predicate_type);
 	}
 
 	auto data = make_uniq<ProgressivePcoaData>();
