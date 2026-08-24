@@ -94,8 +94,25 @@ struct DenseDistanceMatrix {
 // and its wording live in one place.
 LogicalType ProbeFeatureTableIdType(ClientContext &context, const std::string &table_name,
                                     const std::string &caller_name);
+// `predicate_type`, when given, also receives what sample_a/sample_b can be
+// compared against natively -- VARCHAR unless the two columns share one
+// native-eligible type. It is an out-parameter rather than a second probe because
+// the raw column types are already in hand here and a second catalog lookup could
+// disagree with the first.
 LogicalType ProbeDistanceTableIdType(ClientContext &context, const std::string &table_name,
-                                     const std::string &caller_name);
+                                     const std::string &caller_name, LogicalType *predicate_type = nullptr);
+
+// The type an id column can be compared against NATIVELY, or VARCHAR to mean "keep
+// the ::VARCHAR cast". See the definition for the measurement and for why only the
+// integer types and UUID qualify.
+LogicalType NativeIdPredicateType(const LogicalType &column_type);
+
+// One `<column> IN (<literals>)` predicate, native-typed when `predicate_type` is
+// anything but VARCHAR and `<column>::VARCHAR IN ('...')` when it is VARCHAR. The
+// whole fragment is built here so no caller can render the literals in one type and
+// compare in another -- which reads fine and silently matches nothing.
+std::string IdInPredicate(const std::string &column, const std::vector<std::string> &ids,
+                          const LogicalType &predicate_type);
 
 // The distinct, sorted, non-null sample ids of a condensed distance relation,
 // plus the resolved output id type. Materializes only the id dictionary (bounded
@@ -103,6 +120,11 @@ LogicalType ProbeDistanceTableIdType(ClientContext &context, const std::string &
 struct DistanceRelationIds {
 	std::vector<std::string> sorted_ids;
 	LogicalType sample_id_type = LogicalType::VARCHAR;
+	//! What to compare sample_a/sample_b against in a WHERE or JOIN, from
+	//! NativeIdPredicateType. VARCHAR unless BOTH columns share one native-eligible
+	//! type: a predicate whose literal type differs from the column's makes DuckDB
+	//! cast the column, which is the whole cost this avoids.
+	LogicalType sample_id_predicate_type = LogicalType::VARCHAR;
 };
 
 // Enumerate a condensed distance relation's id dictionary: probe the schema,

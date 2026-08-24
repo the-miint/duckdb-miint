@@ -166,6 +166,65 @@ struct ProgressivePcoaResult {
 	std::vector<BatchDiagnostic> batches;     // one per batch, in order (empty when every sample is an anchor)
 };
 
+// Second moments of the assembled configuration, accumulated one batch at a time,
+// and the transform that takes it onto its own principal axes.
+//
+// WHY THIS EXISTS: every batch is fitted into the frame of the ANCHOR ordination, so
+// the emitted axes are the anchor block's principal axes — not the assembled
+// configuration's. "PC1" is therefore not the leading axis of the output, and the
+// reported eigenvalues describe the anchors rather than the emitted coordinates.
+// Rotating the finished configuration onto its own principal axes fixes the first of
+// those.
+//
+// WHAT IT DOES AND DOES NOT BUY: a procrustes disparity is rotation-invariant, so
+// this cannot move M² against any reference — claiming an accuracy gain from it
+// would be wrong. What it moves is AXIS-BY-AXIS agreement, which is what a reader
+// interpreting "PC1 vs PC2" actually relies on, because a full PCoA's axes are the
+// principal axes of the full configuration.
+//
+// Only the moments are accumulated (d² + d doubles, exact, streaming); the rotation
+// itself needs nothing else. What the caller must still arrange is somewhere to hold
+// the coordinates, because applying the transform means revisiting rows that have
+// already been emitted.
+//
+// The transform is y' = R (y − mean): centred as well as rotated, so the result is a
+// centred principal-axis configuration like a real PCoA's, rather than a rotated one
+// with an off-origin centroid. Translation does not affect a procrustes comparison
+// either.
+class PrincipalAxisAccumulator {
+public:
+	explicit PrincipalAxisAccumulator(uint32_t d);
+
+	// `coords` is n_rows × d row-major. Call once per batch, in any order — addition
+	// is commutative and the result depends only on the multiset of rows.
+	void Add(const double *coords, size_t n_rows);
+
+	uint64_t count() const {
+		return n_;
+	}
+
+	// Column means (size d). Empty until at least one row has been added.
+	std::vector<double> Mean() const;
+
+	// d×d row-major rotation, applied as y' = R (y − mean). Columns are the
+	// configuration's principal directions ordered by DESCENDING variance.
+	//
+	// Eigenvector sign is inherently arbitrary, so it is pinned: each axis is
+	// oriented so that its largest-magnitude component is positive (lowest index wins
+	// a tie). That is for reproducibility and readability only — it matches no
+	// external convention, and a procrustes comparison is indifferent to it.
+	//
+	// Throws std::invalid_argument when fewer than 2 rows have been added (a
+	// covariance needs at least two points).
+	std::vector<double> Rotation() const;
+
+private:
+	const uint32_t d_;
+	uint64_t n_ = 0;
+	std::vector<double> sum_;    // d
+	std::vector<double> sum_xx_; // d*d row-major
+};
+
 // Run progressive reference-anchored PCoA.
 //
 //   anchor_ids     distinct anchor samples shared across all batches. Must number
