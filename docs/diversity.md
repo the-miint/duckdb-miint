@@ -577,13 +577,11 @@ COPY (SELECT * FROM read_biom('table.biom') ORDER BY sample_id)
     TO 'observations.parquet' (FORMAT PARQUET);
 ```
 
-**`ORDER BY sample_id` is right for every id type**, including `BIGINT`. Samples are enumerated in the id column's own order, so batches are ranges in that same order and a table stored by `sample_id` lines up with them. Earlier versions enumerated by `sample_id::VARCHAR` and so wanted an integer-keyed table sorted by its *text* form (`1, 10, 100, 1000, …, 2, 20`); that is no longer the case, and the unsorted-table warning judges an integer key numerically rather than as text.
+**`ORDER BY sample_id` is right for every id type**, including `BIGINT`. Samples are enumerated in the id column's own order, so batches are ranges in that same order and a table stored by `sample_id` lines up with them. The unsorted-table warning judges the column the same way, so an integer key is compared numerically rather than as text.
 
 Sort order affects only how much a run reads — never the coordinates it produces.
 
-A non-`VARCHAR` `sample_id` is also *compared* in its own type, so a batch's slice query is a filter DuckDB can push into the scan and prune row groups with. Casting it to text instead — which is what earlier versions did — turns the filter into a per-row expression: measured on a 5.2M-row `BIGINT`-keyed table, one batch's slice cost 11.65 G instructions cast against 0.136 G native, and whole runs over 50,000 such samples went 800 G → 247 G. There is nothing to configure; it follows from the column's type.
-
-One consequence, for integer keys only: anchors are drawn by *position* in that ordered list, so changing the order changes *which* samples anchor the frame for a given `seed`. Coordinates from a run made before this change, on an integer-keyed table, are therefore not comparable point-for-point with a current one — it is an equally valid ordination of an equally valid anchor set, but a different frame. `VARCHAR` and `UUID` keys are unaffected, because for them text order and native order are the same order (checked for `UUID` over random values: the canonical hex form is fixed-width, so it sorts exactly as the 128-bit value does).
+A non-`VARCHAR` `sample_id` is also *compared* in its own type, so a batch's slice query is a filter DuckDB can push into the scan and prune row groups with, rather than an expression it must evaluate per row. There is nothing to configure; it follows from the column's type.
 
 ---
 

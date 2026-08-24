@@ -289,8 +289,9 @@ std::vector<double> PrincipalAxisAccumulator::Rotation() const {
 		uint32_t pivot = 0;
 		double best = std::abs(V(0, src));
 		for (uint32_t k = 1; k < d_; ++k) {
-			if (std::abs(V(k, src)) > best) {
-				best = std::abs(V(k, src));
+			const double mag = std::abs(V(k, src));
+			if (mag > best) {
+				best = mag;
 				pivot = k;
 			}
 		}

@@ -217,9 +217,13 @@ void RunPairLoop(uint32_t row_end, unsigned n_threads, const std::function<void(
 
 // ── Dense Gram (GEMM) fast path ──────────────────────────────────────────────
 //
-// Three of the five pairwise-local metrics are a function of ONE inner product
-// plus per-sample scalars, so all n(n-1)/2 of them can come out of a single
-// matrix product instead of n(n-1)/2 independent merges:
+// A metric qualifies for this path exactly when it can be written as a function of
+// ONE inner product plus per-sample scalars -- then all n(n-1)/2 distances come out
+// of a single matrix product instead of n(n-1)/2 independent merges. `GemmEligible`
+// is the single source of truth for which metrics those are; a metric added to this
+// file has to be decided there, and the switch in the row loop below lists every
+// metric explicitly rather than defaulting so that adding one without deciding is a
+// compile-time prompt rather than a silent block of zeros. Today it admits three:
 //
 //   euclidean      d^2   = Sx2_i + Sx2_j - 2*<x_i,x_j>
 //   jaccard        a     = <1_i, 1_j> over the binary indicator, and
