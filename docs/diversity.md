@@ -288,6 +288,7 @@ the metrics used by Kuczynski et al. 2010 — see [Citations](#citations).
 - **Matrix-wide metrics.** `chisq` and `gower` depend on *global* column statistics (column sums and column ranges across all samples), so a pair's distance is a function of the whole matrix, not just that pair. Subsetting samples changes them.
 - **Sparse contract:** a sample whose values are all zero or NULL is dropped before computation, matching `unifrac_distances`. Distances are therefore emitted only among samples that actually carry signal.
 - **Threading is exact:** results are **bit-identical for any thread count** (each pair writes to a fixed condensed slot), so `threads` is purely a performance knob.
+- <a name="community-distances-dense-kernel"></a>**Dense inputs switch kernels automatically.** The default kernel merges each pair's *nonzeros*, which is the right shape for a microbiome table (typically far under 1% of cells occupied). On a genuinely dense matrix that is the wrong trade, so `euclidean`, `jaccard` and `morisita_horn` switch to a Gram-matrix formulation above ~1.5% density — each is a function of one inner product plus per-sample scalars, so `n²` distances come out of a single matrix product. Measured on 20,000 samples × 2,000 features, one thread: **2.1× at 2% density, 5.1× at 5%, 13× at 15%, 25× at 40%**, and 9.7× on a 38.8%-dense image matrix with only 673 features. `bray_curtis` and `soergel` never switch — `Σ|x−y|` and `Σ max(x,y)` are not inner products, so no such formulation exists for them — and neither do matrices small enough (under 64 samples) or wide enough that the dense operand would exceed 512 MB. The switch does cost memory — the dense operand, plus a sample×sample Gram matrix that is twice the condensed result you are already asking for (measured: +29 MB on a 2,000-sample block, against the 32 MB that predicts) — so it is a bounded factor on an allocation you have already chosen, not a new risk. It changes speed, not results: distances agree with the merge kernel to within floating-point last bits (exactly, for `jaccard`), and both entry points dispatch on the same rule, so the sparse and dense APIs stay bit-identical to each other.
 - Fewer than two samples yields no rows.
 
 **Example — comparing what different metrics see:**
@@ -441,8 +442,39 @@ SELECT * FROM progressive_pcoa_from_distances('dm',
 - `n_anchors` (INTEGER, default 100): number of anchor samples defining the reference frame; must be `≥ n_dims + 1` and `≤ n_samples`. Anchors are chosen at random (seeded)
 - `batch_size` (INTEGER, default 1000): non-anchor samples ordinated per batch (`≥ 1`)
 - `seed` (INTEGER, default -1): seeds both the anchor draw and the FSVD randomization; `-1` = unseeded (nondeterministic)
+- `global_rotation` (BOOLEAN, default `true`): express the finished configuration in its own principal axes rather than the anchors'. See [Global rotation](#progressive-global-rotation) — it cannot change accuracy, but it costs streaming and the ability to extend the ordination later
 
 **Output schema:** [`pcoa`](#pcoa-from-a-distance-table)'s six columns — `(iteration, sample_id, axis, coordinate, eigenvalue, proportion_explained)` — plus two appended diagnostic columns, `(batch, batch_anchor_m2)`. `iteration` is always `0`. `sample_id` mirrors the input `sample_a` type — see [Sample identifier types](#sample-identifier-types). **Caveat:** `eigenvalue` and `proportion_explained` are the *anchor* reference ordination's (they describe the anchor subspace, not the full sample set); the per-sample `coordinate`s span all samples.
+
+<a name="progressive-global-rotation"></a>**`global_rotation` — whose axes are these?** Without it the reference frame is the *anchors'* principal axes and every sample is expressed in them. That is a consistent frame, but not the one a PCoA promises: the anchors are a sample of the data, so their leading axis only *estimates* the full configuration's and is off by however much the draw was unlucky. The symptom is that axis 0 of a progressive run and axis 0 of a full [`pcoa`](#pcoa-from-a-distance-table) are close but not the same direction — so per-axis work (plotting PC1 against PC2, correlating an axis with metadata, comparing two runs axis by axis) disagrees by more than the ordinations themselves do.
+
+With `global_rotation := true` (the default) the run finishes by centring the assembled configuration and rotating it onto its own covariance eigenvectors. The axes then mean what they mean in `pcoa`: axis 0 is the direction of greatest variance *in the returned coordinates*, axis variances are strictly descending, and every axis has mean 0.
+
+**Measured against a full `pcoa`.** Three 5,000-sample tables (a rarefied microbiome table under `bray_curtis` and `jaccard`, and a dense image matrix under `euclidean`), scored as the mean |correlation| between each returned axis and the *same-numbered* axis of a full `pcoa` — **without** procrustes alignment, because aligning first would rotate the two into agreement and hide the very thing being measured:
+
+| table / metric | `n_anchors` | mean \|r\|, axes 0–2 (on → off) |
+|---|---|---|
+| image / `euclidean` | 100 | **0.998** → 0.668 |
+| image / `euclidean` | 200 | **0.998** → 0.652 |
+| image / `euclidean` | 1000 | 0.999 → 0.987 |
+| microbiome / `bray_curtis` | 100 | **0.919** → 0.496 |
+| microbiome / `bray_curtis` | 200 | 0.751 → **0.927** |
+| microbiome / `bray_curtis` | 1000 | **0.969** → 0.694 |
+| microbiome / `jaccard` | 100 | **0.970** → 0.885 |
+| microbiome / `jaccard` | 200 | **0.983** → 0.891 |
+| microbiome / `jaccard` | 1000 | 0.995 → 0.989 |
+
+Better in eight of the nine, and **the gain is largest exactly where anchors are scarce** — the regime this function exists for. With 1,000 anchors on 5,000 samples the anchor frame is already close to the right frame, and rotating buys almost nothing.
+
+**It is not a per-axis guarantee, and the one inversion above shows why.** `bray_curtis` on that table has adjacent axis variances in the ratio 0.94 (axes 1–2) and 0.99 (axes 8–9). When two axes carry nearly the same variance, *which* of them is "axis 1" is not determined — not for this function and not for a full `pcoa` either, since any rotation inside a degenerate eigenspace is equally principal. Where the spectrum is flat, compare subspaces (or use [`procrustes`](#procrustes-align-two-ordinations)), not individual axes.
+
+**It cannot change accuracy — only which coordinate carries which structure.** A rotation about the centroid is a rigid motion and procrustes M² is invariant to rigid motions, so the disparity against a full `pcoa` is identical either way. Measured on the same run: M² between the rotated and unrotated results `4.8e-30`, and all pairwise distances agreeing to `5.6e-17`. And in all nine configurations above, the disparity against the full `pcoa` is the same with the flag on and off to 8–16 significant digits — the axes move, the ordination does not. If a comparison you care about is frame-invariant, this setting is a no-op for it.
+
+**Two costs, both structural rather than numerical:**
+- **The run stops streaming.** The rotation is a property of the whole configuration, so every coordinate is staged before any row is emitted, and the first row arrives at the *end* of the run rather than after the first batch. Concretely, `SELECT * FROM progressive_pcoa_from_features('t', 'bray_curtis') LIMIT 10` used to return as soon as the anchor frame existed; with rotation on it pays for the whole run first. If that matters — interactive exploration, inspecting the first batch before committing to the rest — pass `global_rotation := false`. Staging is buffer-managed, so `memory_limit` bounds it and it spills to `temp_directory` instead of growing unbounded; the volume is small anyway (about 100 bytes per sample plus the id, at `n_dims := 10`). **The wall-clock cost is not the issue** — measured by running the same input, seed and binary with the flag on and off, interleaved: **1.2% at 200,000 samples**, and 0–6% elsewhere with peak RSS unchanged. What changes is *when* the first row arrives, not how long the run takes.
+- **A finished ordination can no longer be extended.** Adding samples later changes the configuration, hence its principal axes, hence the frame — so coordinates returned earlier would no longer be comparable to the new ones. If you intend to place new samples into an existing ordination, use `global_rotation := false`: the anchor frame is fixed by the anchors alone and is therefore stable across runs, which is exactly the property that makes it extensible.
+
+`eigenvalue` and `proportion_explained` remain the *anchor* ordination's in both modes (the caveat above) — they are not re-derived from the rotated configuration, so do not read them as the variance of the axes actually returned.
 
 <a name="progressive-batch-diagnostics"></a>**Reading `batch` / `batch_anchor_m2` (per-run quality evidence).** Each batch is placed into the shared frame by a procrustes fit on its anchor overlap; `batch_anchor_m2` is that fit's disparity — how well this batch's own view of the anchors agreed with the reference view — and `batch` is the 0-based batch that placed the sample. Anchor rows report **NULL** for both: they *define* the frame rather than being fitted into it, so a `0.0` there would be a fabricated perfect fit. This matters because at the scale these functions exist for you cannot check the result against a full `pcoa` — the diagnostic is the accuracy signal you *do* have, and it costs nothing (the fit is computed anyway).
 
@@ -496,7 +528,7 @@ SELECT * FROM progressive_pcoa_from_unifrac('observations', 'tree',
 **Parameters:**
 - `feature_table` (VARCHAR): name of the feature relation exposing `(sample_id, feature_id, value)` (see [Feature table](#feature-table))
 - `tree` (VARCHAR): name of the tree relation (see [Tree](#tree))
-- `n_dims` (3), `n_anchors` (100), `batch_size` (1000), `seed` (-1), `threads` (0), `anchors`: as in [`progressive_pcoa_from_distances`](#progressive-pcoa-from-a-distance-table) — `n_anchors` must be in `[n_dims + 1, n_samples]`. `anchors := [...]` supplies the anchor set explicitly and takes precedence over `n_anchors`/`seed`; note the seed still seeds each block's ordination, so a seeded run is required for reproducibility even with explicit anchors. The seeded random default is a sound choice; the one rule measured to beat it is proportional stratified sampling via [`pick_anchors`](#pick-anchors), and that section also records which rules are *worse* than random and why.
+- `n_dims` (3), `n_anchors` (100), `batch_size` (1000), `seed` (-1), `threads` (0), `global_rotation` (`true`), `anchors`: as in [`progressive_pcoa_from_distances`](#progressive-pcoa-from-a-distance-table) — `n_anchors` must be in `[n_dims + 1, n_samples]`. `anchors := [...]` supplies the anchor set explicitly and takes precedence over `n_anchors`/`seed`; note the seed still seeds each block's ordination, so a seeded run is required for reproducibility even with explicit anchors. The seeded random default is a sound choice; the one rule measured to beat it is proportional stratified sampling via [`pick_anchors`](#pick-anchors), and that section also records which rules are *worse* than random and why.
 - `variant`, `variance_adjust`, `alpha`, `bypass_tips`, `normalize_sample_counts`: the UniFrac controls, identical to [`unifrac_pcoa`](#unifrac-pcoa)
 
 There is deliberately **no `subsample_depth`**: rarefaction and progressive alignment do not compose cleanly (each batch would rarefy independently against a different RNG draw). Rarefy upstream instead with [`rarefy_feature_table`](#rarefy-a-feature-table) and pass the resulting table here — worth doing, since unweighted UniFrac is strongly depth-sensitive and an uneven-depth table makes sequencing depth a covariate of the ordination.
@@ -545,9 +577,11 @@ COPY (SELECT * FROM read_biom('table.biom') ORDER BY sample_id)
     TO 'observations.parquet' (FORMAT PARQUET);
 ```
 
-**With a BIGINT `sample_id`, sort by the text form.** Samples are enumerated and batched by `sample_id::VARCHAR`, so batches are *lexical* ranges (`1, 10, 100, 1000, …, 2, 20`) and a numerically sorted table will not line up with them — use `ORDER BY sample_id::VARCHAR`. VARCHAR and UUID ids sort identically either way (see [Sample identifier types](#sample-identifier-types)).
+**`ORDER BY sample_id` is right for every id type**, including `BIGINT`. Samples are enumerated in the id column's own order, so batches are ranges in that same order and a table stored by `sample_id` lines up with them. The unsorted-table warning judges the column the same way, so an integer key is compared numerically rather than as text.
 
 Sort order affects only how much a run reads — never the coordinates it produces.
+
+A non-`VARCHAR` `sample_id` is also *compared* in its own type, so a batch's slice query is a filter DuckDB can push into the scan and prune row groups with, rather than an expression it must evaluate per row. There is nothing to configure; it follows from the column's type.
 
 ---
 
@@ -566,13 +600,13 @@ SELECT * FROM progressive_pcoa_from_features('observations', 'bray_curtis',
 **Parameters:**
 - `feature_table` (VARCHAR): name of the feature relation exposing `(sample_id, feature_id, value)` (see [Feature table](#feature-table))
 - `metric` (VARCHAR): one of `bray_curtis`, `euclidean`, `jaccard`, `soergel`, `morisita_horn` (case-insensitive). See below for why the other three `community_distances` metrics are not accepted.
-- `n_dims` (3), `n_anchors` (100), `batch_size` (1000), `seed` (-1), `threads` (0), `anchors`: exactly as in [`progressive_pcoa_from_distances`](#progressive-pcoa-from-a-distance-table). [`pick_anchors`](#pick-anchors) applies here too.
+- `n_dims` (3), `n_anchors` (100), `batch_size` (1000), `seed` (-1), `threads` (0), `global_rotation` (`true`), `anchors`: exactly as in [`progressive_pcoa_from_distances`](#progressive-pcoa-from-a-distance-table). [`pick_anchors`](#pick-anchors) applies here too.
 
 **Output schema:** identical to the other two progressive functions — `(iteration, sample_id, axis, coordinate, eigenvalue, proportion_explained, batch, batch_anchor_m2)`, with `iteration` always `0` and anchor rows reporting `NULL` for both diagnostics (see [Reading `batch` / `batch_anchor_m2`](#progressive-batch-diagnostics)). `eigenvalue`/`proportion_explained` describe the *anchor* reference ordination, the same documented caveat as the sibling functions.
 
 <a name="progressive-features-admissible"></a>**Only pairwise-local metrics are accepted, and the rest are refused rather than approximated.** A block carries an arbitrary subset of the samples and only the features that subset happens to use. A metric can be computed that way if and only if `d(i,j)` depends on samples `i` and `j` alone — no statistic over the other rows, and no sensitivity to features that are zero in both. `pearson`, `chisq` and `gower` all fail that test (see the block-wise column under [Community distances](#community-distances-non-phylogenetic)), and the failure is silent: each block would quietly measure a *different* distance and the ordination would come out wrong with no error raised. So they are rejected when the query is bound, with a message naming the metric and pointing at `progressive_pcoa_from_distances` over `community_distances(...)`, which forms the whole matrix and is therefore limited to sample counts that fit in memory.
 
-That admissibility is asserted, not assumed: for every accepted metric the test suite checks that `progressive_pcoa_from_features` reproduces `progressive_pcoa_from_distances` over `community_distances(...)` *coordinate for coordinate*, at two different `batch_size` values and with both seeded and explicit anchors.
+That admissibility is asserted, not assumed: for every accepted metric the test suite checks that `progressive_pcoa_from_features` reproduces `progressive_pcoa_from_distances` over `community_distances(...)` *coordinate for coordinate*, at two different `batch_size` values and with both seeded and explicit anchors. On **dense** inputs read that as agreement to floating-point last bits rather than to the bit, for `euclidean` and `morisita_horn` only: a block and a whole table have different densities, so one can qualify for the [Gram kernel](#community-distances-dense-kernel) while the other does not, and the two formulations associate the same arithmetic differently. `jaccard` is exact either way (its inner products are sums of 0/1 products), and on any table sparse enough to be worth this function the question does not arise.
 
 **Behavior:**
 - **Accuracy:** as [`progressive_pcoa_from_distances`](#progressive-pcoa-from-a-distance-table) — reproduces the full ordination up to a similarity transform, with alignment error that does not compound across batches.
@@ -597,6 +631,8 @@ Cost is linear in N (5.00× the samples cost 3.51× the time from 10k to 50k —
 For scale, a dense `community_distances` matrix over that same table would be roughly 4 TB, so it is not a slow query but an impossible one.
 
 **Blocks are sparse, which is why the feature count does not matter.** A block's pair loop merges each pair's nonzeros rather than walking the whole feature space. On this table a default block spans ~11k features but averages only ~89 nonzeros per sample, so the merge does roughly 62× less arithmetic than a dense loop would — and the block's memory is bounded by nonzeros, not by the 3.25M-feature dictionary.
+
+**If your blocks are *not* sparse, the kernel changes under you — for the better.** Density, not feature count, is what decides: above ~1.5% of a block's cells occupied, `euclidean`, `jaccard` and `morisita_horn` switch to a [Gram-matrix kernel](#community-distances-dense-kernel) worth 2×–25× depending on how dense the block is. Real microbiome blocks sit two orders of magnitude below that line (0.19% and 0.21% on the 10k and 50k subsets here, 0.8% on the 1.2M table), so this path is not what makes those runs fast — the merge is. It matters when `progressive_pcoa_from_features` is pointed at something other than a microbiome table, where the same function would otherwise be paying microbiome-shaped costs on data that is nothing like it. The crossover was measured at **0.96%** and the switch deliberately waits until 1.5%, because right at the crossover the two kernels cost the same and only the Gram one allocates a dense block.
 
 **Against the phylogenetic path.** Same 10,000-sample subset, same parameters, 8 threads, `unweighted` UniFrac over a 3.45M-tip tree: `progressive_pcoa_from_unifrac` took 14.5 s and 4.1 GB, `progressive_pcoa_from_features` with `bray_curtis` took 1.9 s and 1.0 GB. Choosing a tree-free metric is not a scale compromise here — it is the cheaper path.
 

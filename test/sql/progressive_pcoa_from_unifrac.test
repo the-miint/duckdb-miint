@@ -366,9 +366,10 @@ true
 #    batch's slice query prunes to that batch's own rows instead of scanning the
 #    whole sample_id column (measured 9 ms vs 33 ms per batch at 104 M rows). That
 #    advice is only safe to give if layout cannot change the answer: samples are
-#    enumerated with ORDER BY sample_id::VARCHAR before batching, so a shuffled
-#    table must produce bit-identical coordinates. If this ever fails, the
-#    enumeration has started depending on scan order and the doc advice is a bug. ──
+#    enumerated in the id column's own order before batching -- an ORDER BY, never
+#    scan order -- so a shuffled table must produce bit-identical coordinates. If
+#    this ever fails, the enumeration has started depending on scan order and the
+#    doc advice is a bug. ──
 statement ok
 CREATE TABLE ft_shuffled AS SELECT * FROM ft ORDER BY hash(sample_id || feature_id);
 

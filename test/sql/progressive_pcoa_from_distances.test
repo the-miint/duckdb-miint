@@ -322,3 +322,105 @@ query I
 EXECUTE prog_twice;
 ----
 150
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GLOBAL ROTATION (global_rotation, default true)
+#
+# Every batch is fitted into the ANCHOR ordination's frame, so without this the
+# emitted axes are the anchor block's principal axes: "PC1" is not the leading axis
+# of the output, and the reported eigenvalues describe the anchors rather than the
+# coordinates. With it on, the finished configuration is rotated onto its OWN
+# principal axes and centred.
+#
+# The two properties below are the whole contract, and they pull in opposite
+# directions on purpose:
+#   * it must CHANGE the axes -- otherwise it did nothing
+#   * it must NOT change the ordination -- it is an orthogonal transform, so no
+#     pairwise distance and no procrustes disparity may move
+# A bug that rotated by something non-orthogonal would satisfy the first and fail
+# the second; a no-op would do the reverse.
+#
+# threads := 1 on every run here: above one thread skbb's centering reduction sums
+# in thread-count-dependent order and coordinates drift in their last bits (see the
+# reproducibility note in docs/diversity.md), which is unrelated to rotation and
+# would only blunt these assertions.
+# ══════════════════════════════════════════════════════════════════════════════
+
+statement ok
+CREATE TABLE rot_on AS SELECT sample_id, axis, coordinate
+FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, n_anchors := 15, batch_size := 10, seed := 42, threads := 1);
+
+statement ok
+CREATE TABLE rot_off AS SELECT sample_id, axis, coordinate
+FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, n_anchors := 15, batch_size := 10, seed := 42, threads := 1,
+                                     global_rotation := false);
+
+# Same samples, same axes, same row count -- rotation is not a filter.
+query III
+SELECT count(*), count(DISTINCT sample_id), count(DISTINCT axis) FROM rot_on;
+----
+150	50	3
+
+# Axis variance strictly decreasing: axis 0 IS the leading principal axis of the
+# emitted configuration, which is the defect this fixes.
+query I
+SELECT count(*) FROM (
+  SELECT axis, var_pop(coordinate) AS v FROM rot_on GROUP BY axis
+) a JOIN (
+  SELECT axis, var_pop(coordinate) AS v FROM rot_on GROUP BY axis
+) b ON b.axis = a.axis + 1 WHERE b.v > a.v;
+----
+0
+
+# Centred: every axis mean is zero, not merely small.
+query I
+SELECT count(*) FROM (SELECT axis, avg(coordinate) AS m FROM rot_on GROUP BY axis) WHERE abs(m) > 1e-12;
+----
+0
+
+# It really did something: at least one coordinate moved.
+query I
+SELECT max(abs(a.coordinate - b.coordinate)) > 1e-6
+FROM rot_on a JOIN rot_off b USING (sample_id, axis);
+----
+true
+
+# ...and yet the ordination is identical. An orthogonal transform preserves every
+# pairwise distance, so the procrustes disparity between the two must be zero to
+# machine precision -- this is what makes the rotation safe to apply by default.
+query I
+SELECT (SELECT DISTINCT m2 FROM procrustes('rot_off', 'rot_on', n_dims := 3, permutations := 0)) < 1e-20;
+----
+true
+
+# The same statement made directly on the geometry rather than through procrustes:
+# every pairwise distance is unchanged.
+query I
+WITH w_on AS (SELECT sample_id, list(coordinate ORDER BY axis) AS c FROM rot_on GROUP BY sample_id),
+     w_off AS (SELECT sample_id, list(coordinate ORDER BY axis) AS c FROM rot_off GROUP BY sample_id),
+     d_on AS (SELECT a.sample_id AS sa, b.sample_id AS sb,
+                     sqrt(list_sum(list_transform(list_zip(a.c, b.c), lambda p: (p[1] - p[2]) * (p[1] - p[2])))) AS d
+              FROM w_on a JOIN w_on b ON a.sample_id < b.sample_id),
+     d_off AS (SELECT a.sample_id AS sa, b.sample_id AS sb,
+                      sqrt(list_sum(list_transform(list_zip(a.c, b.c), lambda p: (p[1] - p[2]) * (p[1] - p[2])))) AS d
+               FROM w_off a JOIN w_off b ON a.sample_id < b.sample_id)
+SELECT max(abs(d_on.d - d_off.d)) < 1e-12 FROM d_on JOIN d_off USING (sa, sb);
+----
+true
+
+# Accuracy against the full-PCoA oracle is unmoved, for the same reason: M^2 is
+# rotation-invariant. Rotation is an interpretability fix, NOT an accuracy one, and
+# asserting equality here is what stops a future change from claiming otherwise.
+query I
+SELECT abs((SELECT DISTINCT m2 FROM procrustes('full_ord', 'rot_on',  n_dims := 3, permutations := 0))
+         - (SELECT DISTINCT m2 FROM procrustes('full_ord', 'rot_off', n_dims := 3, permutations := 0))) < 1e-12;
+----
+true
+
+# Anchors still report NULL diagnostics: they define the frame rather than being
+# fitted into it, and staging must not turn that into a fabricated 0.
+query I
+SELECT count(*) FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, n_anchors := 15, batch_size := 10, seed := 42, threads := 1)
+WHERE batch IS NULL AND batch_anchor_m2 IS NOT NULL;
+----
+0

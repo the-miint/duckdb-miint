@@ -937,3 +937,225 @@ TEST_CASE("the resumable run fails loud on misuse", "[progressive]") {
 		                  std::invalid_argument);
 	}
 }
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PRINCIPAL AXES OF THE ASSEMBLED CONFIGURATION
+//
+// Every batch is fitted into the ANCHOR ordination's frame, so the emitted axes are
+// the anchor block's principal axes rather than the assembled configuration's --
+// "PC1" is not the leading axis of the output. PrincipalAxisAccumulator supplies the
+// transform that fixes that.
+//
+// What these cases pin is the property a reader depends on: after the transform, axis
+// k really is the k-th principal direction of the configuration, in descending
+// variance, centred. They deliberately do NOT assert anything about procrustes
+// disparity, because a rotation cannot change it -- see the note on the class.
+// ══════════════════════════════════════════════════════════════════════════════
+
+namespace {
+
+using miint::progressive::PrincipalAxisAccumulator;
+
+// Apply y' = R (y - mean) to an n x d row-major configuration.
+std::vector<double> ApplyPrincipalTransform(const std::vector<double> &Y, uint32_t n, uint32_t d,
+                                            const std::vector<double> &R, const std::vector<double> &mean) {
+	std::vector<double> out(static_cast<size_t>(n) * d, 0.0);
+	for (uint32_t r = 0; r < n; ++r) {
+		for (uint32_t a = 0; a < d; ++a) {
+			double acc = 0.0;
+			for (uint32_t k = 0; k < d; ++k) {
+				acc += R[static_cast<size_t>(a) * d + k] * (Y[static_cast<size_t>(r) * d + k] - mean[k]);
+			}
+			out[static_cast<size_t>(r) * d + a] = acc;
+		}
+	}
+	return out;
+}
+
+std::vector<double> AxisVariances(const std::vector<double> &Y, uint32_t n, uint32_t d) {
+	std::vector<double> var(d, 0.0);
+	for (uint32_t a = 0; a < d; ++a) {
+		double s = 0.0;
+		for (uint32_t r = 0; r < n; ++r) {
+			s += Y[static_cast<size_t>(r) * d + a];
+		}
+		const double m = s / n;
+		double ss = 0.0;
+		for (uint32_t r = 0; r < n; ++r) {
+			const double v = Y[static_cast<size_t>(r) * d + a] - m;
+			ss += v * v;
+		}
+		var[a] = ss / n;
+	}
+	return var;
+}
+
+} // namespace
+
+TEST_CASE("principal-axis transform orders axes by descending variance and centres them", "[progressive]") {
+	// A configuration whose axes are deliberately OUT of variance order and off the
+	// origin -- which is exactly the shape a run emits, since the anchor frame fixes
+	// the axes and the assembled centroid is not the anchors' centroid.
+	const uint32_t n = 500, d = 4;
+	std::mt19937 rng(20260819);
+	std::normal_distribution<double> g(0.0, 1.0);
+	const double scale[d] = {0.3, 2.0, 0.7, 1.1}; // axis 1 dominates, axis 0 is weakest
+	const double offset[d] = {5.0, -2.0, 0.25, 7.5};
+	std::vector<double> Y(static_cast<size_t>(n) * d);
+	for (uint32_t r = 0; r < n; ++r) {
+		for (uint32_t a = 0; a < d; ++a) {
+			Y[static_cast<size_t>(r) * d + a] = offset[a] + scale[a] * g(rng);
+		}
+	}
+
+	PrincipalAxisAccumulator acc(d);
+	acc.Add(Y.data(), n);
+	REQUIRE(acc.count() == n);
+	const auto mean = acc.Mean();
+	for (uint32_t a = 0; a < d; ++a) {
+		INFO("axis " << a);
+		CHECK(mean[a] == Approx(offset[a]).margin(0.3));
+	}
+
+	const auto R = acc.Rotation();
+	const auto rotated = ApplyPrincipalTransform(Y, n, d, R, mean);
+	const auto var = AxisVariances(rotated, n, d);
+	for (uint32_t a = 0; a + 1 < d; ++a) {
+		INFO("axis " << a << " var " << var[a] << " vs axis " << a + 1 << " var " << var[a + 1]);
+		CHECK(var[a] >= var[a + 1]);
+	}
+	// The leading axis must pick up the input's dominant direction (sd 2.0), not
+	// whichever axis happened to be first.
+	CHECK(std::sqrt(var[0]) == Approx(2.0).epsilon(0.15));
+	// Centred: every axis mean is zero, not merely small relative to the offsets it
+	// started from.
+	for (uint32_t a = 0; a < d; ++a) {
+		double s = 0.0;
+		for (uint32_t r = 0; r < n; ++r) {
+			s += rotated[static_cast<size_t>(r) * d + a];
+		}
+		INFO("axis " << a << " mean after transform");
+		CHECK(std::abs(s / n) < 1e-10);
+	}
+}
+
+TEST_CASE("principal-axis transform is a rotation, so it preserves every distance", "[progressive]") {
+	// The reason this transform is safe to apply by default: it is orthogonal, so no
+	// pairwise distance moves and no procrustes disparity against any reference can
+	// change. If R ever stopped being orthogonal, the ordination would silently be a
+	// different ordination.
+	const uint32_t n = 200, d = 5;
+	std::mt19937 rng(99);
+	std::normal_distribution<double> g(0.0, 1.0);
+	std::vector<double> Y(static_cast<size_t>(n) * d);
+	for (auto &v : Y) {
+		v = g(rng);
+	}
+	PrincipalAxisAccumulator acc(d);
+	acc.Add(Y.data(), n);
+	const auto R = acc.Rotation();
+
+	// R R^T == I.
+	for (uint32_t a = 0; a < d; ++a) {
+		for (uint32_t b = 0; b < d; ++b) {
+			double dot = 0.0;
+			for (uint32_t k = 0; k < d; ++k) {
+				dot += R[static_cast<size_t>(a) * d + k] * R[static_cast<size_t>(b) * d + k];
+			}
+			INFO("R R^T (" << a << "," << b << ")");
+			CHECK(dot == Approx(a == b ? 1.0 : 0.0).margin(1e-12));
+		}
+	}
+
+	// Orthogonal is not enough: det(R) = -1 is orthogonal too, and it is a REFLECTION —
+	// a mirror image of the configuration. Distances and procrustes M2 would not notice
+	// (procrustes admits reflection), so this is the only assertion that can catch it,
+	// and without it "rotation" in the name and in the docs would be wrong. Reversing
+	// the eigenvector columns for descending variance is an odd permutation whenever d
+	// is even, so the risk is real rather than theoretical: d = 5 here and d = 4 in the
+	// batching case below cover both parities.
+	//
+	// Determinant by cofactor expansion over the d! permutations is fine at this size
+	// and shares no code with the implementation's Eigen call.
+	std::vector<uint32_t> perm(d);
+	for (uint32_t k = 0; k < d; ++k) {
+		perm[k] = k;
+	}
+	double det = 0.0;
+	do {
+		// Sign of the permutation, by counting inversions.
+		uint32_t inv = 0;
+		for (uint32_t a = 0; a < d; ++a) {
+			for (uint32_t b = a + 1; b < d; ++b) {
+				if (perm[a] > perm[b]) {
+					++inv;
+				}
+			}
+		}
+		double term = (inv % 2 == 0) ? 1.0 : -1.0;
+		for (uint32_t a = 0; a < d; ++a) {
+			term *= R[static_cast<size_t>(a) * d + perm[a]];
+		}
+		det += term;
+	} while (std::next_permutation(perm.begin(), perm.end()));
+	CHECK(det == Approx(1.0).margin(1e-10));
+
+	// And distances really are unchanged, checked on the configuration itself rather
+	// than inferred from orthogonality.
+	const auto rotated = ApplyPrincipalTransform(Y, n, d, R, acc.Mean());
+	for (uint32_t i = 0; i < 25; ++i) {
+		for (uint32_t j = i + 1; j < 25; ++j) {
+			double before = 0.0, after = 0.0;
+			for (uint32_t k = 0; k < d; ++k) {
+				const double b = Y[static_cast<size_t>(i) * d + k] - Y[static_cast<size_t>(j) * d + k];
+				const double a2 = rotated[static_cast<size_t>(i) * d + k] - rotated[static_cast<size_t>(j) * d + k];
+				before += b * b;
+				after += a2 * a2;
+			}
+			INFO("pair (" << i << "," << j << ")");
+			CHECK(std::sqrt(after) == Approx(std::sqrt(before)).epsilon(1e-12));
+		}
+	}
+}
+
+TEST_CASE("principal axes are independent of how the configuration is batched", "[progressive]") {
+	// The accumulator sees the configuration one BATCH at a time, and batch boundaries
+	// are an I/O choice that must never change a coordinate. Adding in three uneven
+	// chunks has to give the same transform as adding everything at once.
+	const uint32_t n = 300, d = 3;
+	std::mt19937 rng(7);
+	std::normal_distribution<double> g(0.0, 1.0);
+	std::vector<double> Y(static_cast<size_t>(n) * d);
+	for (auto &v : Y) {
+		v = g(rng) * 1.7 + 0.4;
+	}
+	PrincipalAxisAccumulator whole(d);
+	whole.Add(Y.data(), n);
+
+	PrincipalAxisAccumulator chunked(d);
+	chunked.Add(Y.data(), 7);
+	chunked.Add(Y.data() + static_cast<size_t>(7) * d, 143);
+	chunked.Add(Y.data() + static_cast<size_t>(150) * d, n - 150);
+
+	REQUIRE(chunked.count() == whole.count());
+	const auto rw = whole.Rotation(), rc = chunked.Rotation();
+	const auto mw = whole.Mean(), mc = chunked.Mean();
+	for (uint32_t k = 0; k < d; ++k) {
+		CHECK(mc[k] == Approx(mw[k]).margin(1e-12));
+	}
+	for (size_t k = 0; k < rw.size(); ++k) {
+		CHECK(rc[k] == Approx(rw[k]).margin(1e-10));
+	}
+}
+
+TEST_CASE("principal-axis accumulator fails loud on too few samples", "[progressive]") {
+	// A covariance needs two points. Returning identity instead would silently emit an
+	// unrotated configuration while claiming rotation was applied.
+	PrincipalAxisAccumulator acc(3);
+	CHECK_THROWS_AS(acc.Rotation(), std::invalid_argument);
+	const double one[3] = {1.0, 2.0, 3.0};
+	acc.Add(one, 1);
+	CHECK_THROWS_AS(acc.Rotation(), std::invalid_argument);
+	acc.Add(one, 1);
+	CHECK_NOTHROW(acc.Rotation());
+}
