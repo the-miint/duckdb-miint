@@ -686,7 +686,7 @@ A minimap2 index (`.mmi`) normally loads entirely into memory — there is no la
 minimap2 -d ref.mmi -I 2G ref.fa
 ```
 
-`align_minimap2(index_path := 'ref.mmi')` detects a multi-part index automatically and streams it one part at a time: every query is aligned against part 1, then part 2, and so on, with only one part resident at a time. Peak memory is roughly one part (plus per-thread working memory), not the whole index — pick `-I` to fit your budget. `save_minimap2_index()` always builds a single-part index, so this only applies to indexes built with the minimap2 CLI.
+`align_minimap2(index_path := 'ref.mmi')` detects a multi-part index automatically and streams it one part at a time: every query is aligned against part 1, then part 2, and so on, with only one part resident at a time — verified by live RSS polling across part transitions, which shows memory plateau rather than accumulate as later parts load. Peak memory tracks the **largest single part** plus a fixed baseline (DuckDB engine + per-thread working memory), not the sum of all parts and not the whole index — pick `-I` so that largest part fits your budget. An even split matters more than a small `-I` value on its own: a lopsided split (e.g. one huge part, one small) gives up most of the benefit, since peak memory is set by whichever part is biggest. `save_minimap2_index()` always builds a single-part index, so this only applies to indexes built with the minimap2 CLI.
 
 Trade-offs specific to multi-part indexes:
 - Runtime is roughly linear in part count — every query is aligned against every part in turn, unlike `align_minimap2_sharded`, which aligns each read against exactly one shard it was pre-assigned to. Prefer sharding when reads can be assigned to shards ahead of time.
