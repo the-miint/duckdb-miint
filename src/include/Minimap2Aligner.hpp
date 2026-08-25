@@ -92,6 +92,42 @@ private:
 	std::vector<std::string> subject_names_;
 };
 
+// Streams a possibly multi-part .mmi file one part at a time.
+//
+// minimap2's own answer to "reference larger than RAM" is the multi-part index
+// (built with `minimap2 -d out.mmi -I <batch_size> ref.fa`): mm_idx_reader_read
+// returns one part per call, and the CLI loops until mm_idx_reader_eof, aligning
+// every read against each part in turn. Peak memory is one part, not the whole
+// index. This class is that loop, wrapped so each part comes out as an
+// independently owned SharedMinimap2Index that can be dropped before the next
+// part is loaded.
+//
+// NOT thread-safe: callers (align_minimap2's part-transition logic) serialize
+// access via their own lock, since only one thread should ever be advancing the
+// underlying mm_idx_reader_t at a time.
+class Minimap2IndexReader {
+public:
+	Minimap2IndexReader(const std::string &index_path, const Minimap2Config &config);
+	~Minimap2IndexReader();
+
+	Minimap2IndexReader(const Minimap2IndexReader &) = delete;
+	Minimap2IndexReader &operator=(const Minimap2IndexReader &) = delete;
+
+	// Reads and returns the next part, or nullptr once the file is exhausted.
+	// mm_mapopt_update is applied against THIS part's index (mid_occ is derived
+	// from the loaded index's minimizer distribution, so reusing an earlier
+	// part's value would apply the wrong high-occurrence filter).
+	std::shared_ptr<SharedMinimap2Index> ReadNextPart();
+
+	// True once the most recently read part was the last one in the file.
+	bool AtEof() const;
+
+private:
+	mm_idx_reader_t *reader_ = nullptr;
+	mm_idxopt_t iopt_;
+	Minimap2Config config_;
+};
+
 // Main aligner class.
 // NOT thread-safe: each thread must have its own Minimap2Aligner instance.
 // Multiple instances may share a SharedMinimap2Index concurrently, but the

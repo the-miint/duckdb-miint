@@ -3,6 +3,7 @@
 #include "SAMRecord.hpp"
 #include "SequenceRecord.hpp"
 #include "align_common.hpp"
+#include "catalog_utils.hpp"
 #include "sequence_table_reader.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/typedefs.hpp"
@@ -13,6 +14,7 @@
 #include "duckdb/main/extension/extension_loader.hpp"
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <mutex>
 #include <vector>
 
@@ -57,10 +59,27 @@ public:
 		}
 	};
 
-	// Standard mode state: multi-threaded, shared index, lazy sub-batch streaming
+	// Standard mode state: multi-threaded, shared index, lazy sub-batch streaming.
+	//
+	// index_reader is null except when using_prebuilt_index() opened a
+	// multi-part .mmi. In that case shared_index / query_stream hold only the
+	// CURRENT part — never more than one part is resident at a time, which is
+	// the whole point (a 9GB reference built with -I 2G peaks around 2-3GB
+	// instead of 9GB). part_lock/part_cv/part_generation/advancing coordinate
+	// worker threads through the transition from one part to the next; see
+	// AdvanceMinimap2Part in align_minimap2.cpp. query_stream is a shared_ptr
+	// (not unique_ptr) so a thread that captured it just before a swap can keep
+	// draining it safely instead of racing the object's destruction.
 	struct StandardModeState {
 		std::shared_ptr<miint::SharedMinimap2Index> shared_index;
-		std::unique_ptr<QuerySequenceStream> query_stream; // Lazy streaming reader
+		std::shared_ptr<QuerySequenceStream> query_stream;
+
+		std::unique_ptr<miint::Minimap2IndexReader> index_reader; // multi-part prebuilt index only
+		std::mutex part_lock;
+		std::condition_variable part_cv;
+		idx_t part_generation = 0; // bumped every time shared_index/query_stream are swapped to a new part
+		bool advancing = false;    // true while one thread is loading the next part
+		bool parts_exhausted = false;
 	};
 
 	// Per-subject mode state: single-threaded, builds index per subject
@@ -86,8 +105,23 @@ public:
 		std::unique_ptr<StandardModeState> standard;
 		std::unique_ptr<PerSubjectModeState> per_subject;
 
+		// Multi-part prebuilt index only: TEMP snapshot of the query relation so
+		// it can be replayed once per part (#229 — see
+		// docs/internals/reading-tables-views.md § "Read the relation ONCE").
+		// Empty/null for single-part indexes and subject_table mode, which keep
+		// the original single streaming pass with no snapshot at all.
+		std::unique_ptr<Connection> snapshot_conn;
+		std::string query_snapshot; // unquoted; empty => no snapshot to drop
+
 		idx_t MaxThreads() const override {
 			return num_threads;
+		}
+
+		GlobalState() = default;
+		~GlobalState() override {
+			if (snapshot_conn) {
+				DropHelperTempRelation(*snapshot_conn, KeywordHelper::WriteOptionallyQuoted(query_snapshot));
+			}
 		}
 	};
 
@@ -97,6 +131,21 @@ public:
 		// Per-thread output buffer
 		miint::SAMRecordBatch result_buffer;
 		idx_t buffer_offset = 0;
+		// Multi-part prebuilt index only: which StandardModeState::part_generation
+		// this thread's aligner is currently attached to, and whether it has
+		// attached at all yet. InitLocal deliberately does NOT attach eagerly in
+		// this mode (unlike the single-part/subject_table paths): DuckDB may
+		// initialize more LocalStates than ever receive real work (observed with
+		// a handful of query rows and MaxThreads()=12 — most threads got exactly
+		// one empty fetch and never ran again), and an eager attach would leave
+		// each such idle thread holding a live shared_ptr to whatever part was
+		// current at InitLocal time for the rest of the query — keeping that part
+		// resident alongside every later one and defeating the one-part-at-a-time
+		// memory bound streaming exists for. Attaching lazily on first real use
+		// means a thread that never does real work never holds a part reference
+		// at all. Always false/0 (and never consulted) outside multi-part mode.
+		bool attached_to_part = false;
+		idx_t part_generation = 0;
 	};
 
 	static unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input,

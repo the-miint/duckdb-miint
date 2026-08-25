@@ -409,6 +409,42 @@ if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'phylogeny_fastt
     export PHYLOGENY_FASTTREE_AVAILABLE=1
 fi
 
+# Multi-part minimap2 index fixture for align_minimap2's streaming path
+# (align_minimap2_multipart.test). minimap2 has no SQL-level way to build a
+# multi-part .mmi (save_minimap2_index always builds single-part, via
+# mm_idx_str); the CLI's own `-I <batch>` flag produces one by writing
+# multiple mm_idx_dump blocks into the same file. We reproduce that exact
+# on-disk layout without depending on a minimap2 CLI binary: build two tiny
+# single-part indexes via save_minimap2_index, then concatenate their bytes
+# (each is already a self-contained MM_IDX_MAGIC-prefixed dump).
+MINIMAP2_MULTIPART_DIR="data/shards"
+MINIMAP2_MULTIPART_PART1="$MINIMAP2_MULTIPART_DIR/multipart_fixture_part1.mmi"
+MINIMAP2_MULTIPART_PART2="$MINIMAP2_MULTIPART_DIR/multipart_fixture_part2.mmi"
+MINIMAP2_MULTIPART_MMI="$MINIMAP2_MULTIPART_DIR/multipart_fixture.mmi"
+mkdir -p "$MINIMAP2_MULTIPART_DIR"
+MULTIPART_GEN_SQL="
+CREATE TABLE _multipart_fixture_p1 AS SELECT * FROM (VALUES
+    ('part1_ref', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC')
+) AS t(read_id, sequence1);
+CREATE TABLE _multipart_fixture_p2 AS SELECT * FROM (VALUES
+    ('part2_ref', 'TTTTGGGGCCCCAAAATTTTGGGGCCCCAAAATTTTGGGGCCCCAAAATTTTAAAACCCCGGGGTTTTAAAACCCCGGGGTTTTAAAACCCCGGGGTTTTAAAA')
+) AS t(read_id, sequence1);
+SELECT success FROM save_minimap2_index('_multipart_fixture_p1', '$MINIMAP2_MULTIPART_PART1', k := 5);
+SELECT success FROM save_minimap2_index('_multipart_fixture_p2', '$MINIMAP2_MULTIPART_PART2', k := 5);
+"
+# The two single-part files are kept (not just the concatenated multi-part
+# file) so the .test can build a UNION ALL of two single-index_path calls as
+# an oracle that is correct by construction and independent of the streaming
+# code path being tested.
+if echo "$MULTIPART_GEN_SQL" | ./build/release/duckdb -csv -noheader > /dev/null 2>&1 \
+    && cat "$MINIMAP2_MULTIPART_PART1" "$MINIMAP2_MULTIPART_PART2" > "$MINIMAP2_MULTIPART_MMI" 2>/dev/null; then
+    export MIINT_MINIMAP2_MULTIPART_FIXTURE="$MINIMAP2_MULTIPART_MMI"
+    export MIINT_MINIMAP2_MULTIPART_FIXTURE_PART1="$MINIMAP2_MULTIPART_PART1"
+    export MIINT_MINIMAP2_MULTIPART_FIXTURE_PART2="$MINIMAP2_MULTIPART_PART2"
+else
+    echo "Warning: failed to generate multi-part minimap2 index fixture; align_minimap2_multipart.test will skip"
+fi
+
 # Phase 5: real-data regression oracle.
 #
 # The BLAST-format output of `sortmerna 4.4.0 --blast '1 cigar qcov'` on the

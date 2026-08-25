@@ -389,6 +389,22 @@ std::string MaterializeShardedQueryReads(Connection &conn, const std::string &qu
 	return tmp_name;
 }
 
+std::string MaterializeQueryReads(Connection &conn, const std::string &query_table, const SequenceTableSchema &schema) {
+	// Uniquified per call — same reasoning as MaterializeShardedQueryReads.
+	const std::string tmp_name =
+	    "_miint_query_reads_" + StringUtil::Replace(UUID::ToString(UUID::GenerateRandomUUID()), "-", "");
+	const std::string tmp_quoted = KeywordHelper::WriteOptionallyQuoted(tmp_name);
+
+	auto create_result =
+	    conn.Query("CREATE TEMP TABLE " + tmp_quoted + " AS SELECT " + BuildSequenceColumnList(schema) + " FROM " +
+	               KeywordHelper::WriteOptionallyQuoted(query_table));
+	if (create_result->HasError()) {
+		throw InvalidInputException("Failed to materialize query table '%s': %s", query_table,
+		                            create_result->GetError());
+	}
+	return tmp_name;
+}
+
 void ReadShardReadsFrom(ClientContext &context, const std::string &source_sql, const SequenceTableSchema &schema,
                         const std::string &shard_name, miint::SequenceRecordBatch &output) {
 	auto conn = MakeReadOnlyHelperConnection(context);

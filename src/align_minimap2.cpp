@@ -3,7 +3,10 @@
 #include "shard_debug.hpp"
 #include "duckdb/common/printer.hpp"
 #include "duckdb/common/vector_size.hpp"
+#include "duckdb/main/connection.hpp"
+#include "duckdb/main/database.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
+#include <exception>
 
 namespace duckdb {
 
@@ -137,17 +140,65 @@ unique_ptr<GlobalTableFunctionState> AlignMinimap2TableFunction::InitGlobal(Clie
 		gstate->per_subject = std::move(ps);
 		SHARD_DBG(*gstate, "InitGlobal: per_subject_mode, num_threads=1");
 	} else if (data.using_prebuilt_index()) {
-		// Prebuilt index: load into SharedMinimap2Index for multi-threaded access
+		// Prebuilt index: open it and read the first part to find out whether
+		// it's single- or multi-part. A single-part .mmi (the common case, and
+		// every index built by save_minimap2_index) takes the original path
+		// unchanged: SharedMinimap2Index for multi-threaded access, no snapshot,
+		// no reader retained. A multi-part .mmi (built externally via
+		// `minimap2 -I <batch>` smaller than the reference) streams one part at
+		// a time so peak memory is one part instead of the whole index — see
+		// StandardModeState's doc comment and AdvanceMinimap2Part below.
 		auto st = std::make_unique<StandardModeState>();
+		std::unique_ptr<miint::Minimap2IndexReader> reader;
+		std::shared_ptr<miint::SharedMinimap2Index> first_part;
 		try {
-			st->shared_index = std::make_shared<miint::SharedMinimap2Index>(data.index_path, data.config);
+			reader = std::make_unique<miint::Minimap2IndexReader>(data.index_path, data.config);
+			first_part = reader->ReadNextPart();
 		} catch (const std::exception &e) {
 			throw IOException("Failed to load minimap2 index from '%s': %s", data.index_path, e.what());
 		}
-		gstate->standard = std::move(st);
-		gstate->num_threads = NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads());
-		SHARD_DBG_MEM(*gstate, "InitGlobal: prebuilt index loaded, MaxThreads()=%zu",
-		              static_cast<size_t>(gstate->num_threads));
+		if (!first_part) {
+			throw IOException("Failed to load minimap2 index from '%s': index file contains no parts", data.index_path);
+		}
+
+		if (reader->AtEof()) {
+			st->shared_index = std::move(first_part);
+			gstate->standard = std::move(st);
+			gstate->num_threads = NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads());
+			SHARD_DBG_MEM(*gstate, "InitGlobal: single-part prebuilt index loaded, MaxThreads()=%zu",
+			              static_cast<size_t>(gstate->num_threads));
+		} else {
+			// include_unmapped cannot be validated at Bind: whether the index is
+			// multi-part is only knowable once it's opened here. Same reasoning
+			// as the per_subject_database rejection above and the sharded
+			// function's outright refusal to offer the parameter (#185): each
+			// part is aligned independently, so a per-part "no chain" is only a
+			// statement about that part, not the whole reference.
+			if (data.config.include_unmapped) {
+				throw InvalidInputException(
+				    "align_minimap2: include_unmapped cannot be combined with a multi-part index ('%s'). Each part "
+				    "is aligned independently, so a per-part unmapped row would claim a query did not align when "
+				    "it may align in a later part.",
+				    data.index_path);
+			}
+			st->shared_index = std::move(first_part);
+			st->index_reader = std::move(reader);
+
+			// The query relation must be replayed once per part (#229 — see
+			// docs/internals/reading-tables-views.md § "Read the relation
+			// ONCE"): re-reading it directly would silently drop rows for any
+			// relation not stable across re-evaluation. Same snapshot pattern
+			// as align_minimap2_sharded's multi-shard case.
+			gstate->snapshot_conn = make_uniq<Connection>(DatabaseInstance::GetDatabase(context));
+			InheritTempObjects(context, *gstate->snapshot_conn);
+			gstate->query_snapshot = MaterializeQueryReads(*gstate->snapshot_conn, data.query_table, data.query_schema);
+
+			gstate->standard = std::move(st);
+			gstate->num_threads = NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads());
+			SHARD_DBG_MEM(
+			    *gstate, "InitGlobal: multi-part prebuilt index '%s', snapshot '%s' materialized, MaxThreads()=%zu",
+			    data.index_path.c_str(), gstate->query_snapshot.c_str(), static_cast<size_t>(gstate->num_threads));
+		}
 	} else {
 		// Standard mode with subject table: build shared index
 		auto st = std::make_unique<StandardModeState>();
@@ -161,8 +212,14 @@ unique_ptr<GlobalTableFunctionState> AlignMinimap2TableFunction::InitGlobal(Clie
 	// Set up lazy streaming reader for standard mode.
 	// Sub-batches are fetched on demand in Execute(), overlapping I/O with alignment.
 	if (!gstate->per_subject_mode) {
-		gstate->standard->query_stream =
-		    std::make_unique<QuerySequenceStream>(context, data.query_table, data.query_schema);
+		if (gstate->standard->index_reader) {
+			// Multi-part: replay from the snapshot materialized above.
+			gstate->standard->query_stream = std::make_shared<QuerySequenceStream>(
+			    *gstate->snapshot_conn, gstate->query_snapshot, data.query_schema);
+		} else {
+			gstate->standard->query_stream =
+			    std::make_shared<QuerySequenceStream>(context, data.query_table, data.query_schema);
+		}
 		SHARD_DBG(*gstate, "InitGlobal: query stream initialized for lazy sub-batching");
 	}
 
@@ -176,10 +233,17 @@ unique_ptr<LocalTableFunctionState> AlignMinimap2TableFunction::InitLocal(Execut
 	auto lstate = make_uniq<LocalState>();
 
 	if (!gstate.per_subject_mode) {
-		// Standard mode: create per-thread aligner and attach shared index
+		// Standard mode: create per-thread aligner
 		auto &data = input.bind_data->Cast<Data>();
 		lstate->aligner = std::make_unique<miint::Minimap2Aligner>(data.config);
-		lstate->aligner->attach_shared_index(gstate.standard->shared_index);
+		if (gstate.standard->index_reader) {
+			// Multi-part: attach lazily on first real use in
+			// ExecuteStandardMultiPart — see LocalState::attached_to_part.
+		} else {
+			lstate->aligner->attach_shared_index(gstate.standard->shared_index);
+			lstate->part_generation = gstate.standard->part_generation;
+			lstate->attached_to_part = true;
+		}
 		auto thread_num = gstate.init_local_count.fetch_add(1) + 1;
 		SHARD_DBG(gstate, "InitLocal: thread %zu of %zu initialized", static_cast<size_t>(thread_num),
 		          static_cast<size_t>(gstate.num_threads));
@@ -302,6 +366,161 @@ static void ExecuteStandard(ClientContext &context, const AlignMinimap2TableFunc
 	}
 }
 
+// Advances StandardModeState past `lstate.part_generation` to the next index
+// part, or waits for another thread already doing so.
+//
+// Called when a thread's fetch from the part it last attached to came back
+// empty. Exactly one thread performs the load+swap per transition (the
+// `advancing` flag elects a leader); every other thread blocks on `part_cv`.
+//
+// Only one part is ever resident. That requires dropping BOTH references a
+// part can be held by: GlobalState's own `st.shared_index` (reset by the
+// leader below) AND every LocalState aligner's shared_ptr copy — including
+// this calling thread's. A caller about to become leader or wait must detach
+// its own aligner FIRST, before doing either: a thread that instead waited on
+// `part_cv` while still attached to the old part (as an earlier version of
+// this function did) kept that part alive for the whole load — and with
+// enough idle threads sitting in that wait, for the WHOLE REST OF THE QUERY,
+// since nothing ever made them detach afterwards either. Measured against a
+// human genome multi-part index (2 parts, ~9GB total) with a tiny query
+// table and 12 threads: peak RSS was 15.5GB — HIGHER than loading the same
+// index single-part (11.75GB) — because only 1-2 of the 12 threads ever did
+// real work; the other 10-11 attached to part 1 in InitLocal, got one empty
+// fetch, and sat in this function's wait holding that reference for the rest
+// of the query, on top of part 2 loading fully. Detaching before waiting (and
+// InitLocal no longer attaching eagerly at all — see
+// LocalState::attached_to_part) fixes both: an idle thread now holds no part
+// reference at all instead of holding the wrong one indefinitely.
+//
+// Returns true once a part beyond the generation this thread was stuck on
+// exists to retry against (whether this thread loaded it or another thread
+// did), false once the index reader is exhausted with nothing left to try.
+static bool AdvanceMinimap2Part(const AlignMinimap2TableFunction::Data &bind_data,
+                                AlignMinimap2TableFunction::GlobalState &gstate,
+                                AlignMinimap2TableFunction::LocalState &lstate) {
+	auto &st = *gstate.standard;
+	idx_t expected_generation = lstate.part_generation;
+	lstate.aligner->detach_shared_index();
+	lstate.attached_to_part = false;
+
+	std::unique_lock<std::mutex> lock(st.part_lock);
+
+	while (true) {
+		if (st.part_generation != expected_generation) {
+			// Someone already advanced past the generation this thread was stuck on.
+			return true;
+		}
+		if (st.parts_exhausted) {
+			return false;
+		}
+		if (st.advancing) {
+			st.part_cv.wait(lock);
+			continue;
+		}
+
+		// Become the leader for this transition.
+		st.advancing = true;
+		st.shared_index.reset(); // free the just-finished part before loading the next
+		lock.unlock();
+
+		std::shared_ptr<miint::SharedMinimap2Index> next_index;
+		std::exception_ptr load_error;
+		try {
+			next_index = st.index_reader->ReadNextPart();
+		} catch (...) {
+			load_error = std::current_exception();
+		}
+
+		lock.lock();
+		st.advancing = false;
+		if (load_error) {
+			// Stop every other thread too — the reader is now in an unknown
+			// state and cannot be trusted for a retry.
+			st.parts_exhausted = true;
+			st.part_cv.notify_all();
+			lock.unlock();
+			std::rethrow_exception(load_error);
+		}
+		if (!next_index) {
+			st.parts_exhausted = true;
+			st.part_cv.notify_all();
+			return false;
+		}
+
+		st.shared_index = std::move(next_index);
+		st.query_stream =
+		    std::make_shared<QuerySequenceStream>(*gstate.snapshot_conn, gstate.query_snapshot, bind_data.query_schema);
+		st.part_generation++;
+		SHARD_DBG_MEM(gstate, "AdvanceMinimap2Part: advanced to part_generation=%zu",
+		              static_cast<size_t>(st.part_generation));
+		st.part_cv.notify_all();
+		return true;
+	}
+}
+
+// Multi-part prebuilt index: like ExecuteStandard, but when this thread's
+// local view of query_stream is exhausted, it coordinates with the other
+// worker threads (via AdvanceMinimap2Part) to move to the next index part
+// before looping back, rather than treating exhaustion as end-of-results.
+static void ExecuteStandardMultiPart(const AlignMinimap2TableFunction::Data &bind_data,
+                                     AlignMinimap2TableFunction::GlobalState &gstate,
+                                     AlignMinimap2TableFunction::LocalState &lstate, DataChunk &output) {
+	auto &st = *gstate.standard;
+
+	while (true) {
+		// 1. If local result_buffer has data, output a chunk
+		idx_t available = lstate.result_buffer.size() - lstate.buffer_offset;
+		if (available > 0) {
+			idx_t output_count = std::min(available, static_cast<idx_t>(STANDARD_VECTOR_SIZE));
+			OutputSAMRecordBatch(output, lstate.result_buffer, lstate.buffer_offset, output_count,
+			                     bind_data.query_schema.id_type, bind_data.subject_id_type);
+			lstate.buffer_offset += output_count;
+			return;
+		}
+
+		// 2. Make sure this thread is attached to the current part before fetching.
+		// !attached_to_part covers both a fresh thread's lazy first attach and a
+		// thread returning from AdvanceMinimap2Part, which always detaches first.
+		std::shared_ptr<QuerySequenceStream> current_stream;
+		{
+			std::lock_guard<std::mutex> lock(st.part_lock);
+			if (!lstate.attached_to_part || lstate.part_generation != st.part_generation) {
+				lstate.aligner->attach_shared_index(st.shared_index);
+				lstate.part_generation = st.part_generation;
+				lstate.attached_to_part = true;
+			}
+			current_stream = st.query_stream;
+		}
+
+		// 3. Buffer exhausted — fetch next sub-batch from stream (thread-safe)
+		lstate.result_buffer.clear();
+		lstate.buffer_offset = 0;
+
+		auto query_batch = current_stream->FetchSubBatch();
+
+		if (!query_batch.empty()) {
+			SHARD_DBG(gstate, "ExecuteStandardMultiPart: fetched sub-batch (%zu queries)", query_batch.size());
+			auto align_start = std::chrono::steady_clock::now();
+			lstate.aligner->align(query_batch, lstate.result_buffer);
+			auto align_ms =
+			    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - align_start)
+			        .count();
+			SHARD_DBG(gstate, "ExecuteStandardMultiPart: aligned %zu queries -> %zu results in %ldms",
+			          query_batch.size(), lstate.result_buffer.size(), static_cast<long>(align_ms));
+			continue; // loop back to step 1 to output
+		}
+
+		// 4. This thread's view of the current part is exhausted.
+		if (!AdvanceMinimap2Part(bind_data, gstate, lstate)) {
+			SHARD_DBG(gstate, "ExecuteStandardMultiPart: DONE (all parts exhausted)");
+			output.SetCardinality(0);
+			return;
+		}
+		// A part beyond lstate.part_generation now exists (whether this thread
+		// loaded it or another thread did) — loop back to re-attach and retry.
+	}
+}
+
 void AlignMinimap2TableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &bind_data = data_p.bind_data->Cast<Data>();
 	auto &gstate = data_p.global_state->Cast<GlobalState>();
@@ -310,7 +529,11 @@ void AlignMinimap2TableFunction::Execute(ClientContext &context, TableFunctionIn
 		ExecutePerSubject(context, bind_data, *gstate.per_subject, output);
 	} else {
 		auto &lstate = data_p.local_state->Cast<LocalState>();
-		ExecuteStandard(context, bind_data, gstate, lstate, output);
+		if (gstate.standard->index_reader) {
+			ExecuteStandardMultiPart(bind_data, gstate, lstate, output);
+		} else {
+			ExecuteStandard(context, bind_data, gstate, lstate, output);
+		}
 	}
 }
 

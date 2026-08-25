@@ -134,10 +134,24 @@ void Minimap2Aligner::LoadIndexFromFile(const std::string &path, const mm_idxopt
 	}
 
 	mm_idx_t *idx = mm_idx_reader_read(reader, 1);
+	// mm_idx_reader_eof checks the file position right after the read (feof, or
+	// ftell == the whole-file size recorded at open) — true here means this was
+	// the index's only part. A multi-part .mmi (built with `minimap2 -I <batch>`
+	// smaller than the reference set) would leave more to read.
+	bool has_more_parts = idx && !mm_idx_reader_eof(reader);
 	mm_idx_reader_close(reader);
 
 	if (!idx) {
 		throw std::runtime_error("Failed to load index from: " + path);
+	}
+
+	if (has_more_parts) {
+		mm_idx_destroy(idx);
+		throw std::runtime_error(
+		    "Index file '" + path +
+		    "' has multiple parts (built with 'minimap2 -I <batch_size>' smaller than the reference set). This "
+		    "loader only supports single-part indexes. align_minimap2(index_path := ...) streams multi-part "
+		    "indexes automatically; other callers of a prebuilt index require a single part.");
 	}
 
 	// Extract reference names from loaded index
@@ -153,6 +167,60 @@ void Minimap2Aligner::LoadIndexFromFile(const std::string &path, const mm_idxopt
 	}
 
 	out_idx = idx;
+}
+
+// Minimap2IndexReader implementation.
+Minimap2IndexReader::Minimap2IndexReader(const std::string &index_path, const Minimap2Config &config)
+    : config_(config) {
+	mm_mapopt_t unused_mopt;
+	Minimap2Aligner::InitOptions(config_, iopt_, unused_mopt);
+	reader_ = mm_idx_reader_open(index_path.c_str(), &iopt_, nullptr);
+	if (!reader_) {
+		throw std::runtime_error("Cannot open index file: " + index_path);
+	}
+}
+
+Minimap2IndexReader::~Minimap2IndexReader() {
+	if (reader_) {
+		mm_idx_reader_close(reader_);
+	}
+}
+
+bool Minimap2IndexReader::AtEof() const {
+	return !reader_ || mm_idx_reader_eof(reader_);
+}
+
+std::shared_ptr<SharedMinimap2Index> Minimap2IndexReader::ReadNextPart() {
+	if (!reader_) {
+		return nullptr;
+	}
+	// n_threads=1: matches the existing single-part load in LoadIndexFromFile.
+	// mm_idx_load (the is_idx path mm_idx_reader_read takes for a prebuilt .mmi)
+	// doesn't parallelize on this argument regardless.
+	mm_idx_t *idx = mm_idx_reader_read(reader_, 1);
+	if (!idx) {
+		return nullptr;
+	}
+
+	std::vector<std::string> names;
+	names.reserve(idx->n_seq);
+	for (uint32_t i = 0; i < idx->n_seq; i++) {
+		if (!idx->seq[i].name) {
+			mm_idx_destroy(idx);
+			throw std::runtime_error("Index part contains an unnamed sequence at position " + std::to_string(i));
+		}
+		names.push_back(std::string(idx->seq[i].name));
+	}
+
+	// mm_mapopt_update derives mid_occ from the loaded index's own minimizer
+	// distribution, so it must run against THIS part — reusing an earlier
+	// part's mopt would carry over the wrong high-occurrence filter threshold.
+	mm_mapopt_t mopt;
+	mm_idxopt_t unused_iopt;
+	Minimap2Aligner::InitOptions(config_, unused_iopt, mopt);
+	mm_mapopt_update(&mopt, idx);
+
+	return std::make_shared<SharedMinimap2Index>(idx, mopt, std::move(names));
 }
 
 // Constructor
