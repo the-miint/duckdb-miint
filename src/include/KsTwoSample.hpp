@@ -75,6 +75,14 @@ void ValidateKsMethod(const std::string &method);
 // itself when it contains repeats; comparing mid-tie would report a spurious jump.
 // Matches SciPy's searchsorted(..., side='right') formulation.
 //
+// The value returned is the EXACT D, not the running maximum of the merge walk. The
+// walk accumulates i/na - j/nb in floating point and so lands a few ULP off; D is an
+// exact multiple of 1/lcm(na,nb), so the walk's answer is snapped onto that multiple
+// before returning (issue #256). Two consequences worth relying on: the result is the
+// correctly-rounded D to the bit, so it can be compared for equality against one
+// computed in integer arithmetic; and it is unchanged by which of the tied lattice
+// points the maximum happened to be found at.
+//
 // Requires both vectors non-empty and NaN-free; the caller checks that.
 double KsStatistic(std::vector<double> &a, std::vector<double> &b);
 
@@ -89,10 +97,10 @@ double KsStatistic(std::vector<double> &a, std::vector<double> &b);
 //     allocates min(n1,n2)+1 doubles and sweeps O(n1 * band), so calling it with
 //     n1 = n2 = 1e6 will run for a very long time rather than reject the input.
 //   * `d` is SNAPPED to the nearest achievable statistic, llround(d * lcm)/lcm, not
-//     validated against it. D is always an exact multiple of 1/lcm(n1,n2), so any
-//     d produced by KsStatistic is already one; but KsExactPValue(5, 5, 0.3) quietly
-//     answers for D = 0.4 instead of complaining, because 0.3 is not achievable at
-//     n1 = n2 = 5.
+//     validated against it. D is always an exact multiple of 1/lcm(n1,n2), and
+//     KsStatistic returns exactly such a multiple; but KsExactPValue(5, 5, 0.3)
+//     quietly answers for D = 0.4 instead of complaining, because 0.3 is not
+//     achievable at n1 = n2 = 5.
 //
 // Under H0 both samples are assumed drawn from a CONTINUOUS distribution, so that all
 // C(n1+n2, n1) interleavings are equally likely. Ties violate that assumption, which
