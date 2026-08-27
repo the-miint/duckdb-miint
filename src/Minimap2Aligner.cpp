@@ -193,11 +193,23 @@ Minimap2IndexReader::~Minimap2IndexReader() {
 	}
 }
 
-bool Minimap2IndexReader::AtEof() const {
-	return !reader_ || mm_idx_reader_eof(reader_);
+bool Minimap2IndexReader::AtEof() {
+	if (!has_peeked_) {
+		peeked_part_ = ReadNextPartUncached();
+		has_peeked_ = true;
+	}
+	return peeked_part_ == nullptr;
 }
 
 std::shared_ptr<SharedMinimap2Index> Minimap2IndexReader::ReadNextPart() {
+	if (has_peeked_) {
+		has_peeked_ = false;
+		return std::move(peeked_part_);
+	}
+	return ReadNextPartUncached();
+}
+
+std::shared_ptr<SharedMinimap2Index> Minimap2IndexReader::ReadNextPartUncached() {
 	if (!reader_) {
 		return nullptr;
 	}
