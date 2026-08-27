@@ -1,11 +1,30 @@
 #include <SequenceReader.hpp>
 #include <algorithm>
+#include <cerrno>
+#include <system_error>
 
 #ifdef MIINT_STATIC_BUILD
 #include "duckdb/common/exception.hpp"
 #endif
 
 namespace miint {
+
+gzFile CheckedSeqStreamIn::OpenOrThrow(const std::string &path) {
+	// Cleared first because zlib does not promise to set errno on every failure path
+	// (an allocation failure inside gz_open can return NULL without touching it).
+	errno = 0;
+	gzFile handle = gzopen(path.c_str(), "r");
+	if (handle == nullptr) {
+		const int open_errno = errno;
+		// generic_category().message() rather than strerror(): readers are opened from
+		// several scan threads at once, and strerror's shared buffer is not thread-safe.
+		throw std::runtime_error(
+		    "Failed to open file: " + path + ": " +
+		    (open_errno != 0 ? std::generic_category().message(open_errno) : std::string("gzopen failed")));
+	}
+	return handle;
+}
+
 // Helper function to extract base read ID by stripping /[1-9] suffix and comments
 static std::string base_read_id(const std::string &id) {
 	// First, strip comments (everything after first space)
@@ -74,7 +93,7 @@ std::vector<klibpp::KSeq> SequenceReader::read_stream(StreamVar &var, int n) {
 SequenceReader::SequenceReader(const std::string &path1, const std::optional<std::string> &path2,
                                bool allow_format_mismatch)
     : first_read_(true) {
-	sequence1_reader_ = std::make_unique<SeqStreamIn>(path1.c_str());
+	sequence1_reader_ = std::make_unique<SeqStreamIn>(path1);
 
 	// Check if first file is empty by attempting to peek at first record
 	buffered_read1_ = read_stream(sequence1_reader_, 1);
@@ -89,7 +108,7 @@ SequenceReader::SequenceReader(const std::string &path1, const std::optional<std
 
 	paired_ = path2.has_value() && (path2->length() > 0);
 	if (paired_) {
-		sequence2_reader_.emplace(std::make_unique<SeqStreamIn>(path2->c_str()));
+		sequence2_reader_.emplace(std::make_unique<SeqStreamIn>(path2.value()));
 
 		// Check if second file is empty and detect format
 		buffered_read2_ = read_stream(sequence2_reader_.value(), 1);

@@ -83,7 +83,9 @@ public:
 			file_sequence_counters.resize(sequence1_paths.size(), 1);
 		}
 
-		// Open reader for a specific file index. Called under lock when a thread claims the file.
+		// Open reader for a specific file index. Called WITHOUT the lock, by the one thread that
+		// claimed `file_idx` under it -- see the claim loop in Execute(). That exclusive ownership
+		// is also what lets Execute() destroy the reader again when the file runs out.
 		void OpenReader(size_t file_idx) {
 			if (readers[file_idx]) {
 				return; // Already opened

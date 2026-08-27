@@ -15,6 +15,27 @@
 #endif
 
 namespace miint {
+
+// A local-file sequence stream that checks gzopen() actually succeeded.
+//
+// klibpp::SeqStreamIn hands gzopen()'s result straight to KStream without looking at it.
+// A NULL handle does not fail loudly: it produces a stream that yields zero records, which
+// SequenceReader cannot tell apart from a genuinely empty file, so every failed open --
+// EACCES, EMFILE/ENFILE on descriptor exhaustion, ENOMEM -- was reported as
+// "Empty file: <path>" naming a file that is fine. ext/kseq++ is vendored unpatched, so the
+// check lives here instead. Deriving from SeqStreamIn's own base lets us open the file
+// ourselves and read errno with nothing running in between; SeqStreamIn adds only
+// constructors, so behaviour is otherwise identical.
+class CheckedSeqStreamIn : public klibpp::SeqStreamIn::base_type {
+public:
+	explicit CheckedSeqStreamIn(const std::string &path)
+	    : klibpp::SeqStreamIn::base_type(OpenOrThrow(path), gzread, gzclose) {
+	}
+
+private:
+	static gzFile OpenOrThrow(const std::string &path);
+};
+
 class SequenceReader {
 public:
 	explicit SequenceReader(const std::string &path1, const std::optional<std::string> &path2 = std::nullopt,
@@ -50,7 +71,7 @@ public:
 	}
 
 private:
-	using SeqStreamIn = klibpp::SeqStreamIn;
+	using SeqStreamIn = CheckedSeqStreamIn;
 
 #if defined(MIINT_STATIC_BUILD) && MIINT_ASPERA_SUPPORTED
 	using StreamVar = std::variant<std::unique_ptr<SeqStreamIn>, std::unique_ptr<DuckDBSeqStreamIn>,

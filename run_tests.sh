@@ -467,6 +467,23 @@ fi
 make test
 ./build/release/extension/miint/tests
 
+# read_fastx_fd_release.test must run under a low RLIMIT_NOFILE: it asserts that one scan
+# over many paths holds descriptors proportional to thread count, not to path count, and
+# a process with the usual limit cannot tell those two apart. `make test` above has no way
+# to set a limit, so the file holds itself back with `require-env MIINT_LOW_FD_TEST` and
+# runs here instead.
+#
+# Lowering the soft limit needs no privilege. If a hard limit already sits below the target
+# we run anyway rather than skipping -- a tighter limit only makes the assertion stronger.
+FD_RELEASE_TEST="test/sql/read_fastx_fd_release.test"
+FD_RELEASE_LIMIT=256
+echo "Running $FD_RELEASE_TEST with RLIMIT_NOFILE<=$FD_RELEASE_LIMIT..."
+(
+    ulimit -n "$FD_RELEASE_LIMIT" 2>/dev/null || true
+    echo "  RLIMIT_NOFILE soft=$(ulimit -Sn) hard=$(ulimit -Hn)"
+    MIINT_LOW_FD_TEST=1 ./build/release/test/unittest "$FD_RELEASE_TEST"
+) || exit 1
+
 # Run shell script tests
 echo "Running shell script tests..."
 for test_script in test/shell/*.sh; do
