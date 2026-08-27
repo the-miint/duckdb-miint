@@ -481,6 +481,16 @@ echo "Running $FD_RELEASE_TEST with RLIMIT_NOFILE<=$FD_RELEASE_LIMIT..."
 (
     ulimit -n "$FD_RELEASE_LIMIT" 2>/dev/null || true
     echo "  RLIMIT_NOFILE soft=$(ulimit -Sn) hard=$(ulimit -Hn)"
+    # The || true above swallows the expected failure (hard limit already below target) along
+    # with any unanticipated one. Since the soft limit can never exceed the hard limit, the
+    # expected case always leaves us at or under the target -- so a soft limit still above it
+    # here means the lower silently didn't take, and the test below would run with no real
+    # descriptor pressure and pass without exercising anything.
+    if [ "$(ulimit -Sn)" -gt "$FD_RELEASE_LIMIT" ]; then
+        echo "  ERROR: RLIMIT_NOFILE is still $(ulimit -Sn), above the $FD_RELEASE_LIMIT target;" \
+             "refusing to run $FD_RELEASE_TEST without real descriptor pressure" >&2
+        exit 1
+    fi
     MIINT_LOW_FD_TEST=1 ./build/release/test/unittest "$FD_RELEASE_TEST"
 ) || exit 1
 
