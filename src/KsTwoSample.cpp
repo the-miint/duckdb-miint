@@ -95,7 +95,19 @@ double KsStatistic(std::vector<double> &a, std::vector<double> &b) {
 	// No tail pass is needed. The loop ends with one sample exhausted, so that ECDF
 	// is already 1 and the other's can only rise toward 1 over the remaining values
 	// -- the gap shrinks monotonically from the value just recorded.
-	return best;
+	//
+	// `best` is not yet D. The sweep rounds three times per step -- two divisions and
+	// a subtraction -- so it lands within a few ULP of the answer rather than on it:
+	// at na=1, nb=3 the peak 1.0/1.0 - 1.0/3.0 comes out one ULP above 2/3. Every
+	// achievable D is an exact multiple of 1/lcm(na,nb), so recover WHICH multiple and
+	// divide once. A single IEEE division of two exactly-representable integers is
+	// correctly rounded by construction, which makes the result the true D to the bit
+	// (issue #256). Exact representability holds while lcm <= 2^53; KS_MAX_EXACT_N
+	// keeps it under 1e8.
+	const int64_t n1 = static_cast<int64_t>(na);
+	const int64_t n2 = static_cast<int64_t>(nb);
+	const int64_t lcm = n1 / std::gcd(n1, n2) * n2;
+	return static_cast<double>(std::llround(best * static_cast<double>(lcm))) / static_cast<double>(lcm);
 }
 
 double KsExactPValue(int64_t n1, int64_t n2, double d) {

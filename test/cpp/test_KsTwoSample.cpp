@@ -68,6 +68,38 @@ double BruteForceStatistic(const std::vector<double> &a, const std::vector<doubl
 }
 
 // ---------------------------------------------------------------------------
+// Oracle A2 -- the same literal ECDF sweep, but in EXACT integer arithmetic.
+// Maximise |ca*nb - cb*na| over the pooled values and divide once at the end. A
+// single IEEE division of two exactly-representable integers is correctly rounded,
+// so this is the true D to the bit -- which Oracle A is not: two divisions and a
+// subtraction per pooled value leave its answer 1-3 ULP off (issue #256).
+// ---------------------------------------------------------------------------
+double ExactStatistic(const std::vector<double> &a, const std::vector<double> &b) {
+	const int64_t na = static_cast<int64_t>(a.size());
+	const int64_t nb = static_cast<int64_t>(b.size());
+	std::vector<double> pooled;
+	pooled.insert(pooled.end(), a.begin(), a.end());
+	pooled.insert(pooled.end(), b.begin(), b.end());
+	int64_t best = 0;
+	for (const double v : pooled) {
+		int64_t ca = 0;
+		int64_t cb = 0;
+		for (const double x : a) {
+			if (x <= v) {
+				ca++;
+			}
+		}
+		for (const double x : b) {
+			if (x <= v) {
+				cb++;
+			}
+		}
+		best = std::max<int64_t>(best, std::llabs(ca * nb - cb * na));
+	}
+	return static_cast<double>(best) / static_cast<double>(na * nb);
+}
+
+// ---------------------------------------------------------------------------
 // Oracle B -- the exact p-value, by enumerating EVERY interleaving.
 // This is the definition itself: walk all C(m+n,m) lattice paths, take each one's
 // max|i*ng - j*mg|, and count the fraction reaching h. Ground truth, no recursion
@@ -261,6 +293,54 @@ TEST_CASE("KsStatistic matches the literal ECDF oracle on random inputs", "[ks_2
 		trials++;
 	}
 	REQUIRE(trials == 500);
+}
+
+TEST_CASE("KsStatistic returns the exact D, not the raw sweep value", "[ks_2samp]") {
+	// The merge walk accumulates i/na - j/nb in floating point -- two divisions and a
+	// subtraction, three rounding steps -- so its running maximum is not in general the
+	// correctly-rounded D. The smallest case where it is not: na=1, nb=3 with the pooled
+	// order b < a < b < b. The gap peaks at (i,j) = (1,1), and D = 2/3 (issue #256).
+	//
+	// The first REQUIRE is load-bearing, not decoration: it is the pre-snap value, and
+	// if it ever coincided with 2.0/3.0 the assertion below would pin nothing.
+	REQUIRE(1.0 / 1.0 - 1.0 / 3.0 != 2.0 / 3.0);
+	std::vector<double> a {2.0};
+	std::vector<double> b {1.0, 3.0, 4.0};
+	REQUIRE(KsStatistic(a, b) == 2.0 / 3.0);
+}
+
+TEST_CASE("KsStatistic is bit-exact against the integer-arithmetic oracle", "[ks_2samp]") {
+	// Every achievable D is an exact multiple of 1/lcm(na,nb), so "close enough" is the
+	// wrong bar here: there is one right double and the function should return it. Sizes
+	// reach 30 because micov's n is the number of samples in a metadata group, 10-100.
+	std::mt19937_64 rng(20260825);
+	std::uniform_int_distribution<int> size_dist(1, 30);
+	int inexact = 0;
+	for (int t = 0; t < 500; t++) {
+		const int na = size_dist(rng);
+		const int nb = size_dist(rng);
+		// Small integer alphabet, as above: cumulative coverage curves are nothing but
+		// ties, and the maximum then lands on a lattice point reachable in several ways.
+		std::uniform_int_distribution<int> val_dist(0, 8);
+		std::vector<double> a(static_cast<size_t>(na));
+		std::vector<double> b(static_cast<size_t>(nb));
+		for (auto &v : a) {
+			v = static_cast<double>(val_dist(rng));
+		}
+		for (auto &v : b) {
+			v = static_cast<double>(val_dist(rng));
+		}
+		const double expected = ExactStatistic(a, b);
+		// Oracle A evaluates the same expression the merge walk does, in the same order,
+		// so it reproduces the UNSNAPPED answer. Counting where it disagrees proves this
+		// grid actually reaches the cases that distinguish the two (issue #256) -- an
+		// alphabet or a size range that never did would make the check below vacuous.
+		if (BruteForceStatistic(a, b) != expected) {
+			inexact++;
+		}
+		REQUIRE(KsStatistic(a, b) == expected);
+	}
+	REQUIRE(inexact > 50);
 }
 
 // ===========================================================================

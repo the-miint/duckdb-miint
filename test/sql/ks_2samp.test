@@ -47,6 +47,20 @@ SELECT abs((ks_2samp([1.0,2.0,3.0,4.0,5.0], [6.0,7.0,8.0,9.0,10.0])).pvalue - 2.
 true
 
 # ---------------------------------------------------------------------------
+# Test 3b -- the statistic is the EXACT D, not the merge walk's raw maximum (#256).
+#   a = {2}, b = {1,3,4}: the gap peaks at F_a - F_b = 1 - 1/3. Evaluated the way the
+#   walk does -- two divisions and a subtraction -- that is one ULP above 2/3. This is
+#   the smallest input where the two disagree.
+# Asserted with = rather than a tolerance on purpose: ks_2samp_parity.test allows the
+# statistic 1e-13, three orders looser than this gap, so it passes either way. micov's
+# published KS statistics are exactly reproducible and must stay that way.
+# ---------------------------------------------------------------------------
+query I
+SELECT (ks_2samp([2.0], [1.0, 3.0, 4.0])).statistic = 2.0 / 3.0;
+----
+true
+
+# ---------------------------------------------------------------------------
 # Test 4 -- ties. Every value is shared; only the multiplicities differ, so the gap
 # is 1/3 at v=1 and 0 at v=2. A walk that compared the ECDFs part-way through a run
 # of equal values would report a jump neither ECDF has.
