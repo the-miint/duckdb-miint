@@ -40,8 +40,9 @@ SharedMinimap2Index::SharedMinimap2Index(const std::string &index_path, const Mi
 	mm_mapopt_update(&mopt_, index_.get());
 }
 
-SharedMinimap2Index::SharedMinimap2Index(mm_idx_t *idx, const mm_mapopt_t &mopt, std::vector<std::string> subject_names)
-    : index_(idx), mopt_(mopt), subject_names_(std::move(subject_names)) {
+SharedMinimap2Index::SharedMinimap2Index(Minimap2IndexPtr idx, const mm_mapopt_t &mopt,
+                                         std::vector<std::string> subject_names)
+    : index_(std::move(idx)), mopt_(mopt), subject_names_(std::move(subject_names)) {
 }
 
 SharedMinimap2Index::~SharedMinimap2Index() = default;
@@ -134,18 +135,24 @@ void Minimap2Aligner::LoadIndexFromFile(const std::string &path, const mm_idxopt
 	}
 
 	mm_idx_t *idx = mm_idx_reader_read(reader, 1);
-	// mm_idx_reader_eof checks the file position right after the read (feof, or
-	// ftell == the whole-file size recorded at open) — true here means this was
-	// the index's only part. A multi-part .mmi (built with `minimap2 -I <batch>`
-	// smaller than the reference set) would leave more to read.
-	bool has_more_parts = idx && !mm_idx_reader_eof(reader);
-	mm_idx_reader_close(reader);
-
 	if (!idx) {
+		mm_idx_reader_close(reader);
 		throw std::runtime_error("Failed to load index from: " + path);
 	}
 
-	if (has_more_parts) {
+	// Confirm multi-part-ness by attempting to read a SECOND part, rather than
+	// trusting mm_idx_reader_eof's file-position heuristic (feof(fp) ||
+	// ftell(fp) == the whole-file size captured at open). A single-part .mmi
+	// with trailing bytes for an unrelated reason (a padded transfer, an
+	// appended sidecar) reports "not eof" without containing a second part at
+	// all, which previously hard-failed a load that minimap2 itself would
+	// accept. mm_idx_reader_read returning null is exactly the condition
+	// minimap2's own CLI loop uses to decide there is nothing left to read.
+	mm_idx_t *second_part = mm_idx_reader_read(reader, 1);
+	mm_idx_reader_close(reader);
+
+	if (second_part) {
+		mm_idx_destroy(second_part);
 		mm_idx_destroy(idx);
 		throw std::runtime_error(
 		    "Index file '" + path +
@@ -172,9 +179,9 @@ void Minimap2Aligner::LoadIndexFromFile(const std::string &path, const mm_idxopt
 // Minimap2IndexReader implementation.
 Minimap2IndexReader::Minimap2IndexReader(const std::string &index_path, const Minimap2Config &config)
     : config_(config) {
-	mm_mapopt_t unused_mopt;
-	Minimap2Aligner::InitOptions(config_, iopt_, unused_mopt);
-	reader_ = mm_idx_reader_open(index_path.c_str(), &iopt_, nullptr);
+	mm_idxopt_t iopt;
+	Minimap2Aligner::InitOptions(config_, iopt, mopt_template_);
+	reader_ = mm_idx_reader_open(index_path.c_str(), &iopt, nullptr);
 	if (!reader_) {
 		throw std::runtime_error("Cannot open index file: " + index_path);
 	}
@@ -197,7 +204,13 @@ std::shared_ptr<SharedMinimap2Index> Minimap2IndexReader::ReadNextPart() {
 	// n_threads=1: matches the existing single-part load in LoadIndexFromFile.
 	// mm_idx_load (the is_idx path mm_idx_reader_read takes for a prebuilt .mmi)
 	// doesn't parallelize on this argument regardless.
-	mm_idx_t *idx = mm_idx_reader_read(reader_, 1);
+	//
+	// Wrapped in the RAII deleter immediately: this is the exact memory-pressure
+	// regime (a multi-part index is only in play when a whole reference doesn't
+	// fit) where make_shared's control-block allocation below can throw
+	// bad_alloc. A raw mm_idx_t* held across that throw would leak a whole
+	// index part with nothing left to free it.
+	Minimap2IndexPtr idx(mm_idx_reader_read(reader_, 1));
 	if (!idx) {
 		return nullptr;
 	}
@@ -206,7 +219,6 @@ std::shared_ptr<SharedMinimap2Index> Minimap2IndexReader::ReadNextPart() {
 	names.reserve(idx->n_seq);
 	for (uint32_t i = 0; i < idx->n_seq; i++) {
 		if (!idx->seq[i].name) {
-			mm_idx_destroy(idx);
 			throw std::runtime_error("Index part contains an unnamed sequence at position " + std::to_string(i));
 		}
 		names.push_back(std::string(idx->seq[i].name));
@@ -215,12 +227,10 @@ std::shared_ptr<SharedMinimap2Index> Minimap2IndexReader::ReadNextPart() {
 	// mm_mapopt_update derives mid_occ from the loaded index's own minimizer
 	// distribution, so it must run against THIS part — reusing an earlier
 	// part's mopt would carry over the wrong high-occurrence filter threshold.
-	mm_mapopt_t mopt;
-	mm_idxopt_t unused_iopt;
-	Minimap2Aligner::InitOptions(config_, unused_iopt, mopt);
-	mm_mapopt_update(&mopt, idx);
+	mm_mapopt_t mopt = mopt_template_;
+	mm_mapopt_update(&mopt, idx.get());
 
-	return std::make_shared<SharedMinimap2Index>(idx, mopt, std::move(names));
+	return std::make_shared<SharedMinimap2Index>(std::move(idx), mopt, std::move(names));
 }
 
 // Constructor
@@ -314,10 +324,10 @@ std::shared_ptr<SharedMinimap2Index> Minimap2Aligner::BuildSharedIndex(const std
 	InitOptions(config, iopt, mopt);
 
 	std::vector<std::string> subject_names;
-	mm_idx_t *idx = BuildRawIndex(subjects, iopt, subject_names);
-	mm_mapopt_update(&mopt, idx);
+	Minimap2IndexPtr idx(BuildRawIndex(subjects, iopt, subject_names));
+	mm_mapopt_update(&mopt, idx.get());
 
-	return std::make_shared<SharedMinimap2Index>(idx, mopt, std::move(subject_names));
+	return std::make_shared<SharedMinimap2Index>(std::move(idx), mopt, std::move(subject_names));
 }
 
 const mm_idx_t *Minimap2Aligner::active_index() const {

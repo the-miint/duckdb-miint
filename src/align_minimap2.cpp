@@ -191,7 +191,19 @@ unique_ptr<GlobalTableFunctionState> AlignMinimap2TableFunction::InitGlobal(Clie
 			// as align_minimap2_sharded's multi-shard case.
 			gstate->snapshot_conn = make_uniq<Connection>(DatabaseInstance::GetDatabase(context));
 			InheritTempObjects(context, *gstate->snapshot_conn);
-			gstate->query_snapshot = MaterializeQueryReads(*gstate->snapshot_conn, data.query_table, data.query_schema);
+			idx_t snapshot_row_count = 0;
+			gstate->query_snapshot =
+			    MaterializeQueryReads(*gstate->snapshot_conn, data.query_table, data.query_schema, &snapshot_row_count);
+
+			// No queries at all means every remaining part would be loaded and
+			// decoded (potentially the whole multi-GB index) only to align zero
+			// rows against it. part_generation starts at 0 and the first fetch
+			// against an empty snapshot returns empty immediately, so marking
+			// parts_exhausted now makes that first AdvanceMinimap2Part call
+			// return false without touching the reader again.
+			if (snapshot_row_count == 0) {
+				st->parts_exhausted = true;
+			}
 
 			gstate->standard = std::move(st);
 			gstate->num_threads = NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads());
@@ -423,10 +435,23 @@ static bool AdvanceMinimap2Part(const AlignMinimap2TableFunction::Data &bind_dat
 		st.shared_index.reset(); // free the just-finished part before loading the next
 		lock.unlock();
 
+		// Both the index load AND the query-stream replay happen OUTSIDE the
+		// lock: every other thread is either parked on part_cv or about to
+		// block on part_lock, so no scheduler thread for this pipeline is free
+		// to service a query issued while holding the lock. Both steps are
+		// wrapped in the same try/catch so a throw from either one still
+		// notifies waiters instead of stranding them — mirrors
+		// align_minimap2_sharded's ClaimWork, which guards its equivalent
+		// index-load and sequence-prefetch phases the same way.
 		std::shared_ptr<miint::SharedMinimap2Index> next_index;
+		std::shared_ptr<QuerySequenceStream> next_stream;
 		std::exception_ptr load_error;
 		try {
 			next_index = st.index_reader->ReadNextPart();
+			if (next_index) {
+				next_stream = std::make_shared<QuerySequenceStream>(*gstate.snapshot_conn, gstate.query_snapshot,
+				                                                    bind_data.query_schema);
+			}
 		} catch (...) {
 			load_error = std::current_exception();
 		}
@@ -448,8 +473,7 @@ static bool AdvanceMinimap2Part(const AlignMinimap2TableFunction::Data &bind_dat
 		}
 
 		st.shared_index = std::move(next_index);
-		st.query_stream =
-		    std::make_shared<QuerySequenceStream>(*gstate.snapshot_conn, gstate.query_snapshot, bind_data.query_schema);
+		st.query_stream = std::move(next_stream);
 		st.part_generation++;
 		SHARD_DBG_MEM(gstate, "AdvanceMinimap2Part: advanced to part_generation=%zu",
 		              static_cast<size_t>(st.part_generation));
@@ -485,6 +509,15 @@ static void ExecuteStandardMultiPart(const AlignMinimap2TableFunction::Data &bin
 		{
 			std::lock_guard<std::mutex> lock(st.part_lock);
 			if (!lstate.attached_to_part || lstate.part_generation != st.part_generation) {
+				// st.shared_index is only null for the instant between a leader
+				// resetting it (line ~423) and installing the next part; a thread
+				// that reaches here in that window has not yet observed the
+				// generation bump, so today it always finds the OLD query_stream
+				// already exhausted and immediately loops back into
+				// AdvanceMinimap2Part instead of calling align(). Asserted rather
+				// than silently tolerated so a future change to that ordering
+				// fails loud instead of surfacing as "No index built" mid-query.
+				D_ASSERT(st.shared_index != nullptr);
 				lstate.aligner->attach_shared_index(st.shared_index);
 				lstate.part_generation = st.part_generation;
 				lstate.attached_to_part = true;

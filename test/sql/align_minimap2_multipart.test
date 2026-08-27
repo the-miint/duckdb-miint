@@ -68,6 +68,31 @@ ORDER BY read_id;
 query_part1	part1_ref
 query_part2	part2_ref
 
+# Paired-end + quality columns through the multi-part replay snapshot.
+# MaterializeQueryReads (via BuildSequenceColumnList) is the only caller that
+# builds the sequence2/qual1/qual2 projection for the snapshot every part is
+# replayed from — no other multi-part test exercises a query table with those
+# columns present. A wrong column list there (wrong order, dropped column)
+# would either error or silently misalign values with nothing to catch it.
+# Segment 1 (sequence1) matches part1_ref and segment 2 (sequence2) matches
+# part2_ref, so a correct projection produces exactly these two rows; a
+# scrambled one would misroute a segment to the wrong reference or drop it.
+statement ok
+CREATE TABLE multipart_paired_queries AS SELECT * FROM (VALUES
+    ('query_paired',
+     'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT',
+     'TTTTGGGGCCCCAAAATTTTGGGGCCCCAAAATTTTGGGGCCCCAAAATTTT',
+     CAST(NULL AS INTEGER[]), CAST(NULL AS INTEGER[]))
+) AS t(read_id, sequence1, sequence2, qual1, qual2);
+
+query II
+SELECT read_id, reference
+FROM align_minimap2('multipart_paired_queries', index_path='data/shards/multipart_fixture.mmi', max_secondary=0)
+ORDER BY reference;
+----
+query_paired	part1_ref
+query_paired	part2_ref
+
 # align_minimap2_sharded fails loud (rather than silently truncating) if a
 # shard's .mmi turns out to be multi-part -- it has no streaming path, so
 # loading is a hard error instead of quietly aligning against part 1 only.

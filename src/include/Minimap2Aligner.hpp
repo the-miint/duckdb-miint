@@ -74,8 +74,13 @@ class SharedMinimap2Index {
 public:
 	// Load from .mmi file
 	SharedMinimap2Index(const std::string &index_path, const Minimap2Config &config);
-	// Take ownership of a pre-built index
-	SharedMinimap2Index(mm_idx_t *idx, const mm_mapopt_t &mopt, std::vector<std::string> subject_names);
+	// Take ownership of a pre-built index. Takes Minimap2IndexPtr (not a raw
+	// mm_idx_t*) so ownership transfers atomically with argument binding: a
+	// caller building this via std::make_shared can pass std::move(idx) and be
+	// certain the index is freed even if make_shared's own allocation throws
+	// before this constructor ever runs — a raw pointer argument would leave
+	// nothing owning the index during that window.
+	SharedMinimap2Index(Minimap2IndexPtr idx, const mm_mapopt_t &mopt, std::vector<std::string> subject_names);
 	~SharedMinimap2Index();
 
 	// Non-copyable
@@ -124,7 +129,14 @@ public:
 
 private:
 	mm_idx_reader_t *reader_ = nullptr;
-	mm_idxopt_t iopt_;
+	// Built once at construction (preset/k/w parsed and validated here, not
+	// per part) and copied into a fresh mm_mapopt_t for each ReadNextPart call,
+	// which then runs only mm_mapopt_update against that part's own minimizer
+	// distribution — the one piece of mopt that must be re-derived per part.
+	// mm_idxopt_t is NOT cached the same way: mm_idx_reader_open copies it into
+	// the reader's own state at open time and never consults the caller's copy
+	// again, so keeping it as a member here would just be dead weight.
+	mm_mapopt_t mopt_template_;
 	Minimap2Config config_;
 };
 

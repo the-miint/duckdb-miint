@@ -439,8 +439,6 @@ SELECT success FROM save_minimap2_index('_multipart_fixture_p2', '$MINIMAP2_MULT
 if echo "$MULTIPART_GEN_SQL" | ./build/release/duckdb -csv -noheader > /dev/null 2>&1 \
     && cat "$MINIMAP2_MULTIPART_PART1" "$MINIMAP2_MULTIPART_PART2" > "$MINIMAP2_MULTIPART_MMI" 2>/dev/null; then
     export MIINT_MINIMAP2_MULTIPART_FIXTURE="$MINIMAP2_MULTIPART_MMI"
-    export MIINT_MINIMAP2_MULTIPART_FIXTURE_PART1="$MINIMAP2_MULTIPART_PART1"
-    export MIINT_MINIMAP2_MULTIPART_FIXTURE_PART2="$MINIMAP2_MULTIPART_PART2"
 else
     echo "Warning: failed to generate multi-part minimap2 index fixture; align_minimap2_multipart.test will skip"
 fi
