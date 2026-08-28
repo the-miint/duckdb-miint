@@ -7,6 +7,16 @@
 #include "QualScore.hpp"
 #include "SequenceRecord.hpp"
 #include "SequenceReader.hpp"
+#include <vector>
+
+// getrlimit/geteuid and permission bits that actually deny the owner are POSIX-only; the
+// open-failure test below is compiled out elsewhere. Same guard as test_NewickParser.cpp.
+#if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
+#include <cerrno>
+#include <fcntl.h>
+#include <sys/resource.h>
+#include <unistd.h>
+#endif
 
 // Test fixture for RAII-based temp file management
 class TempFileFixture {
@@ -241,6 +251,126 @@ TEST_CASE("SequenceReader empty file throws", "[SequenceReader][error]") {
 
 	REQUIRE_THROWS_WITH(miint::SequenceReader(path), Catch::Matchers::ContainsSubstring("Empty file"));
 }
+
+#if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
+// kseq++'s SeqStreamIn does not check gzopen()'s return value. A NULL handle reads as a
+// stream with zero records, so before CheckedSeqStreamIn every failed open was reported as
+// "Empty file: <path>" -- naming a file that is present, non-empty and perfectly valid.
+// That is what made descriptor exhaustion over a large VARCHAR[] scan (issue #260)
+// undiagnosable: the error blamed the data. These two conditions must stay distinguishable,
+// because the message is the only signal a user gets about which one actually happened.
+namespace {
+// Returns the message SequenceReader fails with, or "" if it does not throw.
+std::string open_failure_message(const std::string &path) {
+	try {
+		miint::SequenceReader reader(path);
+	} catch (const std::exception &e) {
+		return e.what();
+	}
+	return "";
+}
+
+// Lowers RLIMIT_NOFILE for its lifetime and always puts the soft limit back, including on
+// the stack unwind of a failed REQUIRE.
+class FdLimit {
+public:
+	explicit FdLimit(rlim_t soft) {
+		if (getrlimit(RLIMIT_NOFILE, &saved_) != 0) {
+			throw std::runtime_error("getrlimit failed");
+		}
+		struct rlimit lowered = saved_;
+		lowered.rlim_cur = soft;
+		if (setrlimit(RLIMIT_NOFILE, &lowered) != 0) {
+			throw std::runtime_error("setrlimit failed");
+		}
+	}
+	~FdLimit() {
+		setrlimit(RLIMIT_NOFILE, &saved_);
+	}
+	FdLimit(const FdLimit &) = delete;
+	FdLimit &operator=(const FdLimit &) = delete;
+
+private:
+	struct rlimit saved_;
+};
+
+// Opens `path` until the process runs out of descriptors, recording the errno that stopped
+// it, and closes them all again on destruction.
+class HeldFds {
+public:
+	explicit HeldFds(const char *path) {
+		for (int fd = open(path, O_RDONLY); fd >= 0; fd = open(path, O_RDONLY)) {
+			fds_.push_back(fd);
+		}
+		exhausted_errno = errno;
+	}
+	~HeldFds() {
+		for (int fd : fds_) {
+			close(fd);
+		}
+	}
+	HeldFds(const HeldFds &) = delete;
+	HeldFds &operator=(const HeldFds &) = delete;
+
+	int exhausted_errno = 0;
+
+private:
+	std::vector<int> fds_;
+};
+} // namespace
+
+TEST_CASE("SequenceReader reports a failed open as a failed open, not an empty file", "[SequenceReader][error]") {
+	TempFileFixture fixture;
+
+	SECTION("unreadable file") {
+		auto path = "unreadable.fq";
+		fixture.write_temp_fastq(path, {fixture.simple_read("read1", "ATGC", "IIII")});
+		// Root ignores permission bits, so this case cannot be exercised as root.
+		if (geteuid() == 0) {
+			SUCCEED("skipped: running as root, permission bits are not enforced");
+			return;
+		}
+		std::filesystem::permissions(path, std::filesystem::perms::none);
+
+		const std::string msg = open_failure_message(path);
+		std::filesystem::permissions(path, std::filesystem::perms::owner_all); // let the fixture clean up
+
+		INFO("error was: " << msg);
+		REQUIRE(msg.find("Failed to open file") != std::string::npos);
+		REQUIRE(msg.find(path) != std::string::npos);
+		REQUIRE(msg.find("Empty file") == std::string::npos);
+	}
+
+	SECTION("descriptor exhaustion") {
+		auto path = "fd_exhausted.fq";
+		fixture.write_temp_fastq(path, {fixture.simple_read("read1", "ATGC", "IIII")});
+
+		// Hold every remaining descriptor so the next gzopen() has to fail with EMFILE -- the
+		// exact condition a large-VARCHAR[] scan hits once readers are not released. Both the
+		// lowered limit and the held descriptors unwind via RAII: a REQUIRE that fails (or one
+		// a later edit adds) inside this scope would otherwise leak a 96-descriptor limit into
+		// every test that runs after it in this binary, turning one failure into a cascade.
+		FdLimit limit(96); // low enough to fill quickly, high enough for Catch2 itself
+		HeldFds held(path);
+
+		REQUIRE(held.exhausted_errno == EMFILE);
+		const std::string msg = open_failure_message(path);
+		INFO("error was: " << msg);
+		REQUIRE(msg.find("Failed to open file") != std::string::npos);
+		REQUIRE(msg.find("Empty file") == std::string::npos);
+	}
+
+	SECTION("a genuinely empty file still reports emptiness") {
+		auto path = "really_empty.fq";
+		fixture.write_temp_fastq(path, {});
+
+		const std::string msg = open_failure_message(path);
+		INFO("error was: " << msg);
+		REQUIRE(msg.find("Empty file") != std::string::npos);
+		REQUIRE(msg.find("Failed to open file") == std::string::npos);
+	}
+}
+#endif // !_WIN32 && !__EMSCRIPTEN__
 
 TEST_CASE("SequenceReader gzipped file", "[SequenceReader][compression]") {
 	miint::SequenceReader reader("data/fastq/foo.r1.fastq.gz");

@@ -1,0 +1,61 @@
+# name: test/sql/read_fastx_fd_release.test
+# description: read_fastx releases each reader when its file is exhausted (issue #260)
+# group: [sql]
+
+require miint
+
+# Held back from the main pass: run_tests.sh runs this file under a low RLIMIT_NOFILE, which
+# is the only condition that tells "descriptors proportional to thread count" apart from
+# "descriptors proportional to path count".
+require-env MIINT_LOW_FD_TEST
+
+# Pin the scan width. ReadFastxTableFunction::GlobalState::MaxThreads() caps parallelism at
+# std::thread::hardware_concurrency(), NOT at this setting -- but DuckDB still runs no more
+# concurrent local states than there are scheduler threads, so this bounds it from below and
+# makes the descriptor budget the same on a 4-core laptop and a 128-core runner. Without it
+# the paired-end query below would want 2 x hardware_concurrency descriptors, which on a
+# large runner lands near the 256 the harness allows and would flake for a reason that has
+# nothing to do with reader release.
+statement ok
+SET threads = 4;
+
+# One read_fastx call over far more paths than the scan is allowed descriptors.
+#
+# Readers are opened lazily as threads claim files, so reaching the end of this list at all
+# means each reader was destroyed when its file ran out. Retaining them -- the behaviour this
+# test guards against -- holds one gzFile, one descriptor and one inflate window per path for
+# the whole scan; past RLIMIT_NOFILE gzopen starts returning NULL and the query dies naming a
+# file that is present, readable and non-empty.
+#
+# The same file repeated is deliberate: it keeps the test honest about descriptors without
+# adding hundreds of fixtures to the repo. foo.r1.fastq.gz holds 2 records, so 500 paths must
+# yield 1000 rows.
+query I
+SELECT count(*) FROM read_fastx(repeat(['data/fastq/foo.r1.fastq.gz'], 500));
+----
+1000
+
+# Each path is its own file and must restart its sequence counter at 1, so every index in a
+# 500-path scan of a 2-record file appears exactly 500 times. This is a property rather than
+# a golden: it fails if readers are shared or counters leak across files.
+query II
+SELECT sequence_index, count(*)
+FROM read_fastx(repeat(['data/fastq/foo.r1.fastq.gz'], 500))
+GROUP BY sequence_index
+ORDER BY sequence_index;
+----
+1	500
+2	500
+
+# Paired-end holds two descriptors per reader rather than one, so it exhausts a given limit
+# at half the path count.
+query I
+SELECT count(*) FROM read_fastx(
+    repeat(['data/fastq/foo.r1.fastq.gz'], 250),
+    sequence2=repeat(['data/fastq/foo.r2.fastq.gz'], 250)
+);
+----
+500
+
+statement ok
+RESET threads;

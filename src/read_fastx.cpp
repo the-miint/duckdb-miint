@@ -237,8 +237,23 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 		    global_state.readers[local_state.current_file_idx]->read(STANDARD_VECTOR_SIZE, bind_data.max_batch_bytes);
 		current_filepath = global_state.sequence1_filepaths[local_state.current_file_idx];
 
-		// If this file is exhausted, release it and try to claim another
+		// If this file is exhausted, release it and try to claim another.
+		//
+		// Destroying the reader here -- rather than leaving it parked in `readers` until the
+		// scan ends -- is what bounds open descriptors and retained buffers by thread count
+		// instead of by file count. Every SequenceReader holds an open gzFile plus kseq++'s
+		// line buffer and zlib's inflate window, none of which DuckDB's memory_limit
+		// accounts for, so a single scan over a large VARCHAR[] otherwise accumulates one of
+		// each per file it finishes. Past RLIMIT_NOFILE the next gzopen fails and the scan
+		// dies naming a file that is perfectly readable (issue #260).
+		//
+		// Safe without the lock, and it rests on two things. File indices are handed out once
+		// each under `global_state.lock` and never reused, so this thread is the only one that
+		// ever touches this slot. And `readers` is sized once in the GlobalState constructor
+		// and never resized, so no concurrent reallocation can move the slot out from under a
+		// reader of another element -- if that ever changes, this reset needs the lock back.
 		if (batch.empty()) {
+			global_state.readers[local_state.current_file_idx].reset();
 			local_state.has_file = false;
 			continue; // Loop to claim next file
 		}
