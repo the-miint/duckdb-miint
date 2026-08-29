@@ -80,6 +80,23 @@ std::string BuildShardedQueryReadsSelect(const std::string &query_table, const s
 std::string MaterializeShardedQueryReads(Connection &conn, const std::string &query_table,
                                          const std::string &read_to_shard_table, const SequenceTableSchema &schema);
 
+// Materialize the query relation into a per-call TEMP table, reading it exactly
+// ONCE (#229 — see docs/internals/reading-tables-views.md § "Read the relation
+// ONCE"). Unlike MaterializeShardedQueryReads there is no shard join or
+// shard_name column: this is for a consumer that needs to replay the WHOLE
+// query relation more than once for a reason unrelated to sharding (e.g.
+// align_minimap2 streaming a multi-part prebuilt index, one pass per part).
+//
+// Returns the unquoted TEMP table name. Created on `conn`, which must inherit
+// the caller's TEMP catalog. The caller MUST drop it via DropHelperTempRelation.
+//
+// `out_row_count`, if non-null, receives the number of rows materialized —
+// read off the CTAS result's own row count rather than a second query. Lets a
+// caller with zero query rows skip replaying every remaining index part for
+// nothing (align_minimap2's multi-part path).
+std::string MaterializeQueryReads(Connection &conn, const std::string &query_table, const SequenceTableSchema &schema,
+                                  idx_t *out_row_count = nullptr);
+
 // Read every read assigned to `shard_name`. `source_sql` is anything that can
 // follow FROM and exposes a shard_name column — either a quoted snapshot table
 // name from MaterializeShardedQueryReads, or a parenthesized

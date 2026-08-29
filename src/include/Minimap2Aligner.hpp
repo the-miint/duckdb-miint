@@ -74,8 +74,13 @@ class SharedMinimap2Index {
 public:
 	// Load from .mmi file
 	SharedMinimap2Index(const std::string &index_path, const Minimap2Config &config);
-	// Take ownership of a pre-built index
-	SharedMinimap2Index(mm_idx_t *idx, const mm_mapopt_t &mopt, std::vector<std::string> subject_names);
+	// Take ownership of a pre-built index. Takes Minimap2IndexPtr (not a raw
+	// mm_idx_t*) so ownership transfers atomically with argument binding: a
+	// caller building this via std::make_shared can pass std::move(idx) and be
+	// certain the index is freed even if make_shared's own allocation throws
+	// before this constructor ever runs — a raw pointer argument would leave
+	// nothing owning the index during that window.
+	SharedMinimap2Index(Minimap2IndexPtr idx, const mm_mapopt_t &mopt, std::vector<std::string> subject_names);
 	~SharedMinimap2Index();
 
 	// Non-copyable
@@ -90,6 +95,63 @@ private:
 	Minimap2IndexPtr index_;
 	mm_mapopt_t mopt_;
 	std::vector<std::string> subject_names_;
+};
+
+// Streams a possibly multi-part .mmi file one part at a time.
+//
+// minimap2's own answer to "reference larger than RAM" is the multi-part index
+// (built with `minimap2 -d out.mmi -I <batch_size> ref.fa`): mm_idx_reader_read
+// returns one part per call, and the CLI loops until mm_idx_reader_eof, aligning
+// every read against each part in turn. Peak memory is one part, not the whole
+// index. This class is that loop, wrapped so each part comes out as an
+// independently owned SharedMinimap2Index that can be dropped before the next
+// part is loaded.
+//
+// NOT thread-safe: callers (align_minimap2's part-transition logic) serialize
+// access via their own lock, since only one thread should ever be advancing the
+// underlying mm_idx_reader_t at a time.
+class Minimap2IndexReader {
+public:
+	Minimap2IndexReader(const std::string &index_path, const Minimap2Config &config);
+	~Minimap2IndexReader();
+
+	Minimap2IndexReader(const Minimap2IndexReader &) = delete;
+	Minimap2IndexReader &operator=(const Minimap2IndexReader &) = delete;
+
+	// Reads and returns the next part, or nullptr once the file is exhausted.
+	// mm_mapopt_update is applied against THIS part's index (mid_occ is derived
+	// from the loaded index's minimizer distribution, so reusing an earlier
+	// part's value would apply the wrong high-occurrence filter).
+	std::shared_ptr<SharedMinimap2Index> ReadNextPart();
+
+	// True if there is no next part. Confirms this by actually attempting to
+	// read it (same reasoning as LoadIndexFromFile: mm_idx_reader_eof's
+	// file-position heuristic can report "not eof" for a single-part file that
+	// has trailing bytes for an unrelated reason, e.g. a padded transfer or an
+	// appended sidecar). The attempted read is cached and handed back by the
+	// following ReadNextPart() call rather than repeated or discarded, so
+	// calling this never wastes or skips a part.
+	bool AtEof();
+
+private:
+	mm_idx_reader_t *reader_ = nullptr;
+	// Built once at construction (preset/k/w parsed and validated here, not
+	// per part) and copied into a fresh mm_mapopt_t for each ReadNextPart call,
+	// which then runs only mm_mapopt_update against that part's own minimizer
+	// distribution — the one piece of mopt that must be re-derived per part.
+	// mm_idxopt_t is NOT cached the same way: mm_idx_reader_open copies it into
+	// the reader's own state at open time and never consults the caller's copy
+	// again, so keeping it as a member here would just be dead weight.
+	mm_mapopt_t mopt_template_;
+	Minimap2Config config_;
+	// Set by AtEof() when it reads ahead to confirm there's a next part;
+	// consumed by the following ReadNextPart() call instead of reading again.
+	std::shared_ptr<SharedMinimap2Index> peeked_part_;
+	bool has_peeked_ = false;
+
+	// The actual read, shared by AtEof()'s confirmation read and ReadNextPart()'s
+	// direct read when there is nothing peeked.
+	std::shared_ptr<SharedMinimap2Index> ReadNextPartUncached();
 };
 
 // Main aligner class.
