@@ -2,6 +2,7 @@
 #include <minimap2/minimap.h>
 #include <minimap2/mmpriv.h>
 #include <cstdlib>
+#include <cstring>
 #include <stdexcept>
 
 // When MIINT_USE_JEMALLOC is defined, minimap2 is compiled with malloc/free
@@ -206,15 +207,22 @@ bool Minimap2IndexReader::AtEof() {
 		if (fgetpos(reader_->fp.idx, &rewind_pos) != 0) {
 			throw std::runtime_error("Failed to read index file position while probing for a next part");
 		}
-		auto probe = ReadNextPartUncached();
-		next_part_exists_ = (probe != nullptr);
-		probe.reset();
-		if (next_part_exists_) {
-			// A next part exists -- rewind past the confirming read instead of
-			// keeping it. See the AtEof() doc comment for why.
-			if (fsetpos(reader_->fp.idx, &rewind_pos) != 0) {
-				throw std::runtime_error("Failed to rewind index file position after probing for a next part");
-			}
+		// Peek only the 4-byte MM_IDX_MAGIC header mm_idx_dump writes at the start
+		// of every part (index.c), instead of a full confirming read of the whole
+		// next part. A real next part is multi-GB for the production indexes this
+		// streaming path exists for, so fully loading it (all buckets, hash
+		// tables, and the packed sequence array) just to check it's non-null meant
+		// two whole parts were transiently resident at once, right when the
+		// multi-part decision is made. mm_idx_load itself requires this exact
+		// magic as its first 4 bytes and rejects anything else, so a false-positive
+		// match here (trailing bytes that happen to start with "MMI\2") fails no
+		// differently than a full confirming read already would -- the real
+		// ReadNextPart() call that follows still goes through mm_idx_load unchanged.
+		char magic[4];
+		size_t n = fread(magic, 1, sizeof(magic), reader_->fp.idx);
+		next_part_exists_ = (n == sizeof(magic)) && (strncmp(magic, MM_IDX_MAGIC, sizeof(magic)) == 0);
+		if (fsetpos(reader_->fp.idx, &rewind_pos) != 0) {
+			throw std::runtime_error("Failed to rewind index file position after probing for a next part");
 		}
 		has_peeked_ = true;
 	}
