@@ -50,6 +50,17 @@ unique_ptr<FunctionData> AlignMinimap2TableFunction::Bind(ClientContext &context
 	// Validate query table/view exists (BIGINT read_id is opt-in for PR 1).
 	data->query_schema = ValidateSequenceTableSchema(context, data->query_table, /*allow_bigint=*/true);
 
+	// Minimap2Aligner::align never reads quality scores -- alignment doesn't use
+	// them. Dropping the flags here (rather than passing has_qual1/has_qual2
+	// through unchanged) means every read of query_table downstream
+	// (MaterializeQueryReads' multi-part snapshot and every QuerySequenceStream
+	// over query_table) projects only the columns alignment actually consumes.
+	// For the multi-part snapshot in particular this roughly halves its size for
+	// typical short-read FASTQ input, where qual1/qual2 are comparable in size
+	// to sequence1/sequence2.
+	data->query_schema.has_qual1 = false;
+	data->query_schema.has_qual2 = false;
+
 	// Parse optional named parameters
 	auto per_subject_param = input.named_parameters.find("per_subject_database");
 	if (per_subject_param != input.named_parameters.end() && !per_subject_param->second.IsNull()) {
@@ -151,9 +162,17 @@ unique_ptr<GlobalTableFunctionState> AlignMinimap2TableFunction::InitGlobal(Clie
 		auto st = std::make_unique<StandardModeState>();
 		std::unique_ptr<miint::Minimap2IndexReader> reader;
 		std::shared_ptr<miint::SharedMinimap2Index> first_part;
+		bool at_eof = false;
 		try {
 			reader = std::make_unique<miint::Minimap2IndexReader>(data.index_path, data.config);
 			first_part = reader->ReadNextPart();
+			if (first_part) {
+				// Inside the same try as the load above: AtEof()'s probe read can
+				// throw std::runtime_error (fgetpos/fsetpos failure — see its doc
+				// comment), and that should get the same IOException wrapping as
+				// every other index-load failure here, not escape raw.
+				at_eof = reader->AtEof();
+			}
 		} catch (const std::exception &e) {
 			throw IOException("Failed to load minimap2 index from '%s': %s", data.index_path, e.what());
 		}
@@ -161,7 +180,7 @@ unique_ptr<GlobalTableFunctionState> AlignMinimap2TableFunction::InitGlobal(Clie
 			throw IOException("Failed to load minimap2 index from '%s': index file contains no parts", data.index_path);
 		}
 
-		if (reader->AtEof()) {
+		if (at_eof) {
 			st->shared_index = std::move(first_part);
 			gstate->standard = std::move(st);
 			gstate->num_threads = NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads());

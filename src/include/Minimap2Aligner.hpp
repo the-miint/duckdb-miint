@@ -128,9 +128,12 @@ public:
 	// read it (same reasoning as LoadIndexFromFile: mm_idx_reader_eof's
 	// file-position heuristic can report "not eof" for a single-part file that
 	// has trailing bytes for an unrelated reason, e.g. a padded transfer or an
-	// appended sidecar). The attempted read is cached and handed back by the
-	// following ReadNextPart() call rather than repeated or discarded, so
-	// calling this never wastes or skips a part.
+	// appended sidecar). Unlike a naive peek-and-cache, the confirming read is
+	// immediately destroyed and the file position rewound rather than retained:
+	// keeping the loaded part alive here would sit it resident for the entire
+	// time the PREVIOUS part is being aligned against, doubling peak memory for
+	// every multi-part index. ReadNextPart() re-reads it for real, for keeps,
+	// only once the caller actually asks for it.
 	bool AtEof();
 
 private:
@@ -144,13 +147,14 @@ private:
 	// again, so keeping it as a member here would just be dead weight.
 	mm_mapopt_t mopt_template_;
 	Minimap2Config config_;
-	// Set by AtEof() when it reads ahead to confirm there's a next part;
-	// consumed by the following ReadNextPart() call instead of reading again.
-	std::shared_ptr<SharedMinimap2Index> peeked_part_;
+	// Set by AtEof() once it has confirmed whether a next part exists, so a
+	// second call doesn't re-probe. Deliberately does NOT cache the part
+	// itself — see AtEof().
 	bool has_peeked_ = false;
+	bool next_part_exists_ = false;
 
 	// The actual read, shared by AtEof()'s confirmation read and ReadNextPart()'s
-	// direct read when there is nothing peeked.
+	// direct read when nothing is pending from a previous peek.
 	std::shared_ptr<SharedMinimap2Index> ReadNextPartUncached();
 };
 

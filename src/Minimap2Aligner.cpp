@@ -195,16 +195,40 @@ Minimap2IndexReader::~Minimap2IndexReader() {
 
 bool Minimap2IndexReader::AtEof() {
 	if (!has_peeked_) {
-		peeked_part_ = ReadNextPartUncached();
+		// reader_ always wraps a validated .mmi file here (Bind rejects anything
+		// is_index_file() doesn't accept before a Minimap2IndexReader is ever
+		// constructed), so this is always the FILE*-backed (is_idx) branch of
+		// mm_idx_reader_t and fp.idx is the member in play. fgetpos/fsetpos
+		// (fpos_t), not ftell/fseek (long): a first part at or beyond 2GiB would
+		// silently wrap or fail ftell's 32-bit `long` on an LLP64 platform
+		// (Windows), landing the later rewind mid-part-2 instead of at its start.
+		fpos_t rewind_pos;
+		if (fgetpos(reader_->fp.idx, &rewind_pos) != 0) {
+			throw std::runtime_error("Failed to read index file position while probing for a next part");
+		}
+		auto probe = ReadNextPartUncached();
+		next_part_exists_ = (probe != nullptr);
+		probe.reset();
+		if (next_part_exists_) {
+			// A next part exists -- rewind past the confirming read instead of
+			// keeping it. See the AtEof() doc comment for why.
+			if (fsetpos(reader_->fp.idx, &rewind_pos) != 0) {
+				throw std::runtime_error("Failed to rewind index file position after probing for a next part");
+			}
+		}
 		has_peeked_ = true;
 	}
-	return peeked_part_ == nullptr;
+	return !next_part_exists_;
 }
 
 std::shared_ptr<SharedMinimap2Index> Minimap2IndexReader::ReadNextPart() {
 	if (has_peeked_) {
 		has_peeked_ = false;
-		return std::move(peeked_part_);
+		if (!next_part_exists_) {
+			return nullptr;
+		}
+		// AtEof() confirmed a part is there and rewound to right before it --
+		// read it for real now.
 	}
 	return ReadNextPartUncached();
 }
