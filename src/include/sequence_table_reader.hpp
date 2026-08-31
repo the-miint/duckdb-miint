@@ -90,10 +90,18 @@ std::string MaterializeShardedQueryReads(Connection &conn, const std::string &qu
 // Returns the unquoted TEMP table name. Created on `conn`, which must inherit
 // the caller's TEMP catalog. The caller MUST drop it via DropHelperTempRelation.
 //
+// Streams query_table and appends each chunk into the snapshot as it arrives
+// (one pass, via SendQuery + Appender) rather than a single CREATE TABLE AS
+// SELECT that pulls the whole query relation through the pipeline before this
+// call returns — bounds the materialization's own working set to O(one chunk)
+// instead of O(corpus size), which is what a full-corpus-sized query relation
+// (tens of millions of reads) needs to fit in memory alongside a multi-part
+// index's parts.
+//
 // `out_row_count`, if non-null, receives the number of rows materialized —
-// read off the CTAS result's own row count rather than a second query. Lets a
-// caller with zero query rows skip replaying every remaining index part for
-// nothing (align_minimap2's multi-part path).
+// summed from the streamed chunks as they're appended, rather than a second
+// query. Lets a caller with zero query rows skip replaying every remaining
+// index part for nothing (align_minimap2's multi-part path).
 std::string MaterializeQueryReads(Connection &conn, const std::string &query_table, const SequenceTableSchema &schema,
                                   idx_t *out_row_count = nullptr);
 

@@ -68,15 +68,16 @@ ORDER BY read_id;
 query_part1	part1_ref
 query_part2	part2_ref
 
-# Paired-end + quality columns through the multi-part replay snapshot.
-# MaterializeQueryReads (via BuildSequenceColumnList) is the only caller that
-# builds the sequence2/qual1/qual2 projection for the snapshot every part is
-# replayed from — no other multi-part test exercises a query table with those
-# columns present. A wrong column list there (wrong order, dropped column)
-# would either error or silently misalign values with nothing to catch it.
-# Segment 1 (sequence1) matches part1_ref and segment 2 (sequence2) matches
-# part2_ref, so a correct projection produces exactly these two rows; a
-# scrambled one would misroute a segment to the wrong reference or drop it.
+# Paired-end through the multi-part replay snapshot, with qual1/qual2 present
+# on the query table (but NOT expected in the snapshot's projection —
+# align_minimap2 never reads quality scores, so Bind() zeroes
+# has_qual1/has_qual2 on the schema before it reaches MaterializeQueryReads).
+# This is the only multi-part test exercising a query table with those columns
+# present, so it's what would catch the qual columns leaking back into the
+# snapshot's projection. Segment 1 (sequence1) matches part1_ref and segment 2
+# (sequence2) matches part2_ref, so a correct projection produces exactly
+# these two rows; a scrambled one would misroute a segment to the wrong
+# reference or drop it.
 statement ok
 CREATE TABLE multipart_paired_queries AS SELECT * FROM (VALUES
     ('query_paired',
@@ -92,6 +93,54 @@ ORDER BY reference;
 ----
 query_paired	part1_ref
 query_paired	part2_ref
+
+# A query relation large enough to force the snapshot's Appender past its
+# internal flush threshold (BaseAppender::DEFAULT_FLUSH_COUNT, 204,800 rows)
+# while MaterializeQueryReads's source stream is still open -- regression
+# test for a connection-reentrancy bug: an early version of the batched
+# rewrite drove both the source SendQuery stream and the destination
+# Appender through the same Connection, and Connection supports only one
+# active pending query at a time. That bug was invisible to every other case
+# in this file (a handful of rows never cross the flush threshold before the
+# stream exhausts, so the conflict never triggered) and only reproduced with
+# a genuinely large corpus -- which is also why it matters here: the whole
+# point of streaming the snapshot in chunks is to handle corpora far larger
+# than a few rows. A VIEW source (not a plain VALUES table) matches the
+# shape of the real bug report (a view over read_fastx), though the
+# reentrancy itself is independent of table vs. view.
+statement ok
+CREATE VIEW big_multipart_queries AS
+    SELECT 'query_' || i AS read_id, 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT' AS sequence1
+    FROM range(250000) t(i);
+
+query III
+SELECT count(*), count(*) FILTER (reference = 'part1_ref'), count(*) FILTER (reference = 'part2_ref')
+FROM align_minimap2('big_multipart_queries', index_path='data/shards/multipart_fixture.mmi', max_secondary=0);
+----
+250000	250000	0
+
+# Regression test for a silent-truncation bug found while building the above:
+# QueryResult::Fetch() returns null for BOTH a clean end-of-stream AND a
+# mid-stream query error -- HasError() is the only way to tell them apart. An
+# early version of MaterializeQueryReads's fetch loop treated every null
+# Fetch() as "done", so a real error partway through the source relation
+# (a malformed row, a corrupt input file, ...) silently truncated the
+# snapshot to whatever had been read so far instead of failing the query --
+# align_minimap2 would have returned a successful, quietly-incomplete result
+# for a corpus that has a bad row anywhere past the first chunk. The error
+# is deliberately placed past the flush threshold (i=210000, like the test
+# above) so this also covers the error firing after at least one real flush.
+statement ok
+CREATE VIEW failing_multipart_queries AS
+    SELECT 'query_' || i AS read_id,
+           CASE WHEN i = 210000 THEN error('forced failure mid-stream')
+                ELSE 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT' END AS sequence1
+    FROM range(250000) t(i);
+
+statement error
+SELECT count(*) FROM align_minimap2('failing_multipart_queries', index_path='data/shards/multipart_fixture.mmi', max_secondary=0);
+----
+forced failure mid-stream
 
 # align_minimap2_sharded fails loud (rather than silently truncating) if a
 # shard's .mmi turns out to be multi-part -- it has no streaming path, so
