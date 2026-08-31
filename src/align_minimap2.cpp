@@ -1,6 +1,7 @@
 #include "align_minimap2.hpp"
 #include "align_common.hpp"
 #include "shard_debug.hpp"
+#include "duckdb/common/allocator.hpp"
 #include "duckdb/common/printer.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/main/connection.hpp"
@@ -213,6 +214,20 @@ unique_ptr<GlobalTableFunctionState> AlignMinimap2TableFunction::InitGlobal(Clie
 			idx_t snapshot_row_count = 0;
 			gstate->query_snapshot =
 			    MaterializeQueryReads(*gstate->snapshot_conn, data.query_table, data.query_schema, &snapshot_row_count);
+
+			// MaterializeQueryReads reads and frees a corpus-sized amount of memory
+			// on THIS thread (the query's calling thread, not one of DuckDB's
+			// TaskScheduler worker threads). DuckDB only returns a thread's freed
+			// jemalloc pages to the OS from TaskScheduler::ExecuteForever's
+			// idle-timeout path (duckdb/src/parallel/task_scheduler.cpp) -- a
+			// mechanism this thread never runs through. Without an explicit flush
+			// here, the freed memory is correctly accounted as released by
+			// DuckDB's own bookkeeping (visible in duckdb_memory()) but stays
+			// physically resident, invisible to memory_limit and to the OS/cgroup
+			// ceiling this table function is trying to stay under.
+			if (Allocator::SupportsFlush()) {
+				Allocator::FlushAll();
+			}
 
 			// No queries at all means every remaining part would be loaded and
 			// decoded (potentially the whole multi-GB index) only to align zero
@@ -453,6 +468,19 @@ static bool AdvanceMinimap2Part(const AlignMinimap2TableFunction::Data &bind_dat
 		st.advancing = true;
 		st.shared_index.reset(); // free the just-finished part before loading the next
 		lock.unlock();
+
+		// Flush this thread's freed jemalloc pages back to the OS before loading
+		// the next part. A worker thread driving a multi-part cascade stays
+		// continuously busy (fetch/align/advance, part after part) and so never
+		// hits the 500ms idle timeout that's the ONLY other place DuckDB flushes
+		// a thread's allocator state (TaskScheduler::ExecuteForever) -- without
+		// this, every part's freed memory piles up as retained-but-unreturned
+		// pages for the whole run instead of actually shrinking peak RSS between
+		// parts, even though shared_index.reset() above already dropped the
+		// last reference correctly.
+		if (Allocator::SupportsFlush()) {
+			Allocator::FlushAll();
+		}
 
 		// Both the index load AND the query-stream replay happen OUTSIDE the
 		// lock: every other thread is either parked on part_cv or about to
