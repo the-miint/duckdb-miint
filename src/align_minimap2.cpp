@@ -6,10 +6,28 @@
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/main/settings.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 #include <exception>
 
 namespace duckdb {
+
+// Returns freed pages on the calling thread back to the OS. DuckDB's own
+// background-thread-driven flush only ever runs from
+// TaskScheduler::ExecuteForever's idle-timeout path (see
+// docs/internals/duckdb-engine-notes.md) -- neither InitGlobal's calling
+// thread nor a busy multi-part-cascade worker thread ever reaches it, so both
+// need this explicit call after freeing a corpus-sized amount of memory.
+// Mirrors task_scheduler.cpp's own forced flush at thread-exit
+// (threshold=0, thread_count=1) rather than Allocator::FlushAll(), which
+// would purge every arena in the process, not just this thread's.
+static void FlushThisThreadsFreedMemory(ClientContext &context) {
+	if (!Allocator::SupportsFlush()) {
+		return;
+	}
+	Allocator::ThreadFlush(Settings::Get<AllocatorBackgroundThreadsSetting>(context), /*threshold=*/0,
+	                       /*thread_count=*/1);
+}
 
 unique_ptr<FunctionData> AlignMinimap2TableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                           vector<LogicalType> &return_types,
@@ -217,17 +235,13 @@ unique_ptr<GlobalTableFunctionState> AlignMinimap2TableFunction::InitGlobal(Clie
 
 			// MaterializeQueryReads reads and frees a corpus-sized amount of memory
 			// on THIS thread (the query's calling thread, not one of DuckDB's
-			// TaskScheduler worker threads). DuckDB only returns a thread's freed
-			// jemalloc pages to the OS from TaskScheduler::ExecuteForever's
-			// idle-timeout path (duckdb/src/parallel/task_scheduler.cpp) -- a
-			// mechanism this thread never runs through. Without an explicit flush
-			// here, the freed memory is correctly accounted as released by
-			// DuckDB's own bookkeeping (visible in duckdb_memory()) but stays
-			// physically resident, invisible to memory_limit and to the OS/cgroup
-			// ceiling this table function is trying to stay under.
-			if (Allocator::SupportsFlush()) {
-				Allocator::FlushAll();
-			}
+			// TaskScheduler worker threads) -- without an explicit flush here,
+			// that freed memory is correctly accounted as released by DuckDB's
+			// own bookkeeping (visible in duckdb_memory()) but stays physically
+			// resident, invisible to memory_limit and to the OS/cgroup ceiling
+			// this table function is trying to stay under. See
+			// FlushThisThreadsFreedMemory above.
+			FlushThisThreadsFreedMemory(context);
 
 			// No queries at all means every remaining part would be loaded and
 			// decoded (potentially the whole multi-GB index) only to align zero
@@ -469,18 +483,15 @@ static bool AdvanceMinimap2Part(const AlignMinimap2TableFunction::Data &bind_dat
 		st.shared_index.reset(); // free the just-finished part before loading the next
 		lock.unlock();
 
-		// Flush this thread's freed jemalloc pages back to the OS before loading
-		// the next part. A worker thread driving a multi-part cascade stays
-		// continuously busy (fetch/align/advance, part after part) and so never
-		// hits the 500ms idle timeout that's the ONLY other place DuckDB flushes
-		// a thread's allocator state (TaskScheduler::ExecuteForever) -- without
-		// this, every part's freed memory piles up as retained-but-unreturned
-		// pages for the whole run instead of actually shrinking peak RSS between
-		// parts, even though shared_index.reset() above already dropped the
-		// last reference correctly.
-		if (Allocator::SupportsFlush()) {
-			Allocator::FlushAll();
-		}
+		// A worker thread driving a multi-part cascade stays continuously busy
+		// (fetch/align/advance, part after part) and so never hits the idle
+		// timeout that's the only other place DuckDB flushes a thread's
+		// allocator state -- without this, every part's freed memory piles up
+		// as retained-but-unreturned pages for the whole run instead of
+		// actually shrinking peak RSS between parts, even though
+		// shared_index.reset() above already dropped the last reference
+		// correctly. See FlushThisThreadsFreedMemory above.
+		FlushThisThreadsFreedMemory(*gstate.snapshot_conn->context);
 
 		// Both the index load AND the query-stream replay happen OUTSIDE the
 		// lock: every other thread is either parked on part_cv or about to

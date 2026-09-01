@@ -432,8 +432,7 @@ std::string MaterializeQueryReads(Connection &conn, const std::string &query_tab
 	// active pending query at a time, and the Appender below issues its own
 	// statements against `conn` as it flushes, which would otherwise collide
 	// with `conn`'s still-open SendQuery stream mid-loop.
-	Connection stream_conn(*conn.context->db);
-	InheritTempObjects(*conn.context, stream_conn);
+	Connection stream_conn = MakeReadOnlyHelperConnection(*conn.context);
 	auto stream = stream_conn.SendQuery("SELECT " + column_list + " FROM " + quoted_source);
 	if (stream->HasError()) {
 		throw InvalidInputException("%s: %s", error_context, stream->GetError());
@@ -484,7 +483,7 @@ std::string MaterializeQueryReads(Connection &conn, const std::string &query_tab
 		}
 		appender.Close();
 	} catch (...) {
-		conn.Query("DROP TABLE " + tmp_quoted);
+		DropHelperTempRelation(conn, tmp_quoted);
 		throw;
 	}
 

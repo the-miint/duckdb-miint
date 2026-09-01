@@ -223,3 +223,21 @@ general fix for our allocation-bound paths (tree build/shear, alignment). minima
 deliberate exception — see the jemalloc integration notes in `embedded-tools.md`, which
 also cover why the loadable-extension build falls back to system malloc. Never link a
 second allocator into the process.
+
+**Freed memory isn't returned to the OS until a thread idles.** With
+`allocator_background_threads` off (the default), the *only* place DuckDB automatically
+flushes a thread's tcache and purges its jemalloc arena is
+`TaskScheduler::ExecuteForever`'s idle-timeout path (`duckdb/src/parallel/task_scheduler.cpp`)
+— triggered after a worker sits idle on the task queue for 500ms, and once more at thread
+exit. A thread that frees a large amount of memory and then either keeps working (never
+idles) or was never a `TaskScheduler` worker to begin with (e.g. a table function's
+`InitGlobal`, which runs on the query's calling thread) never hits that path: DuckDB's own
+accounting correctly shows the memory as released (`duckdb_memory()`), but the physical
+pages stay resident — invisible to `memory_limit` and to an OS/cgroup ceiling. A table
+function with a large allocate-then-free burst outside the normal per-batch execution loop
+needs to flush explicitly. Prefer `Allocator::ThreadFlush(background_threads_setting,
+/*threshold=*/0, /*thread_count=*/1)` — it mirrors the scheduler's own forced flush and
+purges only the calling thread's arena — over `Allocator::FlushAll()`, which purges every
+arena in the process and is meant for genuinely global events (buffer-pool eviction
+pressure, DB shutdown). See `align_minimap2.cpp`'s `FlushThisThreadsFreedMemory` for a
+concrete use (the corpus-snapshot materialization and each multi-part index transition).
