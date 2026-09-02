@@ -463,6 +463,17 @@ static bool AdvanceMinimap2Part(const AlignMinimap2TableFunction::Data &bind_dat
 	lstate.aligner->detach_shared_index();
 	lstate.attached_to_part = false;
 
+	// shared_index is held by both GlobalState and every thread's Minimap2Aligner
+	// (attach_shared_index). Threads exhaust the current part at different
+	// times, so whichever thread's detach_shared_index() above happens to drop
+	// the LAST reference is the one that actually frees the part's mm_idx_t --
+	// and that is not necessarily the thread that goes on to become the leader
+	// below. Flush unconditionally, on every thread, right after its own
+	// detach: this thread may have just triggered the real deallocation even
+	// if it never becomes leader and takes the early "someone else already
+	// advanced" return below.
+	FlushThisThreadsFreedMemory(*gstate.snapshot_conn->context);
+
 	std::unique_lock<std::mutex> lock(st.part_lock);
 
 	while (true) {
@@ -483,14 +494,11 @@ static bool AdvanceMinimap2Part(const AlignMinimap2TableFunction::Data &bind_dat
 		st.shared_index.reset(); // free the just-finished part before loading the next
 		lock.unlock();
 
-		// A worker thread driving a multi-part cascade stays continuously busy
-		// (fetch/align/advance, part after part) and so never hits the idle
-		// timeout that's the only other place DuckDB flushes a thread's
-		// allocator state -- without this, every part's freed memory piles up
-		// as retained-but-unreturned pages for the whole run instead of
-		// actually shrinking peak RSS between parts, even though
-		// shared_index.reset() above already dropped the last reference
-		// correctly. See FlushThisThreadsFreedMemory above.
+		// This reset is a second, separate potential last-reference drop (every
+		// other thread may have already detached above, making the leader's own
+		// global reset the one that actually frees the part) -- flush again
+		// here in case that's what just happened. See FlushThisThreadsFreedMemory
+		// above and the detach_shared_index() flush earlier in this function.
 		FlushThisThreadsFreedMemory(*gstate.snapshot_conn->context);
 
 		// Both the index load AND the query-stream replay happen OUTSIDE the
