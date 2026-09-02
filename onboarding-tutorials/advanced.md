@@ -40,16 +40,20 @@ duckdb -c "
 INSTALL httpfs; LOAD httpfs;
 INSTALL miint FROM community; LOAD miint;
 
+-- Fetch the run once. Calling read_ena_sequences inside each COPY
+-- would download it from ENA once per COPY.
+CREATE TABLE reads AS SELECT * FROM read_ena_sequences('ERR1074767');
+
 COPY (
-    SELECT * FROM read_ena_sequences('ERR1074767') WHERE sequence_index % 3 = 0
+    SELECT * FROM reads WHERE sequence_index % 3 = 0
 ) TO '${OUTDIR}/sample_a.parquet' (FORMAT parquet);
 
 COPY (
-    SELECT * FROM read_ena_sequences('ERR1074767') WHERE sequence_index % 3 = 1
+    SELECT * FROM reads WHERE sequence_index % 3 = 1
 ) TO '${OUTDIR}/sample_b.parquet' (FORMAT parquet);
 
 COPY (
-    SELECT * FROM read_ena_sequences('ERR1074767') WHERE sequence_index % 3 = 2
+    SELECT * FROM reads WHERE sequence_index % 3 = 2
 ) TO '${OUTDIR}/sample_c.parquet' (FORMAT parquet);
 "
 ```
@@ -57,7 +61,13 @@ COPY (
 We use
 [`COPY ... TO`](https://duckdb.org/docs/current/sql/statements/copy) with
 [Parquet](https://parquet.apache.org/) format so each sample is a self-contained
-file that DuckDB can read back efficiently.
+file that DuckDB can read back efficiently. The run is loaded into a table
+first so that all three slices come from a single download &mdash; the same
+pattern the intermediate tutorial uses to
+[load the reads](intermediate.md#load-the-reads) before aligning them. A table
+works here because the three `COPY` statements share one DuckDB process. Where
+the consumers are separate processes, as in the loop below, the fetched data
+has to land on disk as Parquet instead.
 
 ### Process each sample in a loop
 

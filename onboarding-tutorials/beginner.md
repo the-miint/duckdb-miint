@@ -116,6 +116,34 @@ There are additional columns such as `qual1` (per-base quality scores),
 [`read_ena_sequences` reference](../docs/insdc_ena.md#read-ena-sequences)
 for the full schema.
 
+## Loading the run into a table
+
+The peek above stopped as soon as it had five reads instead of reading to the
+end of the file &mdash; though remote data arrives in whole blocks, so a short
+peek is cheaper than a full scan but not free. A query that scans the whole run
+&mdash; a count, an average, anything without a `LIMIT` &mdash; downloads all
+of it, and downloads it again for every such query. When you plan to ask
+several questions of the same data, as we're about to, fetch it once into a
+table and query the table instead:
+
+```python
+con.sql(f"""
+    CREATE OR REPLACE TABLE reads AS
+    SELECT * FROM read_ena_sequences('{ACCESSION}')
+""")
+```
+
+[`CREATE TABLE ... AS`](https://duckdb.org/docs/current/sql/statements/create_table)
+runs the query once and stores the result, and `OR REPLACE` lets you re-run the
+cell without a "table already exists" error. Every query from here on reads
+from `reads` instead of going back to ENA.
+
+This run is small enough to keep in memory. A much larger one may not be
+&mdash; there you would either query `read_ena_sequences` directly each time
+and accept the repeated download, or stream the run straight to disk once with
+`COPY (SELECT * FROM read_ena_sequences('ERR1074767')) TO 'reads.parquet'
+(FORMAT parquet)` and query that file instead.
+
 ## How many reads are there?
 
 SQL has built-in
@@ -124,11 +152,11 @@ for summarizing data. `count(*)` counts rows, and `min(...)` / `max(...)` find
 the smallest and largest values:
 
 ```python
-counts = con.sql(f"""
+counts = con.sql("""
     SELECT count(*) AS n_reads,
            min(len(sequence1)) AS min_length,
            max(len(sequence1)) AS max_length
-    FROM read_ena_sequences('{ACCESSION}')
+    FROM reads
 """).df()
 
 print(counts)
@@ -153,11 +181,11 @@ score of 30 means a 1-in-1,000 chance the base call is wrong; 40 means
 into pandas:
 
 ```python
-quality = con.sql(f"""
+quality = con.sql("""
     SELECT read_id,
            round(list_aggregate(qual1, 'avg'), 1)
                AS mean_quality
-    FROM read_ena_sequences('{ACCESSION}')
+    FROM reads
 """).df()
 
 print(quality.describe())
@@ -199,13 +227,13 @@ GC content (the fraction of bases that are G or C) varies across microbial
 taxa and can reveal composition at a glance. Let's compute it for every read:
 
 ```python
-gc = con.sql(f"""
+gc = con.sql("""
     SELECT read_id,
            round(
                len(replace(replace(upper(sequence1), 'A', ''), 'T', ''))
                * 100.0 / len(sequence1),
            1) AS gc_pct
-    FROM read_ena_sequences('{ACCESSION}')
+    FROM reads
 """).df()
 
 fig, ax = plt.subplots(figsize=(8, 4))
@@ -243,7 +271,7 @@ con.sql(f"""
                sequence1,
                round(list_aggregate(qual1, 'avg'), 1)
                    AS mean_quality
-        FROM read_ena_sequences('{ACCESSION}')
+        FROM reads
     ) TO '{parquet_path}' (FORMAT parquet)
 """)
 
