@@ -1,0 +1,814 @@
+# name: test/sql/place_krepp_toy.test
+# description: place_krepp end to end against krepp's own toy index
+# group: [sql]
+
+require miint
+
+require-env KREPP_AVAILABLE
+
+require-env MIINT_KREPP_TOY_INDEX
+
+# The index and the reads both come from ext/krepp/test/ - krepp's tutorial
+# data, which is the closest thing it has to a test corpus. run_tests.sh builds
+# the index from that data with the parameters in krepp's README quickstart.
+#
+# Assertions here are invariants, not carved numbers, for two reasons. The
+# index is rebuilt whenever the krepp binary changes version, so a carved row
+# count would encode the oracle's version rather than our behaviour. And krepp
+# decides how many edges a read is compatible with; that is its judgement to
+# make, not a contract place_krepp owes anyone.
+
+statement ok
+CREATE TABLE toy_reads AS SELECT read_id, sequence1 FROM read_fastx('ext/krepp/test/query_toy.fq');
+
+query I
+SELECT count(*) FROM toy_reads;
+----
+100
+
+# Reads do get placed. Guards against the failure where the search/summarize/
+# collect sequence quietly yields nothing and every other assertion below
+# passes vacuously over an empty result.
+query I
+SELECT count(*) > 0 FROM place_krepp(query_table='toy_reads', index_path='${MIINT_KREPP_TOY_INDEX}');
+----
+true
+
+# Every fragment reported has to be a read we actually sent. place() walks
+# `ids` and `sequences` by the same index and writes *ids[i], so the two lists
+# have to stay in lockstep; if they drift, one read's placements are attributed
+# to a different read: still plausible numbers, silently attached to the wrong
+# sequence, which no downstream query could detect.
+query I
+SELECT count(*)
+FROM place_krepp(query_table='toy_reads', index_path='${MIINT_KREPP_TOY_INDEX}') p
+LEFT JOIN toy_reads r ON p.fragment = r.read_id
+WHERE r.read_id IS NULL;
+----
+0
+
+# A read placed on n edges yields n rows, so rows are not one-to-one with
+# reads. Fragments are a subset of the input: krepp places what it can support
+# and drops the rest.
+query I
+SELECT count(DISTINCT fragment) <= 100
+FROM place_krepp(query_table='toy_reads', index_path='${MIINT_KREPP_TOY_INDEX}');
+----
+true
+
+# like_weight_ratio is a distribution over the candidate edges for one read.
+# If it does not sum to 1, rows were dropped or duplicated somewhere between
+# collect_placements and the output chunk - the batching in Execute hands back
+# STANDARD_VECTOR_SIZE rows at a time and a query's placements can straddle
+# that boundary.
+query I
+SELECT count(*) FROM (
+    SELECT fragment, sum(like_weight_ratio) AS total
+    FROM place_krepp(query_table='toy_reads', index_path='${MIINT_KREPP_TOY_INDEX}')
+    GROUP BY fragment
+) WHERE abs(total - 1.0) > 1e-9;
+----
+0
+
+# Edge numbers index the backbone tree, and the remaining quantities have
+# ranges. A value outside them would be the signature of reading placement_t's
+# fields into the wrong columns - they are all small doubles, so a swap of
+# pendant and distal would otherwise look entirely reasonable.
+#
+# edge_num is deliberately absent for the opposite reason: krepp's get_en()
+# returns an unsigned se_t, so a negative value cannot reach this column and the
+# clause would only look like it was checking something.
+#
+# pendant_length is deliberately absent: krepp emits negative pendant lengths,
+# which jplace does not allow for a branch length. Measured on this index, 270
+# of 404 rows are negative, down to -0.14971, and krepp's own CLI produces the
+# identical values - so this is krepp's output, not a mapping error here.
+# Anything feeding these into tree_resolve_placement gets a negative branch.
+query I
+SELECT count(*)
+FROM place_krepp(query_table='toy_reads', index_path='${MIINT_KREPP_TOY_INDEX}')
+WHERE distal_length < 0 OR distance < 0
+   OR like_weight_ratio < 0 OR like_weight_ratio > 1;
+----
+0
+
+# A single-read table exercises id attribution where the answer is known in
+# advance: whatever krepp says about this read must come back labelled with this
+# read's id and no other. With a batch of one, an off-by-one has nowhere to
+# hide.
+#
+# The read is chosen from the placed set rather than named, so this stays an
+# invariant. Carving an id here would assert that one particular read places,
+# which is the oracle's judgement and moves when the index is rebuilt.
+statement ok
+CREATE TABLE one_read AS
+SELECT read_id, sequence1 FROM toy_reads
+WHERE read_id = (SELECT min(fragment) FROM place_krepp(
+    query_table='toy_reads', index_path='${MIINT_KREPP_TOY_INDEX}'));
+
+query I
+SELECT count(*) FROM one_read;
+----
+1
+
+query I
+SELECT count(DISTINCT fragment) = 1
+   AND max(fragment) = (SELECT read_id FROM one_read)
+FROM place_krepp(query_table='one_read', index_path='${MIINT_KREPP_TOY_INDEX}');
+----
+true
+
+# --- fragment mirrors the query relation's read_id type ---------------------
+#
+# ValidateSequenceTableSchema accepts VARCHAR, BIGINT and UUID read_ids, and the
+# aligners all mirror the discovered type onto their output id column. If
+# place_krepp pinned `fragment` to VARCHAR instead, every one of these joins
+# back to the query table would need a cast, and the schema would claim a type
+# the data does not have. Asserting the type directly, not just that a join
+# works: a silent implicit cast would let a VARCHAR column satisfy the join.
+
+statement ok
+CREATE TABLE toy_reads_bigint AS
+SELECT row_number() OVER () ::BIGINT AS read_id, sequence1 FROM toy_reads;
+
+query I
+SELECT typeof(fragment) FROM place_krepp(query_table='toy_reads_bigint',
+                                         index_path='${MIINT_KREPP_TOY_INDEX}') LIMIT 1;
+----
+BIGINT
+
+# Same reads, same index, ids differing only in storage type: the placements
+# must be the same ones. This is what catches a BIGINT egress path that
+# formats or truncates the id differently from the VARCHAR one.
+query I
+SELECT count(*) FROM place_krepp(query_table='toy_reads_bigint',
+                                 index_path='${MIINT_KREPP_TOY_INDEX}') b
+LEFT JOIN toy_reads_bigint r ON b.fragment = r.read_id
+WHERE r.read_id IS NULL;
+----
+0
+
+statement ok
+CREATE TABLE toy_reads_uuid AS
+SELECT uuid()::UUID AS read_id, sequence1 FROM toy_reads;
+
+query I
+SELECT typeof(fragment) FROM place_krepp(query_table='toy_reads_uuid',
+                                         index_path='${MIINT_KREPP_TOY_INDEX}') LIMIT 1;
+----
+UUID
+
+# typeof alone cannot catch a WRONG uuid - EmitIdCell parses to a UUID value, so
+# any successful parse round-trips canonically. Same join as the BIGINT case
+# above: every fragment must be an id we actually sent.
+query I
+SELECT count(*) FROM place_krepp(query_table='toy_reads_uuid',
+                                 index_path='${MIINT_KREPP_TOY_INDEX}') u
+LEFT JOIN toy_reads_uuid r ON u.fragment = r.read_id
+WHERE r.read_id IS NULL;
+----
+0
+
+# --- RNA input --------------------------------------------------------------
+#
+# krepp maps U to its ambiguous code, so an untouched RNA read breaks the k-mer
+# run at every uracil and places nothing at all - indistinguishable from "this
+# read does not belong on this tree". place() rewrites U to T first, the same
+# normalization the vsearch wrappers apply. Transcribing the toy reads to RNA
+# must therefore reproduce the DNA result exactly, not merely produce rows.
+
+statement ok
+CREATE TABLE toy_reads_rna AS
+SELECT read_id, replace(sequence1, 'T', 'U') AS sequence1 FROM toy_reads;
+
+statement ok
+CREATE TABLE toy_reads_ambiguous AS
+SELECT read_id, replace(sequence1, 'T', 'N') AS sequence1 FROM toy_reads;
+
+# Anti-vacuity: without uracil in the fixture the comparison below would hold
+# no matter what the normalization did.
+query I
+SELECT count(*) FROM toy_reads_rna WHERE sequence1 NOT LIKE '%U%';
+----
+0
+
+# Control, and the reason the assertion below is worth making: with the former
+# T positions ambiguous instead of rewritten - which is exactly what krepp sees
+# for an un-normalized RNA read, since it maps U to the ambiguous code - the
+# same reads place nothing at all. So "RNA matches DNA" cannot pass by accident.
+# The 0 is measured on this index, not implied - T->N still leaves roughly three
+# quarters of each read informative, and it is the k=27 window that no longer
+# fits between substitutions. Expect it to need rechecking if the index is ever
+# rebuilt with a smaller k.
+query I
+SELECT count(*) FROM place_krepp(
+    query_table='toy_reads_ambiguous', index_path='${MIINT_KREPP_TOY_INDEX}');
+----
+0
+
+# Compared on the set of placed fragments and the row count, not on the
+# measures. like_weight_ratio is not reproducible run to run - krepp normalizes
+# it over a hash map keyed by node pointer, so the accumulation order moves with
+# the heap. Measured on this index: 28 to 102 of 404 rows differ between two calls in
+# one process, by up to 2.5e-4 absolute (3.9e-3 relative), while likelihood,
+# distance, distal_length and pendant_length are bit-identical. krepp's own CLI
+# is less stable still - across processes it varies which edges appear at all.
+query I
+WITH rna AS (
+    SELECT DISTINCT fragment
+    FROM place_krepp(query_table='toy_reads_rna', index_path='${MIINT_KREPP_TOY_INDEX}')
+), dna AS (
+    SELECT DISTINCT fragment
+    FROM place_krepp(query_table='toy_reads', index_path='${MIINT_KREPP_TOY_INDEX}')
+)
+SELECT (SELECT count(*) FROM (SELECT * FROM rna EXCEPT SELECT * FROM dna))
+     + (SELECT count(*) FROM (SELECT * FROM dna EXCEPT SELECT * FROM rna));
+----
+0
+
+query I
+SELECT (SELECT count(*) FROM place_krepp(query_table='toy_reads_rna',
+                                         index_path='${MIINT_KREPP_TOY_INDEX}'))
+     = (SELECT count(*) FROM place_krepp(query_table='toy_reads',
+                                         index_path='${MIINT_KREPP_TOY_INDEX}'));
+----
+true
+
+# --- reads shorter than k ---------------------------------------------------
+#
+# These cannot be placed (krepp computes len - k + 1 into an unsigned type), so
+# they are skipped rather than raising. Skipping silently is the failure mode
+# that matters: a user whose reads are all short would get an empty result with
+# nothing to explain it, so the warning has to reach miint_warnings().
+
+# Deliberately larger than STANDARD_VECTOR_SIZE (2048). QuerySequenceStream
+# hands Execute one sub-batch of at most that many rows, and the warn block sits
+# inside the refill loop - so with 100 rows the loop runs it ONCE and a test
+# there cannot tell the warn-once guard from its absence. 5000 rows is three
+# sub-batches, which is what makes the count below discriminating.
+statement ok
+CREATE TABLE toy_reads_short AS
+SELECT read_id || '_' || i AS read_id, substr(sequence1, 1, 10) AS sequence1
+FROM toy_reads, range(50) t(i);
+
+query I
+SELECT count(*) > 2048 FROM toy_reads_short;
+----
+true
+
+query I
+SELECT count(*) FROM place_krepp(query_table='toy_reads_short',
+                                 index_path='${MIINT_KREPP_TOY_INDEX}');
+----
+0
+
+# Exactly one, not at least one. The warning is guarded by a compare_exchange on
+# a scan-wide flag so that neither N workers nor N sub-batches emit N copies.
+# The fixture above spans three sub-batches, so deleting the guard raises this
+# count; `>= 1`, or a single-sub-batch fixture, would pass either way.
+#
+# Order matters: exactly one place_krepp call has warned at this point in the
+# file. toy_reads_mixed below warns a second time, so this assertion must stay
+# ahead of it.
+query I
+SELECT count(*) FROM miint_warnings()
+WHERE message LIKE '%place_krepp: skipping query sequence(s) shorter than the index k-mer length%';
+----
+1
+
+# A batch where only SOME reads are short, which the all-short table above
+# cannot reach: with every read short, place() returns before it ever builds a
+# FASTA, so the part that actually matters is untested.
+#
+# What matters is that the id list and the sequence list are filtered in
+# lockstep - the two push_backs sit on the same side of the short-read
+# `continue`. Move the id one above it, which is exactly what a tidying
+# refactor would do, and every fragment after the first short read is labelled
+# with a neighbouring read's id: plausible numbers, silently attached to the
+# wrong sequence.
+
+statement ok
+CREATE TABLE toy_reads_mixed AS
+SELECT read_id,
+       CASE WHEN (row_number() OVER (ORDER BY read_id)) % 3 = 0
+            THEN substr(sequence1, 1, 10) ELSE sequence1 END AS sequence1
+FROM toy_reads;
+
+# Anti-vacuity: the fixture has to contain both kinds, and enough short reads
+# that a one-position shift could not coincidentally land right.
+query II
+SELECT count(*) FILTER (length(sequence1) < 27),
+       count(*) FILTER (length(sequence1) >= 27)
+FROM toy_reads_mixed;
+----
+33	67
+
+# No placement may be attributed to a read that was skipped for being short.
+query I
+SELECT count(*)
+FROM place_krepp(query_table='toy_reads_mixed', index_path='${MIINT_KREPP_TOY_INDEX}') p
+JOIN toy_reads_mixed m ON p.fragment = m.read_id
+WHERE length(m.sequence1) < 27;
+----
+0
+
+# Stronger: the placed set must be exactly the full-length reads that place when
+# nothing is short. A shifted mapping would satisfy the check above whenever the
+# wrong id happened to be another full-length read; this one would not.
+query I
+WITH mixed AS (
+    SELECT DISTINCT fragment
+    FROM place_krepp(query_table='toy_reads_mixed', index_path='${MIINT_KREPP_TOY_INDEX}')
+), expected AS (
+    SELECT DISTINCT fragment
+    FROM place_krepp(query_table='toy_reads', index_path='${MIINT_KREPP_TOY_INDEX}')
+    WHERE fragment IN (SELECT read_id FROM toy_reads_mixed WHERE length(sequence1) >= 27)
+)
+SELECT (SELECT count(*) FROM (SELECT * FROM mixed EXCEPT SELECT * FROM expected))
+     + (SELECT count(*) FROM (SELECT * FROM expected EXCEPT SELECT * FROM mixed));
+----
+0
+
+# --- non-nucleotide input raises -------------------------------------------
+#
+# A byte outside the IUPAC alphabet means the column does not hold what the
+# caller thinks it holds - a gapped alignment column, or protein. krepp indexes
+# a 128-entry table with a plain char, so a byte above 127 reads out of bounds.
+# Raising beats placing garbage.
+
+statement ok
+CREATE TABLE toy_reads_gapped AS
+SELECT read_id, '--------' || sequence1 AS sequence1 FROM toy_reads LIMIT 1;
+
+statement error
+SELECT * FROM place_krepp(query_table='toy_reads_gapped', index_path='${MIINT_KREPP_TOY_INDEX}');
+----
+is not a nucleotide code
+
+# --- Newick shapes krepp kills the process over -----------------------------
+#
+# krepp's Tree::load reports several problems through error_exit, which is
+# std::exit — it would take the DuckDB server down with no SQL error at all.
+# Both trees below were confirmed to do exactly that before these checks
+# existed. miint's own parser accepts both, so parsing is not sufficient; the
+# constructor has to check the shapes specifically.
+#
+# The duplicate-name case is the one that matters in practice: krepp reads the
+# token after ')' as the node's name, so an internal node's bootstrap support
+# becomes its name, and any backbone with the same support value on two clades
+# collides. That is an ordinary tree, not a malformed one.
+
+statement ok
+COPY (SELECT '((A:1,B:1)100:1,(C:1,D:1)100:1);')
+TO '__TEST_DIR__/dup_label.nwk' (FORMAT csv, HEADER false, QUOTE '');
+
+statement ok
+COPY (SELECT '((A:1):1,B:1);')
+TO '__TEST_DIR__/unifurcation.nwk' (FORMAT csv, HEADER false, QUOTE '');
+
+statement error
+SELECT count(*) FROM place_krepp(query_table='one_read',
+    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/dup_label.nwk');
+----
+more than one node named '100'
+
+statement error
+SELECT count(*) FROM place_krepp(query_table='one_read',
+    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/unifurcation.nwk');
+----
+contains a unifurcation
+
+# The session has to survive both. If either check regressed to krepp's
+# error_exit this statement would never run — the process would already be gone.
+query I
+SELECT count(*) > 0 FROM place_krepp(query_table='one_read',
+                                     index_path='${MIINT_KREPP_TOY_INDEX}');
+----
+true
+
+# --- hdist_th against the index's actual k ----------------------------------
+#
+# Bind rejects anything above 31, krepp's hard cap on k. The exact bound is the
+# index's own k, which is only known once it is loaded. This index is built with
+# -k 27 by run_tests.sh, so 31 is past it.
+
+statement error
+SELECT * FROM place_krepp(query_table='one_read', index_path='${MIINT_KREPP_TOY_INDEX}', hdist_th=31);
+----
+must not exceed the index's k-mer length
+
+statement ok
+SELECT count(*) FROM place_krepp(query_table='one_read', index_path='${MIINT_KREPP_TOY_INDEX}', hdist_th=27);
+
+# --- Newick shapes krepp rejects lexically ----------------------------------
+#
+# krepp's split_nwk runs before any parsing and error_exits on these. They are
+# ordinary files, not malformed ones: a trailing blank line, CRLF line endings,
+# and a [&R] rooted marker each killed the process outright before these checks
+# existed. krepp pops exactly one trailing newline and then demands ';', which
+# is why ";\n" is fine and ";\n\n" is not.
+
+statement ok
+COPY (SELECT '((A:1,B:1):1,(C:1,D:1):1);' || chr(10)) TO '__TEST_DIR__/trailing_blank.nwk'
+    (FORMAT csv, HEADER false, QUOTE '');
+
+statement ok
+COPY (SELECT '[&R] ((A:1,B:1):1,(C:1,D:1):1);') TO '__TEST_DIR__/rooted_marker.nwk'
+    (FORMAT csv, HEADER false, QUOTE '');
+
+statement error
+SELECT * FROM place_krepp(query_table='one_read',
+    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/trailing_blank.nwk');
+----
+must end with ';' followed by at most one newline
+
+# CRLF, the other half of the same rule: krepp pops one '\n' and then finds
+# '\r'. Named in the comment above, so tested rather than merely asserted.
+statement ok
+COPY (SELECT '((A:1,B:1):1,(C:1,D:1):1);' || chr(13)) TO '__TEST_DIR__/crlf.nwk'
+    (FORMAT csv, HEADER false, QUOTE '');
+
+statement error
+SELECT * FROM place_krepp(query_table='one_read',
+    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/crlf.nwk');
+----
+must end with ';' followed by at most one newline
+
+statement error
+SELECT * FROM place_krepp(query_table='one_read',
+    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/rooted_marker.nwk');
+----
+contains an unquoted '[' or ']'
+
+# An indented or line-wrapped tree, which is how most tools pretty-print one.
+statement ok
+COPY (SELECT '(' || chr(10) || '  (A:1,B:1):1,' || chr(10) || '  (C:1,D:1):1' || chr(10) || ');')
+TO '__TEST_DIR__/indented.nwk' (FORMAT csv, HEADER false, QUOTE '');
+
+statement error
+SELECT * FROM place_krepp(query_table='one_read',
+    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/indented.nwk');
+----
+contains whitespace outside a quoted label
+
+# A single space after a comma is the one that matters most, because krepp does
+# NOT error on it. Its whitespace check fires only when a token is already
+# accumulating (ext/krepp/src/phytree.cpp:141-143); otherwise the space falls
+# through into the buffer and becomes part of the NEXT label, so the tip is
+# named ' B'. map_to_qtree then looks that up, misses, and skips it - its only
+# diagnostic for the miss is commented out (phytree.cpp:500-506). Nothing is
+# reported at any layer, so rejecting here is the one place a caller finds out.
+# (Mechanism read from krepp's source, not observed end to end: the CLI takes a
+# backbone only at index time, so there is no way to run the corrupted tree
+# through it for comparison.)
+statement ok
+COPY (SELECT '((A:1, B:1):1,(C:1,D:1):1);')
+TO '__TEST_DIR__/space_after_comma.nwk' (FORMAT csv, HEADER false, QUOTE '');
+
+statement error
+SELECT * FROM place_krepp(query_table='one_read',
+    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/space_after_comma.nwk');
+----
+contains whitespace outside a quoted label
+
+# A concatenated multi-tree file - bootstrap replicates, most commonly.
+statement ok
+COPY (SELECT '(A:1,B:1);' || chr(10) || '(C:1,D:1);')
+TO '__TEST_DIR__/twotrees.nwk' (FORMAT csv, HEADER false, QUOTE '');
+
+statement error
+SELECT * FROM place_krepp(query_table='one_read',
+    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/twotrees.nwk');
+----
+contains a ';' before the end of the file
+
+# The session survives all of it.
+query I
+SELECT count(*) > 0 FROM place_krepp(query_table='one_read', index_path='${MIINT_KREPP_TOY_INDEX}');
+----
+true
+
+# --- multi and filter actually reach krepp ----------------------------------
+#
+# Both parameters were untested: nothing asserted they get past KreppConfig into
+# the IBatch constructor. Replace either with a literal in KreppPlacer and no
+# other assertion in this suite moves.
+#
+# Which edge multi=false picks is not reproducible (see the Reproducibility
+# table in docs/phylogeny.md), but the cardinality is: at most one row per
+# fragment, and never more rows than the multi-on run.
+
+query I
+SELECT count(*) = count(DISTINCT fragment)
+FROM place_krepp(query_table='toy_reads', index_path='${MIINT_KREPP_TOY_INDEX}', multi=false);
+----
+true
+
+query I
+SELECT (SELECT count(*) FROM place_krepp(query_table='toy_reads',
+            index_path='${MIINT_KREPP_TOY_INDEX}', multi=false))
+     < (SELECT count(*) FROM place_krepp(query_table='toy_reads',
+            index_path='${MIINT_KREPP_TOY_INDEX}'));
+----
+true
+
+# filter drops placements without enough k-mer support, so turning it off cannot
+# reduce the result. Equality would mean the flag never reached krepp only if
+# the toy data had no filtered placements to begin with — the strict inequality
+# below rules that out.
+query I
+SELECT (SELECT count(*) FROM place_krepp(query_table='toy_reads',
+            index_path='${MIINT_KREPP_TOY_INDEX}', filter=false))
+     > (SELECT count(*) FROM place_krepp(query_table='toy_reads',
+            index_path='${MIINT_KREPP_TOY_INDEX}'));
+----
+true
+
+# A larger chisq cutoff admits more candidate edges. Strict `>`, not `>=`: with
+# chisq hardcoded inside KreppPlacer both sides would be the same query and
+# `>=` would hold trivially, which is the mutation this is meant to catch.
+# Measured on this index: chisq 0.001/2.706/10.0/100.0 give 264/404/514/872 rows.
+query I
+SELECT (SELECT count(*) FROM place_krepp(query_table='toy_reads',
+            index_path='${MIINT_KREPP_TOY_INDEX}', chisq=10.0))
+     > (SELECT count(*) FROM place_krepp(query_table='toy_reads',
+            index_path='${MIINT_KREPP_TOY_INDEX}'));
+----
+true
+
+# --- the pendant/distal field pair, which nothing else pins -----------------
+#
+# Nothing else here would detect krepp renaming or repurposing a placement_t
+# field, since the struct is read by name and any rename is a compile error but
+# a semantic change is not. Two of the six quantities are in fact covered:
+# swapping likelihood with like_weight_ratio breaks the [0,1] range check and
+# the per-fragment sum above. pendant_length and distal_length are the pair that
+# would swap invisibly — both are small doubles on the same scale.
+#
+# There is an oracle-free property that separates them. krepp attaches at the
+# edge midpoint, so distal_length is get_midpoint_pendant() = blen/2
+# (ext/krepp/src/phytree.hpp:132-138) — a function of the EDGE alone, identical
+# for every read placed there. pendant_length is the Jukes-Cantor distance minus
+# that, so it varies per read. Swap the two and this assertion fails at once.
+
+query I
+SELECT count(*) FROM (
+    SELECT edge_num
+    FROM place_krepp(query_table='toy_reads', index_path='${MIINT_KREPP_TOY_INDEX}')
+    GROUP BY edge_num
+    HAVING count(DISTINCT distal_length) > 1
+);
+----
+0
+
+# Anti-vacuity, and the other half of the discriminator: pendant_length must
+# vary within an edge. Without this the check above would also pass on a result
+# where every edge happened to carry a single row.
+query I
+SELECT count(*) > 0 FROM (
+    SELECT edge_num
+    FROM place_krepp(query_table='toy_reads', index_path='${MIINT_KREPP_TOY_INDEX}')
+    GROUP BY edge_num
+    HAVING count(DISTINCT pendant_length) > 1
+);
+----
+true
+
+# --- jplace {N} edge decorations -------------------------------------------
+#
+# krepp requires every node decorated or none, and (since v0.9.1) the numbers to
+# be unique. Both are error_exit, i.e. std::exit. Checking them with miint's own
+# parser is only sound because the one decoration form it reads - {N} after the
+# branch length, which is the jplace spec's own - is read identically by krepp.
+# Verified: on a fully decorated tree miint reports every node decorated and
+# krepp accepts it; on a partially decorated one miint reports 3 of 7 and krepp
+# exits. A tree decorated in krepp's other accepted position, ")\{N\}:len", is
+# rejected earlier by miint's parser - a known narrower-than-krepp limitation,
+# recorded in docs/phylogeny.md.
+
+# Tip names are taken from the index's own guide tree rather than carved, so
+# this stays correct if krepp's tutorial data changes. Two tips that the index
+# knows: enough to be a well-formed decorated tree that clears the tip-overlap
+# check below.
+statement ok
+COPY (
+    SELECT '(' || a || ':1{0},' || b || ':1{1}):0{2};'
+    FROM (SELECT min(name) AS a, max(name) AS b
+          FROM read_newick('ext/krepp/test/tree_toy.nwk') WHERE is_tip)
+) TO '__TEST_DIR__/decorated_all.nwk' (FORMAT csv, HEADER false, QUOTE '');
+
+statement ok
+COPY (SELECT '((A:1,B:1):1{1},(C:1,D:1):1{2}):0{3};') TO '__TEST_DIR__/decorated_partial.nwk'
+    (FORMAT csv, HEADER false, QUOTE '');
+
+statement ok
+COPY (SELECT '(A:1{0},B:1{0}):0{2};') TO '__TEST_DIR__/decorated_dup.nwk'
+    (FORMAT csv, HEADER false, QUOTE '');
+
+# Fully decorated is accepted. Anti-vacuity for the two rejections below: if
+# this threw, they would pass without discriminating the decoration state.
+statement ok
+SELECT count(*) FROM place_krepp(query_table='one_read',
+    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/decorated_all.nwk');
+
+statement error
+SELECT * FROM place_krepp(query_table='one_read',
+    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/decorated_partial.nwk');
+----
+only partially decorated
+
+statement error
+SELECT * FROM place_krepp(query_table='one_read',
+    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/decorated_dup.nwk');
+----
+on more than one node
+
+# A backbone miint's parser cannot read reports as an input error naming the
+# file, not as an IO error - it is malformed input, not a failed read.
+statement ok
+COPY (SELECT '((A:1,B:1);') TO '__TEST_DIR__/malformed.nwk' (FORMAT csv, HEADER false, QUOTE '');
+
+statement error
+SELECT * FROM place_krepp(query_table='one_read',
+    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/malformed.nwk');
+----
+could not be parsed
+
+# --- hdist_th and tau reach krepp ------------------------------------------
+#
+# Both had only rejection tests: every passing use was a bare `statement ok`,
+# so hardcoding either one inside the IBatch construction would not have moved
+# a single assertion in this file. These are that mutation test.
+#
+# Inequality rather than a direction, because the direction is not a contract
+# krepp owes us - hdist_th admits noisier k-mer matches, which moves the
+# likelihood landscape both ways depending on the data. What IS being asserted
+# is that the parameter arrives at all.
+#
+# Measured on this index: hdist_th 1/2/4/8/20 give 405/406/404/319/229 rows.
+query I
+SELECT (SELECT count(*) FROM place_krepp(query_table='toy_reads',
+            index_path='${MIINT_KREPP_TOY_INDEX}', hdist_th=2, tau=2))
+    <> (SELECT count(*) FROM place_krepp(query_table='toy_reads',
+            index_path='${MIINT_KREPP_TOY_INDEX}', hdist_th=20, tau=2));
+----
+true
+
+# tau gates the placement filter (ext/krepp/src/query.cpp:235, :275: a
+# candidate survives when the k-mers within tau of it weigh more than 1). It is
+# inert at the default hdist_th on this corpus - 404 rows at tau 0, 1, 2 and 4
+# alike - because every surviving candidate already clears the bar at tau=0.
+# Widening hdist_th surfaces the marginal candidates it is meant to judge:
+# measured 229 rows at tau=0 against 522 at tau=20.
+#
+# A test at the default hdist_th would therefore have passed with tau
+# hardcoded. This is why it is pinned here and not there.
+query I
+SELECT (SELECT count(*) FROM place_krepp(query_table='toy_reads',
+            index_path='${MIINT_KREPP_TOY_INDEX}', hdist_th=20, tau=0))
+     < (SELECT count(*) FROM place_krepp(query_table='toy_reads',
+            index_path='${MIINT_KREPP_TOY_INDEX}', hdist_th=20, tau=20));
+----
+true
+
+# --- newick_path actually does something -----------------------------------
+#
+# Every other newick_path case in this file is a rejection, which leaves the
+# mechanism itself untested: a newick_path that was parsed, validated and then
+# ignored would pass all of them. It also leaves the read seam untested - the
+# file is read once with istreambuf_iterator for the checks and the SAME handle
+# is rewound and handed to krepp. If the rewind did not take, krepp would see an
+# empty tree and error_exit: a dead process, not an error.
+#
+# ext/krepp/test/tree_toy.nwk is the guide tree run_tests.sh builds the index
+# from, so passing it explicitly must reproduce what the index does on its own.
+# It is the submodule's own file, which keeps it in lockstep with the index
+# instead of carving tip names here.
+query I
+SELECT count(*) > 0 FROM place_krepp(query_table='toy_reads',
+    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='ext/krepp/test/tree_toy.nwk');
+----
+true
+
+# Same placements, not merely a similar number of them. Measured: the
+# (fragment, edge_num) sets are identical and likelihood, distal_length,
+# pendant_length and distance agree exactly; only like_weight_ratio moves,
+# which docs/phylogeny.md already records as not reproducible.
+query II
+SELECT
+  (SELECT count(*) FROM (
+     SELECT fragment, edge_num FROM place_krepp(query_table='toy_reads',
+         index_path='${MIINT_KREPP_TOY_INDEX}')
+     EXCEPT
+     SELECT fragment, edge_num FROM place_krepp(query_table='toy_reads',
+         index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='ext/krepp/test/tree_toy.nwk'))),
+  (SELECT count(*) FROM (
+     SELECT fragment, edge_num FROM place_krepp(query_table='toy_reads',
+         index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='ext/krepp/test/tree_toy.nwk')
+     EXCEPT
+     SELECT fragment, edge_num FROM place_krepp(query_table='toy_reads',
+         index_path='${MIINT_KREPP_TOY_INDEX}')));
+----
+0	0
+
+# --- a backbone whose labels are not the index's ---------------------------
+#
+# krepp's map_to_qtree skips a backbone leaf it cannot find in the index and
+# says nothing (its diagnostic is commented out, phytree.cpp:500-506). Every
+# skipped leaf leaves eff_nchildren at 0 and collect_placements then rejects
+# every candidate, so the whole call returns zero rows - indistinguishable from
+# "these reads placed nowhere". Measured before the guard existed: one read
+# that places on the real backbone returned 0 rows here, silently.
+statement ok
+COPY (SELECT '(A_NOT_IN_INDEX:1,B_NOT_IN_INDEX:1):0;') TO '__TEST_DIR__/nomatch.nwk'
+    (FORMAT csv, HEADER false, QUOTE '');
+
+statement error
+SELECT * FROM place_krepp(query_table='toy_reads',
+    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/nomatch.nwk');
+----
+shares no tip labels
+
+# The same failure through a different door: a tree with no tip names at all
+# matches nothing either, but `backbone_tips_total == 0` is also how "no
+# newick_path was given" is represented internally, so it needs its own branch.
+# Verified reachable - miint's parser accepts empty tip labels, and krepp's
+# check_unique_labels skips unlabeled nodes (phytree.cpp:456) rather than
+# exiting, so nothing rejects this tree before the check runs.
+statement ok
+COPY (SELECT '(:1,:1):0;') TO '__TEST_DIR__/unlabeled.nwk'
+    (FORMAT csv, HEADER false, QUOTE '');
+
+statement error
+SELECT * FROM place_krepp(query_table='one_read',
+    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/unlabeled.nwk');
+----
+has no labeled tips
+
+# A path that exists but is the wrong kind of thing. is_regular_file returns
+# false with the error code CLEAR for a directory, so without the exists() check
+# this reported "does not exist" - a wrong diagnosis rather than a missing one,
+# which sends the caller hunting for a typo that isn't there.
+statement error
+SELECT * FROM place_krepp(query_table='one_read',
+    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='ext/krepp/test');
+----
+not a regular file
+
+# A partial overlap is legitimate - a backbone covering more than this index -
+# so it warns rather than throwing. It still shrinks the space a read can be
+# placed into, which is why it is not silent. One tip real, one invented.
+statement ok
+COPY (
+    SELECT '(' || a || ':1,NOT_IN_INDEX_XYZ:1):0;'
+    FROM (SELECT min(name) AS a FROM read_newick('ext/krepp/test/tree_toy.nwk') WHERE is_tip)
+) TO '__TEST_DIR__/partialmatch.nwk' (FORMAT csv, HEADER false, QUOTE '');
+
+statement ok
+SELECT count(*) FROM place_krepp(query_table='one_read',
+    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/partialmatch.nwk');
+
+query I
+SELECT count(*) FROM miint_warnings()
+WHERE message LIKE '%backbone tree tips are present in the index%';
+----
+1
+
+# --- {N} outside the range krepp represents --------------------------------
+#
+# miint's parser reads the decoration as int64; krepp narrows it to uint32 with
+# static_cast<se_t>(std::atol(...)) (phytree.cpp:232). Unbounded, {-5} would be
+# reported back as 4294967291 - breaking the promise that these numbers are
+# echoed verbatim - and {-1} would collide with {4294967295} inside krepp while
+# looking distinct to the uniqueness check, reaching an error_exit. Both are
+# rejected up front instead.
+statement ok
+COPY (
+    SELECT '(' || a || ':1{-5},' || b || ':1{1}):0{2};'
+    FROM (SELECT min(name) AS a, max(name) AS b
+          FROM read_newick('ext/krepp/test/tree_toy.nwk') WHERE is_tip)
+) TO '__TEST_DIR__/edge_negative.nwk' (FORMAT csv, HEADER false, QUOTE '');
+
+statement error
+SELECT * FROM place_krepp(query_table='one_read',
+    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/edge_negative.nwk');
+----
+outside the range krepp represents
+
+statement ok
+COPY (
+    SELECT '(' || a || ':1{5000000000},' || b || ':1{1}):0{2};'
+    FROM (SELECT min(name) AS a, max(name) AS b
+          FROM read_newick('ext/krepp/test/tree_toy.nwk') WHERE is_tip)
+) TO '__TEST_DIR__/edge_toobig.nwk' (FORMAT csv, HEADER false, QUOTE '');
+
+statement error
+SELECT * FROM place_krepp(query_table='one_read',
+    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/edge_toobig.nwk');
+----
+outside the range krepp represents
+
+query I
+SELECT count(*) > 0 FROM place_krepp(query_table='one_read', index_path='${MIINT_KREPP_TOY_INDEX}');
+----
+true

@@ -44,3 +44,7 @@
 	path = ext/sylph
 	url = https://github.com/the-miint/sylph.git
 	branch = v0.9.0-miint
+[submodule "ext/krepp"]
+	path = ext/krepp
+	url = https://github.com/bo1929/krepp.git
+	branch = master

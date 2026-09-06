@@ -1,0 +1,165 @@
+# name: test/sql/place_krepp.test
+# description: place_krepp parameter, schema and index validation
+# group: [sql]
+
+require miint
+
+require-env KREPP_AVAILABLE
+
+# This file covers what place_krepp is itself responsible for: rejecting
+# parameters it cannot honour, and refusing an index it cannot read rather than
+# letting krepp's error_exit take the whole process down. None of it needs an
+# index to exist.
+#
+# A note for whoever adds cases with multi=false. report_placement ranks
+# candidates with a non-stable std::sort over a vector built by iterating a
+# hash map keyed by node pointer, then takes .back() - so equal-ranking
+# candidates swap with the heap layout. Measured on the toy index: over six
+# runs of `krepp place --no-multi`, 1 of 92 fragments alternated between two
+# edges. Use `krepp place`, not `krepp dist`, for any such measurement; dist
+# goes through report_distances and is a different, noisier code path.
+#
+# multi left on (the default) keeps the candidate set stable but NOT the
+# numbers: like_weight_ratio is normalized over that same pointer-keyed
+# iteration order and moves between loads. See the Reproducibility table in
+# docs/phylogeny.md for what is and is not safe to assert.
+#
+# NOT covered here: the end-to-end pipe -> krepp -> jplace -> rows path, which
+# needs a built index. See test/sql/place_krepp_toy.test.
+
+statement ok
+CREATE TABLE reads AS SELECT * FROM (VALUES
+    ('r1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    ('r2', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA')
+) AS t(read_id, sequence1);
+
+# Both parameters are required. Neither has a defensible default: guessing a
+# query table would place the wrong reads, and guessing an index would report
+# placements against the wrong phylogeny.
+
+statement error
+SELECT * FROM place_krepp(index_path='data/no_such_index');
+----
+place_krepp requires a query_table parameter
+
+statement error
+SELECT * FROM place_krepp(query_table='reads');
+----
+place_krepp requires an index_path parameter
+
+# tau is the filter threshold applied to matches already bounded by hdist_th.
+# krepp's CLI rejects tau > hdist_th outright (validate_configuration_place),
+# but that check lives in the file this build excludes - and the library path
+# it guards is memory-unsafe, not merely useless: Minfo sizes hdisthist_v to
+# hdist_th + 1 and get_leq_tau sums hdisthist_v[0..tau] unchecked. Rejecting at
+# bind time is what stands in for the CLI's check.
+
+statement error
+SELECT * FROM place_krepp(query_table='reads', index_path='data/no_such_index', tau=5);
+----
+must not exceed
+
+statement error
+SELECT * FROM place_krepp(query_table='reads', index_path='data/no_such_index', hdist_th=3, tau=4);
+----
+must not exceed
+
+# Equal is allowed: tau = hdist_th filters at exactly the bound.
+# This still fails, but on the index, which proves the parameter check passed.
+
+statement error
+SELECT * FROM place_krepp(query_table='reads', index_path='data/no_such_index', hdist_th=4, tau=4);
+----
+krepp index directory does not exist
+
+# The query table must exist and carry the aligner contract (read_id +
+# sequence1). Both are checked at bind, before any index is loaded.
+
+statement error
+SELECT * FROM place_krepp(query_table='no_such_table', index_path='data/no_such_index');
+----
+Sequence table or view 'no_such_table' does not exist
+
+statement ok
+CREATE TABLE no_sequence AS SELECT 'r1' AS read_id, 30 AS quality;
+
+statement error
+SELECT * FROM place_krepp(query_table='no_sequence', index_path='data/no_such_index');
+----
+missing required column
+
+# Index discovery is reimplemented in KreppPlacer because krepp keeps it in
+# krepp.cpp alongside main(). These two cases are what that reimplementation
+# owes callers: a missing directory and a directory holding no index must both
+# raise, because krepp's own path here is error_exit() -> std::exit(), which
+# would terminate the DuckDB process instead of failing the query.
+
+statement error
+SELECT * FROM place_krepp(query_table='reads', index_path='data/no_such_index');
+----
+krepp index directory does not exist
+
+statement error
+SELECT * FROM place_krepp(query_table='reads', index_path='data');
+----
+No krepp index found in directory
+
+
+# chisq is krepp's likelihood-ratio cutoff, registered in its CLI with
+# CLI::PositiveNumber. That check lives in the excluded file too, and without it
+# a non-positive cutoff makes krepp's `chisq < chisq_value` unsatisfiable: every
+# candidate edge is discarded and the query returns nothing, which a caller
+# cannot tell apart from "these reads do not place". NaN is rejected for the
+# same reason - it fails every comparison.
+
+statement error
+SELECT * FROM place_krepp(query_table='reads', index_path='data/no_such_index', chisq=0);
+----
+chisq must be a positive number
+
+statement error
+SELECT * FROM place_krepp(query_table='reads', index_path='data/no_such_index', chisq=-1.5);
+----
+chisq must be a positive number
+
+statement error
+SELECT * FROM place_krepp(query_table='reads', index_path='data/no_such_index', chisq='nan'::DOUBLE);
+----
+chisq must be a positive number
+
+# A positive cutoff gets past bind and fails on the index instead, which is what
+# shows the check above is rejecting the value and not the call shape.
+statement error
+SELECT * FROM place_krepp(query_table='reads', index_path='data/no_such_index', chisq=0.001);
+----
+krepp index directory does not exist
+
+# hdist_th has no upper bound in krepp - its CLI checks only NonNegativeNumber -
+# and the library path is memory-unsafe above k. HDistHistLLH sizes binom_coef_k
+# to k + 1 and then reads binom_coef_k[i] for i up to hdist_th, and sizes
+# binom_coef_hnk to hdist_th + 1, which wraps to 0 at UINT32_MAX so the next
+# write is out of bounds. Measured before this check existed: hdist_th=64
+# returned a different row count off the end of the array, and 4294967295
+# segfaulted the DuckDB process (SIGSEGV, exit 139).
+#
+# 31 is krepp's own hard cap on k, so nothing above it can be valid against any
+# index and it is rejected here without loading one. The exact bound needs the
+# index's k and is checked at init time; see place_krepp_toy.test.
+
+statement error
+SELECT * FROM place_krepp(query_table='reads', index_path='data/no_such_index', hdist_th=32);
+----
+exceeds the largest k-mer length krepp supports
+
+statement error
+SELECT * FROM place_krepp(query_table='reads', index_path='data/no_such_index', hdist_th=4294967295);
+----
+exceeds the largest k-mer length krepp supports
+
+# 31 is allowed through bind - whether it is valid depends on the index's k, and
+# that is not known yet. Failing on the index instead of the value is what shows
+# the bound above is 31 and not something smaller.
+statement error
+SELECT * FROM place_krepp(query_table='reads', index_path='data/no_such_index', hdist_th=31);
+----
+krepp index directory does not exist
