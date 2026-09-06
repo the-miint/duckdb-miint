@@ -1260,13 +1260,30 @@ endif()
 # ext/krepp/src/krepp.cpp is omitted: it holds main() and the CLI11 argument
 # layer. KreppPlacer therefore reimplements krepp's index discovery, which
 # lives in that same file and will drift if krepp changes its index layout.
+#
+# Like the HDF5 and SortMeRNA blocks above: clang-tidy builds do not have vcpkg
+# wired up, so these headers can be absent there. Dropping krepp from the
+# analysis set is the house response - a FATAL_ERROR here fails the whole tidy
+# pipeline for every other extension too, which is what it did on the first CI
+# run of this feature. Regular builds still require both headers.
 if(MIINT_ENABLE_KREPP)
     find_path(PHMAP_INCLUDE_DIR parallel_hashmap/phmap.h)
     find_path(BOOST_MATH_INCLUDE_DIR boost/math/tools/minima.hpp)
-    if(NOT PHMAP_INCLUDE_DIR OR NOT BOOST_MATH_INCLUDE_DIR)
+    if(CLANG_TIDY)
+        if(NOT PHMAP_INCLUDE_DIR OR NOT BOOST_MATH_INCLUDE_DIR)
+            message(STATUS "parallel-hashmap/boost-math not found for tidy-check - krepp placement support will be "
+                           "excluded from analysis")
+            set(MIINT_ENABLE_KREPP OFF)
+        else()
+            message(STATUS "parallel-hashmap and boost-math found for tidy-check - krepp placement support enabled")
+        endif()
+    elseif(NOT PHMAP_INCLUDE_DIR OR NOT BOOST_MATH_INCLUDE_DIR)
         message(FATAL_ERROR "krepp requires parallel-hashmap and boost-math headers (vcpkg). "
                             "Configure with -DMIINT_ENABLE_KREPP=OFF to build without placement support.")
     endif()
+endif()
+
+if(MIINT_ENABLE_KREPP)
     set(KREPP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/krepp)
     add_library(krepp STATIC
         ${KREPP_DIR}/src/common.cpp
