@@ -398,6 +398,126 @@ fi
 if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'sylph_profile';" | ./build/release/duckdb -csv -noheader 2>/dev/null | grep -q 1; then
     export SYLPH_AVAILABLE=1
 fi
+if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'place_krepp';" | ./build/release/duckdb -csv -noheader 2>/dev/null | grep -q 1; then
+    export KREPP_AVAILABLE=1
+fi
+
+# Toy krepp index for the place_krepp end-to-end test.
+#
+# krepp ships no test suite. What it ships is the tutorial data in
+# ext/krepp/test/ - 25 genomes, a rooted guide tree and 100 reads - plus a
+# README quickstart that builds an index from them. We rebuild that index here
+# rather than committing one: it is ~69 MB of derived data (the cmer table is
+# 8 bytes per reference k-mer, so no realistic genome set makes it small), and
+# its on-disk layout is tied to the krepp that wrote it - v0.9.0 swapped the
+# recursion branches in Node::generate_tree, so an index written by a different
+# version is misread rather than rejected.
+#
+# Needs the krepp binary and xz to unpack the references. Without either,
+# test/sql/place_krepp_toy.test skips; the validation tests in
+# test/sql/place_krepp.test still run.
+#
+# NOTE ON THE BINARY. As of 2026-09-05 bioconda's newest krepp is 0.8.2, on
+# every platform including macOS, while the submodule pins v0.9.1 - so
+# `conda install bioconda::krepp` gives a binary that would write an index the
+# linked library does not read the same way. Build it from source
+# (`git clone https://github.com/bo1929/krepp && cd krepp &&
+# git submodule update --init --recursive && make`) until upstream publishes
+# 0.9.1. The stamp below records the CLI banner precisely so a mismatch forces
+# a rebuild rather than being silently reused, but nothing compares it against
+# the linked version - see MIINT_KREPP_TOY_INDEX in the docs.
+#
+# The stamp pins three things, so the ~20 s build happens once and repeats only
+# when one of them moves. Everything lands in data/krepp/, which is gitignored.
+#   - ext/krepp's submodule HEAD, because that is what the extension links.
+#   - the CLI's version banner, because that is what writes the index, and it is
+#     a different build from the linked one (bioconda vs. the submodule).
+#   - the sha of the reference tarball, i.e. the input data itself.
+# The banner alone is not enough: it expands PRINT_VERSION, a hardcoded string
+# in common.hpp that only moves on a release. Two commits either side of the
+# generate_tree change both report v0.9.0 while writing incompatible indexes -
+# precisely the drift described above. Same shape as SORTMERNA_REAL_ORACLE,
+# which records the submodule sha for the same reason.
+#
+# The index directory is NAMED for the stamp rather than stamped alongside it.
+# `krepp index` only creates the directory and writes files whose names encode
+# the resolved config (cmer-m<m>r<r>-{frac,no_frac}); it never clears what is
+# already there. Rebuilding in place after a krepp change that moves m or r
+# would leave the old partials beside the new ones, and DiscoverPartials would
+# find two complete suffix groups and load both - exactly the mixed-version
+# index this stamp exists to prevent. A fresh directory per stamp sidesteps it
+# without deleting anything (CLAUDE.md: never `rm` without permission), at the
+# cost of leaving old indexes on disk; data/krepp/ is gitignored, so remove them
+# by hand when you care.
+KREPP_TOY_DIR=data/krepp
+if [ -n "$KREPP_AVAILABLE" ] && command -v krepp &> /dev/null && command -v xz &> /dev/null; then
+    # Every component is checked, because an empty one would silently match an
+    # empty one on the other side and turn the pin into a no-op. Same reason
+    # ft_check_one above refuses to hand back an empty sha.
+    KREPP_TOY_WANT=""
+    KREPP_TOY_SHA="$(git -C ext/krepp rev-parse HEAD 2>/dev/null || true)"
+    KREPP_TOY_BANNER="$(krepp --help 2>&1 | head -1 || true)"
+    KREPP_TOY_TARBALL="$(sha256sum ext/krepp/test/references_toy.tar.gz 2>/dev/null | awk '{print $1}')"
+    if [ -z "$KREPP_TOY_SHA" ] || [ -z "$KREPP_TOY_BANNER" ] || [ -z "$KREPP_TOY_TARBALL" ]; then
+        echo "Warning: cannot stamp krepp toy index (submodule sha, krepp banner or tarball sha unavailable);"
+        echo "         skipping place_krepp end-to-end tests"
+    else
+        KREPP_TOY_WANT="$KREPP_TOY_SHA|$KREPP_TOY_BANNER|$KREPP_TOY_TARBALL"
+    fi
+fi
+if [ -n "$KREPP_TOY_WANT" ]; then
+    KREPP_TOY_KEY="$(printf '%s' "$KREPP_TOY_WANT" | sha256sum | cut -c1-12)"
+    KREPP_TOY_INDEX="$KREPP_TOY_DIR/index_toy-$KREPP_TOY_KEY"
+    # Built under .partial and moved into place only on success. `krepp index`
+    # creates its output directory in the CLI callback, before it indexes
+    # anything, so a failure at any point leaves a directory behind that exists
+    # and is incomplete. Testing `-d` on the final path would then both export
+    # that partial index and, because the same `-d` guards the build, never
+    # retry it. The mv is atomic, and nothing is deleted.
+    KREPP_TOY_PARTIAL="$KREPP_TOY_INDEX.partial"
+    if [ ! -d "$KREPP_TOY_INDEX" ] && [ ! -d "$KREPP_TOY_PARTIAL" ]; then
+        echo "Building krepp toy index (once per krepp version) ..."
+        mkdir -p "$KREPP_TOY_DIR"
+        if tar -xzf ext/krepp/test/references_toy.tar.gz -C "$KREPP_TOY_DIR" \
+           && xz -df "$KREPP_TOY_DIR"/references_toy/*.fna.xz 2>/dev/null \
+           && awk -v d="$PWD/$KREPP_TOY_DIR" -F'\t' '{print $1 "\t" d "/references_toy/" $1 ".fna"}' \
+                ext/krepp/test/input_map.tsv > "$KREPP_TOY_DIR/input_map.tsv" \
+           && krepp index -h 11 -k 27 -w 35 -o "$KREPP_TOY_PARTIAL" \
+                -i "$KREPP_TOY_DIR/input_map.tsv" -t ext/krepp/test/tree_toy.nwk \
+                --num-threads 4 > "$KREPP_TOY_DIR/index_toy-$KREPP_TOY_KEY.log" 2>&1 \
+           && mv "$KREPP_TOY_PARTIAL" "$KREPP_TOY_INDEX"; then
+            :
+        else
+            echo "Warning: krepp toy index build failed, skipping place_krepp end-to-end tests"
+            echo "         (see $KREPP_TOY_DIR/index_toy-$KREPP_TOY_KEY.log; the incomplete build is"
+            echo "          left at $KREPP_TOY_PARTIAL — remove it to retry)"
+        fi
+    elif [ ! -d "$KREPP_TOY_INDEX" ]; then
+        # Reached when a previous run failed and parked a .partial. Without this
+        # branch the guard above is simply false, nothing builds, nothing warns,
+        # and place_krepp_toy.test skips forever with CI green - the same silent
+        # -skip trap this file already calls out for the FastTree goldens.
+        echo "Warning: an incomplete krepp toy index is parked at $KREPP_TOY_PARTIAL,"
+        echo "         so place_krepp end-to-end tests are being skipped."
+        echo "         Remove that directory to retry the build."
+    fi
+    if [ -d "$KREPP_TOY_INDEX" ]; then
+        export MIINT_KREPP_TOY_INDEX="$KREPP_TOY_INDEX"
+    fi
+elif [ -n "$KREPP_AVAILABLE" ]; then
+    # Say so. bioconda's newest krepp is 0.8.2 against a v0.9.1 pin, so "CLI not
+    # found" is the expected case rather than the exotic one, and a silent skip
+    # here looks identical to a passing end-to-end suite.
+    if ! command -v krepp &> /dev/null; then
+        echo "Note: krepp CLI not on PATH, so the toy index cannot be built and"
+        echo "      place_krepp end-to-end tests are being skipped. bioconda ships"
+        echo "      0.8.2, which writes an index this build misreads - build v0.9.1"
+        echo "      from source (https://github.com/bo1929/krepp) to run them."
+    elif ! command -v xz &> /dev/null; then
+        echo "Note: xz not on PATH, so krepp's reference tarball cannot be unpacked"
+        echo "      and place_krepp end-to-end tests are being skipped."
+    fi
+fi
 # libcurl streaming-upload transport (off on macOS — vsearch/OpenSSL symbol clash).
 if echo "SELECT 1 FROM miint_versions() WHERE library = 'libcurl';" | ./build/release/duckdb -csv -noheader 2>/dev/null | grep -q 1; then
     export MIINT_HAS_CURL=1

@@ -9,7 +9,9 @@
     "openssl",
     "curl",
     { "name": "hdf5", "features": ["cpp", "zlib", "szip"], "platform": "!emscripten" },
-    { "name": "rocksdb", "platform": "!emscripten" }
+    { "name": "rocksdb", "platform": "!emscripten" },
+    { "name": "boost-math", "platform": "!emscripten & !windows" },
+    { "name": "parallel-hashmap", "platform": "!emscripten & !windows" }
   ],
   "vcpkg-configuration": {
     "overlay-ports": ["./ports", "./extension-ci-tools/vcpkg_ports"],

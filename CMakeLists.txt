@@ -145,6 +145,7 @@ option(MIINT_ENABLE_SORTMERNA "Build with SortMeRNA rRNA alignment support" ON)
 option(MIINT_ENABLE_SYLPH "Build with sylph FracMinHash relative-abundance profiling" ON)
 option(MIINT_ENABLE_GPL_BOUNDARY "Build with gpl-boundary subsystem (process pipes + Arrow IPC over POSIX shm)" ON)
 option(MIINT_ENABLE_UNIFRAC "Build with UniFrac (PCoA / PERMANOVA / Faith PD) support" ON)
+option(MIINT_ENABLE_KREPP "Build with krepp phylogenetic placement support" ON)
 
 # libdeflate: Linux-only accelerator for htslib bgzf gzip (FASTQ/FASTA/BAM COPY).
 # Default ON so the shipped Linux binary actually gets the win (~3x over zlib-parallel bgzf,
@@ -282,18 +283,20 @@ if(EMSCRIPTEN)
     set(MIINT_ENABLE_SORTMERNA OFF)
     set(MIINT_ENABLE_SYLPH OFF)
     set(MIINT_ENABLE_GPL_BOUNDARY OFF)
-    message(STATUS "Emscripten detected: disabling HDF5, SortMeRNA, sylph, and gpl-boundary (WASM-incompatible)")
+    set(MIINT_ENABLE_KREPP OFF)
+    message(STATUS "Emscripten detected: disabling HDF5, SortMeRNA, sylph, gpl-boundary, and krepp (WASM-incompatible)")
 elseif(WIN32)
     set(MIINT_ENABLE_MAFFT OFF)
     set(MIINT_ENABLE_ABPOA OFF)
     set(MIINT_ENABLE_SYLPH OFF)
     set(MIINT_ENABLE_GPL_BOUNDARY OFF)
     set(MIINT_ENABLE_UNIFRAC OFF)
+    set(MIINT_ENABLE_KREPP OFF)
     if(MINGW)
         set(MIINT_ENABLE_SORTMERNA OFF)
-        message(STATUS "MinGW detected: disabling MAFFT, SortMeRNA, sylph, gpl-boundary, and UniFrac (cmph + gpl-boundary rely on POSIX APIs; libssu inmem assumes POSIX)")
+        message(STATUS "MinGW detected: disabling MAFFT, SortMeRNA, sylph, gpl-boundary, UniFrac, and krepp (cmph + gpl-boundary rely on POSIX APIs; libssu inmem assumes POSIX)")
     else()
-        message(STATUS "Windows detected: disabling MAFFT, sylph, gpl-boundary, and UniFrac (require POSIX APIs)")
+        message(STATUS "Windows detected: disabling MAFFT, sylph, gpl-boundary, UniFrac, and krepp (require POSIX APIs)")
     endif()
 endif()
 
@@ -428,7 +431,14 @@ if(NOT SYLPH_GIT_VERSION)
     set(SYLPH_GIT_VERSION "unknown")
 endif()
 
-message(STATUS "Submodule versions: minimap2=${MINIMAP2_GIT_VERSION} WFA2=${WFA2_GIT_VERSION} rype=${RYPE_GIT_VERSION} vsearch=${VSEARCH_GIT_VERSION} mafft=${MAFFT_GIT_VERSION} abpoa=${ABPOA_GIT_VERSION} sylph=${SYLPH_GIT_VERSION} unifrac=${UNIFRAC_GIT_VERSION} skbb=${SKBB_GIT_VERSION}")
+execute_process(COMMAND git describe --tags --dirty --always
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ext/krepp
+    OUTPUT_VARIABLE KREPP_GIT_VERSION OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(NOT KREPP_GIT_VERSION)
+    set(KREPP_GIT_VERSION "unknown")
+endif()
+
+message(STATUS "Submodule versions: minimap2=${MINIMAP2_GIT_VERSION} WFA2=${WFA2_GIT_VERSION} rype=${RYPE_GIT_VERSION} vsearch=${VSEARCH_GIT_VERSION} mafft=${MAFFT_GIT_VERSION} abpoa=${ABPOA_GIT_VERSION} sylph=${SYLPH_GIT_VERSION} unifrac=${UNIFRAC_GIT_VERSION} skbb=${SKBB_GIT_VERSION} krepp=${KREPP_GIT_VERSION}")
 
 # Build htslib from release tarball
 # Configure with zstd support if available (htslib autodetects via pkg-config)
@@ -1245,6 +1255,57 @@ if(MIINT_ENABLE_ABPOA)
     endif()
 endif()
 
+# Build krepp phylogenetic placement (v0.9.1).
+# Header-only dependencies come from vcpkg rather than krepp's own submodules.
+# ext/krepp/src/krepp.cpp is omitted: it holds main() and the CLI11 argument
+# layer. KreppPlacer therefore reimplements krepp's index discovery, which
+# lives in that same file and will drift if krepp changes its index layout.
+if(MIINT_ENABLE_KREPP)
+    find_path(PHMAP_INCLUDE_DIR parallel_hashmap/phmap.h)
+    find_path(BOOST_MATH_INCLUDE_DIR boost/math/tools/minima.hpp)
+    if(NOT PHMAP_INCLUDE_DIR OR NOT BOOST_MATH_INCLUDE_DIR)
+        message(FATAL_ERROR "krepp requires parallel-hashmap and boost-math headers (vcpkg). "
+                            "Configure with -DMIINT_ENABLE_KREPP=OFF to build without placement support.")
+    endif()
+    set(KREPP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/krepp)
+    add_library(krepp STATIC
+        ${KREPP_DIR}/src/common.cpp
+        ${KREPP_DIR}/src/MurmurHash3.cpp
+        ${KREPP_DIR}/src/lshf.cpp
+        ${KREPP_DIR}/src/phytree.cpp
+        ${KREPP_DIR}/src/rqseq.cpp
+        ${KREPP_DIR}/src/index.cpp
+        ${KREPP_DIR}/src/sketch.cpp
+        ${KREPP_DIR}/src/query.cpp
+        ${KREPP_DIR}/src/seek.cpp
+        ${KREPP_DIR}/src/record.cpp
+        ${KREPP_DIR}/src/table.cpp)
+    set_target_properties(krepp PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    # krepp and minimap2 both define a global `seq_nt4_table`, and they are not
+    # the same table: minimap2's is `unsigned char [256]`, krepp's is
+    # `const unsigned char [128]`. Linking both is a duplicate-symbol error, and
+    # letting one win would be worse than the error - minimap2 indexes bytes
+    # above 127, which would read off the end of krepp's array. Renaming krepp's
+    # copy keeps the two apart. This line covers krepp's own sources; the single
+    # miint TU that includes krepp's headers gets the same define via a
+    # source-file property further down - deliberately not target-wide, for the
+    # reason recorded there.
+    # PRIVATE, not PUBLIC: krepp's own TUs still get both, but neither becomes a
+    # usage requirement. The three link sites use $<TARGET_FILE:krepp>, which
+    # carries no usage requirements, so PUBLIC is inert today - but one
+    # target_link_libraries(x krepp) anywhere would re-arm exactly the trap the
+    # comment above describes, and put krepp's kseq.h/kvec.h ahead of
+    # minimap2's for that target.
+    target_compile_definitions(krepp PRIVATE _WOPENMP=0 _WLCURL=0
+        seq_nt4_table=krepp_seq_nt4_table)
+    target_include_directories(krepp PRIVATE
+        ${KREPP_DIR}/src ${PHMAP_INCLUDE_DIR} ${BOOST_MATH_INCLUDE_DIR})
+    # PUBLIC here, unlike the two above, is deliberate: zlib is a real link
+    # dependency any consumer of this archive needs, whereas the rename and the
+    # klib include dir are things a consumer must NOT inherit.
+    target_link_libraries(krepp PUBLIC ZLIB::ZLIB)
+endif()
+
 # Backward-compat alias: the WASM linked-libs block below still references
 # RYPE_LIB_PATH. rype now lives inside libmiint_rust_glue.a (built above).
 set(RYPE_LIB_PATH ${GLUE_LIB_PATH})
@@ -1259,6 +1320,28 @@ if(MIINT_ENABLE_MAFFT)
 endif()
 if(MIINT_ENABLE_ABPOA)
     include_directories(ext/abpoa/include)
+endif()
+if(MIINT_ENABLE_KREPP)
+    # Scoped to the same single TU as the defines below, and for the same
+    # reason. ${KREPP_DIR}/src ships a klib set - kseq.h, kvec.h, kalloc.h,
+    # kdq.h, ketopt.h, sdust.h - whose basenames collide with minimap2's. On the
+    # directory-level include path those would shadow for every target in this
+    # file. Nothing includes them bare today, so this is latent rather than a
+    # live bug - but the seq_nt4_table breakage below was latent in exactly the
+    # same way until a header happened to line up, so scope it now.
+    set_source_files_properties(src/KreppPlacer.cpp PROPERTIES
+        INCLUDE_DIRECTORIES "${KREPP_DIR}/src;${PHMAP_INCLUDE_DIR};${BOOST_MATH_INCLUDE_DIR}")
+    # These three belong to the ONE translation unit that includes krepp's
+    # headers, not to the targets. Applied target-wide they also rewrote the
+    # declaration in src/KSW2Aligner.cpp, which declares minimap2's
+    # `unsigned char seq_nt4_table[256]` and indexes it over the full byte
+    # range - so it bound krepp's `const unsigned char [128]` instead and read
+    # up to 128 bytes past the end for any input byte >= 128. That is precisely
+    # the out-of-bounds the rename exists to prevent, pointed the wrong way.
+    # Source-file properties are directory-scoped, so this reaches
+    # miint_extension, miint_loadable_extension and tests alike.
+    set_source_files_properties(src/KreppPlacer.cpp PROPERTIES
+        COMPILE_DEFINITIONS "_WOPENMP=0;_WLCURL=0;seq_nt4_table=krepp_seq_nt4_table")
 endif()
 if(MIINT_ENABLE_VSEARCH)
     include_directories(${VSEARCH_SRC_DIR}/src)
@@ -1571,6 +1654,9 @@ endif()
 if(MIINT_ENABLE_ABPOA)
     list(APPEND EXTENSION_SOURCES src/AbpoaAligner.cpp src/align_abpoa.cpp src/consensus_abpoa.cpp)
 endif()
+if(MIINT_ENABLE_KREPP)
+    list(APPEND EXTENSION_SOURCES src/KreppPlacer.cpp src/place_krepp.cpp)
+endif()
 if(MIINT_ENABLE_SORTMERNA)
     list(APPEND EXTENSION_SOURCES src/SortMeRNAAligner.cpp src/align_sortmerna.cpp src/align_sortmerna_rrna.cpp)
 endif()
@@ -1686,6 +1772,12 @@ endif()
 if(MIINT_ENABLE_SORTMERNA)
     target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_SORTMERNA)
 endif()
+if(MIINT_ENABLE_KREPP)
+    # _WOPENMP/_WLCURL must match how krepp itself was compiled: they gate
+    # declarations in krepp's headers, which KreppPlacer.cpp includes.
+    target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_KREPP
+        KREPP_GIT_VERSION="${KREPP_GIT_VERSION}")
+endif()
 if(MIINT_ENABLE_SYLPH)
     target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_SYLPH
         SYLPH_GIT_VERSION="${SYLPH_GIT_VERSION}")
@@ -1723,6 +1815,13 @@ endif()
 if(MIINT_ENABLE_ABPOA)
     target_link_libraries(${EXTENSION_NAME} $<TARGET_FILE:abpoa>)
     add_dependencies(${EXTENSION_NAME} abpoa)
+endif()
+if(MIINT_ENABLE_KREPP)
+    # Link the archive by path, not by target name: miint_extension goes into
+    # DuckDB's install(EXPORT) set, which rejects link dependencies on targets
+    # outside it. Same treatment as abpoa above.
+    target_link_libraries(${EXTENSION_NAME} $<TARGET_FILE:krepp>)
+    add_dependencies(${EXTENSION_NAME} krepp)
 endif()
 if(MIINT_ENABLE_VSEARCH)
     target_link_libraries(${EXTENSION_NAME} vsearch)
@@ -1826,6 +1925,12 @@ if(MIINT_ENABLE_LIBDEFLATE)
 endif()
 if(MIINT_ENABLE_SORTMERNA)
     target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_SORTMERNA)
+endif()
+if(MIINT_ENABLE_KREPP)
+    target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_KREPP
+        KREPP_GIT_VERSION="${KREPP_GIT_VERSION}")
+    target_link_libraries(${LOADABLE_EXTENSION_NAME} $<TARGET_FILE:krepp>)
+    add_dependencies(${LOADABLE_EXTENSION_NAME} krepp)
 endif()
 if(MIINT_ENABLE_SYLPH)
     target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_SYLPH
@@ -2077,6 +2182,9 @@ if(MIINT_ENABLE_VSEARCH)
         src/VsearchSearchWrapper.cpp test/cpp/test_VsearchSearchWrapper.cpp
         src/VsearchClusterWrapper.cpp test/cpp/test_VsearchClusterWrapper.cpp)
 endif()
+if(MIINT_ENABLE_KREPP)
+    list(APPEND TEST_SOURCES src/KreppPlacer.cpp test/cpp/test_KreppPlacer.cpp)
+endif()
 if(MIINT_ENABLE_MAFFT)
     list(APPEND TEST_SOURCES src/MafftAligner.cpp test/cpp/test_MafftAligner.cpp)
 endif()
@@ -2169,6 +2277,12 @@ endif()
 if(MIINT_ENABLE_SORTMERNA)
     target_link_libraries(tests sortmerna RocksDB::rocksdb)
     target_compile_definitions(tests PRIVATE MIINT_HAS_SORTMERNA)
+endif()
+if(MIINT_ENABLE_KREPP)
+    target_compile_definitions(tests PRIVATE MIINT_HAS_KREPP
+        KREPP_GIT_VERSION="${KREPP_GIT_VERSION}")
+    target_link_libraries(tests $<TARGET_FILE:krepp>)
+    add_dependencies(tests krepp)
 endif()
 if(MIINT_ENABLE_SYLPH)
     # Link rype (the umbrella archive), which transitively provides sylph

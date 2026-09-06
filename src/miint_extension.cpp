@@ -65,6 +65,9 @@
 #ifdef MIINT_HAS_MAFFT
 #include <align_mafft.hpp>
 #endif
+#ifdef MIINT_HAS_KREPP
+#include "place_krepp.hpp"
+#endif
 #ifdef MIINT_HAS_ABPOA
 #include <align_abpoa.hpp>
 #include <consensus_abpoa.hpp>
@@ -220,6 +223,9 @@ static unique_ptr<FunctionData> MiintVersionsBind(ClientContext &context, TableF
 #endif
 #ifdef MIINT_HAS_SYLPH
 	data->versions.emplace_back("sylph", SYLPH_GIT_VERSION);
+#endif
+#ifdef MIINT_HAS_KREPP
+	data->versions.emplace_back("krepp", KREPP_GIT_VERSION);
 #endif
 #ifdef MIINT_HAS_UNIFRAC
 	data->versions.emplace_back("unifrac", UNIFRAC_GIT_VERSION);
@@ -401,6 +407,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 #ifdef MIINT_HAS_SORTMERNA
 	AlignSortMeRNATableFunction::Register(loader);
 	AlignSortMeRNARRNATableFunction::Register(loader);
+#endif
+#ifdef MIINT_HAS_KREPP
+	PlaceKreppTableFunction::Register(loader);
 #endif
 #ifdef MIINT_HAS_SYLPH
 	SylphProfileTableFunction::Register(loader);

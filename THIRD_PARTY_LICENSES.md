@@ -500,6 +500,55 @@ OF SUCH DAMAGE.
 
 ---
 
+## krepp
+
+k-mer LSH index and maximum pseudo-likelihood phylogenetic placement. Used
+by `place_krepp`. Embedded as a statically linked C++ library built from
+11 of the upstream `src/*.cpp` files; `src/krepp.cpp` (the CLI entry point)
+is excluded. miint reads an index built by krepp's own command-line tool.
+Pinned at v0.9.1.
+
+- Repository: https://github.com/bo1929/krepp
+- License: MIT
+
+### MIT License
+
+Copyright (c) 2026 Ali Osman Berk Şapcı
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+### Code vendored inside krepp
+
+krepp's `src/` carries several third-party files that are compiled into
+miint along with the rest of the library. Upstream confirmed their
+provenance (Ali Osman Berk Şapcı, 2026-09-05); the files themselves carry
+author attribution but, apart from MurmurHash3, no inline license text, so
+it is recorded here.
+
+| File(s) | Origin | License |
+|---|---|---|
+| `src/hyperloglog.hpp` | [cpp-HyperLogLog](https://github.com/hideo55/cpp-HyperLogLog), Hideaki Ohno | MIT |
+| `src/kdq.h`, `src/kalloc.h`, `src/ketopt.h`, `src/kseq.h`, `src/kvec.h` | [klib](https://github.com/attractivechaos/klib), Attractive Chaos / Heng Li | MIT |
+| `src/MurmurHash3.{cpp,hpp}` | MurmurHash3, Austin Appleby | Public domain — the file states "placed in the public domain. The author hereby disclaims copyright to this source code." (upstream described it as MIT; the vendored file's own header is the record here) |
+
+---
+
 ## abPOA
 
 Adaptive banded partial order alignment for multiple sequence alignment
