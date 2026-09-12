@@ -370,23 +370,45 @@ std::string BuildShardedQueryReadsSelect(const std::string &query_table, const s
 	       KeywordHelper::WriteOptionallyQuoted(read_to_shard_table) + " rts ON q.read_id = rts.read_id";
 }
 
-std::string MaterializeShardedQueryReads(Connection &conn, const std::string &query_table,
-                                         const std::string &read_to_shard_table, const SequenceTableSchema &schema) {
-	// Uniquified per call: this lands in the *caller's* TEMP catalog (the
-	// connection inherits it, which is what lets worker connections see it), so a
-	// fixed name would collide across concurrent queries in one session. Name
-	// shape follows MaterializeRypeInputTempTable.
-	const std::string tmp_name =
-	    "_miint_shard_reads_" + StringUtil::Replace(UUID::ToString(UUID::GenerateRandomUUID()), "-", "");
+// Shared by MaterializeShardedQueryReads and MaterializeQueryReads: uniquify a
+// TEMP table name under `name_prefix`, CREATE TEMP TABLE AS `select_sql`, and
+// throw `error_context: <duckdb error>` on failure. `out_row_count`, if
+// non-null, receives the CTAS's own row count (its single BIGINT "Count"
+// result) instead of costing the caller a second COUNT(*) query.
+//
+// Uniquified per call: this lands in the *caller's* TEMP catalog (the
+// connection inherits it, which is what lets worker connections see it), so a
+// fixed name would collide across concurrent queries in one session. Name
+// shape follows MaterializeRypeInputTempTable.
+static std::string MaterializeSelectIntoTemp(Connection &conn, const std::string &select_sql,
+                                             const std::string &name_prefix, const std::string &error_context,
+                                             idx_t *out_row_count) {
+	const std::string tmp_name = name_prefix + StringUtil::Replace(UUID::ToString(UUID::GenerateRandomUUID()), "-", "");
 	const std::string tmp_quoted = KeywordHelper::WriteOptionallyQuoted(tmp_name);
 
-	auto create_result = conn.Query("CREATE TEMP TABLE " + tmp_quoted + " AS " +
-	                                BuildShardedQueryReadsSelect(query_table, read_to_shard_table, schema));
+	auto create_result = conn.Query("CREATE TEMP TABLE " + tmp_quoted + " AS " + select_sql);
 	if (create_result->HasError()) {
-		throw InvalidInputException("Failed to materialize shard-assigned reads from query table '%s': %s", query_table,
-		                            create_result->GetError());
+		throw InvalidInputException("%s: %s", error_context, create_result->GetError());
+	}
+	if (out_row_count) {
+		*out_row_count = NumericCast<idx_t>(create_result->GetValue(0, 0).GetValue<int64_t>());
 	}
 	return tmp_name;
+}
+
+std::string MaterializeShardedQueryReads(Connection &conn, const std::string &query_table,
+                                         const std::string &read_to_shard_table, const SequenceTableSchema &schema) {
+	return MaterializeSelectIntoTemp(
+	    conn, BuildShardedQueryReadsSelect(query_table, read_to_shard_table, schema), "_miint_shard_reads_",
+	    "Failed to materialize shard-assigned reads from query table '" + query_table + "'", nullptr);
+}
+
+std::string MaterializeQueryReads(Connection &conn, const std::string &query_table, const SequenceTableSchema &schema,
+                                  idx_t *out_row_count) {
+	return MaterializeSelectIntoTemp(
+	    conn,
+	    "SELECT " + BuildSequenceColumnList(schema) + " FROM " + KeywordHelper::WriteOptionallyQuoted(query_table),
+	    "_miint_query_reads_", "Failed to materialize query table '" + query_table + "'", out_row_count);
 }
 
 void ReadShardReadsFrom(ClientContext &context, const std::string &source_sql, const SequenceTableSchema &schema,

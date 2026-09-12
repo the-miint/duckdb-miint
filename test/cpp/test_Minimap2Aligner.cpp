@@ -4,6 +4,7 @@
 #include "SequenceRecord.hpp"
 #include "sequence_utils.hpp"
 #include <cstdio>
+#include <fstream>
 #include <memory>
 #include <set>
 #include <string>
@@ -516,6 +517,111 @@ TEST_CASE("SharedMinimap2Index construction and accessors", "[Minimap2Aligner]")
 	REQUIRE(shared_idx.subject_names()[0] == "shared_ref");
 	// mapopt should have CIGAR flag set
 	REQUIRE((shared_idx.mapopt().flag & MM_F_CIGAR) != 0);
+}
+
+// Builds a genuine multi-part .mmi fixture by dumping two independently-built
+// single-part indexes and concatenating their bytes. mm_idx_dump (called once
+// by save_index per file) writes a self-contained MM_IDX_MAGIC-prefixed block;
+// minimap2's own `-I <batch>` CLI flag produces a multi-part file by calling
+// mm_idx_dump repeatedly into the SAME fp, so byte-concatenating two
+// independently-dumped single-part files reproduces that exact on-disk layout.
+// Returns the path to the multi-part file; caller owns cleanup of all three
+// paths (part1_path, part2_path, and the returned multi-part path).
+static std::string build_multipart_mmi_fixture(const std::string &part1_path, const std::string &part2_path,
+                                               const std::string &multipart_path) {
+	Minimap2Config config;
+	config.preset = "sr";
+	config.k = 5;
+
+	std::string ref_seq1 = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+	                       "GGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC";
+	std::string ref_seq2 = "TTTTGGGGCCCCAAAATTTTGGGGCCCCAAAATTTTGGGGCCCCAAAATTTT"
+	                       "AAAACCCCGGGGTTTTAAAACCCCGGGGTTTTAAAACCCCGGGGTTTTAAAA";
+
+	Minimap2Aligner builder1(config);
+	builder1.build_index({{"part1_ref", ref_seq1}});
+	builder1.save_index(part1_path);
+
+	Minimap2Aligner builder2(config);
+	builder2.build_index({{"part2_ref", ref_seq2}});
+	builder2.save_index(part2_path);
+
+	std::ifstream in1(part1_path, std::ios::binary);
+	std::ifstream in2(part2_path, std::ios::binary);
+	std::ofstream out(multipart_path, std::ios::binary | std::ios::trunc);
+	REQUIRE(in1.good());
+	REQUIRE(in2.good());
+	REQUIRE(out.good());
+	out << in1.rdbuf();
+	out << in2.rdbuf();
+	out.close();
+
+	return multipart_path;
+}
+
+TEST_CASE("Minimap2IndexReader reads a multi-part index part by part", "[Minimap2Aligner]") {
+	const std::string part1 = "data/shards/test_multipart_reader_p1.mmi";
+	const std::string part2 = "data/shards/test_multipart_reader_p2.mmi";
+	const std::string multipart = "data/shards/test_multipart_reader.mmi";
+	build_multipart_mmi_fixture(part1, part2, multipart);
+
+	Minimap2Config config;
+	config.preset = "sr";
+	config.k = 5;
+
+	Minimap2IndexReader reader(multipart, config);
+
+	auto p1 = reader.ReadNextPart();
+	REQUIRE(p1 != nullptr);
+	REQUIRE(p1->subject_names().size() == 1);
+	REQUIRE(p1->subject_names()[0] == "part1_ref");
+	// A genuinely multi-part fixture: the reader must NOT be at eof after part 1,
+	// or this test (and the design it verifies) would be vacuous.
+	REQUIRE_FALSE(reader.AtEof());
+
+	auto p2 = reader.ReadNextPart();
+	REQUIRE(p2 != nullptr);
+	REQUIRE(p2->subject_names().size() == 1);
+	REQUIRE(p2->subject_names()[0] == "part2_ref");
+	REQUIRE(reader.AtEof());
+
+	auto p3 = reader.ReadNextPart();
+	REQUIRE(p3 == nullptr);
+
+	std::remove(part1.c_str());
+	std::remove(part2.c_str());
+	std::remove(multipart.c_str());
+}
+
+TEST_CASE("LoadIndexFromFile throws loud on a multi-part index instead of silently truncating", "[Minimap2Aligner]") {
+	// Regression for the bug this streaming feature fixes: before
+	// Minimap2IndexReader existed, LoadIndexFromFile (and therefore
+	// SharedMinimap2Index(path, config), and therefore align_minimap2_sharded)
+	// silently returned only the first part of a multi-part .mmi with no error,
+	// dropping every reference in later parts.
+	const std::string part1 = "data/shards/test_multipart_loadfromfile_p1.mmi";
+	const std::string part2 = "data/shards/test_multipart_loadfromfile_p2.mmi";
+	const std::string multipart = "data/shards/test_multipart_loadfromfile.mmi";
+	build_multipart_mmi_fixture(part1, part2, multipart);
+
+	Minimap2Config config;
+	config.preset = "sr";
+	config.k = 5;
+	mm_idxopt_t iopt;
+	mm_mapopt_t mopt;
+	Minimap2Aligner::InitOptions(config, iopt, mopt);
+
+	mm_idx_t *idx = nullptr;
+	std::vector<std::string> names;
+	REQUIRE_THROWS_AS(Minimap2Aligner::LoadIndexFromFile(multipart, iopt, idx, names), std::runtime_error);
+
+	// SharedMinimap2Index(path, config) — the constructor align_minimap2_sharded
+	// uses for every shard — goes through LoadIndexFromFile and must throw too.
+	REQUIRE_THROWS_AS(SharedMinimap2Index(multipart, config), std::runtime_error);
+
+	std::remove(part1.c_str());
+	std::remove(part2.c_str());
+	std::remove(multipart.c_str());
 }
 
 TEST_CASE("Two aligners sharing same SharedMinimap2Index produce identical results", "[Minimap2Aligner]") {

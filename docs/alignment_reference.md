@@ -657,6 +657,7 @@ SELECT * FROM align_minimap2('paired_queries', subject_table='subjects', max_sec
 - Error if neither `subject_table` nor `index_path` is provided
 - Error if both `subject_table` and `index_path` are provided
 - Error if `index_path` file does not exist or is not a valid minimap2 index
+- Error at execution time (not bind time — see *Large references*) if `index_path` is a multi-part index and `include_unmapped=true` is also specified: whether the index is multi-part is only knowable once it's opened, so `EXPLAIN` and `PREPARE` succeed and the error only surfaces when the query actually runs
 - Error if subject_table contains paired-end data (sequence2 not NULL)
 - Error if tables lack required columns (read_id, sequence1)
 - Error if preset is unknown to minimap2
@@ -676,6 +677,24 @@ SELECT * FROM align_minimap2('paired_queries', subject_table='subjects', max_sec
 **Limitations:**
 - Subject sequences must fit in memory (loaded at bind time for indexing when using `subject_table`)
 - No support for reading sequences directly from files (use tables/views from `read_fastx`)
+
+**Large references (multi-part indexes):**
+
+A minimap2 index (`.mmi`) normally loads entirely into memory — there is no lazy or memory-mapped mode for a single-part index, so a 9 GB `.mmi` needs roughly 9 GB of headroom regardless of `memory_limit` (this memory is extension heap, not buffer-manager tracked). For a reference too large for available RAM, build the index as **multiple parts** with minimap2's own `-I` batch-size flag:
+
+```
+minimap2 -d ref.mmi -I 2G ref.fa
+```
+
+`align_minimap2(index_path := 'ref.mmi')` detects a multi-part index automatically and streams it one part at a time: every query is aligned against part 1, then part 2, and so on. Loading the next part always drops the reference to the previous one first, so there is no point where two parts are held onto indefinitely — verified by live RSS polling across part transitions, which shows memory plateau rather than accumulate as later parts load. (A worker still finishing an alignment against the outgoing part briefly overlaps with the incoming part loading, but that overlap is bounded by one in-flight alignment batch, not a whole extra part.) Peak memory tracks the **largest single part** plus a fixed baseline (DuckDB engine + per-thread working memory), not the sum of all parts and not the whole index — pick `-I` so that largest part fits your budget. An even split matters more than a small `-I` value on its own: a lopsided split (e.g. one huge part, one small) gives up most of the benefit, since peak memory is set by whichever part is biggest. `save_minimap2_index()` always builds a single-part index, so this only applies to indexes built with the minimap2 CLI.
+
+Trade-offs specific to multi-part indexes:
+- Runtime is roughly linear in part count — every query is aligned against every part in turn, unlike `align_minimap2_sharded`, which aligns each read against exactly one shard it was pre-assigned to. Prefer sharding when reads can be assigned to shards ahead of time.
+- Primary/secondary selection and mapping quality are computed **per part**, matching the minimap2 CLI's own behavior for multi-part indexes: a read that chains in two parts produces one primary alignment per part, and `mapq` is only meaningful within a part — there is no cross-part reconciliation.
+- `include_unmapped` is rejected for a multi-part index: a read with no chain in part 1 routinely maps in part 3, so a per-part synthetic "unmapped" row would claim a read did not align when it may align in a later part — the same reasoning `align_minimap2_sharded` already applies to the same parameter.
+- `debug := true` prints per-part RSS to stderr as each part loads, which is the number to watch when tuning `-I` against a memory budget.
+
+A single-part `.mmi` (the default output of `minimap2 -d` with no `-I`, and always the case for `save_minimap2_index()`) is unaffected — behavior and performance are unchanged.
 
 #### Sharded alignment with minimap2
 
