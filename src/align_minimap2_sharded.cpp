@@ -288,8 +288,8 @@ std::shared_ptr<ActiveShard> AlignMinimap2ShardedTableFunction::ClaimWork(Client
 	SHARD_DBG(gstate, "ClaimWork: LOADING index '%s'", shard_info.index_path.c_str());
 	auto load_start = std::chrono::steady_clock::now();
 	try {
-		auto shared_idx = std::make_shared<miint::SharedMinimap2Index>(shard_info.index_path, bind_data.config);
-		active->index = std::move(shared_idx);
+		active->parts = std::make_unique<miint::Minimap2PartCursor>(shard_info.index_path, bind_data.config,
+		                                                            MakeFreedMemoryFlusher(context));
 	} catch (...) {
 		// Remove failed shard from active list and notify waiters
 		SHARD_DBG(gstate, "ClaimWork: LOAD FAILED shard %zu", static_cast<size_t>(shard_idx));
@@ -305,8 +305,9 @@ std::shared_ptr<ActiveShard> AlignMinimap2ShardedTableFunction::ClaimWork(Client
 	}
 	auto load_ms =
 	    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - load_start).count();
-	SHARD_DBG_MEM(gstate, "ClaimWork: LOADED index shard %zu '%s' in %ldms", static_cast<size_t>(shard_idx),
-	              shard_info.name.c_str(), static_cast<long>(load_ms));
+	SHARD_DBG_MEM(gstate, "ClaimWork: LOADED index shard %zu '%s' (%s) in %ldms", static_cast<size_t>(shard_idx),
+	              shard_info.name.c_str(), active->parts->IsMultiPart() ? "multi-part, first part" : "single-part",
+	              static_cast<long>(load_ms));
 
 	// Phase 4b: pre-fetch this shard's sequences in one query, from whatever
 	// InitGlobal chose as the source (snapshot table, or an inline subquery for the
@@ -325,6 +326,15 @@ std::shared_ptr<ActiveShard> AlignMinimap2ShardedTableFunction::ClaimWork(Client
 		        .count();
 		seq_count = active->shard_sequences.size();
 		active->batch_size = std::min(SHARD_READ_BATCH_SIZE, std::max<idx_t>(1, seq_count));
+		// A shard can legitimately match zero reads (read_to_shard may name
+		// read_ids absent from query_table — the estimate-vs-actual reconciliation
+		// below exists for exactly that). Without this, the first claim falls
+		// straight into Advance and the cursor walks and fully decodes every
+		// remaining part of this shard's index, potentially many GB, to align
+		// nothing against them. Mirrors align_minimap2's zero-row guard.
+		if (seq_count == 0) {
+			active->parts->MarkExhausted();
+		}
 		SHARD_DBG_MEM(gstate, "ClaimWork: PRE-FETCHED %zu sequences for shard %zu in %ldms (batch_size=%zu)",
 		              static_cast<size_t>(seq_count), static_cast<size_t>(shard_idx), static_cast<long>(fetch_ms),
 		              static_cast<size_t>(active->batch_size));
@@ -376,6 +386,7 @@ std::shared_ptr<ActiveShard> AlignMinimap2ShardedTableFunction::ClaimWork(Client
 void AlignMinimap2ShardedTableFunction::ReleaseWork(GlobalState &gstate, LocalState &lstate) {
 	auto active = lstate.current_active_shard;
 	lstate.aligner->detach_shared_index();
+	lstate.part = miint::Minimap2PartCursor::Attachment {};
 	lstate.has_shard = false;
 
 	auto prev_workers = active->active_workers.fetch_sub(1, std::memory_order_acq_rel);
@@ -460,27 +471,76 @@ void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFun
 			local_state.current_active_shard = active;
 			local_state.has_shard = true;
 			local_state.current_shard_name = bind_data.shards[active->shard_idx].name;
-			local_state.aligner->attach_shared_index(active->index);
+			// Attached to the shard's current part under the cursor lock below.
 		}
 
-		// Atomically claim batch offset into the pre-fetched sequence list
+		// Attach to the shard's current part and claim a batch offset into the
+		// pre-fetched sequence list together — see Minimap2PartCursor's
+		// WithCurrentPart on why the claim may not happen outside it.
 		auto &active = local_state.current_active_shard;
 		idx_t seq_count = active->shard_sequences.size();
-		idx_t my_offset = active->next_batch_offset.fetch_add(active->batch_size, std::memory_order_acq_rel);
+		struct PartClaim {
+			idx_t offset;
+			bool on_last_part;
+		};
+		const PartClaim claim = active->parts->WithCurrentPart(local_state.part, *local_state.aligner, [&]() {
+			const PartClaim claimed {active->next_batch_offset, active->parts->CurrentIsLastPart()};
+			active->next_batch_offset += active->batch_size;
+			return claimed;
+		});
+		const idx_t my_offset = claim.offset;
 
 		if (my_offset >= seq_count) {
-			// All batches claimed already
-			SHARD_DBG(global_state, "Execute: shard %zu offset %zu >= seq_count %zu, exhausted",
+			// This thread has no work left against the current part. For a
+			// multi-part shard, move on to the next part (the leader loads it and
+			// resets the offset counter under the lock; everyone else waits) and
+			// re-walk shard_sequences from 0 against it. Only when no part is left
+			// is the shard exhausted.
+			SHARD_DBG(global_state, "Execute: shard %zu offset %zu >= seq_count %zu, current part exhausted",
 			          static_cast<size_t>(active->shard_idx), static_cast<size_t>(my_offset),
 			          static_cast<size_t>(seq_count));
+			bool advanced;
+			try {
+				advanced = active->parts->Advance(
+				    local_state.part, *local_state.aligner, /*prepare=*/nullptr,
+				    /*publish=*/[&]() {
+					    active->next_batch_offset = 0;
+					    // Every read is aligned again against the incoming part, so
+					    // the denominator has to grow with it, or Progress() saturates
+					    // at 100% the moment part 1 finishes and sits there for the
+					    // rest of the shard. Part count isn't knowable up front (the
+					    // cursor discovers parts as it walks the file), so the estimate
+					    // grows as each part is found — the same moving-estimate
+					    // treatment ClaimWork already gives its GROUP BY count.
+					    global_state.total_associations.fetch_add(seq_count, std::memory_order_relaxed);
+					    SHARD_DBG_MEM(global_state, "Execute: shard %zu next part loaded, publishing",
+					                  static_cast<size_t>(active->shard_idx));
+				    });
+			} catch (...) {
+				// Advance loads an index part and can throw for reasons that are
+				// realistic in exactly the low-memory regime this streaming exists
+				// for (bad_alloc on a later part, an unnamed sequence, a seek
+				// failure). Letting that escape Execute would skip ReleaseWork:
+				// this worker's active_workers count would stay up and the shard
+				// would never be marked exhausted, so a thread parked in
+				// ClaimWork's wait is never woken and the query HANGS instead of
+				// failing. Same guard ClaimWork puts around its own index load.
+				active->exhausted.store(true, std::memory_order_release);
+				ReleaseWork(global_state, local_state);
+				throw;
+			}
+			if (advanced) {
+				continue; // re-attach to the newer part and claim from offset 0
+			}
 			active->exhausted.store(true, std::memory_order_release);
 			ReleaseWork(global_state, local_state);
 			continue;
 		}
 
-		// Clamp batch count to remaining sequences
+		// Clamp batch count to remaining sequences. "Last batch" means the last
+		// batch of the LAST part — on an earlier part there is always more work.
 		idx_t batch_count = std::min(active->batch_size, seq_count - my_offset);
-		bool is_last_batch = (my_offset + batch_count >= seq_count);
+		bool is_last_batch = claim.on_last_part && (my_offset + batch_count >= seq_count);
 
 		// Track progress by sequences claimed (before align, so progress updates during I/O)
 		global_state.associations_processed.fetch_add(batch_count, std::memory_order_relaxed);

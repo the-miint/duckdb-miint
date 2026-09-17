@@ -2,9 +2,13 @@
 #include "Minimap2Aligner.hpp"
 #include "SAMRecord.hpp"
 #include "SequenceRecord.hpp"
+#include "minimap2_part_cursor.hpp"
 #include "sequence_utils.hpp"
+#include <atomic>
 #include <cstdio>
+#include <fstream>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <string>
 #include <thread>
@@ -518,6 +522,241 @@ TEST_CASE("SharedMinimap2Index construction and accessors", "[Minimap2Aligner]")
 	REQUIRE((shared_idx.mapopt().flag & MM_F_CIGAR) != 0);
 }
 
+// Builds a genuine multi-part .mmi fixture by dumping two independently-built
+// single-part indexes and concatenating their bytes. mm_idx_dump (called once
+// by save_index per file) writes a self-contained MM_IDX_MAGIC-prefixed block;
+// minimap2's own `-I <batch>` CLI flag produces a multi-part file by calling
+// mm_idx_dump repeatedly into the SAME fp, so byte-concatenating two
+// independently-dumped single-part files reproduces that exact on-disk layout.
+// Returns the path to the multi-part file; caller owns cleanup of all three
+// paths (part1_path, part2_path, and the returned multi-part path).
+static std::string build_multipart_mmi_fixture(const std::string &part1_path, const std::string &part2_path,
+                                               const std::string &multipart_path) {
+	Minimap2Config config;
+	config.preset = "sr";
+	config.k = 5;
+
+	std::string ref_seq1 = "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+	                       "GGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCCTTAAGGCC";
+	std::string ref_seq2 = "TTTTGGGGCCCCAAAATTTTGGGGCCCCAAAATTTTGGGGCCCCAAAATTTT"
+	                       "AAAACCCCGGGGTTTTAAAACCCCGGGGTTTTAAAACCCCGGGGTTTTAAAA";
+
+	Minimap2Aligner builder1(config);
+	builder1.build_index({{"part1_ref", ref_seq1}});
+	builder1.save_index(part1_path);
+
+	Minimap2Aligner builder2(config);
+	builder2.build_index({{"part2_ref", ref_seq2}});
+	builder2.save_index(part2_path);
+
+	std::ifstream in1(part1_path, std::ios::binary);
+	std::ifstream in2(part2_path, std::ios::binary);
+	std::ofstream out(multipart_path, std::ios::binary | std::ios::trunc);
+	REQUIRE(in1.good());
+	REQUIRE(in2.good());
+	REQUIRE(out.good());
+	out << in1.rdbuf();
+	out << in2.rdbuf();
+	out.close();
+
+	return multipart_path;
+}
+
+TEST_CASE("Minimap2IndexReader reads a multi-part index part by part", "[Minimap2Aligner]") {
+	const std::string part1 = "data/shards/test_multipart_reader_p1.mmi";
+	const std::string part2 = "data/shards/test_multipart_reader_p2.mmi";
+	const std::string multipart = "data/shards/test_multipart_reader.mmi";
+	build_multipart_mmi_fixture(part1, part2, multipart);
+
+	Minimap2Config config;
+	config.preset = "sr";
+	config.k = 5;
+
+	Minimap2IndexReader reader(multipart, config);
+
+	auto p1 = reader.ReadNextPart();
+	REQUIRE(p1 != nullptr);
+	REQUIRE(p1->subject_names().size() == 1);
+	REQUIRE(p1->subject_names()[0] == "part1_ref");
+	// A genuinely multi-part fixture: the reader must NOT be at eof after part 1,
+	// or this test (and the design it verifies) would be vacuous.
+	REQUIRE_FALSE(reader.AtEof());
+
+	auto p2 = reader.ReadNextPart();
+	REQUIRE(p2 != nullptr);
+	REQUIRE(p2->subject_names().size() == 1);
+	REQUIRE(p2->subject_names()[0] == "part2_ref");
+	REQUIRE(reader.AtEof());
+
+	auto p3 = reader.ReadNextPart();
+	REQUIRE(p3 == nullptr);
+
+	std::remove(part1.c_str());
+	std::remove(part2.c_str());
+	std::remove(multipart.c_str());
+}
+
+TEST_CASE("LoadIndexFromFile throws loud on a multi-part index instead of silently truncating", "[Minimap2Aligner]") {
+	// Regression for the bug this streaming feature fixes: before
+	// Minimap2IndexReader existed, LoadIndexFromFile (and therefore
+	// SharedMinimap2Index(path, config), which align_minimap2_sharded used to
+	// load every shard) silently returned only the first part of a multi-part
+	// .mmi with no error, dropping every reference in later parts. Both table
+	// functions now go through Minimap2PartCursor instead; this guards any
+	// other caller of the single-index loader.
+	const std::string part1 = "data/shards/test_multipart_loadfromfile_p1.mmi";
+	const std::string part2 = "data/shards/test_multipart_loadfromfile_p2.mmi";
+	const std::string multipart = "data/shards/test_multipart_loadfromfile.mmi";
+	build_multipart_mmi_fixture(part1, part2, multipart);
+
+	Minimap2Config config;
+	config.preset = "sr";
+	config.k = 5;
+	mm_idxopt_t iopt;
+	mm_mapopt_t mopt;
+	Minimap2Aligner::InitOptions(config, iopt, mopt);
+
+	mm_idx_t *idx = nullptr;
+	std::vector<std::string> names;
+	REQUIRE_THROWS_AS(Minimap2Aligner::LoadIndexFromFile(multipart, iopt, idx, names), std::runtime_error);
+
+	// SharedMinimap2Index(path, config) goes through LoadIndexFromFile and must
+	// throw too.
+	REQUIRE_THROWS_AS(SharedMinimap2Index(multipart, config), std::runtime_error);
+
+	std::remove(part1.c_str());
+	std::remove(part2.c_str());
+	std::remove(multipart.c_str());
+}
+
+TEST_CASE("Minimap2PartCursor hands a single-part index straight through", "[Minimap2Aligner]") {
+	const std::string part1 = "data/shards/test_part_cursor_single_p1.mmi";
+	const std::string part2 = "data/shards/test_part_cursor_single_p2.mmi";
+	const std::string multipart = "data/shards/test_part_cursor_single.mmi";
+	build_multipart_mmi_fixture(part1, part2, multipart);
+
+	Minimap2Config config;
+	config.preset = "sr";
+	config.k = 5;
+
+	Minimap2PartCursor cursor(part1, config, nullptr);
+	REQUIRE_FALSE(cursor.IsMultiPart());
+	auto idx = cursor.ReleaseSinglePart();
+	REQUIRE(idx != nullptr);
+	REQUIRE(idx->subject_names() == std::vector<std::string> {"part1_ref"});
+
+	std::remove(part1.c_str());
+	std::remove(part2.c_str());
+	std::remove(multipart.c_str());
+}
+
+// The coordination protocol align_minimap2 and align_minimap2_sharded both rely
+// on: every worker must see every part exactly once, exactly one thread loads
+// each next part, the freed-memory hook fires on every detach, and the cursor
+// reports exhaustion only once the reader has no part left.
+TEST_CASE("Minimap2PartCursor walks concurrent workers through every part exactly once", "[Minimap2Aligner]") {
+	const std::string part1 = "data/shards/test_part_cursor_multi_p1.mmi";
+	const std::string part2 = "data/shards/test_part_cursor_multi_p2.mmi";
+	const std::string multipart = "data/shards/test_part_cursor_multi.mmi";
+	build_multipart_mmi_fixture(part1, part2, multipart);
+
+	Minimap2Config config;
+	config.preset = "sr";
+	config.k = 5;
+
+	std::atomic<int> flushes {0};
+	Minimap2PartCursor cursor(multipart, config, [&]() { flushes++; });
+	REQUIRE(cursor.IsMultiPart());
+
+	// A query that maps in part 1 only and one that maps in part 2 only: what a
+	// worker aligns against each part tells us which part it was attached to.
+	SequenceRecordBatch queries;
+	queries.is_paired = false;
+	queries.read_ids = {"q_part1", "q_part2"};
+	queries.comments = {"", ""};
+	queries.sequences1 = {"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT",
+	                      "TTTTGGGGCCCCAAAATTTTGGGGCCCCAAAATTTTGGGGCCCCAAAATTTT"};
+	queries.quals1 = {{}, {}};
+
+	std::atomic<int> publishes {0};
+	std::atomic<int> attached_advances {0};
+	constexpr int kWorkers = 4;
+	std::vector<std::vector<std::string>> seen(kWorkers); // per worker: mapped reference per part visited
+	std::vector<std::thread> workers;
+	for (int w = 0; w < kWorkers; w++) {
+		workers.emplace_back([&, w]() {
+			Minimap2Aligner aligner(config);
+			Minimap2PartCursor::Attachment att;
+			while (true) {
+				// Claim through the cursor exactly as the table functions do; the
+				// lambda stands in for their per-part work claim.
+				cursor.WithCurrentPart(att, aligner, []() {});
+				// att.attached is false only while a leader is mid-transition; the
+				// table functions then find their work source exhausted and go
+				// straight to Advance, which is what this does too.
+				if (att.attached) {
+					SAMRecordBatch out;
+					aligner.align(queries, out);
+					// Distinct references only: secondary/supplementary records repeat
+					// the same reference, and each part holds exactly one.
+					std::set<std::string> refs;
+					for (size_t i = 0; i < out.size(); i++) {
+						if ((out.flags[i] & 0x4) == 0) {
+							refs.insert(out.references[i]);
+						}
+					}
+					seen[w].insert(seen[w].end(), refs.begin(), refs.end());
+				}
+				if (att.attached) {
+					attached_advances++;
+				}
+				if (!cursor.Advance(att, aligner, nullptr, [&]() { publishes++; })) {
+					break;
+				}
+			}
+		});
+	}
+	for (auto &t : workers) {
+		t.join();
+	}
+
+	// One transition (part 1 -> part 2), performed by exactly one leader.
+	REQUIRE(publishes.load() == 1);
+	// Parts are visited in file order and never twice by the same worker. A
+	// worker may legitimately miss a part (one that started after the first
+	// transition, or that arrived while a leader was mid-transition) -- the
+	// table functions share their work source across workers, so coverage is a
+	// property of the group, not of each thread. Between them the workers must
+	// have aligned against both parts.
+	std::set<std::string> union_seen;
+	for (int w = 0; w < kWorkers; w++) {
+		REQUIRE(seen[w].size() <= 2);
+		if (seen[w].size() == 2) {
+			REQUIRE(seen[w] == std::vector<std::string> {"part1_ref", "part2_ref"});
+		}
+		union_seen.insert(seen[w].begin(), seen[w].end());
+	}
+	REQUIRE(union_seen == std::set<std::string> {"part1_ref", "part2_ref"});
+	// Every thread flushes its OWN detach, not just the leader's: whichever
+	// thread drops the last reference to a part is the one that actually frees
+	// it, and that is rarely the leader. So the hook must fire at least once per
+	// Advance that had a part attached to give up, on top of the leader's own
+	// post-reset flush per transition. Asserted as a floor, not an exact count,
+	// so tightening when the flush fires stays a free change.
+	REQUIRE(flushes.load() >= attached_advances.load());
+	REQUIRE(flushes.load() >= publishes.load() + 1);
+
+	// Exhausted stays exhausted, without touching the reader again.
+	Minimap2Aligner late(config);
+	Minimap2PartCursor::Attachment late_att;
+	REQUIRE(cursor.WithCurrentPart(late_att, late, [&]() { return cursor.CurrentIsLastPart(); }));
+	REQUIRE_FALSE(cursor.Advance(late_att, late, nullptr, nullptr));
+
+	std::remove(part1.c_str());
+	std::remove(part2.c_str());
+	std::remove(multipart.c_str());
+}
+
 TEST_CASE("Two aligners sharing same SharedMinimap2Index produce identical results", "[Minimap2Aligner]") {
 	// Build and save a test index
 	Minimap2Config config;
@@ -721,11 +960,18 @@ TEST_CASE("Concurrent alignment on shared index from two threads", "[Minimap2Ali
 // Clean up temporary .mmi files created by tests
 TEST_CASE("Cleanup temp .mmi files", "[Minimap2Aligner]") {
 	std::vector<std::string> temp_files = {
-	    "data/shards/test_load_helper.mmi",       "data/shards/test_shared_idx.mmi",
-	    "data/shards/test_shared_align.mmi",      "data/shards/test_owned_clear.mmi",
-	    "data/shards/test_load_clear_shared.mmi", "data/shards/test_load_clear_owned.mmi",
-	    "data/shards/test_reattach_A.mmi",        "data/shards/test_reattach_B.mmi",
-	    "data/shards/test_concurrent.mmi"};
+	    "data/shards/test_load_helper.mmi", "data/shards/test_shared_idx.mmi", "data/shards/test_shared_align.mmi",
+	    "data/shards/test_owned_clear.mmi", "data/shards/test_load_clear_shared.mmi",
+	    "data/shards/test_load_clear_owned.mmi", "data/shards/test_reattach_A.mmi", "data/shards/test_reattach_B.mmi",
+	    "data/shards/test_concurrent.mmi",
+	    // Multi-part fixtures. Each test removes its own three paths on the way
+	    // out; these repeats catch the set a failed REQUIRE aborted past.
+	    "data/shards/test_multipart_reader_p1.mmi", "data/shards/test_multipart_reader_p2.mmi",
+	    "data/shards/test_multipart_reader.mmi", "data/shards/test_multipart_loadfromfile_p1.mmi",
+	    "data/shards/test_multipart_loadfromfile_p2.mmi", "data/shards/test_multipart_loadfromfile.mmi",
+	    "data/shards/test_part_cursor_single_p1.mmi", "data/shards/test_part_cursor_single_p2.mmi",
+	    "data/shards/test_part_cursor_single.mmi", "data/shards/test_part_cursor_multi_p1.mmi",
+	    "data/shards/test_part_cursor_multi_p2.mmi", "data/shards/test_part_cursor_multi.mmi"};
 	for (const auto &path : temp_files) {
 		std::remove(path.c_str());
 	}

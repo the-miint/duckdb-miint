@@ -1502,6 +1502,7 @@ set(EXTENSION_SOURCES
     src/phylo_ancestral_ml.cpp
     src/copy_newick.cpp
     src/Minimap2Aligner.cpp
+    src/minimap2_part_cursor.cpp
     src/sequence_table_reader.cpp
     src/sequence_data_reader.cpp
     src/align_minimap2.cpp
@@ -2199,6 +2200,7 @@ set(TEST_SOURCES
     src/pick_anchors.cpp
     test/cpp/test_PickAnchors.cpp
     src/Minimap2Aligner.cpp
+    src/minimap2_part_cursor.cpp
     test/cpp/test_Minimap2Aligner.cpp
     test/cpp/test_AlignBowtie2Sharded.cpp
     test/cpp/test_Bowtie2Nthreads.cpp

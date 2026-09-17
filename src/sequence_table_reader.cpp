@@ -370,14 +370,21 @@ std::string BuildShardedQueryReadsSelect(const std::string &query_table, const s
 	       KeywordHelper::WriteOptionallyQuoted(read_to_shard_table) + " rts ON q.read_id = rts.read_id";
 }
 
+// Uniquified per call: these TEMP tables land in the *caller's* catalog (the
+// connection inherits it, which is what lets worker connections see them), so a
+// fixed name would collide across concurrent queries in one session. Name shape
+// follows MaterializeRypeInputTempTable.
+std::string BuildQueryReadsSelect(const std::string &query_table, const SequenceTableSchema &schema) {
+	return "SELECT " + BuildSequenceColumnList(schema) + " FROM " + KeywordHelper::WriteOptionallyQuoted(query_table);
+}
+
+static std::string UniqueTempRelationName(const std::string &prefix) {
+	return prefix + StringUtil::Replace(UUID::ToString(UUID::GenerateRandomUUID()), "-", "");
+}
+
 std::string MaterializeShardedQueryReads(Connection &conn, const std::string &query_table,
                                          const std::string &read_to_shard_table, const SequenceTableSchema &schema) {
-	// Uniquified per call: this lands in the *caller's* TEMP catalog (the
-	// connection inherits it, which is what lets worker connections see it), so a
-	// fixed name would collide across concurrent queries in one session. Name
-	// shape follows MaterializeRypeInputTempTable.
-	const std::string tmp_name =
-	    "_miint_shard_reads_" + StringUtil::Replace(UUID::ToString(UUID::GenerateRandomUUID()), "-", "");
+	const std::string tmp_name = UniqueTempRelationName("_miint_shard_reads_");
 	const std::string tmp_quoted = KeywordHelper::WriteOptionallyQuoted(tmp_name);
 
 	auto create_result = conn.Query("CREATE TEMP TABLE " + tmp_quoted + " AS " +
@@ -386,6 +393,86 @@ std::string MaterializeShardedQueryReads(Connection &conn, const std::string &qu
 		throw InvalidInputException("Failed to materialize shard-assigned reads from query table '%s': %s", query_table,
 		                            create_result->GetError());
 	}
+	return tmp_name;
+}
+
+std::string MaterializeQueryReads(Connection &conn, const std::string &query_table, const SequenceTableSchema &schema,
+                                  idx_t &out_row_count) {
+	const std::string tmp_name = UniqueTempRelationName("_miint_query_reads_");
+	const std::string tmp_quoted = KeywordHelper::WriteOptionallyQuoted(tmp_name);
+	const std::string error_context = "Failed to materialize query table '" + query_table + "'";
+
+	// Stream query_table and append each chunk into the snapshot as it arrives,
+	// rather than one CREATE TABLE AS SELECT that pulls the whole query relation
+	// through the pipeline before this call returns. A single-pass streaming
+	// query (SendQuery, not Query) still reads query_table exactly once — the
+	// #229 guarantee above is about pass count, not chunk size — but bounds this
+	// materialization's own working set to O(one chunk) + O(the Appender's
+	// internal flush buffer) instead of O(corpus size). See the multi-part
+	// memory bug this fixes: a full-corpus-sized query relation (tens of
+	// millions of reads) made this the dominant unmanaged, memory_limit-
+	// invisible cost regardless of index-part size or thread count.
+	//
+	// A dedicated connection drives the read: a Connection supports only one
+	// active pending query at a time, and the Appender below issues its own
+	// statements against `conn` as it flushes, which would otherwise collide
+	// with `conn`'s still-open SendQuery stream mid-loop.
+	Connection stream_conn = MakeReadOnlyHelperConnection(*conn.context);
+	auto stream = stream_conn.SendQuery(BuildQueryReadsSelect(query_table, schema));
+	if (stream->HasError()) {
+		throw InvalidInputException("%s: %s", error_context, stream->GetError());
+	}
+
+	// The destination's column types come from the stream's own output schema
+	// (already resolved by SendQuery's bind, before any row is fetched) rather
+	// than a second "CREATE TABLE AS SELECT ... WHERE FALSE" probe query against
+	// query_table. query_table can be a view over something with bind-time work
+	// of its own (e.g. read_fastx opening/sniffing the underlying file) — one
+	// query against it here means that work happens once, not twice.
+	std::string create_sql = "CREATE TEMP TABLE " + tmp_quoted + " (";
+	for (idx_t i = 0; i < stream->types.size(); i++) {
+		if (i > 0) {
+			create_sql += ", ";
+		}
+		create_sql += KeywordHelper::WriteOptionallyQuoted(stream->names[i]) + " " + stream->types[i].ToString();
+	}
+	create_sql += ")";
+	auto create_result = conn.Query(create_sql);
+	if (create_result->HasError()) {
+		throw InvalidInputException("%s: %s", error_context, create_result->GetError());
+	}
+
+	// From here on, the empty snapshot table above is committed in conn's TEMP
+	// catalog. If the fill below throws partway (a mid-stream query error, or
+	// OOM), drop it before propagating — otherwise the caller never receives
+	// query_snapshot's name to clean up later and the empty table leaks in the
+	// user's session for the lifetime of the connection.
+	idx_t row_count = 0;
+	try {
+		Appender appender(conn, tmp_name);
+		while (true) {
+			auto chunk = stream->Fetch();
+			if (!chunk || chunk->size() == 0) {
+				// Fetch() returns null for both a clean end-of-stream AND a
+				// mid-stream query error (e.g. a malformed row deep in
+				// query_table) — HasError() is what tells them apart. Missing
+				// this check would silently truncate the snapshot to whatever
+				// was read before the failure instead of surfacing it.
+				if (stream->HasError()) {
+					throw InvalidInputException("%s: %s", error_context, stream->GetError());
+				}
+				break;
+			}
+			row_count += chunk->size();
+			appender.AppendDataChunk(*chunk);
+		}
+		appender.Close();
+	} catch (...) {
+		DropHelperTempRelation(conn, tmp_quoted);
+		throw;
+	}
+
+	out_row_count = row_count;
 	return tmp_name;
 }
 
@@ -432,10 +519,9 @@ QuerySequenceStream::QuerySequenceStream(Connection &conn, const std::string &ta
 void QuerySequenceStream::InitStream(const std::string &table_name) {
 	partial_.reserve(sub_batch_size_);
 
-	std::string query =
-	    "SELECT " + BuildSequenceColumnList(schema_) + " FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
-
-	stream_ = conn_ptr_->SendQuery(query);
+	// Same projection the snapshot was built with, so replaying a snapshot binds
+	// against exactly the columns it holds.
+	stream_ = conn_ptr_->SendQuery(BuildQueryReadsSelect(table_name, schema_));
 	if (stream_->HasError()) {
 		throw InvalidInputException("Failed to read from query table '%s': %s", table_name, stream_->GetError());
 	}

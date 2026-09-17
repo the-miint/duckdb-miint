@@ -13,6 +13,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
+#include "minimap2_part_cursor.hpp"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -31,17 +32,20 @@ struct ShardInfo {
 };
 
 // A shard that is currently being processed by one or more threads.
-// The shared index is immutable after construction; atomic counters
-// coordinate batch claiming and worker tracking without holding the global lock.
+// `parts` owns the shard's .mmi and, for a multi-part shard, walks its workers
+// through the parts one at a time (see Minimap2PartCursor); the shard's reads
+// are held in shard_sequences for the shard's lifetime and re-walked from
+// offset 0 against every part. Worker tracking uses atomics and never holds the
+// global lock.
 struct ActiveShard {
-	idx_t shard_idx;                                   // Index into Data::shards
-	idx_t batch_size;                                  // Per-shard batch size
-	miint::SequenceRecordBatch shard_sequences;        // Pre-fetched sequences for this shard
-	std::shared_ptr<miint::SharedMinimap2Index> index; // Shared index, immutable after construction
-	std::atomic<idx_t> next_batch_offset {0};          // Threads atomically claim ranges into shard_sequences
-	std::atomic<idx_t> active_workers {0};             // Threads currently on this shard
-	std::atomic<bool> exhausted {false};               // Set when no more batches to read
-	std::atomic<bool> ready {false};                   // Set when index is loaded and IDs materialized
+	idx_t shard_idx;                                  // Index into Data::shards
+	idx_t batch_size;                                 // Per-shard batch size
+	miint::SequenceRecordBatch shard_sequences;       // Pre-fetched sequences for this shard
+	std::unique_ptr<miint::Minimap2PartCursor> parts; // Index parts; set once ready
+	idx_t next_batch_offset = 0;                      // Claimed via parts->WithCurrentPart; reset per part
+	std::atomic<idx_t> active_workers {0};            // Threads currently on this shard
+	std::atomic<bool> exhausted {false};              // Set when no more batches to read
+	std::atomic<bool> ready {false};                  // Set when index is loaded and IDs materialized
 	// Progress-only (read/written only when GlobalState::progress is true).
 	std::atomic<idx_t> alignments_emitted {0};        // Mapped alignments produced for this shard
 	idx_t total_reads = 0;                            // Reads pre-fetched for this shard
@@ -129,6 +133,7 @@ public:
 		std::unique_ptr<miint::Minimap2Aligner> aligner;
 		std::shared_ptr<ActiveShard> current_active_shard;
 		bool has_shard = false;
+		miint::Minimap2PartCursor::Attachment part; // which part of current_active_shard aligner is on
 		miint::SAMRecordBatch result_buffer;
 		idx_t buffer_offset = 0;
 		std::string current_shard_name;

@@ -80,6 +80,37 @@ std::string BuildShardedQueryReadsSelect(const std::string &query_table, const s
 std::string MaterializeShardedQueryReads(Connection &conn, const std::string &query_table,
                                          const std::string &read_to_shard_table, const SequenceTableSchema &schema);
 
+// The projection every read of a sequence relation uses: exactly the columns
+// `schema` says alignment consumes, in a fixed order. Shared by the snapshot
+// builder and the streaming reader so the snapshot's columns and the columns
+// later selected back out of it cannot drift apart.
+std::string BuildQueryReadsSelect(const std::string &query_table, const SequenceTableSchema &schema);
+
+// Materialize the query relation into a per-call TEMP table, reading it exactly
+// ONCE (#229 — see docs/internals/reading-tables-views.md § "Read the relation
+// ONCE"). Unlike MaterializeShardedQueryReads there is no shard join or
+// shard_name column: this is for a consumer that needs to replay the WHOLE
+// query relation more than once for a reason unrelated to sharding (e.g.
+// align_minimap2 streaming a multi-part prebuilt index, one pass per part).
+//
+// Returns the unquoted TEMP table name. Created on `conn`, which must inherit
+// the caller's TEMP catalog. The caller MUST drop it via DropHelperTempRelation.
+//
+// Streams query_table and appends each chunk into the snapshot as it arrives
+// (one pass, via SendQuery + Appender) rather than a single CREATE TABLE AS
+// SELECT that pulls the whole query relation through the pipeline before this
+// call returns — bounds the materialization's own working set to O(one chunk)
+// instead of O(corpus size), which is what a full-corpus-sized query relation
+// (tens of millions of reads) needs to fit in memory alongside a multi-part
+// index's parts.
+//
+// `out_row_count` receives the number of rows materialized —
+// summed from the streamed chunks as they're appended, rather than a second
+// query. Lets a caller with zero query rows skip replaying every remaining
+// index part for nothing (align_minimap2's multi-part path).
+std::string MaterializeQueryReads(Connection &conn, const std::string &query_table, const SequenceTableSchema &schema,
+                                  idx_t &out_row_count);
+
 // Read every read assigned to `shard_name`. `source_sql` is anything that can
 // follow FROM and exposes a shard_name column — either a quoted snapshot table
 // name from MaterializeShardedQueryReads, or a parenthesized

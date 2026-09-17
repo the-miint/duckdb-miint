@@ -21,7 +21,10 @@
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/query_result.hpp"
+#include "duckdb/main/settings.hpp"
+#include "duckdb/storage/block_allocator.hpp"
 #include <cstdlib>
+#include <functional>
 #include <string>
 
 namespace duckdb {
@@ -265,6 +268,39 @@ inline idx_t OutputSAMRecordBatch(DataChunk &output, const miint::SAMRecordBatch
 
 	output.SetCardinality(count);
 	return count;
+}
+
+// Returns a callable that hands freed memory on the calling thread back to the
+// OS. DuckDB's own flush only ever runs from TaskScheduler::ExecuteForever's
+// idle-timeout path (see docs/internals/duckdb-engine-notes.md) — neither a
+// table function's InitGlobal (the query's calling thread) nor a busy
+// multi-part worker thread ever reaches it, so both need an explicit flush
+// after freeing a corpus- or index-part-sized amount of memory.
+//
+// Goes through BlockAllocator, exactly as task_scheduler.cpp does, NOT through
+// Allocator directly. The two are not interchangeable: BlockAllocator::ThreadFlush
+// also clears this thread's cached blocks before delegating, and
+// BlockAllocator::SupportsFlush is true whenever the block allocator is active OR
+// jemalloc is — so gating on Allocator::SupportsFlush alone would hand back a
+// silent no-op in exactly the build where the block allocator holds the cache and
+// jemalloc is absent (the loadable extension; see embedded-tools.md).
+//
+// threshold=0 / thread_count=1 mirrors the scheduler's own forced flush at thread
+// exit, purging just the calling thread rather than FlushAll()'s process-wide
+// purge. The allocator reference and setting are resolved once here so the
+// callable outlives any particular ClientContext use — it is stored inside
+// Minimap2PartCursor for the life of a scan, and the database (which owns the
+// BlockAllocator) outlives every scan on it.
+inline std::function<void()> MakeFreedMemoryFlusher(ClientContext &context) {
+	const auto &block_allocator = BlockAllocator::Get(DatabaseInstance::GetDatabase(context));
+	if (!block_allocator.SupportsFlush()) {
+		return []() {
+		};
+	}
+	const bool background_threads = Settings::Get<AllocatorBackgroundThreadsSetting>(context);
+	return [&block_allocator, background_threads]() {
+		block_allocator.ThreadFlush(background_threads, /*threshold=*/0, /*thread_count=*/1);
+	};
 }
 
 // Filter out unmapped reads from result batch (in-place)
