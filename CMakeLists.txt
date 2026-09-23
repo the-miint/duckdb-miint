@@ -315,13 +315,21 @@ endif()
 # sub-build fails with "storage size of 'e_time' isn't known". Upstream
 # sortmerna CI tests MSVC, not MinGW; we disable it here rather than patching
 # cmph. Still enabled on Linux/macOS/MSVC.
+# MAFFT is off under Emscripten for a different reason: its local arrays are sized
+# by M (mltaln.h: 500000, the maximum sequence count), giving 2-4 MB stack frames,
+# and duckdb-wasm runs with a 1 MB stack (-sSTACK_SIZE=1048576) that has no guard
+# page. Entering such a frame writes past the stack into the heap, and the damage
+# surfaces later as "memory access out of bounds" in free() -- align_mafft on the
+# 36-sequence data/mafft/sample.fa. The frames are MAFFT's own (M is not
+# overridable) and the stack is the runtime's, so the fix would be MAFFT-side.
 if(EMSCRIPTEN)
     set(MIINT_ENABLE_HDF5 OFF)
     set(MIINT_ENABLE_SORTMERNA OFF)
     set(MIINT_ENABLE_SYLPH OFF)
     set(MIINT_ENABLE_GPL_BOUNDARY OFF)
     set(MIINT_ENABLE_KREPP OFF)
-    message(STATUS "Emscripten detected: disabling HDF5, SortMeRNA, sylph, gpl-boundary, and krepp (WASM-incompatible)")
+    set(MIINT_ENABLE_MAFFT OFF)
+    message(STATUS "Emscripten detected: disabling HDF5, SortMeRNA, sylph, gpl-boundary, krepp, and MAFFT (WASM-incompatible)")
 elseif(WIN32)
     set(MIINT_ENABLE_MAFFT OFF)
     set(MIINT_ENABLE_ABPOA OFF)
