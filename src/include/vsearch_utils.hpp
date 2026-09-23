@@ -6,6 +6,16 @@
 
 namespace miint {
 
+// vsearch's batch and whole-database entry points start opt_threads worker threads
+// even when opt_threads is 1. A wasm build without -pthread cannot start any:
+// pthread_create fails and vsearch's fatal() calls exit(1). There, the wrappers
+// default to the single-threaded stand-ins in vsearch_serial.hpp instead.
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+constexpr bool kVsearchSerialByDefault = true;
+#else
+constexpr bool kVsearchSerialByDefault = false;
+#endif
+
 // vsearch result structs use fixed 1024-char label buffers. Validate at input
 // boundaries to throw early rather than silently truncate.
 inline void validate_label_length(const std::string &label, const char *context) {
