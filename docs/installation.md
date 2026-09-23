@@ -146,7 +146,7 @@ Pass these to CMake via `EXT_FLAGS` (e.g. `EXT_FLAGS="-DMIINT_ENABLE_UNIFRAC=OFF
 | `MIINT_ENABLE_UNIFRAC` | `ON` | UniFrac (PCoA / PERMANOVA / Faith PD) — requires libomp on macOS |
 | `MIINT_ENABLE_KREPP` | `ON` | krepp phylogenetic placement and index building (`place_krepp`, `krepp_index_create`) — requires the parallel-hashmap and boost-math headers from vcpkg |
 
-WASM (Emscripten) builds automatically disable HDF5, SortMeRNA, sylph, gpl-boundary, krepp, vsearch, and libcurl. UniFrac and MAFFT remain enabled — UniFrac builds against a dedicated single-threaded WASM target (`libssu_wasm.a` / `libskbb_wasm.a`, Eigen-backed, OpenMP stubbed out).
+WASM (Emscripten) builds automatically disable HDF5, SortMeRNA, sylph, gpl-boundary, krepp, MAFFT, and libcurl. MAFFT is off because its fixed-size local arrays need 2–4 MB stack frames and duckdb-wasm runs with a 1 MB stack. UniFrac and vsearch remain enabled — UniFrac builds against a dedicated single-threaded WASM target (`libssu_wasm.a` / `libskbb_wasm.a`, Eigen-backed, OpenMP stubbed out), and vsearch runs its work on the calling thread (`src/include/vsearch_serial.hpp`) because its threaded entry points cannot start threads there; results are identical to native.
 
 ### Build steps
 Now to build the extension, run:

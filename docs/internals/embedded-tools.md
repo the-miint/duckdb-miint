@@ -15,9 +15,9 @@ Five embedding categories:
 |---|---|---|
 | `MIINT_ENABLE_CURL` | ON | Apple (vsearch/OpenSSL `MD5_*`/`SHA1_*` symbol clash), Emscripten (no network stack, and a loadable extension is a wasm *side module*, so undefined `curl_*` symbols become imports duckdb-wasm cannot supply — they trap when **called**, not at load). Also soft-disabled when neither the vcpkg CONFIG package nor the system `FindCURL` module locates libcurl, so the no-vcpkg tidy lane still configures. |
 | `MIINT_ENABLE_HDF5` | ON | Emscripten (C++ static class members become unresolvable GOT.mem imports in WASM) |
-| `MIINT_ENABLE_MAFFT` | ON | Windows (uses `mkdtemp` and other POSIX APIs; segfaults on MinGW) |
+| `MIINT_ENABLE_MAFFT` | ON | Windows (uses `mkdtemp` and other POSIX APIs; segfaults on MinGW), Emscripten (local arrays sized by `M` = 500000 give 2–4 MB stack frames; duckdb-wasm's stack is 1 MB with no guard page, so they corrupt the heap) |
 | `MIINT_ENABLE_ABPOA` | ON | Windows (POSIX APIs) |
-| `MIINT_ENABLE_VSEARCH` | ON | Emscripten, Windows (autotools build not supported) |
+| `MIINT_ENABLE_VSEARCH` | ON | Windows (autotools build not supported) |
 | `MIINT_ENABLE_SORTMERNA` | ON | Emscripten (RocksDB vcpkg port not built for wasm32), Windows/MinGW (cmph assumes POSIX `<sys/time.h>`; MSVC-on-Windows would work if anyone wires it up) |
 | `MIINT_ENABLE_GPL_BOUNDARY` | ON | Emscripten, Windows (subsystem uses POSIX shm + fork/exec) |
 | `MIINT_ENABLE_UNIFRAC` | ON | Windows (libssu's inmem build assumes POSIX; first-class on Emscripten via the WASM target) |
@@ -66,14 +66,16 @@ Run-time / conditional: `MIINT_USE_JEMALLOC` is set when DuckDB's jemalloc is li
 - **Purpose:** search, clustering, UCHIME chimera detection, DUST masking, paired-end merge
 - **Build:** autotools; produces `libvsearch.a` (PIC static archive)
 - **Gotchas:**
-  - Skipped entirely on Windows/Emscripten (autotools not supported)
+  - Skipped entirely on Windows (autotools not supported)
+  - **Emscripten:** built from a copy of the tracked sources in the build dir (native links `ext/vsearch/src/libvsearch.a` in place, so an in-source wasm build would overwrite it), with `--host=wasm32-unknown-emscripten -msimd128`. wasm32 is none of vsearch's known targets, so it takes its generic path, where SIMDe (`third_party/simde`) lowers the SSE code to SIMD128; the wrapper TUs get `-msimd128` too so both sides agree on SIMDe's vector types. `-Wno-c++11-narrowing` covers `Span<char>{ptr, uint64_t len}` initializers that narrow where `size_t` is 32-bit.
+  - **No threads on wasm:** `dust_all`, `search_batch`, `chimera_detect_batch`, and `cluster_assign_batch` always `pthread_create` (even at `opt_threads == 1`), which is fatal (`exit(1)`) in a non-pthread wasm build. `src/include/vsearch_serial.hpp` has same-signature serial stand-ins, selected by the wrappers' `params.serial` (default `kVsearchSerialByDefault`, true only there). `test/cpp/test_VsearchSerial.cpp` holds them to the threaded results natively.
   - Configure step `touch`es pre-generated autotools files (`aclocal.m4`, `configure`, `Makefile.in`, `config.h.in`, etc.) because fresh `git checkout` gives all files identical timestamps, which can trigger autotools regeneration rules — we don't want that.
 
 ### MAFFT PartTree
 - **Location:** `ext/mafft/core/`
 - **Purpose:** Multiple sequence alignment (PartTree algorithm)
 - **Build:** Makefile; produces `libmafft_parttree.a` with `ENABLE_MULTITHREAD=-Denablemultithread`
-- **Platform:** POSIX only (uses `mkdtemp`); auto-disabled on Windows
+- **Platform:** POSIX only (uses `mkdtemp`); auto-disabled on Windows. Also auto-disabled on Emscripten: see the feature-flag table (stack frames larger than duckdb-wasm's stack)
 
 ### abPOA (the-miint fork)
 - **Location:** `ext/abpoa/` (git submodule at `embed-friction-fixes` on the `the-miint/abPOA` fork; version captured via `git describe` → `ABPOA_GIT_VERSION`)
