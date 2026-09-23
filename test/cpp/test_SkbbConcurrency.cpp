@@ -54,6 +54,9 @@ std::vector<float> EuclideanDm(uint32_t n, uint32_t d_true, uint64_t seed) {
 
 } // namespace
 
+// WASM builds have no OpenMP runtime (OmpThreadPin is a validated no-op there, see
+// unifrac_omp_scope.cpp), so there is no per-thread ICV to observe.
+#ifndef __EMSCRIPTEN__
 TEST_CASE("OmpThreadPin pins the calling thread, not the process", "[omp]") {
 	// WHY THIS IS THE FOUNDATION: every concurrent-compute decision here rests on
 	// omp_set_num_threads affecting only the calling thread (OpenMP specifies it as
@@ -78,6 +81,7 @@ TEST_CASE("OmpThreadPin pins the calling thread, not the process", "[omp]") {
 	REQUIRE(observed_one == 1);
 	REQUIRE(observed_four == 4);
 }
+#endif
 
 TEST_CASE("ComputeCallScope hands out a seed skbb can use without its global RNG", "[omp]") {
 	// The whole reason concurrent skbb calls are safe is that a NON-NEGATIVE seed
@@ -101,11 +105,15 @@ TEST_CASE("ComputeCallScope hands out a seed skbb can use without its global RNG
 		}
 		REQUIRE(seeds.size() > 1);
 	}
-	SECTION("it pins the calling thread's fan-out like a bare pin does") {
-		ComputeCallScope scope(3, 1);
-		REQUIRE(omp_get_max_threads() == 3);
-	}
 }
+
+// Split out of the test case above so the WASM guard sits at file scope.
+#ifndef __EMSCRIPTEN__
+TEST_CASE("ComputeCallScope pins the calling thread's fan-out like a bare pin does", "[omp]") {
+	ComputeCallScope scope(3, 1);
+	REQUIRE(omp_get_max_threads() == 3);
+}
+#endif
 
 TEST_CASE("concurrent seeded skbb PCoA reproduces the serial result exactly", "[omp]") {
 	// The capability claim: several ordinations may run at once in one process
