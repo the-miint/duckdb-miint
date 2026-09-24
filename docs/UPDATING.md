@@ -3,6 +3,8 @@ When cloning this template, the target version of DuckDB should be the latest st
 will inevitably come a time when a new DuckDB is released and the extension repository needs updating. This process goes
 as follows:
 
+**The mechanical part is scripted.** `./scripts/bump-duckdb-version.sh vX.Y.Z` moves both submodules and rewrites every in-repo spelling below, then verifies with `./scripts/check-duckdb-version.sh` (which also runs in CI as the `DuckDB version consistency` job). It deliberately does not commit — a version bump can break the C++ build, so build and test before committing. The rest of this page is what those scripts do, plus the cross-repo steps they cannot do for you.
+
 - Bump submodules
   - `./duckdb` should be set to latest tagged release
   - `./extension-ci-tools` should be set to updated branch corresponding to latest DuckDB release. We track the release-series branch (e.g. `v1.5-variegata`), which upstream keeps identical to the per-patch branch (`v1.5.5`), so check out that branch's head.
