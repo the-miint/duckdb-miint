@@ -1,0 +1,252 @@
+# name: test/sql/sourcetracker_docs.test
+# description: every statement and every printed number in docs/source_tracking.md actually runs and is correct
+# group: [sql]
+
+require miint
+
+require-env ST3_AVAILABLE
+
+# ---------------------------------------------------------------------------
+# THIS FILE IS THE OTHER HALF OF docs/source_tracking.md. Every SQL statement
+# the doc shows appears here, against the same fixture, asserting the numbers
+# the doc prints. Change one, change the other.
+#
+# The proportions are Monte-Carlo means: with the printed seed they are fixed
+# on one platform, but a different platform's floating-point path can flip a
+# draw, and the doc says as much. They are therefore held to within 0.05 of
+# the printed value, which is well inside what a seed change moves them by on
+# this fixture (about 0.03 on the widest cell) and far outside any real
+# regression of the model. Structural facts (row sets, exact zeros, sums)
+# are asserted exactly.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE counts AS SELECT * FROM (VALUES
+  ('soil1','f1',120),('soil1','f2',100),('soil1','f3',5),('soil1','f4',3),('soil1','f5',2),
+  ('soil2','f1',110),('soil2','f2',130),('soil2','f3',4),('soil2','f4',2),('soil2','f6',4),
+  ('gut1','f1',3),('gut1','f2',2),('gut1','f3',130),('gut1','f4',110),('gut1','f5',5),
+  ('gut2','f2',4),('gut2','f3',120),('gut2','f4',140),('gut2','f5',2),('gut2','f6',4),
+  ('water1','f1',2),('water1','f3',3),('water1','f4',5),('water1','f5',140),('water1','f6',120),
+  ('sink_a','f1',90),('sink_a','f2',80),('sink_a','f3',20),('sink_a','f4',10),
+  ('sink_b','f1',5),('sink_b','f2',5),('sink_b','f3',60),('sink_b','f4',50),('sink_b','f5',40),('sink_b','f6',40)
+) AS t(sample_id, feature_id, value);
+
+statement ok
+CREATE TABLE samples AS SELECT * FROM (VALUES
+  ('soil1','source','soil'),('soil2','source','soil'),
+  ('gut1','source','gut'),('gut2','source','gut'),
+  ('water1','source','water'),
+  ('sink_a','sink',NULL),('sink_b','sink',NULL)
+) AS t(sample_id, source_sink, env);
+
+# --- section "sourcetracker": the full default signature binds -------------
+statement ok
+SELECT count(*) FROM (DESCRIBE SELECT * FROM sourcetracker('counts', 'samples',
+    loo := false, assignments := false,
+    alpha1 := 0.001, alpha2 := 0.1, beta := 10.0,
+    restarts := 10, draws_per_restart := 1, burnin := 100, delay := 1,
+    source_rarefaction_depth := 1000, sink_rarefaction_depth := 1000,
+    with_replacement := false, collapse := 'mean',
+    seed := -1, threads := 0));
+
+# --- section "The default call refuses shallow data" ------------------------
+statement error
+SELECT * FROM sourcetracker('counts', 'samples');
+----
+You requested rarefaction of sink samples at 1000, but 2 sink samples have fewer sequences than that. The shallowest of these is 'sink_a' with 200 sequences.
+
+statement ok
+CREATE TABLE mix AS
+SELECT sink_id, source, round(proportion, 2) AS proportion, round(proportion_std, 2) AS proportion_std
+FROM sourcetracker('counts', 'samples', seed := 42,
+                   source_rarefaction_depth := 0, sink_rarefaction_depth := 0)
+ORDER BY sink_id, source;
+
+statement ok
+CREATE TABLE mix_printed AS SELECT * FROM (VALUES
+  ('sink_a','Unknown',0.06,0.02), ('sink_a','gut',0.11,0.01), ('sink_a','soil',0.83,0.02), ('sink_a','water',0.00,0.00),
+  ('sink_b','Unknown',0.14,0.05), ('sink_b','gut',0.49,0.02), ('sink_b','soil',0.03,0.01), ('sink_b','water',0.35,0.03)
+) AS t(sink_id, source, proportion, proportion_std);
+
+# Same rows on both sides, every proportion within 0.05 and every std within
+# 0.03 of what the doc prints.
+query I
+SELECT count(*) FROM mix m FULL JOIN mix_printed p ON m.sink_id = p.sink_id AND m.source = p.source
+WHERE m.proportion IS NULL OR p.proportion IS NULL
+   OR abs(m.proportion - p.proportion) > 0.05 OR abs(m.proportion_std - p.proportion_std) > 0.03;
+----
+0
+
+query I
+SELECT count(*) FROM mix;
+----
+8
+
+# --- section "The result relation" ------------------------------------------
+# Unknown is always present and each sink's proportions sum to 1 (on the
+# unrounded values).
+query II
+SELECT sink_id, round(sum(proportion), 6)
+FROM sourcetracker('counts', 'samples', seed := 42, source_rarefaction_depth := 0, sink_rarefaction_depth := 0)
+GROUP BY sink_id ORDER BY sink_id;
+----
+sink_a	1.0
+sink_b	1.0
+
+query I
+SELECT count(*) FILTER (WHERE assignments IS NOT NULL) FROM mix_printed p JOIN
+  sourcetracker('counts', 'samples', seed := 42, source_rarefaction_depth := 0, sink_rarefaction_depth := 0) r
+  ON r.sink_id = p.sink_id AND r.source = p.source;
+----
+0
+
+# --- section "Per-feature assignments" --------------------------------------
+statement ok
+CREATE TABLE assign AS
+SELECT sink_id, source, assignments
+FROM sourcetracker('counts', 'samples', assignments := true, seed := 42,
+                   source_rarefaction_depth := 0, sink_rarefaction_depth := 0)
+WHERE sink_id = 'sink_a' ORDER BY source;
+
+# The printed maps: each row's key set exactly, and each value within 3
+# sequences (the counts scale of the same Monte-Carlo noise).
+statement ok
+CREATE TABLE assign_printed AS SELECT * FROM (VALUES
+  ('Unknown','f1',3.9), ('Unknown','f2',3.6), ('Unknown','f3',3.1), ('Unknown','f4',1.6),
+  ('gut','f1',0.2), ('gut','f2',0.2), ('gut','f3',14.3), ('gut','f4',7.9),
+  ('soil','f1',85.9), ('soil','f2',76.2), ('soil','f3',2.6), ('soil','f4',0.4),
+  ('water','f4',0.1)
+) AS t(source, feature_id, mean_count);
+
+query I
+SELECT count(*) FROM
+  (SELECT source, unnest(map_keys(assignments)) AS feature_id, unnest(map_values(assignments)) AS mean_count FROM assign) a
+  FULL JOIN assign_printed p ON a.source = p.source AND a.feature_id = p.feature_id
+WHERE a.mean_count IS NULL OR p.mean_count IS NULL OR abs(a.mean_count - p.mean_count) > 3;
+----
+0
+
+# The unnested form the doc shows, and its arithmetic: the four maps of
+# sink_a sum to its depth of 200, and the soil map to proportion * 200.
+query III
+SELECT source, unnest(map_keys(assignments)) AS feature_id, round(unnest(map_values(assignments)), 1) > 0
+FROM assign WHERE source = 'soil' ORDER BY feature_id;
+----
+soil	f1	true
+soil	f2	true
+soil	f3	true
+soil	f4	true
+
+query I
+SELECT round(sum(v), 6) FROM (SELECT unnest(map_values(assignments)) AS v FROM assign);
+----
+200.0
+
+query I
+SELECT abs(sum(v) - 200 * (SELECT proportion FROM sourcetracker('counts', 'samples', assignments := true, seed := 42,
+                                                                source_rarefaction_depth := 0, sink_rarefaction_depth := 0)
+                                                WHERE sink_id = 'sink_a' AND source = 'soil')) < 1e-6
+FROM (SELECT unnest(map_values(assignments)) AS v FROM assign WHERE source = 'soil');
+----
+true
+
+# --- section "Leave-one-out" ------------------------------------------------
+statement ok
+CREATE TABLE loo AS
+SELECT sink_id AS source_sample, source, round(proportion, 2) AS proportion
+FROM sourcetracker('counts', 'samples', loo := true, seed := 42, source_rarefaction_depth := 0)
+ORDER BY source_sample, source;
+
+statement ok
+CREATE TABLE loo_printed AS SELECT * FROM (VALUES
+  ('gut1','Unknown',0.04), ('gut1','gut',0.93), ('gut1','soil',0.01), ('gut1','water',0.01),
+  ('gut2','Unknown',0.05), ('gut2','gut',0.93), ('gut2','soil',0.01), ('gut2','water',0.01),
+  ('soil1','Unknown',0.04), ('soil1','gut',0.02), ('soil1','soil',0.94), ('soil1','water',0.01),
+  ('soil2','Unknown',0.04), ('soil2','gut',0.01), ('soil2','soil',0.94), ('soil2','water',0.01),
+  ('water1','Unknown',0.99), ('water1','gut',0.01), ('water1','soil',0.00), ('water1','water',0.00)
+) AS t(source_sample, source, proportion);
+
+query I
+SELECT count(*) FROM loo m FULL JOIN loo_printed p ON m.source_sample = p.source_sample AND m.source = p.source
+WHERE m.proportion IS NULL OR p.proportion IS NULL OR abs(m.proportion - p.proportion) > 0.05;
+----
+0
+
+# The sole water source held out: its water cell is exactly zero on the
+# unrounded value, which is what the doc claims.
+query I
+SELECT proportion FROM sourcetracker('counts', 'samples', loo := true, seed := 42, source_rarefaction_depth := 0)
+WHERE sink_id = 'water1' AND source = 'water';
+----
+0.0
+
+statement error
+SELECT * FROM sourcetracker('counts', 'samples', loo := true, assignments := true);
+----
+not available with loo
+
+# --- section "Rarefaction" --------------------------------------------------
+# The soil samples (230 and 250) sum to 480 but average to 239, the mean being
+# rounded down feature by feature: a source depth of 250 passes when the
+# environment is summed and is refused when it is averaged, in st3's words,
+# naming the collapsed total.
+query I
+SELECT count(*) FROM sourcetracker('counts', 'samples', seed := 42, collapse := 'sum',
+                                   source_rarefaction_depth := 250, sink_rarefaction_depth := 0);
+----
+8
+
+statement error
+SELECT * FROM sourcetracker('counts', 'samples', seed := 42, collapse := 'mean',
+                            source_rarefaction_depth := 250, sink_rarefaction_depth := 0);
+----
+rarefaction of collapsed source samples at depth 250 was requested, but 1 of them fall short; the shallowest has 239 sequences.
+
+statement ok
+CREATE TABLE rare AS
+SELECT sink_id, source, round(proportion, 2) AS proportion
+FROM sourcetracker('counts', 'samples', seed := 42, collapse := 'sum',
+                   source_rarefaction_depth := 200, sink_rarefaction_depth := 200)
+ORDER BY sink_id, source;
+
+statement ok
+CREATE TABLE rare_printed AS SELECT * FROM (VALUES
+  ('sink_a','Unknown',0.06), ('sink_a','gut',0.12), ('sink_a','soil',0.82), ('sink_a','water',0.00),
+  ('sink_b','Unknown',0.13), ('sink_b','gut',0.49), ('sink_b','soil',0.02), ('sink_b','water',0.35)
+) AS t(sink_id, source, proportion);
+
+query I
+SELECT count(*) FROM rare m FULL JOIN rare_printed p ON m.sink_id = p.sink_id AND m.source = p.source
+WHERE m.proportion IS NULL OR p.proportion IS NULL OR abs(m.proportion - p.proportion) > 0.05;
+----
+0
+
+# With rarefaction on, the sink's assignments sum to the rarefaction depth,
+# not to its own depth.
+query I
+SELECT round(sum(v), 6) FROM (
+  SELECT unnest(map_values(assignments)) AS v
+  FROM sourcetracker('counts', 'samples', assignments := true, seed := 42, collapse := 'sum',
+                     source_rarefaction_depth := 200, sink_rarefaction_depth := 150)
+  WHERE sink_id = 'sink_a');
+----
+150.0
+
+# --- section "Parallelism" --------------------------------------------------
+statement ok
+SET threads=1;
+
+statement ok
+CREATE TABLE t1 AS SELECT * FROM sourcetracker('counts', 'samples', seed := 42, source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+
+statement ok
+SET threads=8;
+
+statement ok
+CREATE TABLE t8 AS SELECT * FROM sourcetracker('counts', 'samples', seed := 42, source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+
+query I
+SELECT (SELECT count(*) FROM (SELECT * FROM t1 EXCEPT ALL SELECT * FROM t8))
+     + (SELECT count(*) FROM (SELECT * FROM t8 EXCEPT ALL SELECT * FROM t1));
+----
+0

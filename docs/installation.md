@@ -111,7 +111,7 @@ OpenMP comes from `libgomp` shipped with gcc, so no separate install is needed f
 
 ### Managing dependencies
 
-**Rust toolchain (required):** The RYpe sequence classification library, and the embedded sylph profiler, are written in Rust. Install Rust via [rustup](https://rustup.rs/):
+**Rust toolchain (required):** The RYpe sequence classification library, the embedded sylph profiler, and SourceTracker3 (`sourcetracker`) are written in Rust. Install Rust via [rustup](https://rustup.rs/):
 ```shell
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
@@ -123,7 +123,7 @@ git clone https://github.com/Microsoft/vcpkg.git
 export VCPKG_TOOLCHAIN_PATH=`pwd`/vcpkg/scripts/buildsystems/vcpkg.cmake
 ```
 
-**Submodules (required):** Several embedded libraries (MAFFT, vsearch, sylph, scikit-bio-binaries, unifrac-binaries, etc.) are git submodules. After cloning:
+**Submodules (required):** Several embedded libraries (MAFFT, vsearch, sylph, st3, scikit-bio-binaries, unifrac-binaries, etc.) are git submodules. After cloning:
 ```shell
 git submodule update --init --recursive
 ```
@@ -142,11 +142,12 @@ Pass these to CMake via `EXT_FLAGS` (e.g. `EXT_FLAGS="-DMIINT_ENABLE_UNIFRAC=OFF
 | `MIINT_ENABLE_MAFFT` | `ON` | MAFFT multiple sequence alignment |
 | `MIINT_ENABLE_SORTMERNA` | `ON` | SortMeRNA rRNA alignment (requires RocksDB) |
 | `MIINT_ENABLE_SYLPH` | `ON` | sylph FracMinHash relative-abundance profiling (Rust) |
+| `MIINT_ENABLE_ST3` | `ON` | SourceTracker3 microbial source attribution, `sourcetracker()` (Rust) |
 | `MIINT_ENABLE_GPL_BOUNDARY` | `ON` | gpl-boundary subsystem (process pipes + Arrow IPC over POSIX shm) |
 | `MIINT_ENABLE_UNIFRAC` | `ON` | UniFrac (PCoA / PERMANOVA / Faith PD) — requires libomp on macOS |
 | `MIINT_ENABLE_KREPP` | `ON` | krepp phylogenetic placement and index building (`place_krepp`, `krepp_index_create`) — requires the parallel-hashmap and boost-math headers from vcpkg |
 
-WASM (Emscripten) builds automatically disable HDF5, SortMeRNA, sylph, gpl-boundary, krepp, MAFFT, and libcurl. MAFFT is off because its fixed-size local arrays need 2–4 MB stack frames and duckdb-wasm runs with a 1 MB stack. UniFrac and vsearch remain enabled — UniFrac builds against a dedicated single-threaded WASM target (`libssu_wasm.a` / `libskbb_wasm.a`, Eigen-backed, OpenMP stubbed out), and vsearch runs its work on the calling thread (`src/include/vsearch_serial.hpp`) because its threaded entry points cannot start threads there; results are identical to native.
+WASM (Emscripten) builds automatically disable HDF5, SortMeRNA, sylph, gpl-boundary, krepp, MAFFT, and libcurl. MAFFT is off because its fixed-size local arrays need 2–4 MB stack frames and duckdb-wasm runs with a 1 MB stack. UniFrac and vsearch remain enabled and work; rype and SourceTracker3 are compiled in and the extension loads with them, but their Rust entry points cannot currently be called under DuckDB-Wasm (see [Rust entry points under WASM](internals/embedded-tools.md#rust-entry-points-under-wasm)). UniFrac builds against a dedicated single-threaded WASM target (`libssu_wasm.a` / `libskbb_wasm.a`, Eigen-backed, OpenMP stubbed out), and vsearch runs its work on the calling thread (`src/include/vsearch_serial.hpp`) because its threaded entry points cannot start threads there; results are identical to native.
 
 ### Build steps
 Now to build the extension, run:
