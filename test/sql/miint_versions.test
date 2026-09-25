@@ -35,7 +35,7 @@ true
 # Every row matches either a core or optional library name
 query I
 SELECT COUNT(*) FROM miint_versions()
-WHERE library NOT IN ('miint', 'htslib', 'minimap2', 'kseq++', 'LBFGS++', 'WFA2-lib', 'HDF5', 'zlib', 'libdeflate', 'libcurl', 'rype', 'vsearch', 'mafft', 'abpoa', 'sylph', 'unifrac', 'scikit-bio-binaries', 'krepp', 'krepp-openmp');
+WHERE library NOT IN ('miint', 'htslib', 'minimap2', 'kseq++', 'LBFGS++', 'WFA2-lib', 'HDF5', 'zlib', 'libdeflate', 'libcurl', 'rype', 'vsearch', 'mafft', 'abpoa', 'sylph', 'st3', 'unifrac', 'scikit-bio-binaries', 'krepp', 'krepp-openmp');
 ----
 0
 

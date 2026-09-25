@@ -39,6 +39,7 @@ using unifrac_internal::AcceptedVariantList;
 using unifrac_internal::IsValidVariant;
 using unifrac_internal::ReadDistanceTable;
 using unifrac_internal::ReadFeatureTable;
+using unifrac_internal::ReadWideMetadata;
 using unifrac_internal::ResolveThreadsParameter;
 
 struct PermanovaRow {
@@ -61,126 +62,6 @@ struct UnifracPermanovaGlobalState : public GlobalTableFunctionState {
 		return 1;
 	}
 };
-
-struct WideMetadata {
-	std::vector<std::string> column_names;         // chosen variables, in canonical order
-	std::vector<miint::unifrac::MetadataRow> rows; // unpivoted long-form view
-};
-
-// Wide-form reader: metadata must have a `sample_id` column
-// (case-insensitive); every other column is a variable whose values are
-// cast to VARCHAR. `requested_variables` empty → use all non-sample_id
-// columns in original column order. Non-empty → exact-match lookup
-// (case-insensitive), preserving user-supplied order. `caller_name` prefixes
-// every error message so it names the SQL function the user actually called
-// (e.g. "permanova" vs "unifrac_permanova").
-WideMetadata ReadWideMetadata(ClientContext &context, const std::string &table_name,
-                              const std::vector<std::string> &requested_variables, const std::string &caller_name) {
-	auto conn = MakeReadOnlyHelperConnection(context);
-	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
-
-	auto probe = conn.Query("SELECT * FROM " + qname + " LIMIT 0");
-	if (probe->HasError()) {
-		throw InvalidInputException("%s: failed to read metadata relation '%s': %s", caller_name, table_name,
-		                            probe->GetError());
-	}
-	auto &probe_mat = probe->Cast<MaterializedQueryResult>();
-	const auto &all_names = probe_mat.names;
-
-	idx_t sample_id_col = DConstants::INVALID_INDEX;
-	std::vector<std::string> non_sample_cols;
-	std::vector<idx_t> non_sample_indices;
-	for (idx_t i = 0; i < all_names.size(); ++i) {
-		if (StringUtil::Lower(all_names[i]) == "sample_id") {
-			if (sample_id_col != DConstants::INVALID_INDEX) {
-				throw BinderException("%s: metadata '%s' has multiple 'sample_id' columns", caller_name, table_name);
-			}
-			sample_id_col = i;
-		} else {
-			non_sample_cols.push_back(all_names[i]);
-			non_sample_indices.push_back(i);
-		}
-	}
-	if (sample_id_col == DConstants::INVALID_INDEX) {
-		throw BinderException("%s: metadata '%s' must have a 'sample_id' column", caller_name, table_name);
-	}
-
-	std::vector<std::string> chosen_variables;
-	std::vector<idx_t> chosen_indices;
-	if (requested_variables.empty()) {
-		chosen_variables = non_sample_cols;
-		chosen_indices = non_sample_indices;
-	} else {
-		// Lookup is case-insensitive on the table's column names, but the
-		// stored canonical name is the actual column name from the relation —
-		// not the user-supplied spelling. The user-supplied spelling would
-		// drift into both the emitted `variable` column and the
-		// MetadataRow.variable field, surprising downstream consumers who
-		// expect the column name they see in the metadata table.
-		std::unordered_map<std::string, idx_t> lookup;
-		for (size_t k = 0; k < non_sample_cols.size(); ++k) {
-			lookup[StringUtil::Lower(non_sample_cols[k])] = k;
-		}
-		for (const auto &v : requested_variables) {
-			auto it = lookup.find(StringUtil::Lower(v));
-			if (it == lookup.end()) {
-				throw BinderException("%s: variable '%s' not found in metadata '%s' (sample_id column is reserved)",
-				                      caller_name, v, table_name);
-			}
-			chosen_variables.push_back(non_sample_cols[it->second]);
-			chosen_indices.push_back(non_sample_indices[it->second]);
-		}
-	}
-
-	std::string sql = "SELECT " + KeywordHelper::WriteOptionallyQuoted(all_names[sample_id_col]) + "::VARCHAR";
-	for (auto col_idx : chosen_indices) {
-		sql += ", " + KeywordHelper::WriteOptionallyQuoted(all_names[col_idx]) + "::VARCHAR";
-	}
-	sql += " FROM " + qname;
-
-	auto result = conn.Query(sql);
-	if (result->HasError()) {
-		throw InvalidInputException("%s: failed to read metadata variables from '%s': %s\nGenerated SQL: %s",
-		                            caller_name, table_name, result->GetError(), sql);
-	}
-
-	WideMetadata out;
-	out.column_names = chosen_variables;
-	auto &mat = result->Cast<MaterializedQueryResult>();
-	while (auto chunk = mat.Fetch()) {
-		const idx_t n = chunk->size();
-		if (n == 0) {
-			break;
-		}
-		UnifiedVectorFormat sid_u;
-		chunk->data[0].ToUnifiedFormat(n, sid_u);
-		auto sid_data = UnifiedVectorFormat::GetData<string_t>(sid_u);
-
-		std::vector<UnifiedVectorFormat> var_u(chosen_variables.size());
-		std::vector<const string_t *> var_data(chosen_variables.size());
-		for (size_t v = 0; v < chosen_variables.size(); ++v) {
-			chunk->data[v + 1].ToUnifiedFormat(n, var_u[v]);
-			var_data[v] = UnifiedVectorFormat::GetData<string_t>(var_u[v]);
-		}
-		for (idx_t i = 0; i < n; ++i) {
-			const auto si = sid_u.sel->get_index(i);
-			if (!sid_u.validity.RowIsValid(si)) {
-				continue; // skip rows with NULL sample_id — never join targets
-			}
-			const std::string sample = sid_data[si].GetString();
-			for (size_t v = 0; v < chosen_variables.size(); ++v) {
-				const auto vi = var_u[v].sel->get_index(i);
-				// NULL values become "" — BuildGroupings treats them as a real
-				// (empty-string) value. Users wanting to drop NULL samples
-				// should filter the metadata table before passing it in.
-				const std::string value =
-				    var_u[v].validity.RowIsValid(vi) ? var_data[v][vi].GetString() : std::string();
-				out.rows.push_back({sample, chosen_variables[v], value});
-			}
-		}
-	}
-	return out;
-}
 
 // Run PERMANOVA (skbb_permanova_fp32) on a dense fp32 distance matrix for every
 // grouping the metadata factorizes into, appending one PermanovaRow per

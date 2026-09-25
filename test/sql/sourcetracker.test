@@ -1,0 +1,457 @@
+# name: test/sql/sourcetracker.test
+# description: sourcetracker() sink mode against SourceTracker3's committed fixtures
+# group: [sql]
+
+require miint
+
+require-env ST3_AVAILABLE
+
+# ---------------------------------------------------------------------------
+# The fixtures are st3's own, read from the submodule. tiny_test is 20 features
+# x 10 samples with 5 sources in 3 environments and 5 sinks; synthetic_small is
+# 6 features x 9 samples with sinks of known composition. The expected matrices
+# were produced by an independent reference implementation with the parameters
+# in each PROVENANCE.md (seed 42, restarts 100, draws_per_restart 10, burnin
+# 100, delay 1, rarefaction OFF) and are compared at the 0.02 absolute
+# tolerance st3's own gate uses. Rarefaction is off in the fixtures, so the
+# SourceTracker2 defaults of 1000/1000 are overridden below.
+#
+# The parity runs use restarts := 800 rather than the fixture's 100. The
+# reference values are converged means; at 100 restarts a single st3 sample's
+# worst cell on tiny_test lands anywhere between 0.012 and 0.025 depending on
+# the seed (measured over seeds 42-44, both collapse modes), so 0.02 would be
+# a coin flip. At 800 restarts every seed and mode stays at or under 0.015,
+# and the standard deviations under 0.013, so the tolerance holds with margin
+# and the comparison is stricter, not looser.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE tiny_wide AS SELECT * FROM read_csv('ext/st3/fixtures/tiny_test/table.tsv', delim='\t', header=true);
+
+statement ok
+CREATE TABLE tiny AS UNPIVOT tiny_wide ON COLUMNS(* EXCLUDE (feature_id)) INTO NAME sample_id VALUE value;
+
+statement ok
+CREATE TABLE tiny_meta AS SELECT * FROM read_csv('ext/st3/fixtures/tiny_test/metadata.tsv', delim='\t', header=true);
+
+query I
+SELECT count(*) FROM duckdb_functions() WHERE function_name = 'sourcetracker' AND function_type = 'table';
+----
+1
+
+# The schema is known at bind, without reading a row: sink_id mirrors the
+# sample_id type, the MAP is keyed by the feature_id type. DESCRIBE never runs
+# the sampler; sourcetracker_errors.test shows the same DESCRIBE succeeding on
+# a relation whose execution is refused.
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM sourcetracker('tiny', 'tiny_meta'));
+----
+sink_id	VARCHAR
+source	VARCHAR
+proportion	DOUBLE
+proportion_std	DOUBLE
+assignments	MAP(VARCHAR, DOUBLE)
+
+# ---------------------------------------------------------------------------
+# Oracle parity, sum collapse (the fixture's primary matrices)
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE gold_sum_wide AS SELECT * FROM read_csv('ext/st3/fixtures/tiny_test/expected_sink_sum.tsv', delim='\t', header=true);
+
+statement ok
+CREATE TABLE gold_sum AS UNPIVOT gold_sum_wide ON COLUMNS(* EXCLUDE (sink_id)) INTO NAME source VALUE proportion;
+
+statement ok
+CREATE TABLE gold_sum_sd_wide AS SELECT * FROM read_csv('ext/st3/fixtures/tiny_test/expected_sink_sum_sd.tsv', delim='\t', header=true);
+
+statement ok
+CREATE TABLE gold_sum_sd AS UNPIVOT gold_sum_sd_wide ON COLUMNS(* EXCLUDE (sink_id)) INTO NAME source VALUE proportion_std;
+
+statement ok
+CREATE TABLE mine_sum AS SELECT * FROM sourcetracker('tiny', 'tiny_meta',
+    collapse := 'sum', seed := 42, restarts := 800, draws_per_restart := 10, burnin := 100, delay := 1,
+    source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+
+# Same (sink, source) cells on both sides, every proportion within 0.02.
+query I
+SELECT count(*) FROM (
+  SELECT 1 FROM mine_sum m FULL JOIN gold_sum g ON m.sink_id = g.sink_id AND m.source = g.source
+  WHERE m.proportion IS NULL OR g.proportion IS NULL OR abs(m.proportion - g.proportion) > 0.02
+);
+----
+0
+
+query I
+SELECT count(*) FROM mine_sum;
+----
+20
+
+# The per-draw standard deviations, against the reference's.
+query I
+SELECT count(*) FROM (
+  SELECT 1 FROM mine_sum m FULL JOIN gold_sum_sd g ON m.sink_id = g.sink_id AND m.source = g.source
+  WHERE m.proportion_std IS NULL OR g.proportion_std IS NULL OR abs(m.proportion_std - g.proportion_std) > 0.02
+);
+----
+0
+
+# Each sink's proportions are a distribution.
+query I
+SELECT count(*) FROM (SELECT sink_id, sum(proportion) AS s FROM mine_sum GROUP BY sink_id) WHERE abs(s - 1.0) > 1e-9;
+----
+0
+
+# Every sink carries the sorted source environments plus Unknown.
+query II
+SELECT sink_id, string_agg(source, ',' ORDER BY source) FROM mine_sum GROUP BY sink_id ORDER BY sink_id;
+----
+s0	Unknown,drainwater,seawater,sewage
+s1	Unknown,drainwater,seawater,sewage
+s2	Unknown,drainwater,seawater,sewage
+s3	Unknown,drainwater,seawater,sewage
+s6	Unknown,drainwater,seawater,sewage
+
+# Assignments were not requested: the MAP column is NULL, not empty.
+query I
+SELECT count(*) FILTER (WHERE assignments IS NOT NULL) FROM mine_sum;
+----
+0
+
+# ---------------------------------------------------------------------------
+# Oracle parity, mean collapse (the fixture's secondary matrix)
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE gold_mean_wide AS SELECT * FROM read_csv('ext/st3/fixtures/tiny_test/expected_sink_mean.tsv', delim='\t', header=true);
+
+statement ok
+CREATE TABLE gold_mean AS UNPIVOT gold_mean_wide ON COLUMNS(* EXCLUDE (sink_id)) INTO NAME source VALUE proportion;
+
+statement ok
+CREATE TABLE mine_mean AS SELECT * FROM sourcetracker('tiny', 'tiny_meta',
+    collapse := 'mean', seed := 42, restarts := 800, draws_per_restart := 10, burnin := 100, delay := 1,
+    source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+
+query I
+SELECT count(*) FROM (
+  SELECT 1 FROM mine_mean m FULL JOIN gold_mean g ON m.sink_id = g.sink_id AND m.source = g.source
+  WHERE m.proportion IS NULL OR g.proportion IS NULL OR abs(m.proportion - g.proportion) > 0.02
+);
+----
+0
+
+# ---------------------------------------------------------------------------
+# Second oracle: synthetic_small, whose sinks have known composition
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE synth_wide AS SELECT * FROM read_csv('ext/st3/fixtures/synthetic_small/table.tsv', delim='\t', header=true);
+
+statement ok
+CREATE TABLE synth AS UNPIVOT synth_wide ON COLUMNS(* EXCLUDE (feature_id)) INTO NAME sample_id VALUE value;
+
+statement ok
+CREATE TABLE synth_meta AS SELECT * FROM read_csv('ext/st3/fixtures/synthetic_small/metadata.tsv', delim='\t', header=true);
+
+statement ok
+CREATE TABLE synth_gold_wide AS SELECT * FROM read_csv('ext/st3/fixtures/synthetic_small/expected_sink_sum.tsv', delim='\t', header=true);
+
+statement ok
+CREATE TABLE synth_gold AS UNPIVOT synth_gold_wide ON COLUMNS(* EXCLUDE (sink_id)) INTO NAME source VALUE proportion;
+
+statement ok
+CREATE TABLE synth_mine AS SELECT * FROM sourcetracker('synth', 'synth_meta',
+    collapse := 'sum', seed := 42, restarts := 800, draws_per_restart := 10, burnin := 100, delay := 1,
+    source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+
+query I
+SELECT count(*) FROM (
+  SELECT 1 FROM synth_mine m FULL JOIN synth_gold g ON m.sink_id = g.sink_id AND m.source = g.source
+  WHERE m.proportion IS NULL OR g.proportion IS NULL OR abs(m.proportion - g.proportion) > 0.02
+);
+----
+0
+
+# ---------------------------------------------------------------------------
+# Determinism: the seed alone decides the answer, not the thread count
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE run_a AS SELECT * FROM sourcetracker('tiny', 'tiny_meta',
+    collapse := 'sum', seed := 42, restarts := 10, draws_per_restart := 2, burnin := 20,
+    source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+
+statement ok
+CREATE TABLE run_b AS SELECT * FROM sourcetracker('tiny', 'tiny_meta',
+    collapse := 'sum', seed := 42, restarts := 10, draws_per_restart := 2, burnin := 20,
+    source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+
+query I
+SELECT (SELECT count(*) FROM (SELECT * FROM run_a EXCEPT ALL SELECT * FROM run_b))
+     + (SELECT count(*) FROM (SELECT * FROM run_b EXCEPT ALL SELECT * FROM run_a));
+----
+0
+
+# Control: another seed gives another answer, so the assertion above can fail.
+statement ok
+CREATE TABLE run_c AS SELECT * FROM sourcetracker('tiny', 'tiny_meta',
+    collapse := 'sum', seed := 43, restarts := 10, draws_per_restart := 2, burnin := 20,
+    source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+
+query I
+SELECT (SELECT count(*) FROM (SELECT * FROM run_a EXCEPT ALL SELECT * FROM run_c)) > 0;
+----
+true
+
+# threads := 0 follows DuckDB's thread count, which is what st3's jobs receives.
+statement ok
+SET threads=1;
+
+statement ok
+CREATE TABLE run_t1 AS SELECT * FROM sourcetracker('tiny', 'tiny_meta',
+    collapse := 'sum', seed := 42, restarts := 10, draws_per_restart := 2, burnin := 20,
+    source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+
+statement ok
+SET threads=8;
+
+statement ok
+CREATE TABLE run_t8 AS SELECT * FROM sourcetracker('tiny', 'tiny_meta',
+    collapse := 'sum', seed := 42, restarts := 10, draws_per_restart := 2, burnin := 20,
+    source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+
+query I
+SELECT (SELECT count(*) FROM (SELECT * FROM run_t1 EXCEPT ALL SELECT * FROM run_t8))
+     + (SELECT count(*) FROM (SELECT * FROM run_t8 EXCEPT ALL SELECT * FROM run_t1));
+----
+0
+
+# ---------------------------------------------------------------------------
+# The feature table is read exactly once, at execution. The volatility sits in
+# `value`, which the reader must evaluate (an unreferenced nextval() would be
+# pruned; see rype_single_read.test), and it is inert: the answer must equal
+# the plain run's.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE SEQUENCE scan_seq START 1;
+
+statement ok
+CREATE VIEW tiny_volatile AS SELECT sample_id, feature_id, value + 0 * nextval('scan_seq') AS value FROM tiny;
+
+statement ok
+CREATE TABLE run_volatile AS SELECT * FROM sourcetracker('tiny_volatile', 'tiny_meta',
+    collapse := 'sum', seed := 42, restarts := 10, draws_per_restart := 2, burnin := 20,
+    source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+
+# 200 cells (20 features x 10 samples, zeros included), each evaluated once.
+query I
+SELECT currval('scan_seq');
+----
+200
+
+# EXPLAIN binds without executing, and bind does not read the relation.
+statement ok
+EXPLAIN SELECT * FROM sourcetracker('tiny_volatile', 'tiny_meta',
+    collapse := 'sum', seed := 42, restarts := 10, draws_per_restart := 2, burnin := 20,
+    source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+
+query I
+SELECT currval('scan_seq');
+----
+200
+
+query I
+SELECT (SELECT count(*) FROM (SELECT * FROM run_a EXCEPT ALL SELECT * FROM run_volatile))
+     + (SELECT count(*) FROM (SELECT * FROM run_volatile EXCEPT ALL SELECT * FROM run_a));
+----
+0
+
+# ---------------------------------------------------------------------------
+# A sink-mode run with no sinks is refused: st3 would return nothing, and an
+# empty result reads as a successful analysis of nothing.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE only_sources AS SELECT * FROM tiny_meta WHERE source_sink = 'source';
+
+statement ok
+CREATE TABLE only_sources_table AS SELECT * FROM tiny WHERE sample_id IN (SELECT sample_id FROM only_sources);
+
+statement error
+SELECT * FROM sourcetracker('only_sources_table', 'only_sources',
+    source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+----
+no sink
+
+# ---------------------------------------------------------------------------
+# Per-feature assignments: assignments := true fills the MAP with the mean
+# number of the sink's sequences of each feature attributed to each source,
+# nonzero features only. The fixture's expected_contingency_sum.tsv is the
+# same long form. Cells are compared as fractions of the sink's depth at
+# st3's 0.01 gate, over the UNION of both sides with a missing side read as
+# zero, so mass placed where the oracle has none is caught too.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE mine_assign AS SELECT * FROM sourcetracker('tiny', 'tiny_meta',
+    assignments := true, collapse := 'sum', seed := 42, restarts := 800, draws_per_restart := 10, burnin := 100,
+    delay := 1, source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+
+# Tallying the assignments does not disturb the draws: the mixing columns are
+# exactly the plain run's.
+query I
+SELECT (SELECT count(*) FROM (SELECT sink_id, source, proportion, proportion_std FROM mine_assign
+                              EXCEPT ALL SELECT sink_id, source, proportion, proportion_std FROM mine_sum))
+     + (SELECT count(*) FROM (SELECT sink_id, source, proportion, proportion_std FROM mine_sum
+                              EXCEPT ALL SELECT sink_id, source, proportion, proportion_std FROM mine_assign));
+----
+0
+
+# Requested, so never NULL; on this fixture every source gets some mass in
+# every sink, so never empty either.
+query II
+SELECT count(*) FILTER (WHERE assignments IS NULL), min(cardinality(assignments)) > 0 FROM mine_assign;
+----
+0	true
+
+statement ok
+CREATE TABLE mine_cells AS
+SELECT sink_id, source, unnest(map_keys(assignments)) AS feature, unnest(map_values(assignments)) AS mean_count
+FROM mine_assign;
+
+statement ok
+CREATE TABLE gold_cells AS SELECT * FROM read_csv('ext/st3/fixtures/tiny_test/expected_contingency_sum.tsv', delim='\t', header=true);
+
+statement ok
+CREATE TABLE tiny_depth AS SELECT sample_id, sum(value) AS depth FROM tiny GROUP BY sample_id;
+
+query I
+SELECT count(*) FROM (
+  SELECT coalesce(m.sink_id, g.sink_id) AS sink_id, coalesce(m.mean_count, 0) AS mine, coalesce(g.mean_count, 0) AS gold
+  FROM mine_cells m FULL JOIN gold_cells g ON m.sink_id = g.sink_id AND m.source = g.source AND m.feature = g.feature
+) c JOIN tiny_depth d ON d.sample_id = c.sink_id
+WHERE abs(c.mine - c.gold) / d.depth > 0.01;
+----
+0
+
+# The MAP is keyed once per feature.
+query I
+SELECT count(*) FROM (SELECT sink_id, source, feature FROM mine_cells GROUP BY ALL HAVING count(*) > 1);
+----
+0
+
+# Every one of a sink's sequences is attributed somewhere: the maps of one
+# sink sum to its depth (rarefaction is off).
+query I
+SELECT count(*) FROM (SELECT sink_id, sum(mean_count) AS mass FROM mine_cells GROUP BY sink_id) c
+JOIN tiny_depth d ON d.sample_id = c.sink_id WHERE abs(c.mass - d.depth) > 1e-6;
+----
+0
+
+# And each map's mass is its own row's proportion of the depth: the tally and
+# the mixing columns describe the same draws. This is what catches a sink or
+# source index mapped onto the wrong row.
+query I
+SELECT count(*) FROM (
+  SELECT a.sink_id, a.source, a.proportion, sum(c.mean_count) / d.depth AS tallied
+  FROM mine_assign a
+  JOIN mine_cells c ON c.sink_id = a.sink_id AND c.source = a.source
+  JOIN tiny_depth d ON d.sample_id = a.sink_id
+  GROUP BY a.sink_id, a.source, a.proportion, d.depth
+) WHERE abs(proportion - tallied) > 1e-9;
+----
+0
+
+# A source that can explain none of a sink's sequences gets an empty map, not
+# NULL: alpha1 := 0 removes the pseudocount that would otherwise let envB claim
+# features it never carried, so its cell is exactly empty and its proportion
+# exactly zero. envA and Unknown share f1 and f2.
+statement ok
+CREATE TABLE disjoint AS SELECT * FROM (VALUES
+  ('srcA', 'f1', 50), ('srcA', 'f2', 50),
+  ('srcB', 'f3', 100),
+  ('sinkK', 'f1', 30), ('sinkK', 'f2', 30)
+) t(sample_id, feature_id, value);
+
+statement ok
+CREATE TABLE disjoint_meta AS SELECT * FROM (VALUES
+  ('srcA', 'source', 'envA'), ('srcB', 'source', 'envB'), ('sinkK', 'sink', NULL)
+) t(sample_id, source_sink, env);
+
+statement ok
+CREATE TABLE disjoint_run AS SELECT * FROM sourcetracker('disjoint', 'disjoint_meta',
+    assignments := true, alpha1 := 0.0, seed := 7, restarts := 10, draws_per_restart := 2, burnin := 20,
+    source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+
+query IIII
+SELECT source, proportion = 0.0, assignments IS NOT NULL, cardinality(assignments) FROM disjoint_run ORDER BY source;
+----
+Unknown	false	true	2
+envA	false	true	2
+envB	true	true	0
+
+query I
+SELECT list_sort(map_keys(assignments)) FROM disjoint_run WHERE source = 'envA';
+----
+[f1, f2]
+
+# ---------------------------------------------------------------------------
+# Leave-one-out: each SOURCE sample is held out in turn and predicted from
+# the others, so the rows are source samples and sink_id names them. The
+# fixture's expected_loo_sum.tsv is compared at st3's own 0.03 gate for
+# tiny_test, whose environments overlap heavily (loo.rs explains the noise).
+# s7 is the only drainwater source, so holding it out leaves no drainwater
+# to attribute to: that cell is exactly zero, not merely small.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE gold_loo_wide AS SELECT * FROM read_csv('ext/st3/fixtures/tiny_test/expected_loo_sum.tsv', delim='\t', header=true);
+
+statement ok
+CREATE TABLE gold_loo AS UNPIVOT gold_loo_wide ON COLUMNS(* EXCLUDE (source_id)) INTO NAME source VALUE proportion;
+
+statement ok
+CREATE TABLE mine_loo AS SELECT * FROM sourcetracker('tiny', 'tiny_meta',
+    loo := true, collapse := 'sum', seed := 42, restarts := 800, draws_per_restart := 10, burnin := 100, delay := 1,
+    source_rarefaction_depth := 0);
+
+query I
+SELECT count(*) FROM (
+  SELECT 1 FROM mine_loo m FULL JOIN gold_loo g ON m.sink_id = g.source_id AND m.source = g.source
+  WHERE m.proportion IS NULL OR g.proportion IS NULL OR abs(m.proportion - g.proportion) > 0.03
+);
+----
+0
+
+query II
+SELECT sink_id, string_agg(source, ',' ORDER BY source) FROM mine_loo GROUP BY sink_id ORDER BY sink_id;
+----
+s4	Unknown,drainwater,seawater,sewage
+s5	Unknown,drainwater,seawater,sewage
+s7	Unknown,drainwater,seawater,sewage
+s8	Unknown,drainwater,seawater,sewage
+s9	Unknown,drainwater,seawater,sewage
+
+query I
+SELECT proportion FROM mine_loo WHERE sink_id = 's7' AND source = 'drainwater';
+----
+0.0
+
+query I
+SELECT count(*) FROM (SELECT sink_id, sum(proportion) AS s FROM mine_loo GROUP BY sink_id) WHERE abs(s - 1.0) > 1e-9;
+----
+0
+
+query I
+SELECT count(*) FILTER (WHERE assignments IS NOT NULL) FROM mine_loo;
+----
+0
+
+# st3 produces no per-feature tally in leave-one-out, so asking for one is
+# refused at bind, before any relation is read.
+statement error
+SELECT * FROM sourcetracker('tiny', 'tiny_meta', loo := true, assignments := true);
+----
+not available with loo

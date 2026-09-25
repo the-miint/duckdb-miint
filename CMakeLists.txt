@@ -143,6 +143,7 @@ option(MIINT_ENABLE_MAFFT "Build with MAFFT multiple sequence alignment support"
 option(MIINT_ENABLE_ABPOA "Build with abPOA partial-order alignment support" ON)
 option(MIINT_ENABLE_SORTMERNA "Build with SortMeRNA rRNA alignment support" ON)
 option(MIINT_ENABLE_SYLPH "Build with sylph FracMinHash relative-abundance profiling" ON)
+option(MIINT_ENABLE_ST3 "Build with SourceTracker3 (st3) microbial source attribution" ON)
 option(MIINT_ENABLE_GPL_BOUNDARY "Build with gpl-boundary subsystem (process pipes + Arrow IPC over POSIX shm)" ON)
 option(MIINT_ENABLE_UNIFRAC "Build with UniFrac (PCoA / PERMANOVA / Faith PD) support" ON)
 option(MIINT_ENABLE_KREPP "Build with krepp phylogenetic placement support" ON)
@@ -483,7 +484,14 @@ if(NOT KREPP_GIT_VERSION)
     set(KREPP_GIT_VERSION "unknown")
 endif()
 
-message(STATUS "Submodule versions: minimap2=${MINIMAP2_GIT_VERSION} WFA2=${WFA2_GIT_VERSION} rype=${RYPE_GIT_VERSION} vsearch=${VSEARCH_GIT_VERSION} mafft=${MAFFT_GIT_VERSION} abpoa=${ABPOA_GIT_VERSION} sylph=${SYLPH_GIT_VERSION} unifrac=${UNIFRAC_GIT_VERSION} skbb=${SKBB_GIT_VERSION} krepp=${KREPP_GIT_VERSION}")
+execute_process(COMMAND git describe --tags --dirty --always
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ext/st3
+    OUTPUT_VARIABLE ST3_GIT_VERSION OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+if(NOT ST3_GIT_VERSION)
+    set(ST3_GIT_VERSION "unknown")
+endif()
+
+message(STATUS "Submodule versions: minimap2=${MINIMAP2_GIT_VERSION} WFA2=${WFA2_GIT_VERSION} rype=${RYPE_GIT_VERSION} vsearch=${VSEARCH_GIT_VERSION} mafft=${MAFFT_GIT_VERSION} abpoa=${ABPOA_GIT_VERSION} sylph=${SYLPH_GIT_VERSION} unifrac=${UNIFRAC_GIT_VERSION} skbb=${SKBB_GIT_VERSION} krepp=${KREPP_GIT_VERSION} st3=${ST3_GIT_VERSION}")
 
 # Build htslib from release tarball
 # Configure with zstd support if available (htslib autodetects via pkg-config)
@@ -1190,6 +1198,9 @@ endif()
 if(MIINT_ENABLE_SYLPH)
     list(APPEND GLUE_FEATURES "with-sylph")
 endif()
+if(MIINT_ENABLE_ST3)
+    list(APPEND GLUE_FEATURES "with-st3")
+endif()
 string(REPLACE ";" "," GLUE_FEATURES_CSV "${GLUE_FEATURES}")
 if(GLUE_FEATURES_CSV)
     set(GLUE_FEATURES_ARGS "--features" "${GLUE_FEATURES_CSV}")
@@ -1464,6 +1475,9 @@ set(RYPE_LIB_PATH ${GLUE_LIB_PATH})
 include_directories(src/include third_party/microtar ext ext/WFA2-lib ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype)
 if(MIINT_ENABLE_SYLPH)
     include_directories(${CMAKE_CURRENT_SOURCE_DIR}/ext/sylph)
+endif()
+if(MIINT_ENABLE_ST3)
+    include_directories(${CMAKE_CURRENT_SOURCE_DIR}/ext/st3/crates/st3-capi/include)
 endif()
 if(MIINT_ENABLE_MAFFT)
     include_directories(ext/mafft/core)
@@ -1830,6 +1844,9 @@ endif()
 if(MIINT_ENABLE_SYLPH)
     list(APPEND EXTENSION_SOURCES src/SylphDatabase.cpp src/sylph_profile.cpp src/sylph_index_create.cpp)
 endif()
+if(MIINT_ENABLE_ST3)
+    list(APPEND EXTENSION_SOURCES src/sourcetracker_dataset.cpp src/sourcetracker_function.cpp)
+endif()
 if(MIINT_ENABLE_CURL)
     list(APPEND EXTENSION_SOURCES src/curl_send.cpp)
 endif()
@@ -1951,6 +1968,10 @@ endif()
 if(MIINT_ENABLE_SYLPH)
     target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_SYLPH
         SYLPH_GIT_VERSION="${SYLPH_GIT_VERSION}")
+endif()
+if(MIINT_ENABLE_ST3)
+    target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_ST3
+        ST3_GIT_VERSION="${ST3_GIT_VERSION}")
 endif()
 if(MIINT_ENABLE_CURL)
     target_compile_definitions(${EXTENSION_NAME} PRIVATE MIINT_HAS_CURL)
@@ -2111,6 +2132,10 @@ endif()
 if(MIINT_ENABLE_SYLPH)
     target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_SYLPH
         SYLPH_GIT_VERSION="${SYLPH_GIT_VERSION}")
+endif()
+if(MIINT_ENABLE_ST3)
+    target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_ST3
+        ST3_GIT_VERSION="${ST3_GIT_VERSION}")
 endif()
 if(MIINT_ENABLE_CURL)
     target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE MIINT_HAS_CURL)
@@ -2387,6 +2412,14 @@ if(MIINT_ENABLE_SYLPH)
         src/SylphDatabase.cpp
         test/cpp/test_SylphDatabase.cpp)
 endif()
+if(MIINT_ENABLE_ST3)
+    # The dataset layer is DuckDB-free by design (see sourcetracker_dataset.hpp),
+    # so it is unit-tested here; the SQL layer is covered by the SQL tests.
+    list(APPEND TEST_SOURCES
+        src/sourcetracker_dataset.cpp
+        test/cpp/test_St3.cpp
+        test/cpp/test_SourcetrackerDataset.cpp)
+endif()
 if(MIINT_ENABLE_CURL)
     list(APPEND TEST_SOURCES src/curl_send.cpp test/cpp/test_curl_send.cpp)
 endif()
@@ -2466,11 +2499,22 @@ if(MIINT_ENABLE_KREPP)
         target_link_libraries(tests miint_openmp)
     endif()
 endif()
-if(MIINT_ENABLE_SYLPH)
-    # Link rype (the umbrella archive), which transitively provides sylph
-    # symbols — see comment near the rype IMPORTED target declaration.
+# The Rust umbrella archive only links into the tests executable on native
+# targets. Under Emscripten the Rust code carries the emscripten unwinding ABI
+# (__cxa_find_matching_catch_2), which the -fwasm-exceptions main-module link
+# of tests.js cannot resolve; the extension is a side module, where that stays
+# an import. st3 on wasm is verified by scripts/build_wasm.sh (exported st3_*
+# symbols) and scripts/test_wasm_load.sh instead.
+if(MIINT_ENABLE_SYLPH OR (MIINT_ENABLE_ST3 AND NOT EMSCRIPTEN))
+    # Link rype (the umbrella archive), which transitively provides the sylph
+    # and st3 symbols — see comment near the rype IMPORTED target declaration.
     target_link_libraries(tests rype)
+endif()
+if(MIINT_ENABLE_SYLPH)
     target_compile_definitions(tests PRIVATE MIINT_HAS_SYLPH)
+endif()
+if(MIINT_ENABLE_ST3 AND NOT EMSCRIPTEN)
+    target_compile_definitions(tests PRIVATE MIINT_HAS_ST3)
 endif()
 if(MIINT_ENABLE_GPL_BOUNDARY)
     target_sources(tests PRIVATE $<TARGET_OBJECTS:miint_nanoarrow_ipc>)

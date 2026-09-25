@@ -21,6 +21,8 @@ path = "src/lib.rs"
 default = []
 # Enable sylph (gated on MIINT_ENABLE_SYLPH in CMake; off on WASM + Windows).
 with-sylph = ["dep:sylph"]
+# Enable st3 / SourceTracker3 (gated on MIINT_ENABLE_ST3 in CMake).
+with-st3 = ["dep:st3"]
 # Enable rype's needletail-based FASTX reader (default-features in upstream).
 # Off on WASM (no needletail) and Windows (cdylib of needletail triggers MSVC
 # linker errors per the historical comment in CMakeLists.txt).
@@ -31,3 +33,6 @@ rype-fastx = ["rype/fastx"]
 # entry points from both crates (rype's classify + sylph_profile).
 rype  = { path = "../rype",  default-features = false, features = ["arrow-ffi"] }
 sylph = { path = "../sylph", default-features = false, features = ["arrow-ffi"], optional = true }
+# st3-capi is the C ABI crate of the st3 workspace; its Arrow C Data Interface
+# entry points are what sourcetracker() calls.
+st3   = { package = "st3-capi", path = "../st3/crates/st3-capi", optional = true }

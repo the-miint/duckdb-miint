@@ -81,6 +81,7 @@ Two constraints come with it:
 - [Taxonomic classification](classification.md) - Classify sequences by minimizer/k-mer content (RYpe).
 - [Profiling & feature tables](profiling.md) - Abundance profiling (sylph) and OGU feature tables (Woltka).
 - [Absolute quantification](absolute_quantification.md) - Turn compositional read counts into absolute quantities: cell counts from synDNA spike-ins (Zaramela et al. 2022), and copies of each ORF's ssRNA.
+- [Source tracking](source_tracking.md) - SourceTracker: estimate what fraction of each sink community came from each source environment, with per-feature assignments and leave-one-out validation.
 
 ## Phylogeny & diversity
 

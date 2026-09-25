@@ -118,6 +118,19 @@ int main(int argc, char **argv) {
                         "3.4"))
         return 1;
 
+    // No Rust-backed function is exercised here, on purpose. The extension
+    // links rype and st3 (Rust) and loads with them, but every Rust entry
+    // point traps at call time under a -fwasm-exceptions main module with
+    // "TypeError: resolved is not a function": rustc's wasm32-unknown-emscripten
+    // target compiles unwinding (catch_unwind, drop glue) against Emscripten's
+    // JavaScript exception ABI, so the side module imports invoke_*,
+    // __cxa_find_matching_catch_2, __resumeException and llvm_eh_typeid_for,
+    // none of which a wasm-EH main module or its JS glue provides. Verified
+    // here with rype_extract_minimizer_set and with sourcetracker; see
+    // docs/internals/embedded-tools.md ("Rust entry points under WASM").
+    // Reinstate a sourcetracker check once the Rust archive is built with
+    // wasm exceptions (or without unwinding).
+
     printf("\n=== All tests passed ===\n");
 
     duckdb_disconnect(&conn);

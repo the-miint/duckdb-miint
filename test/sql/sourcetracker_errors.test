@@ -1,0 +1,245 @@
+# name: test/sql/sourcetracker_errors.test
+# description: sourcetracker() defaults, depth checks, and the fail-loud input matrix, each refused by name before the sampler runs
+# group: [sql]
+
+require miint
+
+require-env ST3_AVAILABLE
+
+# synthetic_small: 6 sources in three environments and 3 sinks, every sample
+# about 200 sequences deep, so SourceTracker2's default rarefaction depth of
+# 1000 cannot be met. That makes it the fixture for the default call.
+statement ok
+CREATE TABLE synth_wide AS SELECT * FROM read_csv('ext/st3/fixtures/synthetic_small/table.tsv', delim='\t', header=true);
+
+statement ok
+CREATE TABLE synth AS UNPIVOT synth_wide ON COLUMNS(* EXCLUDE (feature_id)) INTO NAME sample_id VALUE value;
+
+statement ok
+CREATE TABLE synth_meta AS SELECT * FROM read_csv('ext/st3/fixtures/synthetic_small/metadata.tsv', delim='\t', header=true);
+
+# ---------------------------------------------------------------------------
+# Defaults and depths
+# ---------------------------------------------------------------------------
+
+# Bind reads nothing: the schema of a call that cannot execute is still known.
+query I
+SELECT count(*) FROM (DESCRIBE SELECT * FROM sourcetracker('synth', 'synth_meta'));
+----
+5
+
+# The default call follows SourceTracker2: sinks rarefied to 1000, and a sink
+# shallower than that is refused in SourceTracker2's words, naming the
+# shallowest, rather than silently dropped.
+statement error
+SELECT * FROM sourcetracker('synth', 'synth_meta');
+----
+rarefaction of sink samples at 1000, but 3 sink samples have fewer sequences than that. The shallowest of these is 'sink_ABC' with 198 sequences.
+
+# Rarefaction off: the run goes through, one row per (sink, source).
+query I
+SELECT count(*) FROM sourcetracker('synth', 'synth_meta', source_rarefaction_depth := 0, sink_rarefaction_depth := 0, restarts := 2, burnin := 5);
+----
+12
+
+# The sink depth is checked against each sink; the source depth against each
+# COLLAPSED environment, which is st3's check and depends on how the sources
+# collapse. Two 200-deep sources sum to 400 but average to 200.
+query I
+SELECT count(*) FROM sourcetracker('synth', 'synth_meta', collapse := 'sum', source_rarefaction_depth := 300, sink_rarefaction_depth := 0, restarts := 2, burnin := 5);
+----
+12
+
+statement error
+SELECT * FROM sourcetracker('synth', 'synth_meta', collapse := 'mean', source_rarefaction_depth := 300, sink_rarefaction_depth := 0, restarts := 2, burnin := 5);
+----
+collapsed source
+
+# Leave-one-out holds out SOURCE samples, so the source depth applies to each
+# of them and the sink depth applies to nothing: the default sink depth of
+# 1000 does not stop a leave-one-out run over 200-deep samples.
+statement error
+SELECT * FROM sourcetracker('synth', 'synth_meta', loo := true);
+----
+rarefaction of source samples at 1000, but 6 source samples have fewer sequences than that.
+
+query I
+SELECT count(*) FROM sourcetracker('synth', 'synth_meta', loo := true, source_rarefaction_depth := 0, restarts := 2, burnin := 5);
+----
+24
+
+# ---------------------------------------------------------------------------
+# Metadata: roles and column names are matched without regard to case; the
+# rest of the metadata is ignored.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE VIEW synth_meta_shouty AS SELECT sample_id AS "Sample_ID", upper(source_sink) AS "SOURCE_SINK", env AS "Env", 42 AS extra FROM synth_meta;
+
+query I
+SELECT count(*) FROM sourcetracker('synth', 'synth_meta_shouty', source_rarefaction_depth := 0, sink_rarefaction_depth := 0, restarts := 2, burnin := 5);
+----
+12
+
+# ---------------------------------------------------------------------------
+# Sample sets: SourceTracker2 silently intersects the table and the metadata;
+# here a sample on one side only is an error naming it, in both directions.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE VIEW meta_missing_a1 AS SELECT * FROM synth_meta WHERE sample_id <> 'a1';
+
+statement error
+SELECT * FROM sourcetracker('synth', 'meta_missing_a1', source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+----
+sample 'a1' is in the feature table but has no metadata row
+
+statement ok
+CREATE VIEW table_missing_sink AS SELECT * FROM synth WHERE sample_id <> 'sink_AB';
+
+statement error
+SELECT * FROM sourcetracker('table_missing_sink', 'synth_meta', source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+----
+sample 'sink_AB' is in the metadata but has no non-zero cells in the feature table
+
+# A sample whose cells are all zero is the same case: there is nothing to
+# attribute.
+statement ok
+CREATE VIEW table_zero_sink AS SELECT sample_id, feature_id, CASE WHEN sample_id = 'sink_AB' THEN 0 ELSE value END AS value FROM synth;
+
+statement error
+SELECT * FROM sourcetracker('table_zero_sink', 'synth_meta', source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+----
+sample 'sink_AB' is in the metadata but has no non-zero cells in the feature table
+
+# ---------------------------------------------------------------------------
+# Roles and environments
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE VIEW meta_bad_role AS SELECT sample_id, CASE WHEN sample_id = 'b1' THEN 'sinks' ELSE source_sink END AS source_sink, env FROM synth_meta;
+
+statement error
+SELECT * FROM sourcetracker('synth', 'meta_bad_role', source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+----
+sample 'b1' has source_sink = 'sinks'; expected 'source' or 'sink'
+
+statement ok
+CREATE VIEW meta_no_env AS SELECT sample_id, source_sink, CASE WHEN sample_id = 'c2' THEN NULL ELSE env END AS env FROM synth_meta;
+
+statement error
+SELECT * FROM sourcetracker('synth', 'meta_no_env', source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+----
+source sample 'c2' has an empty env
+
+statement ok
+CREATE VIEW meta_only_sinks AS SELECT sample_id, 'sink' AS source_sink, env FROM synth_meta;
+
+statement error
+SELECT * FROM sourcetracker('synth', 'meta_only_sinks', source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+----
+no source samples in the metadata
+
+statement ok
+CREATE VIEW meta_doubled AS SELECT * FROM synth_meta UNION ALL SELECT * FROM synth_meta WHERE sample_id = 'a2';
+
+statement error
+SELECT * FROM sourcetracker('synth', 'meta_doubled', source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+----
+duplicate metadata rows for sample 'a2'
+
+# ---------------------------------------------------------------------------
+# Counts: SourceTracker draws sequences, so cells must be whole, finite and
+# non-negative, and each (sample, feature) given once.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE VIEW table_negative AS SELECT sample_id, feature_id, CASE WHEN sample_id = 'a1' AND feature_id = 'f1' THEN -3 ELSE value END AS value FROM synth;
+
+statement error
+SELECT * FROM sourcetracker('table_negative', 'synth_meta', source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+----
+feature table cell (sample 'a1', feature 'f1') has count -3; counts must be finite and >= 0
+
+statement ok
+CREATE VIEW table_fractional AS SELECT sample_id, feature_id, CASE WHEN sample_id = 'a1' AND feature_id = 'f1' THEN 2.5 ELSE value END AS value FROM synth;
+
+statement error
+SELECT * FROM sourcetracker('table_fractional', 'synth_meta', source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+----
+feature table cell (sample 'a1', feature 'f1') has count 2.5; counts must be whole numbers
+
+statement ok
+CREATE VIEW table_doubled AS SELECT * FROM synth UNION ALL SELECT * FROM synth WHERE sample_id = 'a1' AND feature_id = 'f1';
+
+statement error
+SELECT * FROM sourcetracker('table_doubled', 'synth_meta', source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+----
+duplicate feature table cell (sample 'a1', feature 'f1')
+
+# ---------------------------------------------------------------------------
+# Parameters, refused at bind
+# ---------------------------------------------------------------------------
+
+statement error
+SELECT * FROM sourcetracker('synth', 'synth_meta', seed := -2);
+----
+seed must be >= 0, or -1 for a fresh draw
+
+statement error
+SELECT * FROM sourcetracker('synth', 'synth_meta', collapse := 'median');
+----
+collapse must be 'mean' or 'sum' (got 'median')
+
+statement error
+SELECT * FROM sourcetracker('synth', 'synth_meta', restarts := 0);
+----
+restarts must be >= 1
+
+statement error
+SELECT * FROM sourcetracker('synth', 'synth_meta', burnin := -5);
+----
+burnin must be >= 1
+
+statement error
+SELECT * FROM sourcetracker('synth', 'synth_meta', alpha1 := -0.5);
+----
+alpha1 must be finite and >= 0
+
+statement error
+SELECT * FROM sourcetracker('synth', 'synth_meta', beta := 'nan'::DOUBLE);
+----
+beta must be finite and >= 0
+
+statement error
+SELECT * FROM sourcetracker('synth', 'synth_meta', sink_rarefaction_depth := -1);
+----
+sink_rarefaction_depth must be >= 0
+
+statement error
+SELECT * FROM sourcetracker('synth', 'synth_meta', threads := -1);
+----
+threads must be >= 0
+
+statement error
+SELECT * FROM sourcetracker('', 'synth_meta');
+----
+feature-table name must not be empty
+
+statement error
+SELECT * FROM sourcetracker('synth', '');
+----
+sample-metadata name must not be empty
+
+statement ok
+CREATE VIEW meta_without_env AS SELECT sample_id, source_sink FROM synth_meta;
+
+statement error
+SELECT * FROM sourcetracker('synth', 'meta_without_env');
+----
+column 'env' is missing
+
+statement error
+SELECT * FROM sourcetracker('no_such_table', 'synth_meta');
+----
+no_such_table
