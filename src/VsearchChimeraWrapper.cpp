@@ -24,6 +24,7 @@
 #include "vsearch_utils.hpp"
 
 #include "vsearch_api.h"
+#include "vsearch_serial.hpp"
 
 #include <stdexcept>
 
@@ -220,7 +221,7 @@ void VsearchChimeraWrapper::set_reference(const std::vector<std::string> &labels
 	init_common(false); // Reference mode: abskew=0
 
 	load_sequences_into_db(labels, sequences, ref_abundances_);
-	dust_all();
+	(params_.serial ? DustAllSerial : dust_all)();
 	dbindex_prepare(1, opt_dbmask);
 	dbindex_addallsequences(opt_dbmask);
 
@@ -243,7 +244,7 @@ void VsearchChimeraWrapper::prepare_denovo(const std::vector<std::string> &label
 	init_common(true); // De novo mode: abskew from params
 
 	load_sequences_into_db(labels, sequences, abundances);
-	dust_all();
+	(params_.serial ? DustAllSerial : dust_all)();
 	dbindex_prepare(1, opt_dbmask);
 	// De novo: do NOT index all sequences — caller indexes incrementally.
 
@@ -333,8 +334,9 @@ void VsearchChimeraWrapper::detect_batch(const std::vector<std::string> &query_l
 
 	std::vector<chimera_result_s> raw_results(args.count);
 
-	chimera_detect_batch(args.seq_ptrs.data(), args.head_ptrs.data(), args.lens.data(), args.sizes.data(), args.count,
-	                     raw_results.data());
+	(params_.serial ? ChimeraDetectBatchSerial : chimera_detect_batch)(args.seq_ptrs.data(), args.head_ptrs.data(),
+	                                                                   args.lens.data(), args.sizes.data(), args.count,
+	                                                                   raw_results.data());
 
 	for (int i = 0; i < args.count; i++) {
 		output.push_back(convert_result(&raw_results[i], query_labels[i]));

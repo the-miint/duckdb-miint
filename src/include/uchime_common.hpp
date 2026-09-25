@@ -3,6 +3,7 @@
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
+#include "vsearch_utils.hpp"
 
 #include <string>
 #include <vector>
@@ -23,6 +24,10 @@ struct UchimeParams {
 	// in de novo mode, which is sequential by construction (one query per call,
 	// then index_sequence) — denovo always runs with opt_threads=1.
 	int threads = 0;
+	// Run on the calling thread via vsearch_serial.hpp rather than vsearch's
+	// thread-pool entry points. Same results; on by default only where threads
+	// are unavailable (wasm).
+	bool serial = kVsearchSerialByDefault;
 };
 
 // Full UCHIME result for a single query (mirrors vsearch --uchimeout 18 columns).

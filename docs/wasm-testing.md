@@ -39,7 +39,7 @@ updating submodules):
 
 ### What it verifies
 
-- All C libraries (htslib, minimap2, WFA2, MAFFT) compile for WASM
+- All C libraries (htslib, minimap2, WFA2, vsearch) compile for WASM
 - Rust rype library compiles with PIC for WASM
 - The emcc post-build linking step succeeds (all static libraries linked
   into the side module via `DUCKDB_EXTENSION_MIINT_LINKED_LIBS`)

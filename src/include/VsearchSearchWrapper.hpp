@@ -1,5 +1,7 @@
 #pragma once
 
+#include "vsearch_utils.hpp"
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -16,6 +18,10 @@ struct SearchParams {
 	// auto-detect" (= all physical cores). Callers normally pass DuckDB's
 	// configured thread count so that `SET threads=N` is honored.
 	int threads = 0;
+	// Run on the calling thread via vsearch_serial.hpp rather than vsearch's
+	// thread-pool entry points. Same results; on by default only where threads
+	// are unavailable (wasm).
+	bool serial = kVsearchSerialByDefault;
 };
 
 // Single search hit result.

@@ -25,6 +25,7 @@
 #include "vsearch_utils.hpp"
 
 #include "vsearch_api.h"
+#include "vsearch_serial.hpp"
 
 namespace miint {
 
@@ -126,7 +127,7 @@ void VsearchClusterWrapper::set_sequences(const std::vector<std::string> &labels
 	}
 
 	// DUST masking
-	dust_all();
+	(params_.serial ? DustAllSerial : dust_all)();
 
 	// Step 5: prepare k-mer index (empty — centroids indexed incrementally)
 	dbindex_prepare(1, opt_dbmask);
@@ -148,7 +149,8 @@ std::vector<ClusterResult> VsearchClusterWrapper::cluster_all() {
 	// Step 7: assign sequences to clusters using batch API
 	// (internally parallelizes search across opt_threads)
 	std::vector<cluster_result_s> raw_results(state_->sequence_count);
-	cluster_assign_batch(cs, 0, state_->sequence_count, raw_results.data());
+	(params_.serial ? ClusterAssignBatchSerial : cluster_assign_batch)(cs, 0, state_->sequence_count,
+	                                                                   raw_results.data());
 
 	std::vector<ClusterResult> results;
 	results.reserve(state_->sequence_count);

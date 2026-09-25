@@ -29,6 +29,7 @@
 #include "vsearch_utils.hpp"
 
 #include "vsearch_api.h"
+#include "vsearch_serial.hpp"
 
 namespace miint {
 
@@ -200,7 +201,7 @@ void VsearchSearchWrapper::set_database(const std::vector<std::string> &labels,
 	}
 
 	// Step 5: DUST masking + k-mer index
-	dust_all();
+	(params_.serial ? DustAllSerial : dust_all)();
 	dbindex_prepare(1, opt_dbmask);
 	dbindex_addallsequences(opt_dbmask);
 	state->index_initialized = true;
@@ -236,8 +237,9 @@ void VsearchSearchWrapper::search_batch(const std::vector<std::string> &query_la
 	std::vector<search_result_s> raw_results(args.count * max_results);
 	std::vector<int> result_counts(args.count);
 
-	::search_batch(args.seq_ptrs.data(), args.head_ptrs.data(), args.lens.data(), args.sizes.data(), args.count,
-	               raw_results.data(), max_results, result_counts.data());
+	(params_.serial ? SearchBatchSerial : ::search_batch)(args.seq_ptrs.data(), args.head_ptrs.data(), args.lens.data(),
+	                                                      args.sizes.data(), args.count, raw_results.data(),
+	                                                      max_results, result_counts.data());
 
 	for (int qi = 0; qi < args.count; qi++) {
 		for (int hi = 0; hi < result_counts[qi]; hi++) {
