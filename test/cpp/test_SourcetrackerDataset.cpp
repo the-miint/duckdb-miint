@@ -55,7 +55,7 @@ std::vector<MetadataRow> ToyMetadata() {
 std::vector<CooRow> ToyTable() {
 	return {
 	    {"src_m2", "f2", 4.0}, {"s_b", "f3", 1.0},    {"src_z", "f1", 10.0}, {"s_a", "f1", 2.0}, {"src_m", "f3", 6.0},
-	    {"s_a", "f3", 5.0},    {"src_z", "f2", 20.0}, {"src_m", "f1", 3.0},  {"s_b", "f2", 7.0}, {"src_m2", "f1", 1.5},
+	    {"s_a", "f3", 5.0},    {"src_z", "f2", 20.0}, {"src_m", "f1", 3.0},  {"s_b", "f2", 7.0}, {"src_m2", "f1", 2.0},
 	};
 }
 
@@ -131,7 +131,7 @@ TEST_CASE("IngestDataset: sample totals are per-sample sums of the cells", "[sou
 	REQUIRE(ds.sample_totals[IndexOf(ds.sample_ids, "s_a")] == Approx(7.0));
 	REQUIRE(ds.sample_totals[IndexOf(ds.sample_ids, "s_b")] == Approx(8.0));
 	REQUIRE(ds.sample_totals[IndexOf(ds.sample_ids, "src_m")] == Approx(9.0));
-	REQUIRE(ds.sample_totals[IndexOf(ds.sample_ids, "src_m2")] == Approx(5.5));
+	REQUIRE(ds.sample_totals[IndexOf(ds.sample_ids, "src_m2")] == Approx(6.0));
 	REQUIRE(ds.sample_totals[IndexOf(ds.sample_ids, "src_z")] == Approx(30.0));
 }
 
@@ -186,6 +186,15 @@ TEST_CASE("IngestDataset: fails loud, naming the id, on every malformed input", 
 		inf.push_back({"s_b", "f1", std::numeric_limits<double>::infinity()});
 		REQUIRE_THROWS_WITH(IngestDataset(inf, ToyMetadata()), ContainsSubstring("s_b"));
 	}
+	SECTION("a fractional count") {
+		// st3 stores integer counts and floors what it is given, so a table of
+		// relative abundances would be silently truncated toward zero. Refuse it,
+		// as SourceTracker2 does.
+		auto frac = ToyTable();
+		frac.push_back({"s_b", "f1", 2.5});
+		REQUIRE_THROWS_WITH(IngestDataset(frac, ToyMetadata()), ContainsSubstring("s_b"));
+		REQUIRE_THROWS_WITH(IngestDataset(frac, ToyMetadata()), ContainsSubstring("whole"));
+	}
 	SECTION("an unknown source_sink value") {
 		std::vector<MetadataRow> meta;
 		AddMeta(meta, "src_z", "source", "sewage");
@@ -226,7 +235,7 @@ TEST_CASE("IngestDataset: fails loud, naming the id, on every malformed input", 
 }
 
 TEST_CASE("CheckDepths: sink mode checks sinks against the sink depth, and only those", "[sourcetracker]") {
-	// Totals: s_a 7, s_b 8 (sinks); src_m 9, src_m2 5.5, src_z 30 (sources).
+	// Totals: s_a 7, s_b 8 (sinks); src_m 9, src_m2 6, src_z 30 (sources).
 	const Dataset ds = IngestDataset(ToyTable(), ToyMetadata());
 
 	SECTION("depth 0 is off") {
@@ -255,12 +264,12 @@ TEST_CASE("CheckDepths: leave-one-out checks source samples against the source d
 	const Dataset ds = IngestDataset(ToyTable(), ToyMetadata());
 
 	SECTION("a source sample at exactly the depth passes") {
-		REQUIRE_NOTHROW(CheckDepths(ds, 5, 0, true));
+		REQUIRE_NOTHROW(CheckDepths(ds, 6, 0, true));
 	}
 	SECTION("the shallowest source sample is named") {
-		REQUIRE_THROWS_WITH(CheckDepths(ds, 6, 0, true), ContainsSubstring("rarefaction of source samples at 6"));
-		REQUIRE_THROWS_WITH(CheckDepths(ds, 6, 0, true), ContainsSubstring("'src_m2'"));
-		REQUIRE_THROWS_WITH(CheckDepths(ds, 6, 0, true), ContainsSubstring("5.5 sequences"));
+		REQUIRE_THROWS_WITH(CheckDepths(ds, 7, 0, true), ContainsSubstring("rarefaction of source samples at 7"));
+		REQUIRE_THROWS_WITH(CheckDepths(ds, 7, 0, true), ContainsSubstring("'src_m2'"));
+		REQUIRE_THROWS_WITH(CheckDepths(ds, 7, 0, true), ContainsSubstring("6 sequences"));
 	}
 	SECTION("the sink depth is ignored in leave-one-out") {
 		REQUIRE_NOTHROW(CheckDepths(ds, 0, 1000000, true));

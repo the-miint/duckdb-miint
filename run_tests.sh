@@ -386,6 +386,9 @@ fi
 if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'align_mafft';" | ./build/release/duckdb -csv -noheader 2>/dev/null | grep -q 1; then
     export MAFFT_AVAILABLE=1
 fi
+if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'sourcetracker';" | ./build/release/duckdb -csv -noheader 2>/dev/null | grep -q 1; then
+    export ST3_AVAILABLE=1
+fi
 # krepp's index regions are only compiled in when an OpenMP runtime was found at
 # configure time; without them krepp_index_create refuses threads > 1. Both
 # branches are exported, because the refusal is worth asserting too - a build

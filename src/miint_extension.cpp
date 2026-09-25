@@ -116,6 +116,9 @@
 #include <sylph_index_create.hpp>
 #include <sylph_profile.hpp>
 #endif
+#ifdef MIINT_HAS_ST3
+#include <sourcetracker_function.hpp>
+#endif
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 #include <duckdb/main/config.hpp>
 #include <duckdb/storage/storage_extension.hpp>
@@ -433,6 +436,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 #ifdef MIINT_HAS_SYLPH
 	SylphProfileTableFunction::Register(loader);
 	SylphIndexCreateTableFunction::Register(loader);
+#endif
+#ifdef MIINT_HAS_ST3
+	RegisterSourcetracker(loader);
 #endif
 #ifdef MIINT_HAS_GPL_BOUNDARY
 	PhylogenyFastTreeTableFunction::Register(loader);

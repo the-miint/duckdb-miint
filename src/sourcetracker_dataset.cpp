@@ -137,6 +137,13 @@ Dataset IngestDataset(const std::vector<CooRow> &table, const std::vector<Metada
 			Fail("feature table cell (sample '" + cell.sample_id + "', feature '" + cell.feature_id + "') has count " +
 			     FormatCount(cell.count) + "; counts must be finite and >= 0");
 		}
+		// st3 stores integer counts and floors what it is given, so a table of
+		// relative abundances would be silently truncated toward zero.
+		// SourceTracker2 refuses non-integer tables too.
+		if (cell.count != std::floor(cell.count)) {
+			Fail("feature table cell (sample '" + cell.sample_id + "', feature '" + cell.feature_id + "') has count " +
+			     FormatCount(cell.count) + "; counts must be whole numbers");
+		}
 		const int32_t fi = feature_index.at(cell.feature_id);
 		const int32_t si = s->second;
 		if (!cells_seen.insert(static_cast<int64_t>(fi) * n_samples + si).second) {
