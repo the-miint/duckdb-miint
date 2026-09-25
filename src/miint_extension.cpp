@@ -225,6 +225,9 @@ static unique_ptr<FunctionData> MiintVersionsBind(ClientContext &context, TableF
 #ifdef MIINT_HAS_SYLPH
 	data->versions.emplace_back("sylph", SYLPH_GIT_VERSION);
 #endif
+#ifdef MIINT_HAS_ST3
+	data->versions.emplace_back("st3", ST3_GIT_VERSION);
+#endif
 #ifdef MIINT_HAS_KREPP
 	data->versions.emplace_back("krepp", KREPP_GIT_VERSION);
 	// A row only when krepp's OpenMP regions are compiled in, which is what

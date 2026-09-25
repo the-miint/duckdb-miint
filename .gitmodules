@@ -48,3 +48,6 @@
 	path = ext/krepp
 	url = https://github.com/bo1929/krepp.git
 	branch = master
+[submodule "ext/st3"]
+	path = ext/st3
+	url = https://github.com/the-miint/st3.git
