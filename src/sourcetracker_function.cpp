@@ -8,6 +8,7 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "catalog_utils.hpp"
@@ -60,13 +61,23 @@ struct SourcetrackerBindData : public TableFunctionData {
 	LogicalType feature_id_type = LogicalType::VARCHAR;
 };
 
+// One (feature, mean count) assignment cell; the feature is an index into the
+// dataset's feature dictionary.
+using TallyCell = std::pair<int32_t, double>;
+
 struct SourcetrackerGlobalState : public GlobalTableFunctionState {
 	std::vector<std::string> sink_ids; // st3's row order
 	std::vector<std::string> sources;  // st3's column order: environments, then Unknown
 	std::vector<double> means;         // [sink][source], row-major
 	std::vector<double> stds;          // same shape
+	// Only when assignments were requested: one cell list per (sink, source),
+	// same row-major order as the means, sorted by feature, nonzero cells only.
+	bool assignments = false;
+	std::vector<std::string> feature_ids;
+	std::vector<std::vector<TallyCell>> tally;
 	idx_t cursor = 0;
 	LogicalType sink_id_type = LogicalType::VARCHAR;
+	LogicalType feature_id_type = LogicalType::VARCHAR;
 	idx_t MaxThreads() const override {
 		return 1;
 	}
@@ -479,6 +490,103 @@ DenseBatch ReadDenseBatch(const St3Result *result,
 }
 
 // ---------------------------------------------------------------------------
+// Arrow -> DuckDB: st3's per-sink assignment tallies
+//
+// The stream yields one batch per sink over [sink INT32, source INT32,
+// feature INT32, value DOUBLE]: `sink` is the row in the means batch, `source`
+// the column, and `feature` the position in the feature-id array st3 was given,
+// which is the dataset dictionary. Only nonzero cells are streamed.
+// ---------------------------------------------------------------------------
+
+struct ArrowStreamHolder {
+	ArrowArrayStream stream {};
+	~ArrowStreamHolder() {
+		if (stream.release) {
+			stream.release(&stream);
+		}
+	}
+	ArrowStreamHolder(const ArrowStreamHolder &) = delete;
+	ArrowStreamHolder &operator=(const ArrowStreamHolder &) = delete;
+	ArrowStreamHolder() = default;
+	[[noreturn]] void Fail(const char *what) {
+		// A failed stream call reports through the stream itself, not st3's
+		// thread-local slot.
+		const char *raw = stream.get_last_error ? stream.get_last_error(&stream) : nullptr;
+		throw InvalidInputException("sourcetracker: st3 contingency stream: %s failed: %s", what,
+		                            (raw && *raw) ? raw : "no message");
+	}
+};
+
+template <typename T>
+const T *ChildValues(const ArrowArray &batch, idx_t child, const char *format, const ArrowSchema &schema) {
+	const ArrowArray &col = *batch.children[child];
+	const ArrowSchema &col_schema = *schema.children[child];
+	if (!col_schema.format || std::strcmp(col_schema.format, format) != 0 || col.n_buffers != 2 ||
+	    col.null_count != 0 || col.length != batch.length) {
+		BadExport("contingency", "columns are not non-null (INT32, INT32, INT32, DOUBLE)");
+	}
+	return static_cast<const T *>(col.buffers[1]) + batch.offset + col.offset;
+}
+
+std::vector<std::vector<TallyCell>> ReadContingency(const St3Result *result, idx_t n_sinks, idx_t n_sources,
+                                                    idx_t n_features) {
+	ArrowStreamHolder holder;
+	ArrowArrayStream &stream = holder.stream;
+	const St3Status status = st3_result_contingency_stream(result, &stream);
+	if (status != ST3_STATUS_OK) {
+		ThrowSt3("st3_result_contingency_stream", status);
+	}
+	ArrowExport schema_holder;
+	if (stream.get_schema(&stream, &schema_holder.schema) != 0) {
+		holder.Fail("get_schema");
+	}
+	const ArrowSchema &schema = schema_holder.schema;
+	if (!schema.format || std::strcmp(schema.format, "+s") != 0 || schema.n_children != 4) {
+		BadExport("contingency", "not a four-column struct batch");
+	}
+
+	std::vector<std::vector<TallyCell>> tally(n_sinks * n_sources);
+	while (true) {
+		ArrowExport batch;
+		if (stream.get_next(&stream, &batch.array) != 0) {
+			holder.Fail("get_next");
+		}
+		if (!batch.array.release) {
+			break; // end of stream
+		}
+		const ArrowArray &arr = batch.array;
+		if (arr.n_children != 4 || arr.null_count != 0) {
+			BadExport("contingency", "not a four-column struct batch");
+		}
+		const auto sinks = ChildValues<int32_t>(arr, 0, "i", schema);
+		const auto sources = ChildValues<int32_t>(arr, 1, "i", schema);
+		const auto features = ChildValues<int32_t>(arr, 2, "i", schema);
+		const auto values = ChildValues<double>(arr, 3, "g", schema);
+		for (int64_t i = 0; i < arr.length; ++i) {
+			const int32_t s = sinks[i];
+			const int32_t e = sources[i];
+			const int32_t f = features[i];
+			if (s < 0 || static_cast<idx_t>(s) >= n_sinks || e < 0 || static_cast<idx_t>(e) >= n_sources || f < 0 ||
+			    static_cast<idx_t>(f) >= n_features) {
+				BadExport("contingency", "an index is outside the sink, source or feature range");
+			}
+			tally[static_cast<idx_t>(s) * n_sources + static_cast<idx_t>(e)].emplace_back(f, values[i]);
+		}
+	}
+	// A MAP needs each key once; the tally is one cell per (source, feature) by
+	// construction, and this makes that a checked fact rather than an assumption.
+	for (auto &cells : tally) {
+		std::sort(cells.begin(), cells.end(), [](const TallyCell &a, const TallyCell &b) { return a.first < b.first; });
+		const auto dup = std::adjacent_find(cells.begin(), cells.end(),
+		                                    [](const TallyCell &a, const TallyCell &b) { return a.first == b.first; });
+		if (dup != cells.end()) {
+			BadExport("contingency", "a feature is tallied twice for one (sink, source)");
+		}
+	}
+	return tally;
+}
+
+// ---------------------------------------------------------------------------
 // InitGlobal: read both relations once, validate, run st3, keep the result.
 // ---------------------------------------------------------------------------
 
@@ -486,6 +594,8 @@ unique_ptr<GlobalTableFunctionState> SourcetrackerInitGlobal(ClientContext &cont
 	auto &data = input.bind_data->Cast<SourcetrackerBindData>();
 	auto gstate = make_uniq<SourcetrackerGlobalState>();
 	gstate->sink_id_type = data.sink_id_type;
+	gstate->feature_id_type = data.feature_id_type;
+	gstate->assignments = data.assignments;
 
 	auto cells = ReadFeatureTable(context, data.table_name, kCaller);
 	auto metadata = ReadWideMetadata(context, data.metadata_name, {"source_sink", "env"}, kCaller);
@@ -528,12 +638,18 @@ unique_ptr<GlobalTableFunctionState> SourcetrackerInitGlobal(ClientContext &cont
 	gstate->sources = std::move(means.columns);
 	gstate->means = std::move(means.values);
 	gstate->stds = std::move(stds.values);
+	if (data.assignments) {
+		gstate->tally =
+		    ReadContingency(result.get(), gstate->sink_ids.size(), gstate->sources.size(), ds.feature_ids.size());
+		gstate->feature_ids = std::move(ds.feature_ids);
+	}
 	return std::move(gstate);
 }
 
 // ---------------------------------------------------------------------------
-// Execute: one row per (sink, source). The assignments MAP is NULL: nothing
-// requests the tally yet, and NULL is the "not requested" value.
+// Execute: one row per (sink, source). The assignments MAP is NULL when the
+// tally was not requested, otherwise one entry per nonzero feature (so a
+// source with no mass in a sink has an empty map).
 // ---------------------------------------------------------------------------
 
 void SourcetrackerExecute(ClientContext &, TableFunctionInput &input, DataChunk &output) {
@@ -559,10 +675,35 @@ void SourcetrackerExecute(ClientContext &, TableFunctionInput &input, DataChunk 
 		SetString(source_vec, i, g.sources[k % n_sources]);
 		proportion[i] = g.means[k];
 		proportion_std[i] = g.stds[k];
-		map_entries[i] = list_entry_t {0, 0};
-		FlatVector::SetNull(map_vec, i, true);
 	}
-	ListVector::SetListSize(map_vec, 0);
+
+	if (!g.assignments) {
+		for (idx_t i = 0; i < n; ++i) {
+			map_entries[i] = list_entry_t {0, 0};
+			FlatVector::SetNull(map_vec, i, true);
+		}
+		ListVector::SetListSize(map_vec, 0);
+	} else {
+		idx_t total_entries = 0;
+		for (idx_t i = 0; i < n; ++i) {
+			total_entries += g.tally[g.cursor + i].size();
+		}
+		auto &keys = MapVector::GetKeys(map_vec);
+		auto &values = MapVector::GetValues(map_vec);
+		idx_t offset = ListVector::GetListSize(map_vec);
+		ListVector::Reserve(map_vec, offset + total_entries);
+		for (idx_t i = 0; i < n; ++i) {
+			const auto &cells = g.tally[g.cursor + i];
+			map_entries[i] = list_entry_t {offset, cells.size()};
+			for (const auto &cell : cells) {
+				// Fetched per cell: Reserve above may have moved the child buffers.
+				EmitIdCell(keys, offset, g.feature_ids[cell.first], g.feature_id_type);
+				FlatVector::GetData<double>(values)[offset] = cell.second;
+				++offset;
+			}
+		}
+		ListVector::SetListSize(map_vec, offset);
+	}
 	g.cursor += n;
 	output.SetCardinality(n);
 }

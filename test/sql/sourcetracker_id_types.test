@@ -1,0 +1,201 @@
+# name: test/sql/sourcetracker_id_types.test
+# description: sourcetracker() mirrors BIGINT and UUID sample and feature ids onto sink_id and the assignments MAP keys
+# group: [sql]
+
+require miint
+
+require-env ST3_AVAILABLE
+
+statement ok
+CREATE TABLE tiny_wide AS SELECT * FROM read_csv('ext/st3/fixtures/tiny_test/table.tsv', delim='\t', header=true);
+
+statement ok
+CREATE TABLE tiny AS UNPIVOT tiny_wide ON COLUMNS(* EXCLUDE (feature_id)) INTO NAME sample_id VALUE value;
+
+statement ok
+CREATE TABLE tiny_meta AS SELECT * FROM read_csv('ext/st3/fixtures/tiny_test/metadata.tsv', delim='\t', header=true);
+
+# Relabelling maps, numbered in the byte order of the text ids so that every
+# relabelled relation sorts exactly as the original does. The sampler walks
+# samples and features in dictionary order and draws from one seeded stream,
+# so an order-preserving relabelling must reproduce the VARCHAR run to the
+# bit; a relabelling that reordered anything would change the numbers for a
+# reason that has nothing to do with id types. The UUIDs end in the same
+# two-digit index, and BIGINTs are all three digits, so both sort as text the
+# way the numbers sort.
+statement ok
+CREATE TABLE s_map AS
+SELECT sample_id AS txt,
+       CAST(100 + row_number() OVER (ORDER BY sample_id) AS BIGINT) AS num,
+       CAST('00000000-0000-4000-8000-0000000000' || lpad(CAST(row_number() OVER (ORDER BY sample_id) AS VARCHAR), 2, '0') AS UUID) AS uu
+FROM (SELECT DISTINCT sample_id FROM tiny);
+
+statement ok
+CREATE TABLE f_map AS
+SELECT feature_id AS txt,
+       CAST(200 + row_number() OVER (ORDER BY feature_id) AS BIGINT) AS num,
+       CAST('00000000-0000-4000-8000-00000000a0' || lpad(CAST(row_number() OVER (ORDER BY feature_id) AS VARCHAR), 2, '0') AS UUID) AS uu
+FROM (SELECT DISTINCT feature_id FROM tiny);
+
+statement ok
+CREATE TABLE tiny_bigint AS
+SELECT s.num AS sample_id, f.num AS feature_id, t.value FROM tiny t JOIN s_map s ON s.txt = t.sample_id JOIN f_map f ON f.txt = t.feature_id;
+
+statement ok
+CREATE TABLE tiny_meta_bigint AS
+SELECT s.num AS sample_id, m.source_sink, m.env FROM tiny_meta m JOIN s_map s ON s.txt = m.sample_id;
+
+statement ok
+CREATE TABLE tiny_uuid AS
+SELECT s.uu AS sample_id, f.uu AS feature_id, t.value FROM tiny t JOIN s_map s ON s.txt = t.sample_id JOIN f_map f ON f.txt = t.feature_id;
+
+statement ok
+CREATE TABLE tiny_meta_uuid AS
+SELECT s.uu AS sample_id, m.source_sink, m.env FROM tiny_meta m JOIN s_map s ON s.txt = m.sample_id;
+
+# The declared schema follows the input types.
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM sourcetracker('tiny_bigint', 'tiny_meta_bigint')) WHERE column_name IN ('sink_id', 'assignments');
+----
+sink_id	BIGINT
+assignments	MAP(BIGINT, DOUBLE)
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM sourcetracker('tiny_uuid', 'tiny_meta_uuid')) WHERE column_name IN ('sink_id', 'assignments');
+----
+sink_id	UUID
+assignments	MAP(UUID, DOUBLE)
+
+statement ok
+CREATE TABLE run_txt AS SELECT * FROM sourcetracker('tiny', 'tiny_meta',
+    assignments := true, collapse := 'sum', seed := 42, restarts := 10, draws_per_restart := 2, burnin := 20,
+    source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+
+statement ok
+CREATE TABLE run_num AS SELECT * FROM sourcetracker('tiny_bigint', 'tiny_meta_bigint',
+    assignments := true, collapse := 'sum', seed := 42, restarts := 10, draws_per_restart := 2, burnin := 20,
+    source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+
+statement ok
+CREATE TABLE run_uu AS SELECT * FROM sourcetracker('tiny_uuid', 'tiny_meta_uuid',
+    assignments := true, collapse := 'sum', seed := 42, restarts := 10, draws_per_restart := 2, burnin := 20,
+    source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+
+# The rows carry the types at runtime, not only in the declared schema: the
+# vectors hold BIGINTs and UUIDs, so sink_id and the map keys join back to
+# typed metadata without a cast.
+query II
+SELECT DISTINCT typeof(sink_id), typeof(map_keys(assignments)[1]) FROM run_num;
+----
+BIGINT	BIGINT
+
+query II
+SELECT DISTINCT typeof(sink_id), typeof(map_keys(assignments)[1]) FROM run_uu;
+----
+UUID	UUID
+
+# The values round-trip: the typed sink ids are exactly the metadata's typed
+# sinks, and the typed map keys are exactly the typed feature ids, compared
+# with no cast on either side. A symmetric difference, so a dropped id and an
+# invented id are both caught.
+query I
+SELECT (SELECT count(*) FROM (SELECT DISTINCT sink_id FROM run_num EXCEPT SELECT sample_id FROM tiny_meta_bigint WHERE source_sink = 'sink'))
+     + (SELECT count(*) FROM (SELECT sample_id FROM tiny_meta_bigint WHERE source_sink = 'sink' EXCEPT SELECT DISTINCT sink_id FROM run_num));
+----
+0
+
+query I
+SELECT (SELECT count(*) FROM (SELECT DISTINCT unnest(map_keys(assignments)) FROM run_num EXCEPT SELECT DISTINCT feature_id FROM tiny_bigint))
+     + (SELECT count(*) FROM (SELECT DISTINCT feature_id FROM tiny_bigint EXCEPT SELECT DISTINCT unnest(map_keys(assignments)) FROM run_num));
+----
+0
+
+query I
+SELECT (SELECT count(*) FROM (SELECT DISTINCT sink_id FROM run_uu EXCEPT SELECT sample_id FROM tiny_meta_uuid WHERE source_sink = 'sink'))
+     + (SELECT count(*) FROM (SELECT sample_id FROM tiny_meta_uuid WHERE source_sink = 'sink' EXCEPT SELECT DISTINCT sink_id FROM run_uu));
+----
+0
+
+query I
+SELECT (SELECT count(*) FROM (SELECT DISTINCT unnest(map_keys(assignments)) FROM run_uu EXCEPT SELECT DISTINCT feature_id FROM tiny_uuid))
+     + (SELECT count(*) FROM (SELECT DISTINCT feature_id FROM tiny_uuid EXCEPT SELECT DISTINCT unnest(map_keys(assignments)) FROM run_uu));
+----
+0
+
+# Mapped back through the relabelling, the typed runs are the VARCHAR run
+# to the bit: the same proportions, the same standard deviations, and the
+# same assignment cells. Relabelling changed the spelling of the ids and
+# nothing the sampler sees.
+statement ok
+CREATE VIEW run_num_as_txt AS
+SELECT s.txt AS sink_id, r.source, r.proportion, r.proportion_std, r.assignments FROM run_num r JOIN s_map s ON s.num = r.sink_id;
+
+statement ok
+CREATE VIEW run_uu_as_txt AS
+SELECT s.txt AS sink_id, r.source, r.proportion, r.proportion_std, r.assignments FROM run_uu r JOIN s_map s ON s.uu = r.sink_id;
+
+query I
+SELECT (SELECT count(*) FROM (SELECT sink_id, source, proportion, proportion_std FROM run_num_as_txt
+                              EXCEPT ALL SELECT sink_id, source, proportion, proportion_std FROM run_txt))
+     + (SELECT count(*) FROM (SELECT sink_id, source, proportion, proportion_std FROM run_txt
+                              EXCEPT ALL SELECT sink_id, source, proportion, proportion_std FROM run_num_as_txt))
+     + (SELECT count(*) FROM (SELECT sink_id, source, proportion, proportion_std FROM run_uu_as_txt
+                              EXCEPT ALL SELECT sink_id, source, proportion, proportion_std FROM run_txt))
+     + (SELECT count(*) FROM (SELECT sink_id, source, proportion, proportion_std FROM run_txt
+                              EXCEPT ALL SELECT sink_id, source, proportion, proportion_std FROM run_uu_as_txt));
+----
+0
+
+statement ok
+CREATE VIEW cells_txt AS
+SELECT sink_id, source, unnest(map_keys(assignments)) AS feature, unnest(map_values(assignments)) AS mean_count FROM run_txt;
+
+statement ok
+CREATE VIEW cells_num AS
+SELECT c.sink_id, c.source, f.txt AS feature, c.mean_count
+FROM (SELECT sink_id, source, unnest(map_keys(assignments)) AS feature, unnest(map_values(assignments)) AS mean_count FROM run_num_as_txt) c
+JOIN f_map f ON f.num = c.feature;
+
+statement ok
+CREATE VIEW cells_uu AS
+SELECT c.sink_id, c.source, f.txt AS feature, c.mean_count
+FROM (SELECT sink_id, source, unnest(map_keys(assignments)) AS feature, unnest(map_values(assignments)) AS mean_count FROM run_uu_as_txt) c
+JOIN f_map f ON f.uu = c.feature;
+
+query I
+SELECT (SELECT count(*) FROM (SELECT * FROM cells_num EXCEPT ALL SELECT * FROM cells_txt))
+     + (SELECT count(*) FROM (SELECT * FROM cells_txt EXCEPT ALL SELECT * FROM cells_num))
+     + (SELECT count(*) FROM (SELECT * FROM cells_uu EXCEPT ALL SELECT * FROM cells_txt))
+     + (SELECT count(*) FROM (SELECT * FROM cells_txt EXCEPT ALL SELECT * FROM cells_uu));
+----
+0
+
+# The comparison above cannot pass vacuously.
+query I
+SELECT count(*) > 0 FROM cells_txt;
+----
+true
+
+# Only BIGINT and UUID are mirrored; every other input type comes back as
+# VARCHAR, spelled the way DuckDB spells it. INTEGER is the easy one to trip
+# over, since a bare integer literal is INTEGER, not BIGINT. This is the
+# project-wide id-column convention (ResolveSampleIdOutputType), not a choice
+# sourcetracker makes.
+statement ok
+CREATE TABLE tiny_integer AS SELECT CAST(sample_id AS INTEGER) AS sample_id, CAST(feature_id AS INTEGER) AS feature_id, value FROM tiny_bigint;
+
+statement ok
+CREATE TABLE tiny_meta_integer AS SELECT CAST(sample_id AS INTEGER) AS sample_id, source_sink, env FROM tiny_meta_bigint;
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM sourcetracker('tiny_integer', 'tiny_meta_integer')) WHERE column_name IN ('sink_id', 'assignments');
+----
+sink_id	VARCHAR
+assignments	MAP(VARCHAR, DOUBLE)
+
+query I
+SELECT string_agg(DISTINCT sink_id, ',' ORDER BY sink_id) FROM sourcetracker('tiny_integer', 'tiny_meta_integer',
+    collapse := 'sum', seed := 42, restarts := 10, draws_per_restart := 2, burnin := 20,
+    source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+----
+101,102,103,104,107
