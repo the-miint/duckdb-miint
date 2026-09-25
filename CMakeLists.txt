@@ -2410,7 +2410,12 @@ if(MIINT_ENABLE_SYLPH)
         test/cpp/test_SylphDatabase.cpp)
 endif()
 if(MIINT_ENABLE_ST3)
-    list(APPEND TEST_SOURCES test/cpp/test_St3.cpp)
+    # The dataset layer is DuckDB-free by design (see sourcetracker_dataset.hpp),
+    # so it is unit-tested here; the SQL layer is covered by the SQL tests.
+    list(APPEND TEST_SOURCES
+        src/sourcetracker_dataset.cpp
+        test/cpp/test_St3.cpp
+        test/cpp/test_SourcetrackerDataset.cpp)
 endif()
 if(MIINT_ENABLE_CURL)
     list(APPEND TEST_SOURCES src/curl_send.cpp test/cpp/test_curl_send.cpp)

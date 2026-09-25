@@ -9,6 +9,7 @@
 // CooRow only -- deliberately NOT unifrac_support_biom.hpp, which would pull in
 // unifrac-binaries' api.hpp and re-couple these generic readers to that feature.
 #include "feature_table_row.hpp"
+#include "unifrac_metadata.hpp"
 
 namespace duckdb::unifrac_internal {
 
@@ -92,8 +93,13 @@ struct DenseDistanceMatrix {
 // and nothing more, so the scan itself can happen per execution. `pcoa` and
 // `unifrac_pcoa` use them for that; the readers below call them too, so the probe
 // and its wording live in one place.
+//
+// When `feature_id_type` is non-null, the output type of `feature_id`, resolved by
+// the same rule, is written through it -- for callers whose output mirrors both id
+// columns (sourcetracker's MAP keys are feature ids). The column list is already
+// in hand here, so this costs no second catalog lookup.
 LogicalType ProbeFeatureTableIdType(ClientContext &context, const std::string &table_name,
-                                    const std::string &caller_name);
+                                    const std::string &caller_name, LogicalType *feature_id_type = nullptr);
 // `predicate_type`, when given, also receives what sample_a/sample_b can be
 // compared against natively -- VARCHAR unless the two columns share one
 // native-eligible type. It is an out-parameter rather than a second probe because
@@ -229,6 +235,24 @@ inline LogicalType ResolveSampleIdOutputType(const LogicalType &input_type) {
 // (e.g., "unifrac_pcoa").
 //
 // Returns a positive int suitable for OmpThreadPin / ComputeCallScope.
+// Wide-form sample metadata, read once and unpivoted. Shared by permanova /
+// unifrac_permanova and sourcetracker, which all take a (sample_id, <variable>...)
+// relation and want it as long-form rows.
+struct WideMetadata {
+	std::vector<std::string> column_names;         // chosen variables, in canonical order
+	std::vector<miint::unifrac::MetadataRow> rows; // unpivoted long-form view
+};
+
+// Wide-form reader: metadata must have a `sample_id` column
+// (case-insensitive); every other column is a variable whose values are
+// cast to VARCHAR. `requested_variables` empty → use all non-sample_id
+// columns in original column order. Non-empty → exact-match lookup
+// (case-insensitive), preserving user-supplied order. `caller_name` prefixes
+// every error message so it names the SQL function the user actually called
+// (e.g. "permanova" vs "unifrac_permanova").
+WideMetadata ReadWideMetadata(ClientContext &context, const std::string &table_name,
+                              const std::vector<std::string> &requested_variables, const std::string &caller_name);
+
 int ResolveThreadsParameter(ClientContext &context, int32_t user_value, const std::string &caller_name);
 
 } // namespace duckdb::unifrac_internal
