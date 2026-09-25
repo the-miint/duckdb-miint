@@ -104,6 +104,14 @@
 #include <uchime_ref.hpp>
 #include <uchime_denovo.hpp>
 #include <mask_dust_function.hpp>
+#include <sc_version_function.hpp>
+#include <sc_fit_function.hpp>
+#include <sc_feature_importances_function.hpp>
+#include <sc_predict_function.hpp>
+#include <sc_model_features_function.hpp>
+#include <sc_predict_proba_function.hpp>
+#include <sc_shap_function.hpp>
+#include <sc_cross_validate_function.hpp>
 #include <merge_pairs_function.hpp>
 #include <search_sequences.hpp>
 #include <cluster_sequences.hpp>
@@ -534,6 +542,15 @@ static void LoadInternal(ExtensionLoader &loader) {
 	RypeExtractStrandMinimizersTableFunction::Register(loader);
 	RypeLogRatioTableFunction::Register(loader);
 	RypeIndexCreateTableFunction::Register(loader);
+
+	ScVersionFunction::Register(loader);
+	ScFitFunction::Register(loader);
+	ScFeatureImportancesFunction::Register(loader);
+	ScPredictFunction::Register(loader);
+	ScModelFeaturesFunction::Register(loader);
+	ScPredictProbaFunction::Register(loader);
+	ScShapFunction::Register(loader);
+	ScCrossValidateFunction::Register(loader);
 #ifdef MIINT_HAS_VSEARCH
 	UchimeRefTableFunction::Register(loader);
 	UchimeDenovoTableFunction::Register(loader);

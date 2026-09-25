@@ -1,0 +1,461 @@
+# name: test/sql/sc_fit.test
+# description: test sc_fit_regressor / sc_fit_classifier table functions
+# group: [sql]
+
+require miint
+
+require-env HDF5_AVAILABLE
+
+statement ok
+PRAGMA enable_verification;
+
+# The whole point of coupling sc to the (sample_id, feature_id, value) triple is
+# that read_biom feeds it directly, with no format-specific code in between.
+statement ok
+CREATE TABLE train_data AS SELECT * FROM read_biom('data/biom/test.biom');
+
+statement ok
+CREATE TABLE train_metadata AS
+  SELECT unnest(['Sample1','Sample2','Sample3','Sample4','Sample5','Sample6']) AS sample_id,
+         unnest(['1','3','6','9','12','15']) AS value;
+
+# Regression: 6 samples x 5 features, model comes back as a non-empty BLOB.
+query IIII
+SELECT n_samples, n_features, n_trees, task
+FROM sc_fit_regressor('train_data', 'train_metadata', n_estimators := 10, random_state := 42, name := 'm1');
+----
+6	5	10	regression
+
+query I
+SELECT octet_length(model_blob) > 0
+FROM sc_fit_regressor('train_data', 'train_metadata', n_estimators := 10, random_state := 42, name := 'm2');
+----
+true
+
+# Same seed must give a byte-identical model. sc guarantees determinism, but only
+# if the row order reaching it is stable -- which is what the builder's sorted
+# dictionaries are for. A regression here means SQL row order leaked through.
+query I
+SELECT (SELECT model_blob FROM sc_fit_regressor('train_data','train_metadata', n_estimators := 10, random_state := 42, name := 'm3'))
+     = (SELECT model_blob FROM sc_fit_regressor('train_data','train_metadata', n_estimators := 10, random_state := 42, name := 'm4'));
+----
+true
+
+# A different seed must give a different model, or the seed is being ignored.
+query I
+SELECT (SELECT model_blob FROM sc_fit_regressor('train_data','train_metadata', n_estimators := 10, random_state := 42, name := 'm5'))
+     = (SELECT model_blob FROM sc_fit_regressor('train_data','train_metadata', n_estimators := 10, random_state := 99, name := 'm6'));
+----
+false
+
+# Classification: string labels instead of numbers.
+statement ok
+CREATE TABLE class_metadata AS
+  SELECT unnest(['Sample1','Sample2','Sample3','Sample4','Sample5','Sample6']) AS sample_id,
+         unnest(['gut','gut','gut','skin','skin','skin']) AS value;
+
+query III
+SELECT n_samples, n_features, task
+FROM sc_fit_classifier('train_data', 'class_metadata', n_estimators := 20, random_state := 7, name := 'm7');
+----
+6	5	classification
+
+# --- errors: the caller's data must be right before fitting ---
+
+# A sample with counts but no label, and a label with no counts. Both directions
+# are reported at once so one round trip fixes the whole mismatch.
+statement ok
+CREATE TABLE short_metadata AS
+  SELECT unnest(['Sample1','Sample2','Sample9']) AS sample_id, unnest(['1','3','6']) AS value;
+
+statement error
+SELECT * FROM sc_fit_regressor('train_data', 'short_metadata', name := 'm8');
+----
+describe different sample sets
+
+# A duplicated join key fans out every cell for that sample. Summing would
+# silently inflate the counts, so this errors and shows the values -- identical
+# ones point at a fanout, differing ones at genuine repeat measurements.
+statement ok
+CREATE TABLE to_train AS SELECT unnest(['Sample1','Sample2','Sample2']) AS sample_id;
+
+statement ok
+CREATE TABLE fanned AS SELECT * FROM read_biom('data/biom/test.biom') JOIN to_train USING (sample_id);
+
+statement ok
+CREATE TABLE two_metadata AS
+  SELECT unnest(['Sample1','Sample2']) AS sample_id, unnest(['1','3']) AS value;
+
+statement error
+SELECT * FROM sc_fit_regressor('fanned', 'two_metadata', name := 'm9');
+----
+duplicate (sample_id, feature_id) cell
+
+# Two labels for one sample cannot be reconciled -- unlike duplicate counts,
+# there is no defensible way to combine them.
+statement ok
+CREATE TABLE dup_metadata AS
+  SELECT unnest(['Sample1','Sample2','Sample2']) AS sample_id, unnest(['1','3','7']) AS value;
+
+statement ok
+CREATE TABLE two_samples AS
+  SELECT * FROM read_biom('data/biom/test.biom') WHERE sample_id IN ('Sample1','Sample2');
+
+statement error
+SELECT * FROM sc_fit_regressor('two_samples', 'dup_metadata', name := 'm10');
+----
+more than one value
+
+# A NULL count means a broken join upstream, not a zero. An absent cell is
+# already zero in a sparse matrix, so a NULL cannot be passed through.
+statement ok
+CREATE TABLE null_data AS
+  SELECT sample_id, feature_id, CASE WHEN value = 5 THEN NULL ELSE value END AS value
+  FROM read_biom('data/biom/test.biom');
+
+statement error
+SELECT * FROM sc_fit_regressor('null_data', 'train_metadata', name := 'm11');
+----
+NULL in data relation
+
+# A non-numeric target cannot be a regression label.
+statement error
+SELECT * FROM sc_fit_regressor('train_data', 'class_metadata', name := 'm12');
+----
+castable to DOUBLE
+
+statement error
+SELECT * FROM sc_fit_regressor('train_data', 'train_metadata', model := 'xgboost', name := 'm13');
+----
+model must be 'random_forest'
+
+# --- choosing the target column ---
+#
+# Omitted, the target is the metadata relation's single non-sample_id column --
+# `(sample_id, month)` needs no configuration at all. With several candidates
+# the answer is genuinely unknown, and guessing would train on the wrong
+# variable with no error anywhere, so it asks. This replaces a hardcoded default
+# of "value", which suited long-format metadata and quietly failed otherwise.
+
+statement ok
+CREATE TABLE meta_wide AS SELECT sample_id, sum(value) AS month FROM train_data GROUP BY sample_id;
+
+query II
+SELECT n_samples, task FROM sc_fit_regressor('train_data', 'meta_wide', n_estimators := 5, name := 'auto_target');
+----
+6	regression
+
+# The auto-selected column is the one actually used, not merely accepted.
+query I
+SELECT (SELECT model_blob FROM sc_fit_regressor('train_data','meta_wide', n_estimators := 5, random_state := 3, name := 'a'))
+     = (SELECT model_blob FROM sc_fit_regressor('train_data','meta_wide', n_estimators := 5, random_state := 3,
+                                                target_column := 'month', name := 'b'));
+----
+true
+
+statement ok
+CREATE TABLE meta_many AS
+  SELECT sample_id, sum(value) AS age, sum(value)/2 AS bmi, 'vaginal' AS delivery_mode
+  FROM train_data GROUP BY sample_id;
+
+statement error
+SELECT * FROM sc_fit_regressor('train_data', 'meta_many', n_estimators := 5, name := 'ambiguous');
+----
+Candidates : ['age', 'bmi', 'delivery_mode']
+
+# ...and naming one resolves it, without probing.
+query I
+SELECT n_samples FROM sc_fit_regressor('train_data', 'meta_many', target_column := 'bmi', n_estimators := 5, name := 'picked');
+----
+6
+
+statement ok
+CREATE TABLE meta_bare AS SELECT DISTINCT sample_id FROM train_data;
+
+statement error
+SELECT * FROM sc_fit_regressor('train_data', 'meta_bare', n_estimators := 5, name := 'no_target');
+----
+only a sample_id column
+
+statement ok
+CREATE TABLE meta_nosid AS SELECT sum(value) AS month FROM train_data;
+
+statement error
+SELECT * FROM sc_fit_regressor('train_data', 'meta_nosid', n_estimators := 5, name := 'no_sid');
+----
+no 'sample_id' column
+
+# --- hyperparameters ---
+#
+# Unset parameters take sklearn's RandomForest defaults, so an unparameterised
+# call matches what the same data would give in scikit-learn.
+
+# max_features / min_samples_* / max_samples are sklearn's tagged unions: an
+# integer means a count, a float means a fraction. SQL literal types already
+# carry that distinction, so the named parameters take ANY and dispatch on it.
+query I
+SELECT count(*) FROM (
+  SELECT model_blob FROM sc_fit_classifier('train_data','class_metadata', max_features := 'sqrt',  random_state := 1, name := 'm14')
+  UNION ALL SELECT model_blob FROM sc_fit_classifier('train_data','class_metadata', max_features := 'log2', random_state := 1, name := 'm15')
+  UNION ALL SELECT model_blob FROM sc_fit_classifier('train_data','class_metadata', max_features := 'all',  random_state := 1, name := 'm16')
+  UNION ALL SELECT model_blob FROM sc_fit_classifier('train_data','class_metadata', max_features := 0.5,    random_state := 1, name := 'm17')
+  UNION ALL SELECT model_blob FROM sc_fit_classifier('train_data','class_metadata', max_features := 3,      random_state := 1, name := 'm18'));
+----
+5
+
+# A parameter that changes the fit must change the model, or it is being
+# silently dropped on the way to sc.
+query I
+SELECT (SELECT model_blob FROM sc_fit_classifier('train_data','class_metadata', random_state := 1, name := 'm19'))
+     = (SELECT model_blob FROM sc_fit_classifier('train_data','class_metadata', random_state := 1, max_depth := 1, name := 'm20'));
+----
+false
+
+query I
+SELECT (SELECT model_blob FROM sc_fit_classifier('train_data','class_metadata', random_state := 1, name := 'm21'))
+     = (SELECT model_blob FROM sc_fit_classifier('train_data','class_metadata', random_state := 1, bootstrap := false, name := 'm22'));
+----
+false
+
+# n_trees reports what sc was actually given, not the default.
+query I
+SELECT n_trees FROM sc_fit_classifier('train_data','class_metadata', n_estimators := 33, name := 'm23');
+----
+33
+
+statement ok
+SELECT * FROM sc_fit_classifier('train_data','class_metadata', criterion := 'entropy',
+                                min_samples_split := 3, min_samples_leaf := 0.25,
+                                min_impurity_decrease := 0.001, max_samples := 0.5, name := 'm24');
+
+# --- bad hyperparameters fail at bind, before any scanning ---
+
+statement error
+SELECT * FROM sc_fit_classifier('train_data', 'class_metadata', max_features := 'banana', name := 'm25');
+----
+max_features must be
+
+statement error
+SELECT * FROM sc_fit_classifier('train_data', 'class_metadata', max_features := 1.5, name := 'm26');
+----
+fraction must be in (0, 1]
+
+statement error
+SELECT * FROM sc_fit_classifier('train_data', 'class_metadata', min_samples_split := 1, name := 'm27');
+----
+min_samples_split count must be >= 2
+
+# The criterion has to match the task; sc would reject this too, but catching it
+# here names the function the user actually called.
+statement error
+SELECT * FROM sc_fit_classifier('train_data', 'class_metadata', criterion := 'squared_error', name := 'm28');
+----
+sc_fit_classifier: criterion must be 'gini' or 'entropy'
+
+statement error
+SELECT * FROM sc_fit_regressor('train_data', 'train_metadata', criterion := 'gini', name := 'm29');
+----
+sc_fit_regressor: criterion must be 'squared_error'
+
+# sklearn rejects max_samples without bootstrap rather than ignoring it.
+statement error
+SELECT * FROM sc_fit_classifier('train_data', 'class_metadata', max_samples := 0.5, bootstrap := false, name := 'm30');
+----
+only meaningful with bootstrap
+
+# --- random_state round-trips ---
+#
+# The seed is echoed back so a model row can reproduce itself. That is only
+# worth anything if feeding it to a refit gives the same model, which is what
+# these assert -- otherwise the column is a comment that looks like a fact.
+
+statement ok
+CREATE TABLE seeded AS
+  SELECT * FROM sc_fit_regressor('train_data','train_metadata', n_estimators := 30, random_state := 20260907, name := 'm31');
+
+query II
+SELECT random_state, n_trees FROM seeded;
+----
+20260907	30
+
+# DuckDB requires table-function arguments to be constant-foldable, so the
+# echoed values cannot be piped back in a subquery -- "Table function cannot
+# contain subqueries". The property is established in two steps instead: the row
+# above reports 20260907/30, and refitting with exactly those values reproduces
+# the model byte for byte. Together those say the echoed seed is the seed that
+# reproduces the fit.
+query I
+SELECT (SELECT model_blob FROM seeded)
+     = (SELECT model_blob FROM sc_fit_regressor('train_data','train_metadata',
+                                           n_estimators := 30, random_state := 20260907, name := 'm32'));
+----
+true
+
+# ...and that it is the seed doing the work, not the tree count alone.
+query I
+SELECT (SELECT model_blob FROM seeded)
+     = (SELECT model_blob FROM sc_fit_regressor('train_data','train_metadata',
+                                           n_estimators := 30, random_state := 20260908, name := 'm33'));
+----
+false
+
+# The default is 0 and is reported, not left NULL -- an unstated seed is still a
+# seed, and a row that says nothing cannot be reproduced from.
+query I
+SELECT random_state FROM sc_fit_regressor('train_data', 'train_metadata', n_estimators := 5, name := 'm34');
+----
+0
+
+query I
+SELECT (SELECT model_blob FROM sc_fit_regressor('train_data','train_metadata', n_estimators := 5, name := 'm35'))
+     = (SELECT model_blob FROM sc_fit_regressor('train_data','train_metadata', n_estimators := 5, random_state := 0, name := 'm36'));
+----
+true
+
+# Provenance columns are the caller's: `SELECT 'x' AS name, *` prepends them,
+# and the model row still works as a model relation afterwards.
+statement ok
+CREATE TABLE named_models AS
+  SELECT 'depth_rf' AS name, 'total_depth' AS target, *
+  FROM sc_fit_regressor('train_data','train_metadata', n_estimators := 15, random_state := 99, name := 'm37');
+
+statement ok
+INSERT INTO named_models
+  SELECT 'depth_rf_big', 'total_depth', *
+  FROM sc_fit_regressor('train_data','train_metadata', n_estimators := 60, random_state := 99, name := 'm38');
+
+query III
+SELECT name, n_trees, random_state FROM named_models ORDER BY name;
+----
+depth_rf	15	99
+depth_rf_big	60	99
+
+# A view narrows the registry to the one row sc_predict needs.
+statement ok
+CREATE VIEW picked AS SELECT * FROM named_models WHERE name = 'depth_rf_big';
+
+query I
+SELECT n_trees FROM picked;
+----
+60
+
+# --- the name column ---
+#
+# Required, so it is never NULL and a registry is selectable the moment it is
+# created. A name is not an input to the fit -- the same seed with and without
+# one gives a byte-identical model -- but requiring it removes a state from the
+# system: `sc_predict(..., name := ...)` always works, and nobody has to reason
+# about the unnamed case. Nothing is ever invented to fill it; a generated 'm0'
+# would collide on the very next call, because a table function cannot see what
+# already exists in the table its row is headed for.
+
+statement error
+SELECT * FROM sc_fit_regressor('train_data', 'train_metadata', n_estimators := 5);
+----
+name is required
+
+statement error
+SELECT * FROM sc_fit_classifier('train_data', 'class_metadata', n_estimators := 5);
+----
+name is required
+
+query I
+SELECT name FROM sc_fit_regressor('train_data', 'train_metadata', n_estimators := 5, name := 'depth_v1');
+----
+depth_v1
+
+# A registry is selectable from the first row, with no ALTER TABLE and no rowid
+# archaeology to make it usable.
+statement ok
+CREATE TABLE reg AS
+  SELECT * FROM sc_fit_regressor('train_data','train_metadata', n_estimators := 5, name := 'small');
+
+statement ok
+INSERT INTO reg
+  SELECT * FROM sc_fit_regressor('train_data','train_metadata', n_estimators := 10, name := 'big');
+
+query II
+SELECT name, n_trees FROM reg ORDER BY n_trees;
+----
+small	5
+big	10
+
+query I
+SELECT count(*) FROM reg WHERE name IS NULL;
+----
+0
+
+# The name is a label, not an input: two fits differing only in name produce the
+# same model. That is what makes it safe to require -- it cannot change results.
+query I
+SELECT (SELECT model_blob FROM sc_fit_regressor('train_data','train_metadata', n_estimators := 7, random_state := 3, name := 'one'))
+     = (SELECT model_blob FROM sc_fit_regressor('train_data','train_metadata', n_estimators := 7, random_state := 3, name := 'two'));
+----
+true
+
+statement error
+SELECT * FROM sc_fit_regressor('train_data', 'train_metadata', name := '');
+----
+name must not be empty
+
+# --- the whole flow, as it is actually written ---
+#
+# A model has to land in a table before sc_predict_* can read it back, so this
+# exercises the pattern end to end: split in SQL, fit, store, verify. Every
+# earlier test calls the function inline, which is not how anyone uses it.
+
+statement ok
+CREATE TABLE gm_to_train AS SELECT unnest(['Sample1','Sample2','Sample3','Sample4']) AS sample_id;
+
+statement ok
+CREATE TABLE gm_data AS SELECT * FROM read_biom('data/biom/test.biom') JOIN gm_to_train USING (sample_id);
+
+statement ok
+CREATE TABLE gm_metadata AS
+  SELECT sample_id, value FROM (
+    SELECT unnest(['Sample1','Sample2','Sample3','Sample4','Sample5','Sample6']) AS sample_id,
+           unnest(['1','3','6','9','12','15']) AS value)
+  JOIN gm_to_train USING (sample_id);
+
+statement ok
+CREATE TABLE month_model AS
+  SELECT * FROM sc_fit_regressor('gm_data', 'gm_metadata', model := 'random_forest',
+                                 n_estimators := 25, random_state := 1234, name := 'm42');
+
+# One row, and the counts reflect the split rather than the whole file: 4 of the
+# 6 samples, and only the features those 4 actually carry.
+query I
+SELECT count(*) FROM month_model;
+----
+1
+
+query IIII
+SELECT n_samples, n_features, n_trees, task FROM month_model;
+----
+4	5	25	regression
+
+# The blob survives being stored in a table and read back -- byte-identical to a
+# fresh fit under the same seed. This is the round trip sc_predict_* depends on.
+query I
+SELECT (SELECT model_blob FROM month_model)
+     = (SELECT model_blob FROM sc_fit_regressor('gm_data', 'gm_metadata', model := 'random_forest',
+                                           n_estimators := 25, random_state := 1234, name := 'm43'));
+----
+true
+
+query I
+SELECT octet_length(model_blob) > 0 FROM month_model;
+----
+true
+
+# The held-out split has a different feature set than the training split -- 3 of
+# the 5. That is what sc_model_feature_ids exists for: re-deriving an encoding
+# from this table would produce a 3-column matrix the 5-column model rejects.
+statement ok
+CREATE TABLE gm_test_data AS SELECT * FROM read_biom('data/biom/test.biom') ANTI JOIN gm_to_train USING (sample_id);
+
+query II
+SELECT (SELECT count(DISTINCT feature_id) FROM gm_data),
+       (SELECT count(DISTINCT feature_id) FROM gm_test_data);
+----
+5	3

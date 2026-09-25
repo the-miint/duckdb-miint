@@ -1,0 +1,130 @@
+# name: test/sql/sc_predict_proba.test
+# description: test sc_predict_proba table function
+# group: [sql]
+
+require miint
+
+require-env HDF5_AVAILABLE
+
+statement ok
+PRAGMA enable_verification;
+
+statement ok
+CREATE TABLE pp_data AS SELECT * FROM read_biom('data/biom/test.biom');
+
+# Three classes, so the FixedSizeList has width 3 and a stride bug would be
+# visible rather than hidden by a binary split.
+statement ok
+CREATE TABLE pp_meta AS
+  SELECT unnest(['Sample1','Sample2','Sample3','Sample4','Sample5','Sample6']) AS sample_id,
+         unnest(['gut','gut','gut','skin','skin','oral']) AS value;
+
+statement ok
+CREATE TABLE pp_models AS
+  SELECT * FROM sc_fit_classifier('pp_data','pp_meta', n_estimators := 100, random_state := 1, name := 'site');
+
+# One row per (sample, class): 6 samples x 3 classes.
+query I
+SELECT count(*) FROM sc_predict_proba('pp_data', 'pp_models', name := 'site');
+----
+18
+
+query I
+SELECT list_sort(list(DISTINCT class)) FROM sc_predict_proba('pp_data', 'pp_models', name := 'site');
+----
+[gut, oral, skin]
+
+# Probabilities over a sample's classes are a distribution.
+query I
+SELECT bool_and(abs(total - 1.0) < 1e-9) FROM (
+  SELECT sum(probability) AS total FROM sc_predict_proba('pp_data','pp_models', name := 'site') GROUP BY sample_id);
+----
+true
+
+query I
+SELECT bool_and(probability BETWEEN 0.0 AND 1.0) FROM sc_predict_proba('pp_data', 'pp_models', name := 'site');
+----
+true
+
+# The load-bearing check on the FixedSizeList decoding: sc flattens
+# n_samples x n_classes row-major, and reading it with the wrong stride would
+# put a sample's probabilities against the wrong classes. The highest-probability
+# class must therefore equal what sc_predict returns for the same sample, which
+# comes from an entirely separate sc call.
+query I
+SELECT bool_and(p.prediction = a.class) FROM sc_predict('pp_data','pp_models', name := 'site') p
+JOIN (SELECT sample_id, class, row_number() OVER (PARTITION BY sample_id ORDER BY probability DESC) rn
+      FROM sc_predict_proba('pp_data','pp_models', name := 'site')) a
+  ON a.sample_id = p.sample_id AND a.rn = 1;
+----
+true
+
+# Same model, same data, same numbers -- decoding must be a pure function.
+query I
+SELECT (SELECT list(probability ORDER BY sample_id, class) FROM sc_predict_proba('pp_data','pp_models', name := 'site'))
+     = (SELECT list(probability ORDER BY sample_id, class) FROM sc_predict_proba('pp_data','pp_models', name := 'site'));
+----
+true
+
+# A two-class model gives width 2, so the width comes from the model rather than
+# being assumed.
+statement ok
+CREATE TABLE pp_binary_meta AS
+  SELECT unnest(['Sample1','Sample2','Sample3','Sample4','Sample5','Sample6']) AS sample_id,
+         unnest(['gut','gut','gut','skin','skin','skin']) AS value;
+
+statement ok
+CREATE TABLE pp_binary AS
+  SELECT * FROM sc_fit_classifier('pp_data','pp_binary_meta', n_estimators := 20, random_state := 1, name := 'bin');
+
+query II
+SELECT count(*), count(DISTINCT class) FROM sc_predict_proba('pp_data', 'pp_binary', name := 'bin');
+----
+12	2
+
+# --- coverage, same semantics as sc_predict ---
+
+statement ok
+CREATE TABLE pp_mixed AS
+  SELECT sample_id, feature_id, value FROM pp_data WHERE sample_id IN ('Sample1','Sample2')
+  UNION ALL
+  SELECT sample_id, 'ALIEN_' || feature_id, value FROM pp_data WHERE sample_id IN ('Sample1','Sample2');
+
+# Coverage is per sample and repeats across that sample's class rows.
+query I
+SELECT list_sort(list(DISTINCT sample_coverage)) FROM sc_predict_proba('pp_mixed', 'pp_models', name := 'site');
+----
+[0.5]
+
+statement ok
+CREATE TABLE pp_alien AS SELECT sample_id, 'ALIEN_' || feature_id AS feature_id, value FROM pp_data;
+
+statement error
+SELECT * FROM sc_predict_proba('pp_alien', 'pp_models', name := 'site');
+----
+do not share a feature vocabulary
+
+# --- errors ---
+
+# A regressor has no classes. Caught at bind, before any scanning.
+statement ok
+CREATE TABLE pp_reg_meta AS SELECT sample_id, sum(value) AS month FROM pp_data GROUP BY sample_id;
+
+statement ok
+CREATE TABLE pp_reg AS
+  SELECT * FROM sc_fit_regressor('pp_data','pp_reg_meta', n_estimators := 10, random_state := 1, name := 'reg');
+
+statement error
+SELECT * FROM sc_predict_proba('pp_data', 'pp_reg', name := 'reg');
+----
+is a regressor, which has no classes
+
+statement error
+SELECT * FROM sc_predict_proba('pp_models', 'pp_models', name := 'site');
+----
+does not match the required COO triplet schema
+
+statement error
+SELECT * FROM sc_predict_proba('pp_data', 'pp_models', name := 'nope');
+----
+No model named 'nope'

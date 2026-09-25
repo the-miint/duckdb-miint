@@ -1,0 +1,199 @@
+# name: test/sql/sc_id_types.test
+# description: sample_id / feature_id / label types survive a round trip through sc
+# group: [sql]
+
+require miint
+
+statement ok
+PRAGMA enable_verification;
+
+# Ids travel through sc as text -- that is how a BIGINT 42 and a VARCHAR '42'
+# name one feature -- but they come back as the type they arrived as. Returning
+# VARCHAR instead would change what ORDER BY means (lexically '10' < '2') and
+# spread the string type into every table built from the result.
+#
+# Which type each column mirrors:
+#   sample_id  -> the data relation of THIS call
+#   feature_id -> the relation the MODEL was fit from (a sample is explained
+#                 against features it does not contain, so the ids are the
+#                 model's)
+#   labels     -> the metadata column the model was fit from; a regressor
+#                 predicts a continuous value, so its columns are DOUBLE
+
+statement ok
+CREATE TABLE base AS SELECT (i // 5) AS s, (i % 5) AS f, 1.0 + ((i * 7) % 4) AS value FROM range(60) t(i);
+
+# --- BIGINT ids, BIGINT labels ---
+
+statement ok
+CREATE TABLE big_counts AS SELECT s::BIGINT AS sample_id, f::BIGINT AS feature_id, value FROM base;
+
+statement ok
+CREATE TABLE big_meta AS SELECT DISTINCT s::BIGINT AS sample_id, (s % 3)::BIGINT AS grp FROM base;
+
+statement ok
+CREATE TABLE big_model AS
+  SELECT * FROM sc_fit_classifier('big_counts', 'big_meta', name := 'c', n_estimators := 5, random_state := 1);
+
+statement ok
+INSERT INTO big_model
+  SELECT * FROM sc_fit_regressor('big_counts', 'big_meta', name := 'r', n_estimators := 5, random_state := 1);
+
+# The fit records what it was given, so later calls can hand ids and labels back.
+query II
+SELECT feature_id_type, target_type FROM big_model WHERE name = 'c';
+----
+BIGINT	BIGINT
+
+query III
+SELECT typeof(sample_id), typeof(prediction), typeof(sample_coverage)
+FROM sc_predict('big_counts', 'big_model', name := 'c') LIMIT 1;
+----
+BIGINT	BIGINT	DOUBLE
+
+# A regressor predicts a continuous value: DOUBLE even though the column was BIGINT.
+query II
+SELECT typeof(sample_id), typeof(prediction) FROM sc_predict('big_counts', 'big_model', name := 'r') LIMIT 1;
+----
+BIGINT	DOUBLE
+
+query III
+SELECT typeof(sample_id), typeof(class), typeof(probability)
+FROM sc_predict_proba('big_counts', 'big_model', name := 'c') LIMIT 1;
+----
+BIGINT	BIGINT	DOUBLE
+
+query III
+SELECT typeof(sample_id), typeof(class), typeof(feature_id)
+FROM sc_shap('big_counts', 'big_model', name := 'c', top_k := 2) LIMIT 1;
+----
+BIGINT	BIGINT	BIGINT
+
+query II
+SELECT typeof(feature_id), typeof(column_index) FROM sc_model_features('big_model', name := 'c') LIMIT 1;
+----
+BIGINT	BIGINT
+
+query II
+SELECT typeof(feature_id), typeof(importance) FROM sc_feature_importances('big_model', name := 'c') LIMIT 1;
+----
+BIGINT	DOUBLE
+
+query IIII
+SELECT typeof(sample_id), typeof(prediction), typeof(actual), typeof(classes)
+FROM sc_cross_validate_classifier('big_counts', 'big_meta', n_folds := 2, n_estimators := 5, random_state := 1) LIMIT 1;
+----
+BIGINT	BIGINT	BIGINT	BIGINT[]
+
+query III
+SELECT typeof(sample_id), typeof(prediction), typeof(actual)
+FROM sc_cross_validate_regressor('big_counts', 'big_meta', n_folds := 2, n_estimators := 5, random_state := 1) LIMIT 1;
+----
+BIGINT	DOUBLE	DOUBLE
+
+# The point of all of it: ORDER BY sorts numerically again. As VARCHAR this
+# reads [0, 1, 10, 11, 2, ...].
+query I
+SELECT list(sample_id) FROM (SELECT sample_id FROM sc_predict('big_counts', 'big_model', name := 'c') ORDER BY sample_id);
+----
+[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+
+# And a join needs no cast on either side.
+query I
+SELECT count(*) FROM big_meta JOIN sc_predict('big_counts', 'big_model', name := 'c') USING (sample_id);
+----
+12
+
+# --- UUID ids ---
+
+statement ok
+CREATE TABLE uu_counts AS
+  SELECT ('aaaaaaaa-bbbb-cccc-dddd-' || lpad(s::VARCHAR, 12, 'e'))::UUID AS sample_id,
+         ('ffffffff-1111-2222-3333-' || lpad(f::VARCHAR, 12, 'd'))::UUID AS feature_id, value
+  FROM base;
+
+statement ok
+CREATE TABLE uu_meta AS
+  SELECT DISTINCT sample_id, CASE WHEN sample_id::VARCHAR < 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee6' THEN 'a' ELSE 'b' END AS grp
+  FROM uu_counts;
+
+statement ok
+CREATE TABLE uu_model AS
+  SELECT * FROM sc_fit_classifier('uu_counts', 'uu_meta', name := 'u', n_estimators := 5, random_state := 1);
+
+query II
+SELECT feature_id_type, target_type FROM uu_model;
+----
+UUID	VARCHAR
+
+query III
+SELECT typeof(sample_id), typeof(class), typeof(feature_id)
+FROM sc_shap('uu_counts', 'uu_model', name := 'u', top_k := 2) LIMIT 1;
+----
+UUID	VARCHAR	UUID
+
+query I
+SELECT count(*) FROM uu_meta JOIN sc_predict('uu_counts', 'uu_model', name := 'u') USING (sample_id);
+----
+12
+
+# --- VARCHAR ids stay VARCHAR ---
+
+statement ok
+CREATE TABLE txt_counts AS SELECT 'sample_' || s AS sample_id, 'feat_' || f AS feature_id, value FROM base;
+
+statement ok
+CREATE TABLE txt_meta AS SELECT DISTINCT 'sample_' || s AS sample_id, CASE WHEN s < 6 THEN 'a' ELSE 'b' END AS grp FROM base;
+
+statement ok
+CREATE TABLE txt_model AS
+  SELECT * FROM sc_fit_classifier('txt_counts', 'txt_meta', name := 't', n_estimators := 5, random_state := 1);
+
+query III
+SELECT typeof(sample_id), typeof(prediction), typeof(feature_id)
+FROM (SELECT p.sample_id, p.prediction, m.feature_id
+      FROM sc_predict('txt_counts', 'txt_model', name := 't') p, sc_model_features('txt_model', name := 't') m) LIMIT 1;
+----
+VARCHAR	VARCHAR	VARCHAR
+
+# --- a model row from before the type columns existed ---
+
+# ReadModelTypes falls back to VARCHAR rather than refusing to predict, so an
+# older model table keeps working -- it just cannot say what its ids were.
+statement ok
+CREATE TABLE legacy_model AS
+  SELECT name, model, model_blob, n_samples, n_features, n_trees, task, random_state FROM big_model WHERE name = 'c';
+
+query II
+SELECT typeof(sample_id), typeof(prediction) FROM sc_predict('big_counts', 'legacy_model', name := 'c') LIMIT 1;
+----
+BIGINT	VARCHAR
+
+query II
+SELECT typeof(feature_id), count(*) FROM sc_model_features('legacy_model', name := 'c') GROUP BY 1;
+----
+VARCHAR	5
+
+# --- id types sc will not accept ---
+
+statement ok
+CREATE VIEW int_ids AS SELECT s::INTEGER AS sample_id, f::BIGINT AS feature_id, value FROM base;
+
+statement error
+SELECT * FROM sc_fit_classifier('int_ids', 'big_meta', name := 'x', n_estimators := 5);
+----
+an id column must be VARCHAR, BIGINT, or UUID
+
+statement ok
+CREATE VIEW date_features AS SELECT s::BIGINT AS sample_id, DATE '2020-01-01' + f::INTEGER AS feature_id, value FROM base;
+
+statement error
+SELECT * FROM sc_predict('date_features', 'big_model', name := 'c');
+----
+an id column must be VARCHAR, BIGINT, or UUID
+
+# The COO schema check still comes first, and still names the remedy.
+statement error
+SELECT * FROM sc_predict('big_meta', 'big_model', name := 'c');
+----
+does not match the required COO triplet schema

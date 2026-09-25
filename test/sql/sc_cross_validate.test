@@ -1,0 +1,321 @@
+# name: test/sql/sc_cross_validate.test
+# description: test sc_cross_validate_classifier / _regressor on sc's ECAM fixture
+# group: [sql]
+
+require miint
+
+require json
+
+statement ok
+PRAGMA enable_verification;
+
+# 126 samples x 150 features, read straight out of sc's fixture (see
+# sc_oracle_ecam.test for why the ids are zero-padded).
+statement ok
+CREATE TABLE fx AS SELECT * FROM read_json('ext/sc/oracle/fixtures/forest/agg_ecam.json');
+
+statement ok
+CREATE TABLE cv_counts AS
+  SELECT printf('sample_%03d', unnest(data_coo.rows)) AS sample_id,
+         printf('feat_%03d',   unnest(data_coo.cols)) AS feature_id,
+         unnest(data_coo.vals) AS value
+  FROM fx;
+
+statement ok
+CREATE TABLE cv_month AS
+  SELECT printf('sample_%03d', generate_subscripts(values, 1) - 1) AS sample_id, unnest(values) AS month FROM fx;
+
+# 72 early / 54 late, so both classes survive stratification at any sane fold count.
+statement ok
+CREATE TABLE cv_stage AS
+  SELECT sample_id, CASE WHEN month < 12 THEN 'early' ELSE 'late' END AS stage FROM cv_month;
+
+statement ok
+CREATE TABLE cvc AS
+  SELECT * FROM sc_cross_validate_classifier('cv_counts', 'cv_stage', n_estimators := 20, random_state := 42);
+
+# --- shape ---
+
+# One row per sample: every sample is held out exactly once, so it gets exactly
+# one prediction, from a forest that never saw it.
+query III
+SELECT count(*), count(DISTINCT sample_id), count(*) FILTER (WHERE prediction IS NULL) FROM cvc;
+----
+126	126	0
+
+query I
+SELECT bool_and(sample_id IN (SELECT sample_id FROM cv_stage)) FROM cvc;
+----
+true
+
+# Predictions are class labels the model was trained on, not anything invented.
+query I
+SELECT bool_and(prediction IN ('early', 'late')) FROM cvc;
+----
+true
+
+# The score columns describe the whole run, not the row, so they repeat.
+query IIII
+SELECT count(DISTINCT metric), count(DISTINCT mean_score), count(DISTINCT std_score), count(DISTINCT fold_scores) FROM cvc;
+----
+1	1	1	1
+
+query II
+SELECT any_value(metric), len(any_value(fold_scores)) FROM cvc;
+----
+accuracy	5
+
+# --- actual ---
+
+# The target each fold was scored against, carried through from the metadata
+# relation so the result can be scored without joining back to it.
+query I
+SELECT bool_and(c.actual = s.stage) FROM cvc c JOIN cv_stage s USING (sample_id);
+----
+true
+
+# Accuracy straight off the result, and a confusion matrix with no join.
+query II
+SELECT abs(avg(CASE WHEN prediction = actual THEN 1.0 ELSE 0.0 END) - any_value(mean_score)) < 0.02,
+       count(*) FILTER (WHERE prediction <> actual) > 0
+FROM cvc;
+----
+true	true
+
+# --- scores ---
+
+# mean_score / std_score summarise the per-fold scores: the mean and the
+# population standard deviation (ddof=0), which is what sklearn and q2 print.
+query II
+WITH f AS (SELECT unnest(fold_scores) AS s FROM cvc LIMIT 5)
+SELECT abs(avg(s) - (SELECT any_value(mean_score) FROM cvc)) < 1e-12,
+       abs(stddev_pop(s) - (SELECT any_value(std_score) FROM cvc)) < 1e-12
+FROM f;
+----
+true	true
+
+# A fold score is an accuracy: in [0, 1], and on this data well above chance.
+query II
+WITH f AS (SELECT unnest(fold_scores) AS s FROM cvc LIMIT 5)
+SELECT bool_and(s >= 0.0 AND s <= 1.0), min(s) > 0.5 FROM f;
+----
+true	true
+
+# Scoring the OOF predictions directly is close to, but not the same as, the
+# reported mean: mean_score averages the folds, and 126 does not divide into 5
+# equal ones, so the folds carry slightly different weight.
+query II
+SELECT abs(avg(CASE WHEN c.prediction = s.stage THEN 1.0 ELSE 0.0 END) - any_value(c.mean_score)) < 0.02,
+       avg(CASE WHEN c.prediction = s.stage THEN 1.0 ELSE 0.0 END) > 0.8
+FROM cvc c JOIN cv_stage s USING (sample_id);
+----
+true	true
+
+# --- probabilities ---
+
+# One list per sample, aligned to `classes`, which is the same list on every row.
+query III
+SELECT count(DISTINCT classes), any_value(len(classes)), bool_and(len(probabilities) = len(classes)) FROM cvc;
+----
+1	2	true
+
+query I
+SELECT any_value(classes) FROM cvc;
+----
+[early, late]
+
+# They are a distribution over the classes: each in [0, 1], summing to 1.
+query II
+SELECT bool_and(list_min(probabilities) >= 0.0 AND list_max(probabilities) <= 1.0),
+       bool_and(abs(list_sum(probabilities) - 1.0) < 1e-12)
+FROM cvc;
+----
+true	true
+
+# The alignment, stated as a property: the class holding the highest probability
+# is the predicted one. A mis-ordered axis would break this on the first sample
+# whose classes are not tied.
+query I
+SELECT bool_and(list_extract(classes, list_position(probabilities, list_max(probabilities))) = prediction) FROM cvc;
+----
+true
+
+# A regressor predicts a number, so there is no class to be probable. The task is
+# fixed by which function was called, so the columns are absent rather than NULL.
+query II
+SELECT count(*) FILTER (WHERE column_name IN ('probabilities', 'classes')), count(*)
+FROM (DESCRIBE SELECT * FROM sc_cross_validate_regressor('cv_counts', 'cv_month', n_estimators := 5, n_folds := 2));
+----
+0	7
+
+query II
+SELECT count(*) FILTER (WHERE column_name IN ('probabilities', 'classes')), count(*)
+FROM (DESCRIBE SELECT * FROM sc_cross_validate_classifier('cv_counts', 'cv_stage', n_estimators := 5, n_folds := 2));
+----
+2	9
+
+statement error
+SELECT probabilities FROM sc_cross_validate_regressor('cv_counts', 'cv_month', n_estimators := 5, n_folds := 2);
+----
+probabilities
+
+# --- determinism ---
+
+# Same seed, same folds, same forests: cross-validation is reproducible, which is
+# what lets a reported score be checked later.
+statement ok
+CREATE TABLE cvc2 AS
+  SELECT * FROM sc_cross_validate_classifier('cv_counts', 'cv_stage', n_estimators := 20, random_state := 42);
+
+query II
+SELECT count(*), count(*) FILTER (WHERE a.prediction <> b.prediction OR a.mean_score <> b.mean_score
+                                     OR a.std_score <> b.std_score OR a.fold_scores <> b.fold_scores)
+FROM cvc a JOIN cvc2 b USING (sample_id);
+----
+126	0
+
+# --- fold count ---
+
+query I
+SELECT len(any_value(fold_scores)) FROM
+  sc_cross_validate_classifier('cv_counts', 'cv_stage', n_estimators := 5, n_folds := 3, random_state := 1);
+----
+3
+
+query II
+SELECT count(*), len(any_value(fold_scores)) FROM
+  sc_cross_validate_classifier('cv_counts', 'cv_stage', n_estimators := 5, n_folds := 10, random_state := 1);
+----
+126	10
+
+# --- regressor ---
+
+statement ok
+CREATE TABLE cvr AS
+  SELECT * FROM sc_cross_validate_regressor('cv_counts', 'cv_month', n_estimators := 20, random_state := 42, n_folds := 4);
+
+query III
+SELECT count(*), any_value(metric), len(any_value(fold_scores)) FROM cvr;
+----
+126	mse	4
+
+# The prediction column follows the task: DOUBLE here, VARCHAR for a classifier.
+query II
+SELECT typeof(any_value(prediction)), bool_and(prediction IS NOT NULL) FROM cvr;
+----
+DOUBLE	true
+
+# MSE beats predicting the mean of the data, which is what an uninformative
+# model scores. Also the metric is an error, so lower is better -- the opposite
+# of the classifier's accuracy.
+query II
+SELECT any_value(cvr.mean_score) > 0, any_value(cvr.mean_score) < (SELECT var_pop(month) FROM cv_month) FROM cvr;
+----
+true	true
+
+# A regressor carries the number it was scored against, so a residual needs no
+# join either. The pooled MSE is close to, but not the same as, the reported
+# mean: 126 samples do not divide into 4 equal folds.
+query II
+SELECT abs(avg((prediction - actual) ^ 2) - any_value(mean_score)) < 1.0,
+       abs(avg((prediction - actual) ^ 2) - any_value(mean_score)) > 0
+FROM cvr;
+----
+true	true
+
+# --- parameter_tuning ---
+
+# The inner search runs inside each training fold, so the held-out fold stays
+# unseen and the score stays honest.
+query II
+SELECT count(*), len(any_value(fold_scores)) FROM
+  sc_cross_validate_classifier('cv_counts', 'cv_stage', n_estimators := 5, n_folds := 2, random_state := 1,
+                               parameter_tuning := true);
+----
+126	2
+
+# --- target column ---
+
+statement ok
+CREATE TABLE cv_many AS SELECT sample_id, month, stage FROM cv_month JOIN cv_stage USING (sample_id);
+
+statement error
+SELECT * FROM sc_cross_validate_classifier('cv_counts', 'cv_many', n_estimators := 5);
+----
+more than one column that could be the target
+
+query I
+SELECT any_value(metric) FROM
+  sc_cross_validate_classifier('cv_counts', 'cv_many', target_column := 'stage', n_estimators := 5, n_folds := 2);
+----
+accuracy
+
+# --- errors ---
+
+# One fold would score the model on the data it was fit on.
+statement error
+SELECT * FROM sc_cross_validate_classifier('cv_counts', 'cv_stage', n_folds := 1);
+----
+n_folds must be >= 2
+
+# cv is the q2 / sklearn spelling of the same number.
+query I
+SELECT len(any_value(fold_scores)) FROM
+  sc_cross_validate_classifier('cv_counts', 'cv_stage', n_estimators := 5, cv := 3, random_state := 1);
+----
+3
+
+# Both at once would leave one of them silently ignored.
+statement error
+SELECT * FROM sc_cross_validate_classifier('cv_counts', 'cv_stage', n_folds := 3, cv := 5, n_estimators := 5);
+----
+pass n_folds or cv, not both
+
+statement error
+SELECT * FROM sc_cross_validate_classifier('cv_counts', 'cv_stage', n_folds := 200, n_estimators := 5);
+----
+has only 126 samples
+
+# Stratification needs every class to reach every fold, so a class rarer than the
+# fold count cannot be split. sc says which class and what it would need.
+statement ok
+CREATE TABLE cv_rare AS
+  SELECT sample_id, CASE WHEN month = 0 THEN 'newborn' WHEN month < 12 THEN 'early' ELSE 'late' END AS stage
+  FROM cv_month;
+
+statement error
+SELECT * FROM sc_cross_validate_classifier('cv_counts', 'cv_rare', n_folds := 10, n_estimators := 5);
+----
+each class needs >= 10
+
+# The shared input checks report the cross-validate function, not sc_fit.
+statement error
+SELECT * FROM sc_cross_validate_classifier('cv_stage', 'cv_stage', n_estimators := 5);
+----
+sc_cross_validate_classifier: Data relation 'cv_stage' does not match the required COO triplet schema
+
+statement ok
+CREATE VIEW cv_dup AS SELECT * FROM cv_counts UNION ALL SELECT * FROM cv_counts WHERE sample_id = 'sample_000';
+
+statement error
+SELECT * FROM sc_cross_validate_classifier('cv_dup', 'cv_stage', n_estimators := 5);
+----
+duplicate (sample_id, feature_id) cell(s)
+
+statement ok
+CREATE VIEW cv_short AS SELECT * FROM cv_stage WHERE sample_id <> 'sample_000';
+
+statement error
+SELECT * FROM sc_cross_validate_classifier('cv_counts', 'cv_short', n_estimators := 5);
+----
+describe different sample sets
+
+statement error
+SELECT * FROM sc_cross_validate_regressor('cv_counts', 'cv_month', n_estimators := 0);
+----
+n_estimators must be > 0
+
+statement error
+SELECT * FROM sc_cross_validate_regressor('cv_counts', 'cv_month', max_samples := 0.5, bootstrap := false);
+----
+max_samples is only meaningful with bootstrap := true

@@ -8,3 +8,5 @@ extern crate rype as _;
 
 #[cfg(feature = "with-sylph")]
 extern crate sylph as _;
+
+extern crate sc_capi as _;

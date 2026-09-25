@@ -1461,7 +1461,12 @@ endif()
 set(RYPE_LIB_PATH ${GLUE_LIB_PATH})
 
 # adapted kseq++ include use from strobealign
-include_directories(src/include third_party/microtar ext ext/WFA2-lib ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype)
+# ext/sc/include holds sc.h, a cbindgen BUILD PRODUCT (gitignored in sc) written
+# by sc-capi's build.rs during the rust-glue build. It does not exist on a fresh
+# clone; the `rype` link target's dependency on miint_rust_glue_build orders the
+# glue ahead of the C++ compile, so it is present by the time anything includes it.
+include_directories(src/include third_party/microtar ext ext/WFA2-lib ${CMAKE_CURRENT_SOURCE_DIR}/ext/rype
+                    ${CMAKE_CURRENT_SOURCE_DIR}/ext/sc/include)
 if(MIINT_ENABLE_SYLPH)
     include_directories(${CMAKE_CURRENT_SOURCE_DIR}/ext/sylph)
 endif()
@@ -1505,6 +1510,18 @@ if(MIINT_ENABLE_GPL_BOUNDARY)
     add_subdirectory(third_party/nanoarrow_ipc)
 endif()
 set(EXTENSION_SOURCES
+    src/sc_version_function.cpp
+    src/arrow_export.cpp
+    src/coo_builder.cpp
+    src/sc_rf_common.cpp
+    src/sc_fit_function.cpp
+    src/sc_common.cpp
+    src/sc_feature_importances_function.cpp
+    src/sc_predict_function.cpp
+    src/sc_model_features_function.cpp
+    src/sc_predict_proba_function.cpp
+    src/sc_shap_function.cpp
+    src/sc_cross_validate_function.cpp
     src/SequenceReader.cpp
     src/QualScore.cpp
     src/read_fastx.cpp
@@ -2207,6 +2224,9 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(catch2)
 set(TEST_SOURCES
+    src/arrow_export.cpp
+    src/coo_builder.cpp
+    test/cpp/test_CooBuilder.cpp
     test/cpp/test_sigpipe_bootstrap.cpp
     src/SequenceReader.cpp
     test/cpp/test_SequenceReader.cpp

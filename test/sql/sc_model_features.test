@@ -1,0 +1,125 @@
+# name: test/sql/sc_model_features.test
+# description: test sc_model_features table function
+# group: [sql]
+
+require miint
+
+require-env HDF5_AVAILABLE
+
+statement ok
+PRAGMA enable_verification;
+
+statement ok
+CREATE TABLE mf_data AS SELECT * FROM read_biom('data/biom/test.biom');
+
+statement ok
+CREATE TABLE mf_meta AS SELECT sample_id, sum(value) AS month FROM mf_data GROUP BY sample_id;
+
+statement ok
+CREATE TABLE mf_models AS
+  SELECT * FROM sc_fit_regressor('mf_data', 'mf_meta', n_estimators := 20, random_state := 1, name := 'rf');
+
+# The vocabulary, in the model's own column order, with the positions that fit
+# and predict must agree on.
+query II
+SELECT feature_id, column_index FROM sc_model_features('mf_models', name := 'rf');
+----
+GG_OTU_1	0
+GG_OTU_2	1
+GG_OTU_3	2
+GG_OTU_4	3
+GG_OTU_5	4
+
+# Column indices are dense and start at zero -- they are positions in the
+# matrix, not row numbers that happen to be ordered.
+query III
+SELECT count(*), min(column_index), max(column_index) FROM sc_model_features('mf_models', name := 'rf');
+----
+5	0	4
+
+# It agrees with sc_feature_importances, which reads the same array. This is the
+# assertion that fails if the two ever drift apart.
+query I
+SELECT (SELECT list(feature_id ORDER BY column_index) FROM sc_model_features('mf_models', name := 'rf'))
+     = (SELECT list(feature_id) FROM sc_feature_importances('mf_models', name := 'rf'));
+----
+true
+
+# A model fit on a subset reports only that subset -- the list comes from the
+# model, not from whatever the data table happens to hold now.
+statement ok
+CREATE TABLE mf_subset AS SELECT * FROM mf_data WHERE feature_id IN ('GG_OTU_2','GG_OTU_4');
+
+statement ok
+CREATE TABLE mf_sub_meta AS
+  SELECT * FROM mf_meta WHERE sample_id IN (SELECT DISTINCT sample_id FROM mf_subset);
+
+statement ok
+CREATE TABLE mf_sub_model AS
+  SELECT * FROM sc_fit_regressor('mf_subset', 'mf_sub_meta', n_estimators := 5, random_state := 1, name := 'sub');
+
+query II
+SELECT feature_id, column_index FROM sc_model_features('mf_sub_model', name := 'sub');
+----
+GG_OTU_2	0
+GG_OTU_4	1
+
+# --- the diagnostic this exists for ---
+#
+# When sample_coverage is low the cause is usually a naming mismatch, not
+# missing biology. Diffing both directions says which.
+
+statement ok
+CREATE TABLE mf_new AS
+  SELECT sample_id, feature_id, value FROM mf_data WHERE feature_id IN ('GG_OTU_2','GG_OTU_3')
+  UNION ALL SELECT sample_id, 'gg_otu_4', value FROM mf_data WHERE feature_id = 'GG_OTU_4';
+
+# Present in the data but unknown to the model: silently dropped at predict.
+query I
+SELECT list(feature_id ORDER BY feature_id) FROM (
+  SELECT DISTINCT feature_id FROM mf_new
+  EXCEPT SELECT feature_id FROM sc_model_features('mf_models', name := 'rf'));
+----
+[gg_otu_4]
+
+# Known to the model but absent from the data: read as zero, which is correct
+# for a sparse matrix.
+query I
+SELECT list(feature_id ORDER BY feature_id) FROM (
+  SELECT feature_id FROM sc_model_features('mf_models', name := 'rf')
+  EXCEPT SELECT DISTINCT feature_id FROM mf_new);
+----
+[GG_OTU_1, GG_OTU_4, GG_OTU_5]
+
+# GG_OTU_4 appears on BOTH sides -- the same taxon, failing on case. That is the
+# mismatch this function exists to make visible.
+query I
+SELECT count(*) FROM (
+  SELECT lower(feature_id) AS f FROM sc_model_features('mf_models', name := 'rf')
+  INTERSECT
+  SELECT lower(feature_id) FROM (
+    SELECT DISTINCT feature_id FROM mf_new
+    EXCEPT SELECT feature_id FROM sc_model_features('mf_models', name := 'rf')));
+----
+1
+
+# --- model selection, same rules as everywhere else ---
+
+statement ok
+INSERT INTO mf_models
+  SELECT * FROM sc_fit_regressor('mf_data', 'mf_meta', n_estimators := 30, random_state := 2, name := 'rf2');
+
+statement error
+SELECT * FROM sc_model_features('mf_models');
+----
+so this call is ambiguous
+
+statement error
+SELECT * FROM sc_model_features('mf_models', name := 'nope');
+----
+No model named 'nope'
+
+statement error
+SELECT * FROM sc_model_features('mf_data');
+----
+must expose a 'model_blob' column

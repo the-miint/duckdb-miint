@@ -1,0 +1,442 @@
+# name: test/sql/sc_shap.test
+# description: test sc_shap table function on sc's ECAM oracle fixture
+# group: [sql]
+
+require miint
+
+require json
+
+statement ok
+PRAGMA enable_verification;
+
+# Real data -- 126 samples x 150 features -- read straight out of sc's fixture,
+# so there is no BIOM dependency. Ids are zero-padded so lexical order equals
+# numeric order; see sc_oracle_ecam.test for why that matters.
+statement ok
+CREATE TABLE fx AS SELECT * FROM read_json('ext/sc/oracle/fixtures/forest/agg_ecam.json');
+
+statement ok
+CREATE TABLE shp_counts AS
+  SELECT printf('sample_%03d', unnest(data_coo.rows)) AS sample_id,
+         printf('feat_%03d',   unnest(data_coo.cols)) AS feature_id,
+         unnest(data_coo.vals) AS value
+  FROM fx;
+
+statement ok
+CREATE TABLE shp_month AS
+  SELECT printf('sample_%03d', generate_subscripts(values, 1) - 1) AS sample_id, unnest(values) AS month FROM fx;
+
+# Months are 0..12 then every other month to 28, six samples each. `< 12` splits
+# 72 / 54; the three-way cut gives 36 / 42 / 48, so every class is present.
+statement ok
+CREATE TABLE shp_bin AS
+  SELECT sample_id, CASE WHEN month < 12 THEN 'early' ELSE 'late' END AS stage FROM shp_month;
+
+statement ok
+CREATE TABLE shp_tri AS
+  SELECT sample_id, CASE WHEN month < 6 THEN 'infant' WHEN month < 14 THEN 'toddler' ELSE 'child' END AS stage
+  FROM shp_month;
+
+statement ok
+CREATE TABLE shp_models AS
+  SELECT * FROM sc_fit_regressor('shp_counts', 'shp_month', n_estimators := 10, random_state := 7, name := 'reg');
+
+statement ok
+INSERT INTO shp_models
+  SELECT * FROM sc_fit_classifier('shp_counts', 'shp_bin', n_estimators := 10, random_state := 7, name := 'bin');
+
+statement ok
+INSERT INTO shp_models
+  SELECT * FROM sc_fit_classifier('shp_counts', 'shp_tri', n_estimators := 10, random_state := 7, name := 'tri');
+
+# SHAP is asked about a handful of samples, so explain eight.
+statement ok
+CREATE VIEW shp_few AS
+  SELECT * FROM shp_counts
+  WHERE sample_id IN (SELECT DISTINCT sample_id FROM shp_counts ORDER BY sample_id LIMIT 8);
+
+# --- regressor ---
+
+# One row per sample x feature, and a regressor has no class.
+query II
+SELECT count(*), count(class) FROM sc_shap('shp_few', 'shp_models', name := 'reg');
+----
+1200	0
+
+query I
+SELECT count(DISTINCT base_value) FROM sc_shap('shp_few', 'shp_models', name := 'reg');
+----
+1
+
+# Additivity, which is what makes SHAP an explanation of THIS prediction rather
+# than a ranking: base + sum of a sample's attributions is its predicted value.
+# It is also the check on the decoding -- a stride error in the output-major
+# layout would break the sum.
+query I
+WITH s AS (SELECT sample_id, sum(shap_value) + any_value(base_value) AS recon
+           FROM sc_shap('shp_few', 'shp_models', name := 'reg') GROUP BY sample_id)
+SELECT bool_and(abs(s.recon - p.prediction) < 1e-9) AND count(*) = 8
+FROM s JOIN sc_predict('shp_few', 'shp_models', name := 'reg') p USING (sample_id);
+----
+true
+
+# predicted_class_only means nothing to a single-output model.
+query I
+SELECT count(*) FROM sc_shap('shp_few', 'shp_models', name := 'reg', predicted_class_only := false);
+----
+1200
+
+# --- classifier, predicted class only (the default) ---
+
+query II
+SELECT count(*), count(DISTINCT (sample_id, class)) FROM sc_shap('shp_few', 'shp_models', name := 'bin');
+----
+1200	8
+
+# The class shown is the one sc_predict reports -- a separate sc call.
+query I
+SELECT bool_and(s.class = p.prediction) FROM
+  (SELECT DISTINCT sample_id, class FROM sc_shap('shp_few', 'shp_models', name := 'bin')) s
+  JOIN sc_predict('shp_few', 'shp_models', name := 'bin') p USING (sample_id);
+----
+true
+
+# For a classifier the additive target is that class's probability.
+query I
+WITH s AS (SELECT sample_id, class, sum(shap_value) + any_value(base_value) AS recon
+           FROM sc_shap('shp_few', 'shp_models', name := 'bin') GROUP BY ALL)
+SELECT bool_and(abs(s.recon - pp.probability) < 1e-9) AND count(*) = 8
+FROM s JOIN sc_predict_proba('shp_few', 'shp_models', name := 'bin') pp USING (sample_id, class);
+----
+true
+
+# --- classifier, every class ---
+
+query I
+SELECT count(*) FROM sc_shap('shp_few', 'shp_models', name := 'bin', predicted_class_only := false);
+----
+2400
+
+# Why two classes default to one: p(late) = 1 - p(early), and SHAP is linear in
+# the output, so every attribution for one class is exactly the negative of the
+# other's. Returning both is the same information twice.
+query II
+SELECT count(*), bool_and(abs(pair_sum) < 1e-9) FROM (
+  SELECT sample_id, feature_id, sum(shap_value) AS pair_sum
+  FROM sc_shap('shp_few', 'shp_models', name := 'bin', predicted_class_only := false)
+  GROUP BY ALL);
+----
+1200	true
+
+# With three classes there is no mirror, which is why the option exists. Every
+# (sample, class) still reconstructs its own probability.
+query II
+WITH s AS (SELECT sample_id, class, sum(shap_value) + any_value(base_value) AS recon
+           FROM sc_shap('shp_few', 'shp_models', name := 'tri', predicted_class_only := false) GROUP BY ALL)
+SELECT count(*), bool_and(abs(s.recon - pp.probability) < 1e-9)
+FROM s JOIN sc_predict_proba('shp_few', 'shp_models', name := 'tri') pp USING (sample_id, class);
+----
+24	true
+
+# --- top_k ---
+
+statement ok
+CREATE TABLE shp_full AS SELECT * FROM sc_shap('shp_few', 'shp_models', name := 'reg');
+
+statement ok
+CREATE TABLE shp_top10 AS SELECT * FROM sc_shap('shp_few', 'shp_models', name := 'reg', top_k := 10);
+
+# k rows whenever the sample has k non-zero attributions.
+query I
+WITH nz AS (SELECT sample_id, count(*) FILTER (WHERE shap_value <> 0) AS n FROM shp_full GROUP BY sample_id),
+     got AS (SELECT sample_id, count(*) AS n FROM shp_top10 GROUP BY sample_id)
+SELECT bool_and(got.n = least(10, nz.n)) AND count(*) = 8 FROM nz JOIN got USING (sample_id);
+----
+true
+
+# A zero pushes neither way and is never picked.
+query I
+SELECT count(*) FROM shp_top10 WHERE shap_value = 0;
+----
+0
+
+# A k beyond what a sample has returns every non-zero attribution and no more.
+query I
+SELECT (SELECT count(*) FROM sc_shap('shp_few', 'shp_models', name := 'reg', top_k := 1000))
+     = (SELECT count(*) FROM shp_full WHERE shap_value <> 0);
+----
+true
+
+# The rule, stated exactly: ceil(k/2) positive and floor(k/2) negative, and when
+# one side runs short the other fills the gap. Recomputed here from the full
+# output so the test does not trust the implementation's own counting.
+query I
+WITH fc AS (SELECT sample_id, count(*) FILTER (WHERE shap_value > 0) AS p, count(*) FILTER (WHERE shap_value < 0) AS n
+            FROM shp_full GROUP BY sample_id),
+     tc AS (SELECT sample_id, count(*) FILTER (WHERE shap_value > 0) AS p, count(*) FILTER (WHERE shap_value < 0) AS n
+            FROM shp_top10 GROUP BY sample_id),
+     w1 AS (SELECT sample_id, p, n, least(5, p) AS tp0, least(5, n) AS tn0 FROM fc),
+     w2 AS (SELECT sample_id, p, n, tp0, tn0, 10 - tp0 - tn0 AS spare FROM w1),
+     w3 AS (SELECT sample_id, n, tn0, spare, least(spare, p - tp0) AS mp, tp0 + least(spare, p - tp0) AS tp FROM w2),
+     w AS (SELECT sample_id, tp, tn0 + least(spare - mp, n - tn0) AS tn FROM w3)
+SELECT bool_and(tc.p = w.tp AND tc.n = w.tn) AND count(*) = 8 FROM w JOIN tc USING (sample_id);
+----
+true
+
+# Every sample here has at least 30 positive and 30 negative attributions, so
+# k = 10 never runs a side short. k = 71 does, both ways -- sample_000 has 30
+# positive (negatives fill in), sample_005 has 31 negative (positives fill in),
+# sample_002 has plenty of each (plain 36 / 35) -- and is odd, so the positive
+# side takes the extra row.
+query II
+SELECT count(*) FILTER (WHERE shap_value > 0) < 36 AND count(*) FILTER (WHERE shap_value < 0) >= 36,
+       count(*) FILTER (WHERE shap_value < 0) < 35 AND count(*) FILTER (WHERE shap_value > 0) >= 35
+FROM shp_full WHERE sample_id IN ('sample_000', 'sample_005') GROUP BY sample_id ORDER BY sample_id;
+----
+true	false
+false	true
+
+statement ok
+CREATE TABLE shp_top71 AS SELECT * FROM sc_shap('shp_few', 'shp_models', name := 'reg', top_k := 71);
+
+query I
+WITH fc AS (SELECT sample_id, count(*) FILTER (WHERE shap_value > 0) AS p, count(*) FILTER (WHERE shap_value < 0) AS n
+            FROM shp_full GROUP BY sample_id),
+     tc AS (SELECT sample_id, count(*) FILTER (WHERE shap_value > 0) AS p, count(*) FILTER (WHERE shap_value < 0) AS n
+            FROM shp_top71 GROUP BY sample_id),
+     w1 AS (SELECT sample_id, p, n, least(36, p) AS tp0, least(35, n) AS tn0 FROM fc),
+     w2 AS (SELECT sample_id, p, n, tp0, tn0, 71 - tp0 - tn0 AS spare FROM w1),
+     w3 AS (SELECT sample_id, n, tn0, spare, least(spare, p - tp0) AS mp, tp0 + least(spare, p - tp0) AS tp FROM w2),
+     w AS (SELECT sample_id, tp, tn0 + least(spare - mp, n - tn0) AS tn FROM w3)
+SELECT bool_and(tc.p = w.tp AND tc.n = w.tn) AND count(*) = 8 FROM w JOIN tc USING (sample_id);
+----
+true
+
+# The kept rows are the extremes: no dropped positive beats a kept one, and no
+# dropped negative is more negative than a kept one.
+query I
+WITH j AS (SELECT f.sample_id, f.shap_value, t.feature_id IS NOT NULL AS kept
+           FROM shp_full f LEFT JOIN shp_top10 t USING (sample_id, feature_id)),
+     per AS (SELECT sample_id,
+                    min(shap_value) FILTER (WHERE kept AND shap_value > 0)     AS min_kept_pos,
+                    max(shap_value) FILTER (WHERE NOT kept AND shap_value > 0) AS max_dropped_pos,
+                    max(shap_value) FILTER (WHERE kept AND shap_value < 0)     AS max_kept_neg,
+                    min(shap_value) FILTER (WHERE NOT kept AND shap_value < 0) AS min_dropped_neg
+             FROM j GROUP BY sample_id)
+SELECT bool_and(coalesce(max_dropped_pos <= min_kept_pos, true) AND coalesce(min_dropped_neg >= max_kept_neg, true))
+FROM per;
+----
+true
+
+# With every class returned, top_k applies per (sample, class).
+query I
+WITH fc AS (SELECT sample_id, class, count(*) FILTER (WHERE shap_value <> 0) AS nz
+            FROM sc_shap('shp_few', 'shp_models', name := 'tri', predicted_class_only := false) GROUP BY ALL),
+     tc AS (SELECT sample_id, class, count(*) AS n
+            FROM sc_shap('shp_few', 'shp_models', name := 'tri', predicted_class_only := false, top_k := 6)
+            GROUP BY ALL)
+SELECT bool_and(tc.n = least(6, fc.nz)) AND count(*) = 24 FROM fc JOIN tc USING (sample_id, class);
+----
+true
+
+# --- row order ---
+
+# Rows come out as ORDER BY sample_id, class, shap_value DESC, ties in model
+# column order (feature_id order here, since the fit dictionary is sorted).
+# CREATE TABLE AS keeps production order, so rowid is the order rows were
+# emitted in. Checked on every class of every sample, which puts all three
+# sorts to work plus the ~70 zero ties per row.
+statement ok
+CREATE TABLE shp_order AS
+  SELECT * FROM sc_shap('shp_few', 'shp_models', name := 'tri', predicted_class_only := false);
+
+query II
+SELECT count(*) FILTER (WHERE rowid <> want), count(*) FROM (
+  SELECT rowid, row_number() OVER (ORDER BY sample_id, class, shap_value DESC, feature_id) - 1 AS want
+  FROM shp_order);
+----
+0	3600
+
+# top_k output is in the same order, not the order the two sides were picked in.
+query II
+SELECT count(*) FILTER (WHERE rowid <> want), count(*) FROM (
+  SELECT rowid, row_number() OVER (ORDER BY sample_id, class, shap_value DESC, feature_id) - 1 AS want
+  FROM shp_top10);
+----
+0	80
+
+# --- sample_coverage ---
+
+# One cell of a feature the model never saw on sample_000 (23 known features),
+# and a sample whose only feature is unseen.
+statement ok
+CREATE VIEW shp_cov AS
+  SELECT * FROM shp_few
+  UNION ALL SELECT 'sample_000', 'D_unseen', 999.0
+  UNION ALL SELECT 'only_D', 'D_unseen', 5.0;
+
+# Unseen features never get a row: no tree splits on them.
+query I
+SELECT count(*) FROM sc_shap('shp_cov', 'shp_models', name := 'reg') WHERE feature_id = 'D_unseen';
+----
+0
+
+# Coverage is known features / the sample's features, the same number sc_predict
+# reports.
+query II
+SELECT sample_id, round(any_value(sample_coverage), 4)
+FROM sc_shap('shp_cov', 'shp_models', name := 'reg')
+WHERE sample_id IN ('only_D', 'sample_000', 'sample_001')
+GROUP BY ALL ORDER BY ALL;
+----
+only_D	0.0
+sample_000	0.9583
+sample_001	1.0
+
+# Constant within a sample, equal to sc_predict's for all nine, and the dropped
+# cells change nothing about additivity -- the prediction ignored them too.
+# only_D is the case the column exists for: its explanation adds up exactly, yet
+# it explains an all-zero row, and only coverage says so.
+query II
+WITH s AS (SELECT sample_id, count(DISTINCT sample_coverage) AS k, any_value(sample_coverage) AS c,
+                  sum(shap_value) + any_value(base_value) AS recon
+           FROM sc_shap('shp_cov', 'shp_models', name := 'reg') GROUP BY sample_id)
+SELECT count(*), bool_and(s.k = 1 AND s.c = p.sample_coverage AND abs(s.recon - p.prediction) < 1e-9)
+FROM s JOIN sc_predict('shp_cov', 'shp_models', name := 'reg') p USING (sample_id);
+----
+9	true
+
+# One sample per batch puts only_D (first in sample order) in a batch with no
+# cells at all: still a valid table, and still the same numbers.
+query II
+WITH s AS (SELECT sample_id, count(DISTINCT sample_coverage) AS k, any_value(sample_coverage) AS c,
+                  sum(shap_value) + any_value(base_value) AS recon
+           FROM sc_shap('shp_cov', 'shp_models', name := 'reg', batch_size := 1) GROUP BY sample_id)
+SELECT count(*), bool_and(s.k = 1 AND s.c = p.sample_coverage AND abs(s.recon - p.prediction) < 1e-9)
+FROM s JOIN sc_predict('shp_cov', 'shp_models', name := 'reg') p USING (sample_id);
+----
+9	true
+
+# --- batching ---
+
+# Samples are explained in batches, so memory is one batch however many samples
+# there are. Each sample is explained on its own, so batching must change no
+# value and no row order. The references above are unbatched: 8 x 3 x 150 = 3600
+# attributions fits the default budget in one batch.
+#
+# rowid is production order (see row order above), so joining on it checks order
+# and values at once. Equality is exact: a sample's arithmetic does not depend
+# on which batch it lands in.
+statement ok
+CREATE TABLE shp_b1 AS
+  SELECT * FROM sc_shap('shp_few', 'shp_models', name := 'tri', predicted_class_only := false, batch_size := 1);
+
+query II
+SELECT count(*), count(*) FILTER (WHERE a.sample_id <> b.sample_id OR a.class IS DISTINCT FROM b.class
+                                     OR a.feature_id <> b.feature_id OR a.shap_value <> b.shap_value
+                                     OR a.base_value <> b.base_value OR a.sample_coverage <> b.sample_coverage)
+FROM shp_order a JOIN shp_b1 b ON a.rowid = b.rowid;
+----
+3600	0
+
+# Threes leave a short last batch of two.
+statement ok
+CREATE TABLE shp_b3 AS
+  SELECT * FROM sc_shap('shp_few', 'shp_models', name := 'tri', predicted_class_only := false, batch_size := 3);
+
+query II
+SELECT count(*), count(*) FILTER (WHERE a.sample_id <> b.sample_id OR a.class IS DISTINCT FROM b.class
+                                     OR a.feature_id <> b.feature_id OR a.shap_value <> b.shap_value
+                                     OR a.base_value <> b.base_value OR a.sample_coverage <> b.sample_coverage)
+FROM shp_order a JOIN shp_b3 b ON a.rowid = b.rowid;
+----
+3600	0
+
+# The default output and top_k across batch boundaries: keeping the predicted
+# class and picking the top rows happen per sample, after sc.
+statement ok
+CREATE TABLE shp_bin_top AS SELECT * FROM sc_shap('shp_few', 'shp_models', name := 'bin', top_k := 10);
+
+statement ok
+CREATE TABLE shp_bin_top_b3 AS
+  SELECT * FROM sc_shap('shp_few', 'shp_models', name := 'bin', top_k := 10, batch_size := 3);
+
+query II
+SELECT count(*) > 0 AND count(*) = (SELECT count(*) FROM shp_bin_top) AND count(*) = (SELECT count(*) FROM shp_bin_top_b3),
+       count(*) FILTER (WHERE a.sample_id <> b.sample_id OR a.class IS DISTINCT FROM b.class
+                           OR a.feature_id <> b.feature_id OR a.shap_value <> b.shap_value
+                           OR a.base_value <> b.base_value OR a.sample_coverage <> b.sample_coverage)
+FROM shp_bin_top a JOIN shp_bin_top_b3 b ON a.rowid = b.rowid;
+----
+true	0
+
+# Without batch_size the size comes from the budget: 400 attributions over 150
+# features is two samples a batch.
+statement ok
+CREATE TABLE shp_reg_budget AS SELECT * FROM sc_shap('shp_few', 'shp_models', name := 'reg', max_attributions := 400);
+
+query II
+SELECT count(*), count(*) FILTER (WHERE a.sample_id <> b.sample_id OR a.class IS DISTINCT FROM b.class
+                                     OR a.feature_id <> b.feature_id OR a.shap_value <> b.shap_value
+                                     OR a.base_value <> b.base_value OR a.sample_coverage <> b.sample_coverage)
+FROM shp_full a JOIN shp_reg_budget b ON a.rowid = b.rowid;
+----
+1200	0
+
+# One regressor sample needs 150 attributions. Under a budget of 100 it cannot be
+# split, so it runs alone -- with a warning, and with the same numbers.
+statement ok
+SET enable_logging = true;
+
+statement ok
+CREATE TABLE shp_reg_over AS SELECT * FROM sc_shap('shp_few', 'shp_models', name := 'reg', max_attributions := 100);
+
+query II
+SELECT count(*), count(*) FILTER (WHERE a.sample_id <> b.sample_id OR a.class IS DISTINCT FROM b.class
+                                     OR a.feature_id <> b.feature_id OR a.shap_value <> b.shap_value
+                                     OR a.base_value <> b.base_value OR a.sample_coverage <> b.sample_coverage)
+FROM shp_full a JOIN shp_reg_over b ON a.rowid = b.rowid;
+----
+1200	0
+
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE '%one sample needs 150 attributions (1 output x 150 features), above max_attributions 100%';
+----
+true
+
+# --- errors ---
+
+statement error
+SELECT * FROM sc_shap('shp_few', 'shp_models', name := 'reg', top_k := 0);
+----
+top_k must be > 0
+
+statement error
+SELECT * FROM sc_shap('shp_few', 'shp_models', name := 'reg', batch_size := 0);
+----
+batch_size must be > 0
+
+# Two ways to size a batch; taking both would leave one silently ignored.
+statement error
+SELECT * FROM sc_shap('shp_few', 'shp_models', name := 'reg', batch_size := 2, max_attributions := 1000);
+----
+pass batch_size or max_attributions, not both
+
+statement error
+SELECT * FROM sc_shap('shp_few', 'shp_models', name := 'nope');
+----
+No model named 'nope'
+
+statement error
+SELECT * FROM sc_shap('shp_models', 'shp_models', name := 'reg');
+----
+does not match the required COO triplet schema
+
+statement ok
+CREATE VIEW shp_alien AS SELECT sample_id, 'ALIEN_' || feature_id AS feature_id, value FROM shp_few;
+
+statement error
+SELECT * FROM sc_shap('shp_alien', 'shp_models', name := 'reg');
+----
+do not share a feature vocabulary

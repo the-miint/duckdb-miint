@@ -1,0 +1,229 @@
+# name: test/sql/sc_feature_importances.test
+# description: test sc_feature_importances table function
+# group: [sql]
+
+require miint
+
+require-env HDF5_AVAILABLE
+
+statement ok
+PRAGMA enable_verification;
+
+statement ok
+CREATE TABLE fi_data AS SELECT * FROM read_biom('data/biom/test.biom');
+
+statement ok
+CREATE TABLE fi_metadata AS
+  SELECT unnest(['Sample1','Sample2','Sample3','Sample4','Sample5','Sample6']) AS sample_id,
+         unnest(['gut','gut','gut','skin','skin','skin']) AS value;
+
+statement ok
+CREATE TABLE fi_model AS
+  SELECT * FROM sc_fit_classifier('fi_data', 'fi_metadata', n_estimators := 200, random_state := 42, name := 'm46');
+
+# One row per model feature, and every one is labelled. sc returns the weights
+# and the names as separate arrays; neither is useful without the other.
+query I
+SELECT count(*) FROM sc_feature_importances('fi_model');
+----
+5
+
+query I
+SELECT count(*) FROM sc_feature_importances('fi_model') WHERE feature_id IS NULL OR importance IS NULL;
+----
+0
+
+# MDI importances are normalised across the forest.
+query I
+SELECT abs(sum(importance) - 1.0) < 1e-9 FROM sc_feature_importances('fi_model');
+----
+true
+
+query I
+SELECT bool_and(importance >= 0.0) FROM sc_feature_importances('fi_model');
+----
+true
+
+# The labels are the model's training vocabulary, so they must match the
+# features the model was actually fit on -- not whatever the data table happens
+# to contain now.
+query I
+SELECT list_sort(list(feature_id)) FROM sc_feature_importances('fi_model');
+----
+[GG_OTU_1, GG_OTU_2, GG_OTU_3, GG_OTU_4, GG_OTU_5]
+
+query I
+SELECT (SELECT count(DISTINCT feature_id) FROM fi_data)
+     = (SELECT count(*) FROM sc_feature_importances('fi_model'));
+----
+true
+
+# A model fit on a subset must report only that subset's features -- this is the
+# check that fails if the labels were re-derived from the data rather than read
+# out of the model.
+statement ok
+CREATE TABLE fi_subset AS SELECT * FROM fi_data WHERE feature_id IN ('GG_OTU_2','GG_OTU_4');
+
+statement ok
+CREATE TABLE fi_subset_meta AS
+  SELECT * FROM fi_metadata WHERE sample_id IN (SELECT DISTINCT sample_id FROM fi_subset);
+
+statement ok
+CREATE TABLE fi_subset_model AS
+  SELECT * FROM sc_fit_classifier('fi_subset', 'fi_subset_meta', n_estimators := 10, random_state := 1, name := 'm47');
+
+query I
+SELECT list_sort(list(feature_id)) FROM sc_feature_importances('fi_subset_model');
+----
+[GG_OTU_2, GG_OTU_4]
+
+# Regression models carry importances too.
+statement ok
+CREATE TABLE fi_reg_metadata AS
+  SELECT unnest(['Sample1','Sample2','Sample3','Sample4','Sample5','Sample6']) AS sample_id,
+         unnest(['1','3','6','9','12','15']) AS value;
+
+statement ok
+CREATE TABLE fi_reg_model AS
+  SELECT * FROM sc_fit_regressor('fi_data', 'fi_reg_metadata', n_estimators := 50, random_state := 7, name := 'm48');
+
+query I
+SELECT abs(sum(importance) - 1.0) < 1e-9 FROM sc_feature_importances('fi_reg_model');
+----
+true
+
+# --- errors ---
+
+statement ok
+CREATE TABLE fi_empty AS SELECT * FROM fi_model WHERE false;
+
+statement error
+SELECT * FROM sc_feature_importances('fi_empty');
+----
+is empty
+
+statement ok
+CREATE TABLE fi_two AS SELECT * FROM fi_model UNION ALL SELECT * FROM fi_model;
+
+statement error
+SELECT * FROM sc_feature_importances('fi_two');
+----
+so this call is ambiguous
+
+statement error
+SELECT * FROM sc_feature_importances('fi_data');
+----
+must expose a 'model_blob' column
+
+statement ok
+CREATE TABLE fi_null AS SELECT NULL::BLOB AS model_blob;
+
+statement error
+SELECT * FROM sc_feature_importances('fi_null');
+----
+has a NULL model
+
+statement error
+SELECT * FROM sc_feature_importances('no_such_relation');
+----
+must expose a 'model_blob' column
+
+# A blob that is not a serialized sc model.
+statement ok
+CREATE TABLE fi_junk AS SELECT 'not a model'::BLOB AS model_blob;
+
+statement error
+SELECT * FROM sc_feature_importances('fi_junk');
+----
+sc error
+
+# --- determinism ---
+#
+# Importances are read off the tree structure, so they are only as stable as the
+# forest. The forest is only stable if (a) sc's seeded RNG is honoured and (b)
+# the row and column order reaching sc does not depend on how DuckDB scheduled
+# the scan. This is the end-to-end check on both.
+
+statement ok
+CREATE TABLE det_model AS
+  SELECT * FROM sc_fit_classifier('fi_data', 'fi_metadata', n_estimators := 200, random_state := 4242, name := 'm49');
+
+# Three independent calls against the same stored model must agree exactly --
+# not approximately. Deserialise -> export -> decode must be a pure function.
+query I
+SELECT count(DISTINCT sig) FROM (
+  SELECT list(importance ORDER BY feature_id) AS sig FROM sc_feature_importances('det_model')
+  UNION ALL SELECT list(importance ORDER BY feature_id) FROM sc_feature_importances('det_model')
+  UNION ALL SELECT list(importance ORDER BY feature_id) FROM sc_feature_importances('det_model'));
+----
+1
+
+# Refitting from scratch under the same seed must reproduce them. This is the
+# assertion that fails if SQL row order ever leaks into the model: the seed is
+# unchanged, so any difference came from the data arriving in a different order.
+statement ok
+CREATE TABLE det_model_refit AS
+  SELECT * FROM sc_fit_classifier('fi_data', 'fi_metadata', n_estimators := 200, random_state := 4242, name := 'm50');
+
+query I
+SELECT (SELECT list(importance ORDER BY feature_id) FROM sc_feature_importances('det_model'))
+     = (SELECT list(importance ORDER BY feature_id) FROM sc_feature_importances('det_model_refit'));
+----
+true
+
+# A different seed must move them, or the seed is not reaching the forest.
+statement ok
+CREATE TABLE det_model_seed7 AS
+  SELECT * FROM sc_fit_classifier('fi_data', 'fi_metadata', n_estimators := 200, random_state := 7, name := 'm51');
+
+query I
+SELECT (SELECT list(importance ORDER BY feature_id) FROM sc_feature_importances('det_model'))
+     = (SELECT list(importance ORDER BY feature_id) FROM sc_feature_importances('det_model_seed7'));
+----
+false
+
+# Row order in the source table must not matter. Same cells, shuffled arrival:
+# the builder's sorted dictionaries are what make this hold.
+statement ok
+CREATE TABLE fi_shuffled AS SELECT * FROM fi_data ORDER BY hash(feature_id || sample_id);
+
+statement ok
+CREATE TABLE det_model_shuffled AS
+  SELECT * FROM sc_fit_classifier('fi_shuffled', 'fi_metadata', n_estimators := 200, random_state := 4242, name := 'm52');
+
+query I
+SELECT (SELECT list(importance ORDER BY feature_id) FROM sc_feature_importances('det_model'))
+     = (SELECT list(importance ORDER BY feature_id) FROM sc_feature_importances('det_model_shuffled'));
+----
+true
+
+# --- selecting one model out of a registry ---
+
+statement ok
+CREATE TABLE fi_reg AS SELECT * FROM sc_fit_classifier('fi_data','fi_metadata', n_estimators := 20, random_state := 1, name := 'clf');
+
+statement ok
+INSERT INTO fi_reg SELECT * FROM sc_fit_regressor('fi_data','fi_reg_metadata', n_estimators := 30, random_state := 1, name := 'reg');
+
+query I
+SELECT count(*) FROM sc_feature_importances('fi_reg', name := 'reg');
+----
+5
+
+# Different models in one table give different importances, so the name is
+# actually selecting rather than just permitting the call.
+query I
+SELECT (SELECT list(importance ORDER BY feature_id) FROM sc_feature_importances('fi_reg', name := 'clf'))
+     = (SELECT list(importance ORDER BY feature_id) FROM sc_feature_importances('fi_reg', name := 'reg'));
+----
+false
+
+statement error
+SELECT * FROM sc_feature_importances('fi_reg', name := 'missing');
+----
+No model named 'missing'
+
+statement error
+SELECT * FROM sc_feature_importances('fi_reg');
+----
+so this call is ambiguous
