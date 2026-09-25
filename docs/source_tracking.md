@@ -333,9 +333,8 @@ a cancelled query keeps its cores busy until the sampler finishes.
 Sinks (or, under `loo`, held-out source samples) are sampled concurrently. `threads := 0`
 follows DuckDB's `threads` setting; an explicit value overrides it for this call. The result
 does not depend on the thread count: each sink's chains draw from their own seeded stream, so
-`threads := 1` and `threads := 8` give identical rows. The DuckDB-Wasm build compiles the
-sampler in but cannot call into it yet; see the
-[installation notes](installation.md#optional-feature-flags).
+`threads := 1` and `threads := 8` give identical rows. Under DuckDB-Wasm the sampler runs on
+the calling thread.
 
 ## Reproducibility
 

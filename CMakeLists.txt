@@ -1157,6 +1157,7 @@ if ! rustup toolchain list | grep -q "^${ver}"; then
     rustup toolchain install "${ver}" --profile minimal
 fi
 rustup target add --toolchain "${ver}" wasm32-unknown-emscripten
+rustup component add --toolchain "${ver}" rust-src
 ]=])
         set(GLUE_CONFIGURE_CMD sh ${GLUE_WASM_RUST_PIN_SH} ${MIINT_WASM_RUST_TOOLCHAIN})
         set(GLUE_RUSTUP_TOOLCHAIN ${MIINT_WASM_RUST_TOOLCHAIN})
@@ -1223,6 +1224,18 @@ if(EMSCRIPTEN)
     # goes into the extension. This just unblocks the cargo build.
     list(APPEND GLUE_RUSTFLAGS_LIST "-C" "relocation-model=pic")
     list(APPEND GLUE_RUSTFLAGS_LIST "-C" "link-arg=-sSIDE_MODULE=2")
+    # WebAssembly exceptions, to match DuckDB-Wasm's -fwasm-exceptions main
+    # module. rustc's emscripten target otherwise implements unwinding (every
+    # catch_unwind at a C entry point, every drop-on-unwind landing pad, in
+    # std included) with Emscripten's JavaScript exception ABI, so the side
+    # module imports invoke_* trampolines and __cxa_find_matching_catch_2,
+    # which a wasm-EH main module never provides: the extension loads, but the
+    # first call into any Rust entry point throws "resolved is not a function".
+    # The flag is nightly-gated on the pinned stable toolchain (RUSTC_BOOTSTRAP
+    # below), and the prebuilt std was compiled the old way, so std is rebuilt
+    # with the same flags (-Zbuild-std, needs the rust-src component).
+    list(APPEND GLUE_RUSTFLAGS_LIST "-Z" "emscripten-wasm-eh")
+    list(APPEND GLUE_RUSTFLAGS_LIST "-C" "link-arg=-fwasm-exceptions")
 endif()
 
 if(WIN32 AND MINGW)
@@ -1240,9 +1253,16 @@ if(WIN32 AND MINGW)
 endif()
 
 set(GLUE_ENV_ARGS "")
+set(GLUE_CARGO_EXTRA_ARGS "")
 if(GLUE_RUSTFLAGS_LIST)
     string(JOIN " " GLUE_RUSTFLAGS_STR ${GLUE_RUSTFLAGS_LIST})
     list(APPEND GLUE_ENV_ARGS "RUSTFLAGS=${GLUE_RUSTFLAGS_STR}")
+endif()
+if(EMSCRIPTEN)
+    # See the wasm-exceptions note above: -Z flags on a stable toolchain, and
+    # a std rebuilt with those flags.
+    list(APPEND GLUE_ENV_ARGS "RUSTC_BOOTSTRAP=1")
+    list(APPEND GLUE_CARGO_EXTRA_ARGS "-Zbuild-std=std")
 endif()
 if(GLUE_RUSTUP_TOOLCHAIN)
     # Force cargo (the rustup shim) onto the pinned toolchain for this build.
@@ -1261,6 +1281,7 @@ ExternalProject_Add(
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/miint-rust-glue
     CONFIGURE_COMMAND "${GLUE_CONFIGURE_CMD}"
     BUILD_COMMAND ${GLUE_BUILD_ENV} ${CARGO} build --release
+        ${GLUE_CARGO_EXTRA_ARGS}
         ${GLUE_FEATURES_ARGS}
         --target-dir ${GLUE_TARGET_DIR}
         --manifest-path ${CMAKE_CURRENT_SOURCE_DIR}/ext/miint-rust-glue/Cargo.toml
@@ -2499,21 +2520,18 @@ if(MIINT_ENABLE_KREPP)
         target_link_libraries(tests miint_openmp)
     endif()
 endif()
-# The Rust umbrella archive only links into the tests executable on native
-# targets. Under Emscripten the Rust code carries the emscripten unwinding ABI
-# (__cxa_find_matching_catch_2), which the -fwasm-exceptions main-module link
-# of tests.js cannot resolve; the extension is a side module, where that stays
-# an import. st3 on wasm is verified by scripts/build_wasm.sh (exported st3_*
-# symbols) and scripts/test_wasm_load.sh instead.
-if(MIINT_ENABLE_SYLPH OR (MIINT_ENABLE_ST3 AND NOT EMSCRIPTEN))
+if(MIINT_ENABLE_SYLPH OR MIINT_ENABLE_ST3)
     # Link rype (the umbrella archive), which transitively provides the sylph
     # and st3 symbols — see comment near the rype IMPORTED target declaration.
+    # Under Emscripten this works because the archive is built with wasm
+    # exceptions (GLUE_RUSTFLAGS_LIST): the JavaScript-ABI unwinding symbols
+    # rustc emits by default cannot link into a -fwasm-exceptions main module.
     target_link_libraries(tests rype)
 endif()
 if(MIINT_ENABLE_SYLPH)
     target_compile_definitions(tests PRIVATE MIINT_HAS_SYLPH)
 endif()
-if(MIINT_ENABLE_ST3 AND NOT EMSCRIPTEN)
+if(MIINT_ENABLE_ST3)
     target_compile_definitions(tests PRIVATE MIINT_HAS_ST3)
 endif()
 if(MIINT_ENABLE_GPL_BOUNDARY)

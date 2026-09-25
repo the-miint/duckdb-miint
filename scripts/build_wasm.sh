@@ -189,10 +189,21 @@ if $VERIFY; then
                 // Check 3: Extension init function must be exported
                 const hasInit = exportNames.has('miint_duckdb_cpp_init');
 
+                // Check 4: no JavaScript-exception imports. rustc's emscripten
+                // target emits these unless the Rust archive is built with wasm
+                // exceptions (CMakeLists.txt, GLUE_RUSTFLAGS_LIST). A
+                // -fwasm-exceptions main module (DuckDB-Wasm) never provides
+                // them, the module still loads, and the first call into Rust
+                // throws TypeError: resolved is not a function, at runtime.
+                const jsEh = imports.filter(i => i.module === 'env' &&
+                    /^(invoke_|__cxa_find_matching_catch|__resumeException$|llvm_eh_typeid_for$)/.test(i.name));
+
                 const problems = [];
                 if (!hasInit) problems.push('Missing miint_duckdb_cpp_init export');
                 badDirect.forEach(i => problems.push('Unlinked: env.' + i.name));
                 badGot.forEach(i => problems.push('GOT without export: ' + i.module + '.' + i.name));
+                if (jsEh.length > 0) problems.push('JavaScript-exception imports (' + jsEh.length + '): ' +
+                    jsEh.slice(0, 6).map(i => i.name).join(' ') + (jsEh.length > 6 ? ' ...' : ''));
 
                 if (problems.length > 0) {
                     console.log('FAIL');

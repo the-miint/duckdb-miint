@@ -118,18 +118,61 @@ int main(int argc, char **argv) {
                         "3.4"))
         return 1;
 
-    // No Rust-backed function is exercised here, on purpose. The extension
-    // links rype and st3 (Rust) and loads with them, but every Rust entry
-    // point traps at call time under a -fwasm-exceptions main module with
-    // "TypeError: resolved is not a function": rustc's wasm32-unknown-emscripten
-    // target compiles unwinding (catch_unwind, drop glue) against Emscripten's
-    // JavaScript exception ABI, so the side module imports invoke_*,
-    // __cxa_find_matching_catch_2, __resumeException and llvm_eh_typeid_for,
-    // none of which a wasm-EH main module or its JS glue provides. Verified
-    // here with rype_extract_minimizer_set and with sourcetracker; see
-    // docs/internals/embedded-tools.md ("Rust entry points under WASM").
-    // Reinstate a sourcetracker check once the Rust archive is built with
-    // wasm exceptions (or without unwinding).
+    // Rust entry points. The Rust archive is built with wasm exceptions for
+    // this target (CMakeLists.txt, GLUE_RUSTFLAGS_LIST); without that the side
+    // module imports Emscripten's JavaScript exception helpers, the extension
+    // still loads, and the first call into Rust throws "TypeError: resolved is
+    // not a function". The rype check guards that build setting for every
+    // Rust crate; the sourcetracker check runs the st3 sampler end to end.
+    printf("\n5. rype_extract_minimizer_set (Rust entry point)\n");
+    const char *rype_setup[] = {
+        "CREATE TABLE seqs(read_id VARCHAR, sequence1 VARCHAR)",
+        "INSERT INTO seqs VALUES ('r1','ACGTACGTACGTACGTACGTACGTACGTACGTAAAA'),('r2','TTTTGGGGCCCCAAAATTTTGGGGCCCCAAAA')",
+    };
+    for (size_t i = 0; i < sizeof(rype_setup) / sizeof(rype_setup[0]); i++) {
+        if (duckdb_query(conn, rype_setup[i], &result) != DuckDBSuccess) {
+            fprintf(stderr, "  FAIL (setup): %s\n", duckdb_result_error(&result));
+            duckdb_destroy_result(&result);
+            return 1;
+        }
+        duckdb_destroy_result(&result);
+    }
+    if (run_query_check(conn, "SELECT count(*) FROM rype_extract_minimizer_set('seqs', 16, 5)", "2")) return 1;
+
+    // Two soil sources, one gut source, one sink drawn from soil. Whatever the
+    // seed, soil must be the dominant source of the sink by a wide margin, so
+    // the check is on the ordering, not on a Monte-Carlo estimate.
+    printf("\n6. sourcetracker (end-to-end st3 sampler)\n");
+    const char *st_setup[] = {
+        "CREATE TABLE st_counts(sample_id VARCHAR, feature_id VARCHAR, value INTEGER)",
+        "INSERT INTO st_counts VALUES "
+        "('soil1','f1',120),('soil1','f2',100),('soil1','f3',5),"
+        "('soil2','f1',110),('soil2','f2',130),('soil2','f3',4),"
+        "('gut1','f1',3),('gut1','f2',2),('gut1','f3',130),('gut1','f4',110),"
+        "('sink_a','f1',90),('sink_a','f2',80),('sink_a','f3',10)",
+        "CREATE TABLE st_samples(sample_id VARCHAR, source_sink VARCHAR, env VARCHAR)",
+        "INSERT INTO st_samples VALUES "
+        "('soil1','source','soil'),('soil2','source','soil'),('gut1','source','gut'),('sink_a','sink',NULL)",
+    };
+    for (size_t i = 0; i < sizeof(st_setup) / sizeof(st_setup[0]); i++) {
+        if (duckdb_query(conn, st_setup[i], &result) != DuckDBSuccess) {
+            fprintf(stderr, "  FAIL (setup): %s\n", duckdb_result_error(&result));
+            duckdb_destroy_result(&result);
+            return 1;
+        }
+        duckdb_destroy_result(&result);
+    }
+    if (run_query_check(conn,
+                        "SELECT count(*) FROM sourcetracker('st_counts', 'st_samples', seed := 42, "
+                        "source_rarefaction_depth := 0, sink_rarefaction_depth := 0)",
+                        "3"))
+        return 1;
+    if (run_query_check(conn,
+                        "SELECT source FROM sourcetracker('st_counts', 'st_samples', seed := 42, "
+                        "source_rarefaction_depth := 0, sink_rarefaction_depth := 0) "
+                        "ORDER BY proportion DESC LIMIT 1",
+                        "soil"))
+        return 1;
 
     printf("\n=== All tests passed ===\n");
 
