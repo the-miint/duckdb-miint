@@ -368,13 +368,13 @@ SELECT miint_version();
 
 ### `miint_versions()`
 
-Returns a table of the pinned versions of miint and every embedded library, one row per component. Which rows appear depends on the build's compile-time features (HDF5, vsearch, mafft, abpoa, sylph, unifrac, libcurl, libdeflate are conditional).
+Returns a table of the pinned versions of miint and every embedded library, one row per component. Which rows appear depends on the build's compile-time features (HDF5, vsearch, mafft, abpoa, sylph, krepp, unifrac, libcurl, libdeflate are conditional). The `krepp-openmp` row, whose version is `enabled`, appears only when krepp's OpenMP regions are compiled in, which is what lets [`krepp_index_create`](phylogeny.md#build-a-krepp-index) accept `threads` > 1.
 
 **Output schema:**
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `library` | VARCHAR | Component name (`miint`, `htslib`, `minimap2`, `kseq++`, `LBFGS++`, `WFA2-lib`, `zlib`, `rype`, and conditionally `HDF5`, `libdeflate`, `libcurl`, `vsearch`, `mafft`, `abpoa`, `sylph`, `unifrac`, `scikit-bio-binaries`) |
+| `library` | VARCHAR | Component name (`miint`, `htslib`, `minimap2`, `kseq++`, `LBFGS++`, `WFA2-lib`, `zlib`, `rype`, and conditionally `HDF5`, `libdeflate`, `libcurl`, `vsearch`, `mafft`, `abpoa`, `sylph`, `krepp`, `krepp-openmp`, `unifrac`, `scikit-bio-binaries`) |
 | `version` | VARCHAR | Version / git description for that component |
 
 ```sql
