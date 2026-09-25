@@ -218,7 +218,9 @@ static unique_ptr<FunctionData> MiintVersionsBind(ClientContext &context, TableF
 #ifdef MIINT_HAS_VSEARCH
 	data->versions.emplace_back("vsearch", VSEARCH_GIT_VERSION);
 #endif
+#ifdef MIINT_HAS_MAFFT
 	data->versions.emplace_back("mafft", MAFFT_GIT_VERSION);
+#endif
 #ifdef MIINT_HAS_ABPOA
 	data->versions.emplace_back("abpoa", ABPOA_GIT_VERSION);
 #endif
