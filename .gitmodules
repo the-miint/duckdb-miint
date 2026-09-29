@@ -51,3 +51,4 @@
 [submodule "ext/st3"]
 	path = ext/st3
 	url = https://github.com/the-miint/st3.git
+	branch = main

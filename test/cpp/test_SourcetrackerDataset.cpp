@@ -149,6 +149,22 @@ TEST_CASE("IngestDataset: variable names and role values are matched case-insens
 	REQUIRE(ds.envs[IndexOf(ds.sample_ids, "src_z")] == std::optional<std::string> {"sewage"});
 }
 
+TEST_CASE("IngestDataset: an environment named Unknown is refused in any spelling", "[sourcetracker]") {
+	// st3 names its invented source Unknown and appends it after the sorted
+	// environments, so a real environment with that name would be a second,
+	// indistinguishable Unknown row on every sink.
+	for (const char *spelling : {"Unknown", "unknown", "UNKNOWN"}) {
+		std::vector<MetadataRow> meta;
+		AddMeta(meta, "s_a", "sink", "");
+		AddMeta(meta, "s_b", "sink", "");
+		AddMeta(meta, "src_z", "source", spelling);
+		AddMeta(meta, "src_m", "source", "seawater");
+		AddMeta(meta, "src_m2", "source", "seawater");
+		REQUIRE_THROWS_WITH(IngestDataset(ToyTable(), meta), ContainsSubstring("src_z"));
+		REQUIRE_THROWS_WITH(IngestDataset(ToyTable(), meta), ContainsSubstring("reserves for the unknown source"));
+	}
+}
+
 TEST_CASE("IngestDataset: fails loud, naming the id, on every malformed input", "[sourcetracker]") {
 	SECTION("a feature-table sample with no metadata row") {
 		auto table = ToyTable();

@@ -59,6 +59,10 @@ struct SourcetrackerBindData : public TableFunctionData {
 	bool assignments = false;
 	LogicalType sink_id_type = LogicalType::VARCHAR;
 	LogicalType feature_id_type = LogicalType::VARCHAR;
+	// The metadata's role and environment columns, matched without regard to
+	// case; SourceTracker2 mapping files call them SourceSink and Env.
+	std::string source_sink_column = "source_sink";
+	std::string env_column = "env";
 };
 
 // One (feature, mean count) assignment cell; the feature is an index into the
@@ -149,6 +153,9 @@ unique_ptr<FunctionData> SourcetrackerBind(ClientContext &context, TableFunction
 
 	for (const auto &kv : input.named_parameters) {
 		const auto key = StringUtil::Lower(kv.first);
+		if (kv.second.IsNull()) {
+			throw BinderException("sourcetracker: %s must not be NULL", key);
+		}
 		if (key == "loo") {
 			data->loo = kv.second.GetValue<bool>();
 		} else if (key == "assignments") {
@@ -191,7 +198,25 @@ unique_ptr<FunctionData> SourcetrackerBind(ClientContext &context, TableFunction
 			}
 		} else if (key == "threads") {
 			threads = kv.second.GetValue<int32_t>();
+		} else if (key == "source_sink_column") {
+			data->source_sink_column = kv.second.GetValue<string>();
+		} else if (key == "env_column") {
+			data->env_column = kv.second.GetValue<string>();
 		}
+	}
+	for (const auto &column : {std::make_pair("source_sink_column", &data->source_sink_column),
+	                           std::make_pair("env_column", &data->env_column)}) {
+		if (column.second->empty()) {
+			throw BinderException("sourcetracker: %s must not be empty", column.first);
+		}
+		if (StringUtil::Lower(*column.second) == "sample_id") {
+			throw BinderException("sourcetracker: %s must not be the sample_id column", column.first);
+		}
+	}
+	if (StringUtil::Lower(data->source_sink_column) == StringUtil::Lower(data->env_column)) {
+		throw BinderException(
+		    "sourcetracker: source_sink_column and env_column must name different columns (both are '%s')",
+		    data->env_column);
 	}
 	if (data->loo && data->assignments) {
 		throw BinderException("sourcetracker: assignments := true is not available with loo := true "
@@ -214,11 +239,11 @@ unique_ptr<FunctionData> SourcetrackerBind(ClientContext &context, TableFunction
 	// columns exist and cast, and the catalog gives both id types.
 	data->sink_id_type = ProbeFeatureTableIdType(context, data->table_name, kCaller, &data->feature_id_type);
 	auto cols = GetTableOrViewColumns(context, data->metadata_name, "sample-metadata");
-	for (const char *required : {"sample_id", "source_sink", "env"}) {
+	for (const std::string &required : {std::string("sample_id"), data->source_sink_column, data->env_column}) {
 		if (!HasColumn(cols, required)) {
-			throw BinderException("sourcetracker: sample-metadata '%s' must expose (sample_id, source_sink, env); "
-			                      "column '%s' is missing",
-			                      data->metadata_name, required);
+			throw BinderException("sourcetracker: sample-metadata '%s' must expose (sample_id, %s, %s); column '%s' is "
+			                      "missing",
+			                      data->metadata_name, data->source_sink_column, data->env_column, required);
 		}
 	}
 
@@ -598,7 +623,20 @@ unique_ptr<GlobalTableFunctionState> SourcetrackerInitGlobal(ClientContext &cont
 	gstate->assignments = data.assignments;
 
 	auto cells = ReadFeatureTable(context, data.table_name, kCaller);
-	auto metadata = ReadWideMetadata(context, data.metadata_name, {"source_sink", "env"}, kCaller);
+	auto metadata = ReadWideMetadata(context, data.metadata_name, {data.source_sink_column, data.env_column}, kCaller);
+	// The dataset layer knows the two variables by their canonical names; the
+	// reader reports them by the column names it resolved, in requested order.
+	if (metadata.column_names.size() != 2) {
+		throw InvalidInputException("sourcetracker: expected two metadata variables, got %d",
+		                            static_cast<int>(metadata.column_names.size()));
+	}
+	for (auto &row : metadata.rows) {
+		if (row.variable == metadata.column_names[0]) {
+			row.variable = "source_sink";
+		} else if (row.variable == metadata.column_names[1]) {
+			row.variable = "env";
+		}
+	}
 
 	Dataset ds;
 	try {
@@ -728,6 +766,8 @@ void RegisterSourcetracker(ExtensionLoader &loader) {
 	fn.named_parameters["collapse"] = LogicalType::VARCHAR;
 	fn.named_parameters["seed"] = LogicalType::BIGINT;
 	fn.named_parameters["threads"] = LogicalType::INTEGER;
+	fn.named_parameters["source_sink_column"] = LogicalType::VARCHAR;
+	fn.named_parameters["env_column"] = LogicalType::VARCHAR;
 	loader.RegisterFunction(fn);
 }
 

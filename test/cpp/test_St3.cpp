@@ -12,7 +12,7 @@
 // Rust umbrella archive and reachable from a miint translation unit. The
 // behavioural coverage lives in the SQL tests, which run the real pipeline
 // against st3's committed fixtures.
-TEST_CASE("st3 C ABI links and reports the v1 ABI version", "[st3]") {
+TEST_CASE("st3 C ABI links and reports ABI version 0", "[st3]") {
 	REQUIRE(st3_abi_version() == 0);
 }
 

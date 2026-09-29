@@ -47,7 +47,18 @@ SELECT count(*) FROM (DESCRIBE SELECT * FROM sourcetracker('counts', 'samples',
     restarts := 10, draws_per_restart := 1, burnin := 100, delay := 1,
     source_rarefaction_depth := 1000, sink_rarefaction_depth := 1000,
     with_replacement := false, collapse := 'mean',
-    seed := -1, threads := 0));
+    seed := -1, threads := 0,
+    source_sink_column := 'source_sink', env_column := 'env'));
+
+# --- section "Inputs": SourceTracker2's own column names -------------------
+statement ok
+CREATE VIEW samples_st2 AS SELECT sample_id, source_sink AS "SourceSink", env AS "Env" FROM samples;
+
+query I
+SELECT count(*) FROM sourcetracker('counts', 'samples_st2', source_sink_column := 'SourceSink', env_column := 'Env',
+                                   source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+----
+8
 
 # --- section "The default call refuses shallow data" ------------------------
 statement error

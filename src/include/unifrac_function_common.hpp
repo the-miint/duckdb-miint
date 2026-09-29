@@ -235,6 +235,8 @@ inline LogicalType ResolveSampleIdOutputType(const LogicalType &input_type) {
 // (e.g., "unifrac_pcoa").
 //
 // Returns a positive int suitable for OmpThreadPin / ComputeCallScope.
+int ResolveThreadsParameter(ClientContext &context, int32_t user_value, const std::string &caller_name);
+
 // Wide-form sample metadata, read once and unpivoted. Shared by permanova /
 // unifrac_permanova and sourcetracker, which all take a (sample_id, <variable>...)
 // relation and want it as long-form rows.
@@ -252,7 +254,5 @@ struct WideMetadata {
 // (e.g. "permanova" vs "unifrac_permanova").
 WideMetadata ReadWideMetadata(ClientContext &context, const std::string &table_name,
                               const std::vector<std::string> &requested_variables, const std::string &caller_name);
-
-int ResolveThreadsParameter(ClientContext &context, int32_t user_value, const std::string &caller_name);
 
 } // namespace duckdb::unifrac_internal

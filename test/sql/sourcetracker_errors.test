@@ -178,8 +178,111 @@ SELECT * FROM sourcetracker('table_doubled', 'synth_meta', source_rarefaction_de
 duplicate feature table cell (sample 'a1', feature 'f1')
 
 # ---------------------------------------------------------------------------
+# Environments: SourceTracker reserves the name Unknown for the source it
+# invents, and st3 appends that column after the sorted environments. A real
+# environment with that name, in any case, would give every sink two rows
+# called Unknown that a GROUP BY merges silently. Refused by name, in any
+# spelling, so that a missing-value code in harmonised metadata cannot pass.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE VIEW meta_unknown_env AS SELECT sample_id, source_sink, CASE WHEN env = 'envC' THEN 'Unknown' ELSE env END AS env FROM synth_meta;
+
+statement error
+SELECT * FROM sourcetracker('synth', 'meta_unknown_env', source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+----
+source sample 'c1' has env 'Unknown', which SourceTracker reserves for the unknown source
+
+statement ok
+CREATE VIEW meta_unknown_lower AS SELECT sample_id, source_sink, CASE WHEN env = 'envC' THEN 'unknown' ELSE env END AS env FROM synth_meta;
+
+statement error
+SELECT * FROM sourcetracker('synth', 'meta_unknown_lower', source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+----
+source sample 'c1' has env 'unknown', which SourceTracker reserves for the unknown source
+
+# A NaN cell is refused by the shared feature-table reader (see
+# feature_table_nan.test), so it never reaches the whole-number check.
+statement ok
+CREATE VIEW table_nan AS SELECT sample_id, feature_id, CASE WHEN sample_id = 'a1' AND feature_id = 'f1' THEN 'nan'::DOUBLE ELSE value::DOUBLE END AS value FROM synth;
+
+statement error
+SELECT * FROM sourcetracker('table_nan', 'synth_meta', source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+----
+(sample 'a1', feature 'f1') is NaN
+
+# ---------------------------------------------------------------------------
+# Metadata column names: the role and environment columns can be renamed,
+# which is how a SourceTracker2 mapping file (SourceSink / Env) is used as is.
+# The sample_id column and the feature table's columns are the project-wide
+# long-form contract and stay fixed.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE VIEW synth_meta_st2 AS SELECT sample_id, source_sink AS "SourceSink", env AS "Env" FROM synth_meta;
+
+query I
+SELECT count(*) FROM sourcetracker('synth', 'synth_meta_st2', source_sink_column := 'SourceSink', env_column := 'Env',
+                                   source_rarefaction_depth := 0, sink_rarefaction_depth := 0, restarts := 2, burnin := 5);
+----
+12
+
+# The renamed columns are matched without regard to case, like the defaults.
+query I
+SELECT count(*) FROM sourcetracker('synth', 'synth_meta_st2', source_sink_column := 'sourcesink', env_column := 'ENV',
+                                   source_rarefaction_depth := 0, sink_rarefaction_depth := 0, restarts := 2, burnin := 5);
+----
+12
+
+statement error
+SELECT * FROM sourcetracker('synth', 'synth_meta_st2');
+----
+column 'source_sink' is missing
+
+statement error
+SELECT * FROM sourcetracker('synth', 'synth_meta', source_sink_column := 'role');
+----
+column 'role' is missing
+
+statement error
+SELECT * FROM sourcetracker('synth', 'synth_meta', env_column := '');
+----
+env_column must not be empty
+
+statement error
+SELECT * FROM sourcetracker('synth', 'synth_meta', source_sink_column := 'env');
+----
+source_sink_column and env_column must name different columns
+
+statement error
+SELECT * FROM sourcetracker('synth', 'synth_meta', env_column := 'sample_id');
+----
+env_column must not be the sample_id column
+
+# ---------------------------------------------------------------------------
 # Parameters, refused at bind
 # ---------------------------------------------------------------------------
+
+# A NULL parameter is refused by name, not passed to the sampler.
+statement error
+SELECT * FROM sourcetracker('synth', 'synth_meta', seed := NULL);
+----
+seed must not be NULL
+
+statement error
+SELECT * FROM sourcetracker('synth', 'synth_meta', restarts := NULL);
+----
+restarts must not be NULL
+
+statement error
+SELECT * FROM sourcetracker('synth', 'synth_meta', collapse := NULL);
+----
+collapse must not be NULL
+
+statement error
+SELECT * FROM sourcetracker('synth', 'synth_meta', source_sink_column := NULL);
+----
+source_sink_column must not be NULL
 
 statement error
 SELECT * FROM sourcetracker('synth', 'synth_meta', seed := -2);

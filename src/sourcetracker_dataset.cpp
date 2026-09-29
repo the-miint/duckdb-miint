@@ -91,6 +91,14 @@ Dataset IngestDataset(const std::vector<CooRow> &table, const std::vector<Metada
 		if (is_source && m.env.empty()) {
 			Fail("source sample '" + sample + "' has an empty env; every source needs an environment");
 		}
+		// st3 appends a column named Unknown after the sorted environments; a
+		// real environment with that name would give every sink two rows a
+		// GROUP BY merges silently. Any spelling, so a missing-value code in
+		// harmonised metadata cannot slip through as an environment.
+		if (is_source && Lower(m.env) == "unknown") {
+			Fail("source sample '" + sample + "' has env '" + m.env +
+			     "', which SourceTracker reserves for the unknown source; rename that environment");
+		}
 		ds.is_source.push_back(is_source);
 		ds.envs.push_back(is_source ? std::optional<std::string> {m.env} : std::nullopt);
 		n_sources += is_source ? 1 : 0;

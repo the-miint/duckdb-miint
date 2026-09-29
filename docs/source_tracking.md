@@ -39,19 +39,21 @@ Two relations, both passed **by name** (see [passing relations by name](table_of
 [`read_biom`](reading.md#biom) and everything in [diversity](diversity.md). Values are sequence
 counts: SourceTracker withdraws and re-assigns individual sequences, so a cell must be a whole
 number, finite and non-negative. A table of relative abundances is refused rather than
-truncated to zeros. NULL and zero cells are ignored; a duplicate `(sample_id, feature_id)`
-cell is an error, because summing it would change the answer. `sample_id` and `feature_id`
+truncated to zeros. NULL and zero cells are ignored, and a NaN cell is an error naming it: a missing count is
+NULL, and NaN is a broken upstream computation. A duplicate `(sample_id, feature_id)` cell is
+an error, because summing it would change the answer. `sample_id` and `feature_id`
 may be `VARCHAR`, `BIGINT` or `UUID`; the types are mirrored onto `sink_id` and onto the keys
 of the assignments map, so results join back to typed metadata without a cast.
 
 **The sample metadata** must expose three columns, matched by name without regard to case;
-any other column is ignored:
+any other column is ignored. The role and environment columns can be renamed with
+`source_sink_column` and `env_column`, so a SourceTracker2 mapping file works as it is:
 
-| column | meaning |
-|---|---|
-| `sample_id` | the sample, matching the feature table's `sample_id` |
-| `source_sink` | `source` or `sink` (case-insensitive) |
-| `env` | the source's environment; required for every source, ignored for sinks |
+| column | default name | meaning |
+|---|---|---|
+| sample id | `sample_id` | the sample, matching the feature table's `sample_id` |
+| role | `source_sink` (`source_sink_column`) | `source` or `sink` (case-insensitive) |
+| environment | `env` (`env_column`) | the source's environment; required for every source, ignored for sinks |
 
 Requirements, all enforced with errors that name the offending sample:
 
@@ -87,6 +89,16 @@ CREATE TABLE samples AS SELECT * FROM (VALUES
 By construction `sink_a` is mostly soil with some gut, and `sink_b` is roughly half gut and
 a third water.
 
+SourceTracker2's mapping files name the two columns `SourceSink` and `Env`. Point the function
+at them rather than renaming them:
+
+```sql
+CREATE VIEW samples_st2 AS SELECT sample_id, source_sink AS "SourceSink", env AS "Env" FROM samples;
+SELECT count(*) FROM sourcetracker('counts', 'samples_st2', source_sink_column := 'SourceSink', env_column := 'Env',
+                                   source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+-- 8
+```
+
 ## `sourcetracker`
 
 ```sql
@@ -96,7 +108,8 @@ SELECT * FROM sourcetracker('counts', 'samples',
     restarts := 10, draws_per_restart := 1, burnin := 100, delay := 1,
     source_rarefaction_depth := 1000, sink_rarefaction_depth := 1000,
     with_replacement := false, collapse := 'mean',
-    seed := -1, threads := 0);
+    seed := -1, threads := 0,
+    source_sink_column := 'source_sink', env_column := 'env');
 ```
 
 Every named parameter is optional; the values shown are the defaults, which are
@@ -119,10 +132,13 @@ SourceTracker2's.
 | `collapse` | `'mean'` | How the source samples of one environment are combined before rarefaction: `'mean'` averages their counts (SourceTracker2's behaviour), `'sum'` adds them. |
 | `seed` | `-1` | A value `>= 0` fixes the random stream; `-1` draws a fresh seed on every execution. See [Reproducibility](#reproducibility). |
 | `threads` | `0` | Sinks sampled concurrently; `0` follows DuckDB's `threads` setting. See [Parallelism](#parallelism). |
+| `source_sink_column` | `'source_sink'` | The metadata column holding `source` / `sink`. |
+| `env_column` | `'env'` | The metadata column holding each source's environment. |
 
 Bad parameter values are refused at bind: a `collapse` other than `mean` or `sum`, a `seed`
 below `-1`, a prior that is negative or not finite, a chain parameter below 1, a negative
-depth or thread count, or `assignments := true` together with `loo := true`.
+depth or thread count, a NULL for any parameter, an empty or duplicated column name, or
+`assignments := true` together with `loo := true`.
 
 ### The default call refuses shallow data
 
@@ -225,8 +241,9 @@ it changes nothing else in the result.
 `loo := true` holds each **source** sample out in turn and predicts it from the remaining
 sources, which is the standard check that the environments are distinguishable at all: a
 source sample that does not come back as its own environment says the sources overlap, or the
-sample is mislabelled. The rows are source samples, named in `sink_id`; the sinks in the
-metadata are ignored, as is `sink_rarefaction_depth`.
+sample is mislabelled. The rows are source samples, named in `sink_id`. The sinks take no part in the analysis, and
+`sink_rarefaction_depth` is ignored, but the sinks are still validated as samples: a sink
+without cells or without a metadata row is an error in this mode too.
 
 ```sql
 SELECT sink_id AS source_sample, source, round(proportion, 2) AS proportion
@@ -328,6 +345,14 @@ The Gibbs sampler runs as one call into st3, and Ctrl-C is honoured before it st
 after it returns, not inside it. On a large table with many sinks and high `restarts`,
 a cancelled query keeps its cores busy until the sampler finishes.
 
+### Running out of memory ends the process
+
+st3 allocates its working set with Rust's ordinary allocator, whose response to an allocation
+failure is to abort, and the C boundary cannot turn that into an error the way it does for a
+panic. A run that does not fit in memory takes the whole DuckDB process with it rather than
+failing the query. Size the run to the machine: the rarefaction depths bound the per-sink
+work, and `threads` bounds how many sinks are in flight at once.
+
 ## Parallelism
 
 Sinks (or, under `loo`, held-out source samples) are sampled concurrently. `threads := 0`
@@ -342,6 +367,14 @@ With `seed` set to a value `>= 0`, the same inputs, parameters, and st3 version 
 rows, to the bit, on any thread count. The default `seed := -1` draws a fresh seed for every
 execution, including every `EXECUTE` of a prepared statement, which is what SourceTracker2
 does (it has no seed parameter).
+
+Reproducibility is per dataset, not per sink. Each sink's chains are seeded from `seed` and
+the sink's position in the sorted list of sinks, which is what makes the answer independent
+of the thread count. It also means that adding or removing one sink changes every other
+sink's draws, and that a sink analysed in two different batches gets two different answers,
+both correct within the Monte-Carlo spread. Ids sort by their text form, so BIGINT `10` sorts
+before `9`. With `seed := -1` the drawn seed is not reported anywhere; pass an explicit seed
+for anything you will need to reproduce.
 
 The proportions are Monte-Carlo estimates. On the example above, a different seed moves them
 in the second decimal place; on real data with overlapping environments the spread is larger.
@@ -363,6 +396,11 @@ rarefy, the `Unknown` source, and the shallow-sample error.
 - **`collapse := 'sum'`** is reachable. SourceTracker2's collapse helper knows a sum as well, but
   its `gibbs` entry point and command line always average.
 - **`seed`** exists. SourceTracker2 has none.
+- **Column names.** The metadata's role and environment columns are configurable
+  (`source_sink_column`, `env_column`; SourceTracker2's defaults are `SourceSink` and `Env`,
+  ours are `source_sink` and `env`), but the role values are always `source` and `sink`, and
+  the feature table's `(sample_id, feature_id, value)` columns are fixed: they are the
+  long form every feature-table function in this extension shares.
 - **The random stream differs.** st3 uses its own generator, so results are statistically
   equivalent to SourceTracker2's rather than bit-identical to them.
 - **Per-feature assignments are a column**, not one file per sink, and list only the features

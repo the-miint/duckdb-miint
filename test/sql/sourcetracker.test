@@ -39,6 +39,12 @@ SELECT count(*) FROM duckdb_functions() WHERE function_name = 'sourcetracker' AN
 ----
 1
 
+# The build that registers the function also reports the library it wraps.
+query I
+SELECT count(*) FROM miint_versions() WHERE library = 'st3';
+----
+1
+
 # The schema is known at bind, without reading a row: sink_id mirrors the
 # sample_id type, the MAP is keyed by the feature_id type. DESCRIBE never runs
 # the sampler; sourcetracker_errors.test shows the same DESCRIBE succeeding on
@@ -265,6 +271,42 @@ SELECT currval('scan_seq');
 query I
 SELECT (SELECT count(*) FROM (SELECT * FROM run_a EXCEPT ALL SELECT * FROM run_volatile))
      + (SELECT count(*) FROM (SELECT * FROM run_volatile EXCEPT ALL SELECT * FROM run_a));
+----
+0
+
+# The same for the metadata relation: the volatility sits in the role column,
+# which the reader must evaluate, and is inert.
+statement ok
+CREATE SEQUENCE meta_seq START 1;
+
+statement ok
+CREATE VIEW tiny_meta_volatile AS
+SELECT sample_id, concat(source_sink, repeat('x', 0 * nextval('meta_seq'))) AS source_sink, env FROM tiny_meta;
+
+statement ok
+CREATE TABLE run_meta_volatile AS SELECT * FROM sourcetracker('tiny', 'tiny_meta_volatile',
+    collapse := 'sum', seed := 42, restarts := 10, draws_per_restart := 2, burnin := 20,
+    source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+
+# 10 metadata rows, each evaluated once.
+query I
+SELECT currval('meta_seq');
+----
+10
+
+statement ok
+EXPLAIN SELECT * FROM sourcetracker('tiny', 'tiny_meta_volatile',
+    collapse := 'sum', seed := 42, restarts := 10, draws_per_restart := 2, burnin := 20,
+    source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+
+query I
+SELECT currval('meta_seq');
+----
+10
+
+query I
+SELECT (SELECT count(*) FROM (SELECT * FROM run_a EXCEPT ALL SELECT * FROM run_meta_volatile))
+     + (SELECT count(*) FROM (SELECT * FROM run_meta_volatile EXCEPT ALL SELECT * FROM run_a));
 ----
 0
 
