@@ -1,0 +1,44 @@
+# name: test/sql/feature_table_nan.test
+# description: the shared long-form feature-table reader refuses a NaN cell by name instead of dropping it
+# group: [sql]
+
+require miint
+
+# Every function that takes a (sample_id, feature_id, value) relation by name
+# reads it through one reader (ReadFeatureTable in unifrac_function_common).
+# That reader ignores NULL and zero cells, which is the sparse-storage
+# contract. It used to ignore NaN the same way, which meant a broken upstream
+# computation (0/0, a failed normalisation) vanished from the analysis with no
+# trace. NaN is not a count and is now an error naming the cell.
+# community_distances is the consumer used here because it has no optional
+# dependency, so this file always runs; the behaviour is the reader's.
+
+statement ok
+CREATE TABLE ft AS SELECT * FROM (VALUES
+  ('s1','f1',3.0),('s1','f2',1.0),
+  ('s2','f1',2.0),('s2','f2',4.0)
+) t(sample_id, feature_id, value);
+
+query I
+SELECT count(*) FROM community_distances('ft', 'bray_curtis');
+----
+1
+
+# NULL is a missing cell, ignored like zero.
+statement ok
+CREATE VIEW ft_null AS
+SELECT sample_id, feature_id, CASE WHEN sample_id = 's1' AND feature_id = 'f2' THEN NULL ELSE value END AS value FROM ft;
+
+query I
+SELECT count(*) FROM community_distances('ft_null', 'bray_curtis');
+----
+1
+
+statement ok
+CREATE VIEW ft_nan AS
+SELECT sample_id, feature_id, CASE WHEN sample_id = 's1' AND feature_id = 'f2' THEN 'nan'::DOUBLE ELSE value END AS value FROM ft;
+
+statement error
+SELECT * FROM community_distances('ft_nan', 'bray_curtis');
+----
+(sample 's1', feature 'f2') is NaN

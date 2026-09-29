@@ -112,7 +112,16 @@ std::vector<miint::unifrac::CooRow> ReadFeatureTable(ClientContext &context, con
 				continue;
 			}
 			const double v = val_data[vi];
-			if (v == 0.0 || std::isnan(v)) {
+			if (std::isnan(v)) {
+				// Not a count. A missing cell is NULL or an absent row; NaN is a
+				// broken upstream computation (0/0, a failed normalisation) and
+				// used to vanish here without a trace.
+				throw InvalidInputException(
+				    "%s: feature-table '%s' cell (sample '%s', feature '%s') is NaN; a missing count is NULL or an "
+				    "absent row",
+				    caller_name, table_name, sid_data[si].GetString(), fid_data[fi].GetString());
+			}
+			if (v == 0.0) {
 				continue; // sparse-storage invariant; UnifracSupportBiomView would drop these anyway
 			}
 			rows.push_back({sid_data[si].GetString(), fid_data[fi].GetString(), v});
@@ -530,13 +539,7 @@ int ResolveThreadsParameter(ClientContext &context, int32_t user_value, const st
 	return NumericCast<int>(db_threads);
 }
 
-// Wide-form reader: metadata must have a `sample_id` column
-// (case-insensitive); every other column is a variable whose values are
-// cast to VARCHAR. `requested_variables` empty → use all non-sample_id
-// columns in original column order. Non-empty → exact-match lookup
-// (case-insensitive), preserving user-supplied order. `caller_name` prefixes
-// every error message so it names the SQL function the user actually called
-// (e.g. "permanova" vs "unifrac_permanova").
+// Contract in unifrac_function_common.hpp.
 WideMetadata ReadWideMetadata(ClientContext &context, const std::string &table_name,
                               const std::vector<std::string> &requested_variables, const std::string &caller_name) {
 	auto conn = MakeReadOnlyHelperConnection(context);
