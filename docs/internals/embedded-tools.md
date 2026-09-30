@@ -179,23 +179,24 @@ Two coupled submodules implementing the UniFrac distance + Faith's PD + PERMANOV
 
 ### Rust crates via the `miint_rust_glue` umbrella
 
-Two Rust crates — rype and sylph — are statically linked into the extension. They are bundled through a thin umbrella crate at `ext/miint-rust-glue/` that produces a single `libmiint_rust_glue.a`.
+Three Rust crates — rype, sylph and st3 — are statically linked into the extension. They are bundled through a thin umbrella crate at `ext/miint-rust-glue/` that produces a single `libmiint_rust_glue.a`.
 
 **Why an umbrella, not two independent staticlibs?** Each independent Rust staticlib embeds its own copy of the Rust standard library (`rust_eh_personality`, `std::panicking::EMPTY_PANIC`, ...). Linking two of them into the same binary trips duplicate-symbol errors on every supported linker. Previous workarounds (`-Wl,--allow-multiple-definition` on GNU ld, `-Wl,-ld_classic -Wl,-multiply_defined,suppress` on Apple) lived in `extension_config.cmake` until macOS 26 / Xcode 17's ld-prime stopped honoring `-multiply_defined,suppress` even via `-ld_classic`, breaking the duckdb shell, `libduckdb.dylib`, `plan_serializer`, and `unittest` link targets. The umbrella is the canonical fix per the Rust Reference "Linkage" chapter — a single staticlib emitted from one cargo invocation has one shared std and one set of symbols. Same pattern Mozilla has used in Firefox's `rul` super-crate since 2015.
 
-- **Location:** `ext/miint-rust-glue/` (in-tree Cargo crate; `Cargo.toml` lists `rype` and `sylph` as path dependencies)
+- **Location:** `ext/miint-rust-glue/` (in-tree Cargo crate; `Cargo.toml` lists `rype`, `sylph` and `st3-capi` as path dependencies)
 - **Build:** `ExternalProject_Add(miint_rust_glue_build)` drives `cargo build --release`; produces `libmiint_rust_glue.a`
 - **Cargo features:**
   - `with-sylph` — on when `MIINT_ENABLE_SYLPH=ON` (default). Off on Emscripten and Windows/MinGW (sylph leans on POSIX APIs in its sketch indexer).
+  - `with-st3` — on when `MIINT_ENABLE_ST3=ON` (default), on every platform including Emscripten (st3 has no platform-specific code; its rayon pool is bypassed with `jobs = 1` under wasm).
   - `rype-fastx` — enables rype's needletail-based FASTX reader. Off on Emscripten and Windows/MinGW because needletail's `cdylib` crate type triggers linker errors (standalone-linking failures on WASM; unresolved `___chkstk_ms` on MSVC).
   - `arrow-ffi` — always on for both crates; the extension consumes both via the Arrow C Data Interface for zero-copy FFI.
-- **CMake exposure:** the umbrella is wired up as two `IMPORTED STATIC` targets — `rype` and `sylph` — both pointing at the same `libmiint_rust_glue.a`. Existing call sites like `target_link_libraries(... rype)` and `target_link_libraries(... sylph)` work unchanged; the linker dedupes the duplicate archive on the link line.
+- **CMake exposure:** the umbrella is wired up as two `IMPORTED STATIC` targets — `rype` and `sylph` — both pointing at the same `libmiint_rust_glue.a`. Existing call sites like `target_link_libraries(... rype)` and `target_link_libraries(... sylph)` work unchanged; the linker dedupes the duplicate archive on the link line. st3 adds no third target: its symbols ride in the same archive, so anything that links `rype` has them.
 - **Cross-compilation gotchas:**
   - Cargo `--target` flag selected per platform; `rustup target add` called at configure time.
   - **Emscripten:** `--target wasm32-unknown-emscripten` + `RUSTFLAGS=-C relocation-model=pic` (default wasm32 is static; DuckDB WASM side modules need PIC).
   - **Windows/MinGW:** `--target x86_64-pc-windows-gnu` (NOT the MSVC default) so object files are compatible with MinGW `ld.exe`.
   - **macOS cross:** explicit `x86_64-apple-darwin` / `aarch64-apple-darwin` targets.
-- **Forcing a rebuild:** ExternalProject caches `miint_rust_glue_build` aggressively. Touching source files in `ext/rype/` or `ext/sylph/` does not invalidate it. To force a rebuild: `touch build/release/extension/miint/miint_rust_glue_build-prefix/src/miint_rust_glue_build-stamp/miint_rust_glue_build-configure`.
+- **Forcing a rebuild:** ExternalProject caches `miint_rust_glue_build` aggressively. Touching source files in `ext/rype/`, `ext/sylph/` or `ext/st3/` does not invalidate it. To force a rebuild: `touch build/release/extension/miint/miint_rust_glue_build-prefix/src/miint_rust_glue_build-stamp/miint_rust_glue_build-configure`.
 
 #### rype subsystem
 
@@ -214,6 +215,31 @@ Two Rust crates — rype and sylph — are statically linked into the extension.
 - **C++ wrappers:**
   - `src/include/SylphDatabase.hpp` / `src/SylphDatabase.cpp` — `SylphDatabaseHandle`, a RAII wrapper around the C FFI `SylphDatabase*` from `ext/sylph/sylph.h`. Non-copyable, non-movable; owned by the `sylph_profile` GlobalState.
   - `src/include/sylph_profile.hpp` / `src/sylph_profile.cpp` — `SylphProfileTableFunction`, the DuckDB table-function binding. The database is loaded once into GlobalState and shared read-only across worker threads; sylph treats the loaded database as immutable so no read-side mutex is required.
+
+#### st3 subsystem
+
+- **Location:** `ext/st3/` (git submodule on `the-miint/st3`; version captured via `git describe` → `ST3_GIT_VERSION`). The C ABI is `crates/st3-capi/include/st3.h`, a committed cbindgen output; the header names the Arrow C Data Interface structs without declaring them, so include `duckdb/common/arrow/arrow.hpp` first.
+- **Purpose:** SourceTracker (collapsed Gibbs) microbial source attribution, exposed as the `sourcetracker` table function ([docs/source_tracking.md](../source_tracking.md)).
+- **Gated by:** `MIINT_ENABLE_ST3` (default ON everywhere; nothing in st3 is platform-specific). `MIINT_HAS_ST3` compile define when on; `ST3_GIT_VERSION` carries the configure-time `git describe` string.
+- **Reported as:** `st3` row in `miint_versions()` (only emitted when `MIINT_HAS_ST3` is defined)
+- **C++ wrappers:**
+  - `src/include/sourcetracker_dataset.hpp` / `src/sourcetracker_dataset.cpp` — DuckDB-free: builds the sorted sample and feature dictionaries and the COO triples from the long-form table and the metadata, and runs every input check (sample sets, roles, environments, whole-number counts, per-sample depths) with errors that name the id. Catch2-tested in `test/cpp/test_SourcetrackerDataset.cpp`.
+  - `src/include/sourcetracker_function.hpp` / `src/sourcetracker_function.cpp` — the DuckDB table-function binding. Bind validates parameters and resolves the schema from the catalog; InitGlobal reads both relations once, marshals three Arrow arrays through `ArrowAppender` with the session's Arrow settings pinned to what st3-arrow reads (32-bit offsets, no string or list views), runs the sampler in one blocking call, and reads the dense means/stds batches and the per-sink contingency stream back.
+- **Ownership rules that matter:** `st3_table_from_arrow` consumes its three input arrays on every status once all pointers are valid, so the caller must not release them afterwards (the schemas stay the caller's); every exported batch and the contingency stream are released through their own `release` callbacks; and `st3_last_error()` is thread-local and cleared on every entry, so its text is copied before anything else is called. Stream errors come from `ArrowArrayStream::get_last_error`, not from st3's slot.
+- **Errors:** st3's input-validation statuses surface as `InvalidInputException`. So does a panic or allocation failure inside st3 — deliberately not `InternalException`, which would invalidate the whole database for one failed query.
+- **Tests:** the Catch2 `tests` target links the Rust archive on every target, Emscripten included; `node build/wasm_eh/extension/miint/tests.js "[sourcetracker]"` runs the dataset-layer cases under wasm. That link is only possible because the archive is built with wasm exceptions (next section).
+
+#### Rust entry points under WASM
+
+The Rust archive is cross-compiled for `wasm32-unknown-emscripten` with **WebAssembly exceptions**, to match DuckDB-Wasm's `-fwasm-exceptions` main module. This is not the target's default and it costs three things in the umbrella's cargo invocation (CMakeLists.txt, `GLUE_RUSTFLAGS_LIST` / `GLUE_CARGO_EXTRA_ARGS`, Emscripten branch only):
+
+- `RUSTFLAGS` gains `-Z emscripten-wasm-eh` (and `-C link-arg=-fwasm-exceptions` for the stray cdylib link cargo insists on), so every crate's unwinding — `catch_unwind` at each C entry point, every drop-on-unwind landing pad — is emitted as wasm `throw`/`catch` instead of Emscripten's JavaScript exception ABI.
+- `-Zbuild-std=std`, because the prebuilt `std` shipped by rustup for this target was compiled the old way and its landing pads would otherwise still reach the JavaScript ABI. The pin script installs the `rust-src` component the rebuild reads.
+- `RUSTC_BOOTSTRAP=1`, because both flags are nightly-gated and the lane pins a stable toolchain (`MIINT_WASM_RUST_TOOLCHAIN`, 1.86.0, which has both).
+
+**What goes wrong without it, for the record:** the side module builds, verifies and loads, `miint_versions()` reports rype and st3, and every C++ path works — but the first call into **any** Rust entry point throws `TypeError: resolved is not a function`. rustc's default for this target implements unwinding with the JavaScript exception ABI, so the archive imports `invoke_*` trampolines (69 signatures at the time), `__cxa_find_matching_catch_2/4`, `__resumeException` and `llvm_eh_typeid_for`; a wasm-EH main module defines none of them, emscripten's dynamic linker leaves stubs, and the stub throws when called. Observed with `rype_extract_minimizer_set` and with `sourcetracker` on the DuckDB v1.5.5 core, emsdk 3.1.71, rustc 1.86.0. Two guards now exist: `scripts/build_wasm.sh`'s import verification refuses a side module with any JavaScript-exception import, and the Level 3 harness (`scripts/test_wasm_extension.c`) calls one rype and one st3 function.
+
+`-C panic=abort` was considered and rejected: without a rebuilt `std` it does not remove the landing pads that matter, and with one it turns a Rust panic into a wasm trap that takes the whole DuckDB-Wasm instance down instead of surfacing as an error through the crates' `catch_unwind` guards.
 
 ## 2. Header-Only
 

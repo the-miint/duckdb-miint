@@ -141,7 +141,7 @@ SQL tests use `require-env VAR_NAME` (after `require miint`) to skip gracefully 
 
 `run_tests.sh` is the authoritative source for what gets detected and exported. It covers three kinds of guards:
 - **Runtime binaries** detected via `command -v` (e.g., `BOWTIE2_AVAILABLE`, `ASPERA_AVAILABLE`, `MASSQL_PYTHON_AVAILABLE`, `GPL_BOUNDARY_AVAILABLE` for the FastTree process-isolation host, `FASTTREE_AVAILABLE` for the bioconda parity oracle binary)
-- **Compile-time features** detected by querying the built extension (e.g., `HDF5_AVAILABLE`, `VSEARCH_AVAILABLE`, `MAFFT_AVAILABLE` — each checks for a registered function or library entry)
+- **Compile-time features** detected by querying the built extension (e.g., `HDF5_AVAILABLE`, `VSEARCH_AVAILABLE`, `MAFFT_AVAILABLE`, `ST3_AVAILABLE` — each checks for a registered function or library entry)
 - **Downloaded / served test data** (e.g., `MIINT_HTTPS_TEST_URL`, `MASSQL_TEST_DATA`, `MASSQL_GNPS_DATA`, `MZXML_REAL_DATA`)
 - **SHA-pinned parity oracles** (e.g., `SORTMERNA_REAL_ORACLE`, `MIINT_FASTTREE_TINY_PARITY_OK`, `MIINT_FASTTREE_MODERATE_PARITY_OK`) — exported only when the oracle file's SHA matches the recorded sidecar. To regenerate stale oracles: `MIINT_SORTMERNA_REAL_DATA=1` or `MIINT_FASTTREE_REGENERATE=1` and rerun `run_tests.sh`.
 - **Process state the main pass cannot provide** (currently `MIINT_LOW_FD_TEST`, guarding `test/sql/read_fastx_fd_release.test`) — not an availability check. `make test` has no way to set `RLIMIT_NOFILE`, so the file opts out of that pass and `run_tests.sh` reruns it in a subshell with the limit lowered. Reach for this only when the test needs process state, never to work around missing data.
