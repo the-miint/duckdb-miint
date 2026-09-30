@@ -16,7 +16,8 @@
 
 namespace duckdb {
 
-// Build a sylph `.syldb` reference database from a table/view of reference
+// Build a sylph `.syldb` (or two-stage `.syl2db`) reference database from a
+// table/view of reference
 // sequences (read_fastx output or equivalent), grouping contigs into genomes by
 // a genome-key column. Wraps the sylph index-builder FFI
 // (sylph_index_builder_*), which sketches each genome from in-memory sequence
@@ -70,6 +71,15 @@ public:
 		// Genome-sketch parallelism. 0 = auto (= DuckDB scheduler thread count,
 		// matching `sylph sketch -t <cores>`); a `threads` named param overrides.
 		uint32_t user_threads = 0;
+
+		// Output format: the `two_stage` named param if given, else inferred from the
+		// output_path suffix (`.syl2db`). true writes sylph 1.0's two-stage seekable
+		// database (what `sylph convert-db-two-screen` produces) via
+		// sylph_index_builder_write_two_stage; false writes a plain `.syldb`.
+		// two_stage_params is seeded from sylph's converter defaults in Bind();
+		// `screen_c` / `min_sparse_kmers` named params override fields.
+		bool two_stage = false;
+		SylphTwoStageParams two_stage_params;
 
 		vector<std::string> names;
 		vector<LogicalType> types;

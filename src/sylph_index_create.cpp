@@ -1,4 +1,4 @@
-// sylph_index_create() — build a sylph `.syldb` from a reference-sequence table.
+// sylph_index_create() — build a sylph `.syldb` / `.syl2db` from a reference-sequence table.
 // See sylph_index_create.hpp for the contract. The build is a synchronous side
 // effect in InitGlobal: the distinct genome ids are enumerated, then N worker
 // threads each claim genomes off a shared counter and sketch one genome at a time
@@ -115,6 +115,41 @@ unique_ptr<FunctionData> SylphIndexCreateTableFunction::Bind(ClientContext &cont
 			throw BinderException("sylph_index_create: threads must be >= 0 (got %lld)", (long long)t);
 		}
 		data->user_threads = static_cast<uint32_t>(t);
+	}
+
+	// Output format: an explicit `two_stage` parameter decides; without it the
+	// output_path suffix is the default (`.syl2db` = two-stage), as with
+	// DuckDB's COPY and the sylph CLI's converter. The converter's own
+	// preconditions are checked here so the (non-atomic) build never runs for
+	// a database that could not be written; the FFI re-checks them.
+	auto two_stage_param = input.named_parameters.find("two_stage");
+	if (two_stage_param != input.named_parameters.end() && !two_stage_param->second.IsNull()) {
+		data->two_stage = two_stage_param->second.GetValue<bool>();
+	} else {
+		data->two_stage = StringUtil::EndsWith(data->output_path, ".syl2db");
+	}
+	if (sylph_two_stage_params_default(&data->two_stage_params) != 0) {
+		throw IOException("sylph_index_create: sylph_two_stage_params_default failed");
+	}
+	const bool has_two_stage_knobs =
+	    input.named_parameters.count("screen_c") != 0 || input.named_parameters.count("min_sparse_kmers") != 0;
+	if (data->two_stage) {
+		ApplyBoundedInt(input, "screen_c", 4294967295LL, data->two_stage_params.screen_c);
+		ApplyBoundedInt(input, "min_sparse_kmers", 4294967295LL, data->two_stage_params.min_sparse_kmers);
+		if (data->sketch_params.pseudotax == 0) {
+			throw BinderException("sylph_index_create: a two-stage (.syl2db) database needs profiling k-mers; "
+			                      "pseudotax := false cannot be combined with a two-stage output");
+		}
+		// 0 = sylph's default c (200), the same resolution Execute reports.
+		const uint32_t dense_c = data->sketch_params.c != 0 ? data->sketch_params.c : 200;
+		if (data->two_stage_params.screen_c < dense_c) {
+			throw BinderException("sylph_index_create: screen_c (%u) must be >= c (%u); the stage-1 screen can only "
+			                      "be sparser than the dense sketch",
+			                      data->two_stage_params.screen_c, dense_c);
+		}
+	} else if (has_two_stage_knobs) {
+		throw BinderException("sylph_index_create: screen_c / min_sparse_kmers only apply to a two-stage output "
+		                      "(two_stage := true or a .syl2db output_path)");
 	}
 
 	// Fail-fast schema validation (before the build side effect). read_id +
@@ -313,7 +348,11 @@ unique_ptr<GlobalTableFunctionState> SylphIndexCreateTableFunction::InitGlobal(C
 		}
 	}
 	gstate->num_genomes = sylph_index_builder_num_genomes(builders[0]);
-	if (sylph_index_builder_write(builders[0], data.output_path.c_str()) != 0) {
+	if (data.two_stage) {
+		if (sylph_index_builder_write_two_stage(builders[0], data.output_path.c_str(), &data.two_stage_params) != 0) {
+			ThrowFFI("failed to write two-stage database");
+		}
+	} else if (sylph_index_builder_write(builders[0], data.output_path.c_str()) != 0) {
 		ThrowFFI("failed to write database");
 	}
 	// builders_guard frees all builders on return.
@@ -365,6 +404,9 @@ TableFunction SylphIndexCreateTableFunction::GetFunction() {
 	tf.named_parameters["min_spacing"] = LogicalType::INTEGER;
 	tf.named_parameters["pseudotax"] = LogicalType::BOOLEAN;
 	tf.named_parameters["threads"] = LogicalType::INTEGER;
+	tf.named_parameters["two_stage"] = LogicalType::BOOLEAN;
+	tf.named_parameters["screen_c"] = LogicalType::INTEGER;
+	tf.named_parameters["min_sparse_kmers"] = LogicalType::INTEGER;
 
 	return tf;
 }

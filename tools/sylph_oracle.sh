@@ -48,9 +48,20 @@ echo "Profiling tiny K12 paired reads against tiny.syldb..."
     -2 tiny_reads_R2.fq.gz \
     -o expected_profile.tsv
 
+echo "Converting tiny.syldb to a two-stage tiny.syl2db..."
+"$SYLPH" convert-db-two-screen tiny.syldb -o tiny
+
+echo "Profiling tiny K12 paired reads against tiny.syl2db..."
+"$SYLPH" profile tiny.syl2db \
+    -1 tiny_reads_R1.fq.gz \
+    -2 tiny_reads_R2.fq.gz \
+    -o expected_profile_two_stage.tsv
+
 echo "Done. Updated:"
 echo "  data/sylph/tiny.syldb"
 echo "  data/sylph/expected_profile.tsv"
+echo "  data/sylph/tiny.syl2db"
+echo "  data/sylph/expected_profile_two_stage.tsv"
 echo
 echo "Update the SHA pin (after committing the embedded fork):"
 echo "  ( cd ext/sylph && git rev-parse HEAD ) > data/sylph/tiny_oracle.submodule.sha"

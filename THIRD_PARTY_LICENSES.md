@@ -927,7 +927,7 @@ inside the same merged `libmiint_rust_glue.a` archive as rype. Used by
 the `sylph_profile` and `sylph_index_create` table functions. Reported
 as the `sylph` row in `miint_versions()`.
 
-- Repository: https://github.com/the-miint/sylph (branch `v0.9.0-miint`, pinned at the submodule SHA in `.gitmodules` / `git submodule status ext/sylph`)
+- Repository: https://github.com/the-miint/sylph (branch `v1.0.0-miint`, pinned at the submodule SHA in `.gitmodules` / `git submodule status ext/sylph`)
 - License: `MIT OR Apache-2.0` (SPDX expression, dual). The MIT text ships at `ext/sylph/LICENSE` and is reproduced below.
 
 ### MIT License

@@ -156,6 +156,12 @@ unique_ptr<FunctionData> SylphProfileTableFunction::Bind(ClientContext &context,
 		data->profile_params.min_number_kmers = static_cast<double>(*v);
 	if (auto v = get_double("min_count_correct", 0.0, 1e9))
 		data->profile_params.min_count_correct = *v;
+	if (auto v = get_uint("min_contain"))
+		data->profile_params.min_contain = *v;
+	// screen_ani: like min_ani, a fraction [0,1] in SQL; FFI takes percent.
+	// Only consulted for two-stage (.syl2db) databases.
+	if (auto v = get_double("screen_ani", 0.0, 1.0))
+		data->profile_params.screen_ani = *v * 100.0;
 	if (auto v = get_bool("estimate_unknown"))
 		data->profile_params.estimate_unknown = *v ? 1 : 0;
 	if (auto v = get_bool("dedup_paired_reads"))
@@ -502,6 +508,8 @@ TableFunction SylphProfileTableFunction::GetFunction() {
 	tf.named_parameters["min_ani"] = LogicalType::DOUBLE;
 	tf.named_parameters["min_number_kmers"] = LogicalType::UINTEGER;
 	tf.named_parameters["min_count_correct"] = LogicalType::DOUBLE;
+	tf.named_parameters["min_contain"] = LogicalType::UINTEGER;
+	tf.named_parameters["screen_ani"] = LogicalType::DOUBLE;
 	tf.named_parameters["estimate_unknown"] = LogicalType::BOOLEAN;
 	tf.named_parameters["dedup_paired_reads"] = LogicalType::BOOLEAN;
 	tf.named_parameters["dedup_fpr"] = LogicalType::DOUBLE;

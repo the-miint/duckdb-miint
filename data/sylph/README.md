@@ -16,6 +16,8 @@ license.
 | `tiny_reads_R2.fq.gz`             | gzip of sylph 0.9.0 `test_files/k12_R2.fq` | Synthetic paired reads from K12 (R2) |
 | `tiny.syldb`                      | regenerated (see below) | Sylph reference database over the 3 refs |
 | `expected_profile.tsv`            | regenerated (see below) | Golden output of `sylph profile` |
+| `tiny.syl2db`                     | regenerated (see below) | Two-stage (`sylph convert-db-two-screen`) form of `tiny.syldb`; used by `test/sql/sylph_two_stage.test` |
+| `expected_profile_two_stage.tsv`  | regenerated (see below) | Golden output of `sylph profile` against `tiny.syl2db` (identical numbers to `expected_profile.tsv`) |
 | `tiny_oracle.submodule.sha`       | `git rev-parse HEAD` of the embedded sylph fork that produced the above | Drift detector |
 
 ## Expected behaviour

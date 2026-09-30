@@ -16,7 +16,8 @@ namespace miint {
 // RAII wrapper around the sylph_database_load / sylph_database_free FFI pair.
 //
 // Constructs by loading a `.syldb` (sylph's bincode-serialized
-// `Vec<GenomeSketch>`) from disk; throws `std::runtime_error` with the FFI's
+// `Vec<GenomeSketch>`) or a two-stage `.syl2db` (sylph >= 1.0; the kind is
+// detected from the file's magic bytes) from disk; throws `std::runtime_error` with the FFI's
 // thread-local error message on failure (typically "failed to open"
 // for missing files, "not a valid .syldb" for corrupt or version-mismatched
 // archives). The handle is freed automatically by the destructor.
@@ -44,6 +45,10 @@ public:
 	// Number of reference genome sketches in the database. Constant after
 	// construction.
 	size_t num_genomes() const;
+
+	// True for a two-stage `.syl2db`, false for a plain `.syldb`. Profiling is
+	// the same call either way; this is for diagnostics / validation.
+	bool is_two_stage() const;
 
 	// Borrow the raw FFI pointer (non-owning). Lifetime is tied to this
 	// wrapper — do NOT call sylph_database_free on the returned pointer;

@@ -45,6 +45,10 @@ size_t SylphDatabaseHandle::num_genomes() const {
 	return sylph_database_num_genomes(db_);
 }
 
+bool SylphDatabaseHandle::is_two_stage() const {
+	return sylph_database_is_two_stage(db_) != 0;
+}
+
 } // namespace miint
 
 #endif // MIINT_HAS_SYLPH

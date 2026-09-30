@@ -6,7 +6,7 @@ Estimate *who* is in a community and *how much* of each is present, and turn tho
 
 - [`woltka_ogu`](#woltka_ogu) - OGU (Operational Genomic Unit) feature table from alignments, global or per-sample.
 - [`sylph_profile`](#sylph_profile) - FracMinHash relative-abundance profiling of shotgun reads against a `.syldb` database.
-- [`sylph_index_create`](#sylph_index_create) - Build a sylph `.syldb` reference database from a table.
+- [`sylph_index_create`](#sylph_index_create) - Build a sylph `.syldb` or two-stage `.syl2db` reference database from a table.
 
 ### `woltka_ogu`
 
@@ -92,9 +92,11 @@ COPY (
 
 ### `sylph_index_create`
 
-Builds a sylph `.syldb` reference database from a DuckDB table or view of reference sequences, then writes it to disk. The in-SQL counterpart to the upstream `sylph sketch` CLI: reference genomes come from a table (e.g. the output of [`read_fastx`](reading.md#fasta-and-fastq) over reference FASTAs) rather than file paths, so the reference set can be assembled with ordinary SQL (joins, filters, unions). The resulting file is consumable by [`sylph_profile`](#sylph_profile) and by the upstream sylph CLI.
+Builds a sylph reference database from a DuckDB table or view of reference sequences, then writes it to disk. The in-SQL counterpart to the upstream `sylph sketch` CLI: reference genomes come from a table (e.g. the output of [`read_fastx`](reading.md#fasta-and-fastq) over reference FASTAs) rather than file paths, so the reference set can be assembled with ordinary SQL (joins, filters, unions). The resulting file is consumable by [`sylph_profile`](#sylph_profile) and by the upstream sylph CLI.
 
-Sketching is done from in-memory sequence bytes via the same sylph 0.9.0-miint Rust static library that backs `sylph_profile`; a genome built here is byte-identical to one from `sylph sketch` given the same contigs in the same order. Linux and macOS only; not registered on WASM or Windows builds.
+The output format is chosen by the `two_stage` parameter, or, when it is not given, by the `output_path` suffix. Two-stage output (`two_stage := true`, or a `.syl2db` suffix) writes sylph 1.0's **two-stage** database (what `sylph convert-db-two-screen` produces): a small stage-1 screen index that is loaded in full, plus per-genome compressed dense blocks that are read on demand only for genomes passing the screen. Profiling against it scales with the sample rather than the reference, so it is the right choice for large (atlas-scale) references of typical-size microbial genomes. Upstream advises against it for small genomes such as viruses and plasmids, which the sparse stage-1 screen leaves with too few k-mers. Otherwise a plain `.syldb` is written.
+
+Sketching is done from in-memory sequence bytes via the same sylph 1.0.0-miint Rust static library that backs `sylph_profile`; a genome built here is byte-identical to one from `sylph sketch` given the same contigs in the same order. Linux and macOS only; not registered on WASM or Windows builds.
 
 **Function signature**:
 
@@ -103,13 +105,16 @@ Sketching is done from in-memory sequence bytes via the same sylph 0.9.0-miint R
 **Parameters:**
 
 - `source_table` (VARCHAR, positional): Name of a table or view with columns `read_id` (VARCHAR or BIGINT) and `sequence1` (VARCHAR). Each row is one contig; `sequence1` is the contig sequence and `read_id` is its name. If a `comment` column is also present (as in `read_fastx` output), the contig name is reconstructed as the full FASTA header `read_id || ' ' || comment` — matching how `sylph sketch` (via needletail) stores `first_contig_name`. Without a `comment` column, the contig name is `read_id` as-is.
-- `output_path` (VARCHAR, positional): Destination path for the `.syldb` file. Overwritten if it exists.
+- `output_path` (VARCHAR, positional): Destination path. Overwritten if it exists. When `two_stage` is not given, a `.syl2db` suffix selects the two-stage format.
+- `two_stage` (BOOLEAN, default = inferred from the `output_path` suffix): Write a two-stage `.syl2db` database instead of a plain `.syldb`. An explicit value wins over the suffix, as `FORMAT` does for `COPY`; readers detect the format from the file, not the name.
 - `genome_id` (VARCHAR, **required**): Name of the grouping column. One `GenomeSketch` is produced per distinct value; all contigs sharing a value are merged into that genome (matching `sylph sketch`'s default whole-file behavior). A natural choice is the `filepath` column from `read_fastx(..., include_filepath := true)` — one genome per reference FASTA.
 - `order_by` (VARCHAR, default `read_id`): Column used to order a genome's contigs before sketching. Pass `sequence_index` to reproduce original FASTA order (and thus byte-parity with `sylph sketch`).
 - `k` (INTEGER, default 31): k-mer size. Only 21 and 31 are supported. Must match the `k` used at profile time.
 - `c` (INTEGER, default 200): FracMinHash subsampling rate. Must be ≥ the `c` of any sample sketch profiled against the database.
 - `min_spacing` (INTEGER, default 30): Minimum k-mer spacing; thins densely-seeded regions.
-- `pseudotax` (BOOLEAN, default true): Track min-spacing-dropped k-mers so the database supports pseudotax/profiling mode. Set false for query-only databases.
+- `pseudotax` (BOOLEAN, default true): Track min-spacing-dropped k-mers so the database supports pseudotax/profiling mode. Set false for query-only databases. Not allowed with a two-stage output, which always needs profiling k-mers.
+- `screen_c` (INTEGER, default 3000, two-stage only): FracMinHash rate of the stage-1 screen index. Must be ≥ `c`; larger is a smaller, faster, more permissive screen. Matches `--screen-c` on `sylph convert-db-two-screen`.
+- `min_sparse_kmers` (INTEGER, default 50, two-stage only): Minimum screen k-mers per genome; genomes that would fall short at `screen_c` get a denser, genome-specific screen rate. Matches `--min-sparse-kmers`.
 
 **Output schema:** a single status row.
 
@@ -150,14 +155,17 @@ ORDER BY taxonomic_abundance DESC;
 - Error if `source_table` does not exist or is missing required columns (`read_id`, `sequence1`).
 - Error if the `genome_id` parameter is not supplied, or if the `genome_id` / `order_by` column does not exist.
 - Error if `k` is not 21 or 31.
+- Error if the output is two-stage and `pseudotax := false`, or `screen_c` < `c`; error if `screen_c` / `min_sparse_kmers` are given for a plain `.syldb` output.
 - Error if no non-NULL `genome_id` values are found.
 - IO error surfaces the underlying sylph diagnostic string (e.g., failure to write the output path).
 
 ### `sylph_profile`
 
-FracMinHash-based relative-abundance profiling of paired-end shotgun metagenomic reads against a pre-built `.syldb` reference database, using [sylph](https://github.com/bluenote-1577/sylph) (Shaw & Yu 2024, *Nature Biotechnology*). Sequences come from a DuckDB table or view — there is no FASTQ path argument — and the database is loaded once per call, mmap-backed. The result is streamed back via the Arrow C Data Interface (zero-copy).
+FracMinHash-based relative-abundance profiling of paired-end shotgun metagenomic reads against a pre-built reference database, using [sylph](https://github.com/bluenote-1577/sylph) (Shaw & Yu 2024, *Nature Biotechnology*). Sequences come from a DuckDB table or view — there is no FASTQ path argument — and the database is loaded once per call. The result is streamed back via the Arrow C Data Interface (zero-copy).
 
-Embedded as a Rust static library (sylph 0.9.0-miint fork; MIT). Linux and macOS only; the function is not registered on WASM or Windows builds.
+Both sylph database formats are accepted and detected from the file's contents, not its name: a plain `.syldb` (all genome sketches resident) or sylph 1.0's two-stage `.syl2db` (screen index resident, dense blocks decoded on demand for genomes that pass the stage-1 screen). For the genomes it reports, a two-stage database gives the same numbers as the `.syldb` it was converted from.
+
+Embedded as a Rust static library (sylph 1.0.0-miint fork; MIT). Linux and macOS only; the function is not registered on WASM or Windows builds.
 
 **Function signature**:
 
@@ -166,11 +174,13 @@ Embedded as a Rust static library (sylph 0.9.0-miint fork; MIT). Linux and macOS
 **Parameters:**
 
 - `source_table` (VARCHAR, positional): Name of a table or view with columns `read_id` (VARCHAR), `sequence1` (VARCHAR), and optionally `sequence2` (VARCHAR). When `sequence2` is present and non-empty per row, the read pair is processed paired-end; otherwise the call is single-end.
-- `syldb_path` (VARCHAR, positional): Path to a sylph `.syldb` reference database, built either via [`sylph_index_create`](#sylph_index_create) or the upstream `sylph sketch` CLI. The file is opened read-only and shared mmap-style across the call.
+- `syldb_path` (VARCHAR, positional): Path to a sylph `.syldb` or `.syl2db` reference database, built either via [`sylph_index_create`](#sylph_index_create) or the upstream sylph CLI (`sketch`, `convert-db-two-screen`). The file is opened read-only and shared across the call.
 - `sample_id` (VARCHAR, optional): Name of a column on `source_table` to partition by. When set, the function fans out per-sample (parallelized via the per-sample helper used by [`deblur`](denoising.md) / [`align_mafft`](alignment_multiple.md) / [`detect_chimera_uchime_denovo`](chimera.md)) and prepends a `sample_id` column to the output. Without this option, the entire table is processed as a single sample.
 - `min_ani` (DOUBLE, default = sylph default): Minimum adjusted ANI (percent, 0..100) for a genome to be reported. Negative or unset = use sylph's built-in default.
-- `min_number_kmers` (UINTEGER, default = 50): Minimum number of matching k-mers required to report a genome.
+- `min_number_kmers` (UINTEGER, default = 10): Minimum number of *sampled* k-mers a reference genome must have to be considered (a size floor: ≈ genome length / `c`). sylph 1.0 lowered the default from 50 so genomes under ~10 kb are no longer excluded outright; pass 50 for the 0.9 behavior.
+- `min_contain` (UINTEGER, default = 7): Minimum number of *contained* k-mers (observed in the sample) for a genome to count as a hit — the evidence floor sylph 1.0 added alongside the lower `min_number_kmers`. 0 = sylph default.
 - `min_count_correct` (DOUBLE, default = 3.0): Minimum corrected k-mer count for genome detection. Lower values increase sensitivity at the cost of false positives.
+- `screen_ani` (DOUBLE, default = 0.85, `.syl2db` only): Minimum adjusted ANI, as a fraction in [0, 1], for a genome to pass the two-stage stage-1 screen. Deliberately permissive; the dense stage restores specificity. Ignored for `.syldb` databases.
 - `estimate_unknown` (BOOLEAN, default false): Renormalize `taxonomic_abundance` to fraction-of-reads-explained, accounting for unknown / unmatched fraction.
 - `dedup_paired_reads` (BOOLEAN, default true): Enable approximate paired-read deduplication during sketching. Matches sylph CLI behavior.
 - `dedup_fpr` (DOUBLE, default 0.0001): Bloom-filter false-positive rate used during sketch-time deduplication. Matches `--fpr` on the upstream CLI.
@@ -196,7 +206,7 @@ Adding columns at the end is non-breaking; reordering is.
 **Behavior:**
 
 - **Single-vs-paired:** auto-detected per-row. Rows whose `sequence2` is NULL or empty are sketched single-end; rows with both sequences set are sketched paired. Mixing within one sample is allowed.
-- **Database lifecycle:** the `.syldb` is loaded once per `sylph_profile` call into the GlobalState and reused across all execute invocations on that call. Back-to-back calls against the same DB pay the load cost each time (a future session-scoped cache is on the roadmap).
+- **Database lifecycle:** the database is loaded once per `sylph_profile` call into the GlobalState and reused across all execute invocations on that call. Back-to-back calls against the same DB pay the load cost each time (a future session-scoped cache is on the roadmap). For a `.syl2db` the fixed cost is the screen index only; dense blocks are decoded per call for the genomes that pass the screen.
 - **Ordering:** `order_preservation_type = NO_ORDER` — rows may interleave across genomes when running per-sample. Sort downstream if needed.
 - **Numerical parity:** bit-identical to upstream `sylph profile --reads` on the same data, modulo a small documented set of divergences in the embedded library.
 
@@ -229,7 +239,7 @@ FROM sylph_profile('reads', '/refs/gtdb-r220-c200-dbv1.syldb',
 **Error conditions:**
 
 - Error if `source_table` does not exist or is missing required columns (`read_id`, `sequence1`).
-- Error if `syldb_path` cannot be opened, is corrupt, or is not a sylph `.syldb` file.
+- Error if `syldb_path` cannot be opened, is corrupt, or is neither a sylph `.syldb` nor `.syl2db` file.
 - Error if `sample_id` is set but the named column does not exist on `source_table` or collides with an output column name.
 - IO error surfaces the underlying sylph diagnostic string (e.g., truncated database, unsupported version).
 - **`sample_id` mode cannot read a TEMP table or view.** Every other relation parameter in miint accepts `CREATE TEMP TABLE`/`CREATE TEMP VIEW` output, but the per-sample path builds a fixed-name temporary view on a private per-thread connection, which must stay isolated so parallel workers do not collide on that name. Materialize the source as an ordinary table (or a view in a schema) first. Tracked as #207.

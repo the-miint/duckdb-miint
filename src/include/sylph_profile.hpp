@@ -29,8 +29,9 @@ namespace duckdb {
 // FracMinHash relative-abundance profiling table function.
 //
 // Wraps sylph (Shaw & Yu 2024, *Nature Biotechnology*) as a DuckDB table
-// function: takes a paired-end reads table/view and a `.syldb` reference
-// database path, sketches the reads in-memory via the FFI's streaming
+// function: takes a paired-end reads table/view and a reference database path
+// (`.syldb`, or sylph 1.0's two-stage `.syl2db` — detected from the file, not
+// the name), sketches the reads in-memory via the FFI's streaming
 // builder, runs sylph_profile, and returns the resulting Arrow batch as a
 // DataChunk.
 //

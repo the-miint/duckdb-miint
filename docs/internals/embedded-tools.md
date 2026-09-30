@@ -207,13 +207,14 @@ Three Rust crates — rype, sylph and st3 — are statically linked into the ext
 
 #### sylph subsystem
 
-- **Location:** `ext/sylph/` (git submodule on `the-miint/sylph`, branch `v0.9.0-miint`; version captured via `git describe` → `SYLPH_GIT_VERSION`)
-- **Purpose:** FracMinHash sketch-based relative-abundance profiling of microbial communities, exposed as the `sylph_profile` table function
+- **Location:** `ext/sylph/` (git submodule on `the-miint/sylph`, branch `v1.0.0-miint`; version captured via `git describe` → `SYLPH_GIT_VERSION`)
+- **Fork contents:** upstream sylph 1.0.0 plus the embedding surface (`src/builders.rs`, `src/profile_api.rs`, `src/c_api.rs`, `sylph.h`). Upstream declined to take the library API, so both halves are maintained on the fork; the diff to upstream source files is kept to visibility changes and `fastx` feature gates so rebasing onto new sylph releases stays cheap.
+- **Purpose:** FracMinHash sketch-based relative-abundance profiling of microbial communities, exposed as the `sylph_profile` and `sylph_index_create` table functions. Both `.syldb` and two-stage `.syl2db` databases are supported; the kind is detected from the file.
 - **Gated by:** `MIINT_ENABLE_SYLPH` (auto-off on Emscripten + Windows/MinGW per the POSIX-API requirement above). `MIINT_HAS_SYLPH` compile define when on; `SYLPH_GIT_VERSION` carries the configure-time `git describe` string.
 - **Reported as:** `sylph` row in `miint_versions()` (only emitted when `MIINT_HAS_SYLPH` is defined)
 - **C++ wrappers:**
   - `src/include/SylphDatabase.hpp` / `src/SylphDatabase.cpp` — `SylphDatabaseHandle`, a RAII wrapper around the C FFI `SylphDatabase*` from `ext/sylph/sylph.h`. Non-copyable, non-movable; owned by the `sylph_profile` GlobalState.
-  - `src/include/sylph_profile.hpp` / `src/sylph_profile.cpp` — `SylphProfileTableFunction`, the DuckDB table-function binding. The `.syldb` is loaded once into GlobalState and shared read-only across worker threads; sylph treats the loaded database as immutable so no read-side mutex is required.
+  - `src/include/sylph_profile.hpp` / `src/sylph_profile.cpp` — `SylphProfileTableFunction`, the DuckDB table-function binding. The database is loaded once into GlobalState and shared read-only across worker threads; sylph treats the loaded database as immutable so no read-side mutex is required.
 
 #### st3 subsystem
 

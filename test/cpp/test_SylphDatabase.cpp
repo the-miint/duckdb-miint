@@ -16,8 +16,22 @@ namespace {
 // Path is relative to the repo root (where the tests binary is executed
 // from, matching Minimap2/SortMeRNA tests).
 const std::string kTinySyldb = "data/sylph/tiny.syldb";
+// `sylph convert-db-two-screen` over kTinySyldb (see data/sylph/README.md).
+const std::string kTinySyl2db = "data/sylph/tiny.syl2db";
 
 } // namespace
+
+// The database kind is detected from the file, not its name, and profiling is
+// the same call for both; the handle only reports the kind so hosts can
+// validate what they were given (an atlas-scale reference should be two-stage).
+TEST_CASE("SylphDatabaseHandle loads a two-stage .syl2db and reports the kind", "[sylph][database]") {
+	miint::SylphDatabaseHandle plain(kTinySyldb);
+	REQUIRE_FALSE(plain.is_two_stage());
+
+	miint::SylphDatabaseHandle two(kTinySyl2db);
+	REQUIRE(two.is_two_stage());
+	REQUIRE(two.num_genomes() == 3);
+}
 
 TEST_CASE("SylphDatabaseHandle loads a real .syldb", "[sylph][database]") {
 	miint::SylphDatabaseHandle db(kTinySyldb);
@@ -75,9 +89,23 @@ TEST_CASE("sylph_profile_params_default seeds sylph defaults", "[sylph][ffi]") {
 	REQUIRE(pp.seq_id == Approx(-1.0));        // sentinel: auto
 	REQUIRE(pp.redundant_ani == Approx(99.0)); // DEREP_PROFILE_ANI fix
 	REQUIRE(pp.min_count_correct == Approx(3.0));
-	REQUIRE(pp.min_number_kmers == Approx(50.0));
+	REQUIRE(pp.min_number_kmers == Approx(10.0));
+	REQUIRE(pp.min_contain == 7);
 	REQUIRE(pp.num_threads == 0);
+	REQUIRE(pp.screen_ani == Approx(0.0)); // sentinel: sylph's default stage-1 screen ANI
 	REQUIRE(sylph_profile_params_default(nullptr) != 0);
+}
+
+// sylph_index_create seeds its .syl2db write parameters from this getter, so
+// a miint-built two-stage database matches `sylph convert-db-two-screen`'s
+// defaults unless the caller overrides them.
+TEST_CASE("sylph_two_stage_params_default seeds converter defaults", "[sylph][ffi]") {
+	SylphTwoStageParams tp {};
+	REQUIRE(sylph_two_stage_params_default(&tp) == 0);
+	REQUIRE(tp.screen_c == 3000);
+	REQUIRE(tp.min_sparse_kmers == 50);
+	REQUIRE(tp.min_contain == 7);
+	REQUIRE(sylph_two_stage_params_default(nullptr) != 0);
 }
 
 // Same regression coverage for the sketch-side defaults. The dedup_fpr field
