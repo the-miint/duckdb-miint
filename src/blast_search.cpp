@@ -1,4 +1,5 @@
 #include "blast_search.hpp"
+#include "catalog_utils.hpp"
 #include "id_column_utils.hpp"
 #include "miint_log.hpp"
 #include "duckdb/common/exception.hpp"
@@ -29,6 +30,7 @@ unique_ptr<FunctionData> BlastSearchTableFunction::Bind(ClientContext &context, 
 		throw BinderException("blast: table name cannot be NULL");
 	}
 	data->query_table = input.inputs[0].ToString();
+	RejectCTERelationName(input, data->query_table);
 	if (data->query_table.empty()) {
 		throw BinderException("blast: table name cannot be empty");
 	}

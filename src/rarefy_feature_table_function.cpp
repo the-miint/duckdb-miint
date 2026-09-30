@@ -1,4 +1,5 @@
 #include "unifrac_table_functions.hpp"
+#include "catalog_utils.hpp"
 
 #include <algorithm>
 #include <memory>
@@ -71,6 +72,7 @@ std::vector<miint::unifrac::CooRow> FlattenToCoo(const miint::unifrac::UnifracSu
 unique_ptr<FunctionData> RarefyBind(ClientContext &context, TableFunctionBindInput &input,
                                     vector<LogicalType> &return_types, vector<string> &names) {
 	const std::string table_name = input.inputs[0].GetValue<string>();
+	RejectCTERelationName(input, table_name);
 	if (table_name.empty()) {
 		throw BinderException("rarefy_feature_table: feature-table name must not be empty");
 	}

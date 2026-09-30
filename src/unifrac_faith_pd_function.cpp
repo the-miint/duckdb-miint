@@ -1,4 +1,5 @@
 #include "unifrac_table_functions.hpp"
+#include "catalog_utils.hpp"
 
 #include <algorithm>
 #include <climits>
@@ -128,6 +129,8 @@ unique_ptr<FunctionData> UnifracFaithPdBind(ClientContext &context, TableFunctio
                                             vector<LogicalType> &return_types, vector<string> &names) {
 	const std::string table_name = input.inputs[0].GetValue<string>();
 	const std::string tree_name = input.inputs[1].GetValue<string>();
+	RejectCTERelationName(input, table_name);
+	RejectCTERelationName(input, tree_name);
 	if (table_name.empty()) {
 		throw BinderException("unifrac_faith_pd: feature-table name must not be empty");
 	}

@@ -175,6 +175,8 @@ static unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindIn
 	auto data = make_uniq<PileupBindData>();
 	data->alignments_table = input.inputs[0].GetValue<std::string>();
 	data->reference_table = input.inputs[1].GetValue<std::string>();
+	RejectCTERelationName(input, data->alignments_table);
+	RejectCTERelationName(input, data->reference_table);
 
 	ValidateTableSchema(context, data->alignments_table, "read_id, reference, position, cigar, sequence, qual",
 	                    "alignments");

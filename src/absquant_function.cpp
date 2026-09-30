@@ -66,6 +66,9 @@ unique_ptr<FunctionData> AbsQuantFitBind(ClientContext &context, TableFunctionBi
 	data->counts_table = input.inputs[0].GetValue<string>();
 	data->concentrations_table = input.inputs[1].GetValue<string>();
 	data->params_table = input.inputs[2].GetValue<string>();
+	RejectCTERelationName(input, data->counts_table);
+	RejectCTERelationName(input, data->concentrations_table);
+	RejectCTERelationName(input, data->params_table);
 	data->options.syndna_contributing_fraction = input.inputs[3].GetValue<double>();
 	for (const auto &kv : input.named_parameters) {
 		if (StringUtil::Lower(kv.first) == "min_syndna_counts") {

@@ -54,6 +54,7 @@ unique_ptr<FunctionData> AlignmentSliceTableFunction::Bind(ClientContext &contex
 
 	// Extract positional parameters
 	data->table_name = input.inputs[0].GetValue<string>();
+	RejectCTERelationName(input, data->table_name);
 	data->region_start = input.inputs[1].GetValue<int64_t>();
 	data->region_stop = input.inputs[2].GetValue<int64_t>();
 

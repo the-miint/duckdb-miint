@@ -1,0 +1,30 @@
+# name: test/sql/cte_relation_name_guard_krepp.test
+# description: CTE relation-name guard for functions built with krepp (MIINT_HAS_KREPP)
+# group: [sql]
+
+#
+# The krepp (MIINT_HAS_KREPP) half of test/sql/cte_relation_name_guard.test, split out only
+# because these functions are not registered without it. See that file for
+# why a CTE passed by name must be rejected.
+#
+# Covers: krepp_index_create, place_krepp
+#
+
+require miint
+
+require-env KREPP_AVAILABLE
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM krepp_index_create('c', 'nope_dir', newick_path := 'nope.nwk');
+----
+krepp_index_create: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM krepp_index_create('nope', 'nope_dir', tree_table := 'c');
+----
+krepp_index_create: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM place_krepp(query_table := 'c', index_path := 'nope_dir');
+----
+place_krepp: 'c' is a common table expression

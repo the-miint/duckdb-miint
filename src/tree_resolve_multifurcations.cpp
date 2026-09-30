@@ -1,4 +1,5 @@
 #include "tree_resolve_multifurcations.hpp"
+#include "catalog_utils.hpp"
 #include "tree_table_reader.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
@@ -14,6 +15,7 @@ unique_ptr<FunctionData> TreeResolveMultifurcationsTableFunction::Bind(ClientCon
                                                                        vector<LogicalType> &return_types,
                                                                        vector<std::string> &names) {
 	auto tree_table_name = input.inputs[0].ToString();
+	RejectCTERelationName(input, tree_table_name);
 
 	// Validate schema at bind time for early error detection.
 	ValidateTreeTableSchema(context, tree_table_name);

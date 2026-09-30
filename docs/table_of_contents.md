@@ -9,7 +9,7 @@ argument — `align_minimap2('reads', subject_table := 'refs')`. Those names are
 catalog, so a `CREATE TEMP TABLE` or `CREATE TEMP VIEW` works anywhere an ordinary table does. This
 matters most under a read-only catalog, where a temporary relation may be the only one you can create.
 
-Two exceptions, both with a note in the relevant function's documentation:
+Three exceptions:
 
 - [`massql()`](massql.md) and the per-sample (`sample_id := ...`) paths of
   [`woltka_ogu`](profiling.md), [`sylph_profile`](profiling.md) and
@@ -17,6 +17,13 @@ Two exceptions, both with a note in the relevant function's documentation:
   ordinary table first.
 - A relation created inside an explicit `BEGIN` that has not been committed yet is not visible to any of
   these functions, temporary or not.
+- A CTE (`WITH name AS (...)`) cannot be passed by name: it exists only inside its query, not in the
+  catalog. Passing one is an error naming the CTE, even when a table of the same name exists, because
+  reading that table instead would silently give the wrong answer. Create a view or table under a
+  *different* name and pass that instead, e.g. `CREATE TEMP VIEW name_view AS ...` (an ordinary view or
+  table for the functions in the first bullet). Reusing the CTE's name would make a view that reads
+  itself whenever the CTE's query reads the same-named table. Inside a CTE's own body the name still
+  refers to the table, as in plain SQL, so that is not an error. Real CTE support is tracked in #286.
 
 A subquery cannot be used in place of the literal — DuckDB rejects it outright with `Binder Error: Table
 function cannot contain subqueries`. To choose the relation at runtime, use `SET VARIABLE` plus

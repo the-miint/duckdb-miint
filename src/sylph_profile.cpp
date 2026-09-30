@@ -102,6 +102,7 @@ unique_ptr<FunctionData> SylphProfileTableFunction::Bind(ClientContext &context,
                                                          vector<std::string> &names) {
 	auto data = make_uniq<Data>();
 	data->source_table = input.inputs[0].GetValue<std::string>();
+	RejectCTERelationName(input, data->source_table);
 	data->syldb_path = input.inputs[1].GetValue<std::string>();
 
 	// Accept BIGINT/UUID read_id (allow_bigint=true), consistent with the other

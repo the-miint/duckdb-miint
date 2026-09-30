@@ -1,4 +1,5 @@
 #include "massql_function.hpp"
+#include "catalog_utils.hpp"
 #include "massql_parser.hpp"
 #include "massql_transpiler.hpp"
 
@@ -147,6 +148,7 @@ static unique_ptr<FunctionData> MassQLBind(ClientContext &context, TableFunction
 
 	auto query_str = input.inputs[0].GetValue<string>();
 	auto source_str = input.inputs[1].GetValue<string>();
+	RejectCTERelationName(input, source_str);
 
 	// Read optional sample_id named parameter (validation deferred to DiscoverSamples)
 	string sample_id_col;

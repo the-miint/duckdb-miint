@@ -5,9 +5,12 @@
 #include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_data.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/parser/keyword_helper.hpp"
 #include "duckdb/parser/qualified_name.hpp"
+#include "duckdb/planner/binder.hpp"
 
 namespace duckdb {
 
@@ -78,6 +81,34 @@ void RejectRelationNameAsLiteral(ClientContext &context, const std::string &func
 	    "them into a list first — a subquery cannot be a table-function argument: "
 	    "SET VARIABLE accs = (SELECT list(<column>) FROM %s); %s(getvariable('accs'));",
 	    function_name, literal, kind, function_name, function_name, function_name, literal, literal, function_name);
+}
+
+void RejectCTERelationName(TableFunctionBindInput &input, const std::string &relation_name) {
+	// Null when DuckDB re-binds a deserialized plan (LogicalGet::Deserialize); no
+	// query text, so no CTE, is in scope there.
+	if (!input.binder) {
+		return;
+	}
+	// Mirrors Binder::Bind(BaseTableRef), so the name gets the scoping a plain
+	// FROM-clause reference would. GetCTEBinding walks parent binders only through
+	// REGULAR_BINDERs, which keeps a caller's CTE out of a view body. Inside a CTE's
+	// own body (or a recursive CTE's anchor) the lookup returns a CANNOT_BE_REFERENCED
+	// self-binding, and there the name still means the catalog relation.
+	auto cte = input.binder->GetCTEBinding(BindingAlias(relation_name));
+	if (!cte || !cte->CanBeReferenced()) {
+		return;
+	}
+	// The suggested view gets a NEW name: in the shadowing case the CTE body usually
+	// reads the same-named table, so reusing the name would make a view that
+	// references itself. TEMP is only the common case — massql and some sample_id
+	// paths still cannot read TEMP relations (#207).
+	auto suggested = KeywordHelper::WriteOptionallyQuoted(relation_name + "_view");
+	throw BinderException("%s: '%s' is a common table expression (WITH clause). Relation names are resolved in the "
+	                      "catalog, where CTEs do not exist, so it cannot be read by name. Create a view or table "
+	                      "under a different name and pass that name instead, e.g. CREATE TEMP VIEW %s AS ...; "
+	                      "(massql and some sample_id modes cannot read TEMP relations yet, #207: use CREATE VIEW or "
+	                      "CREATE TABLE there).",
+	                      input.table_function.name, relation_name, suggested);
 }
 
 void InheritTempObjects(ClientContext &context, Connection &conn) {

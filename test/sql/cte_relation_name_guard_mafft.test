@@ -1,0 +1,20 @@
+# name: test/sql/cte_relation_name_guard_mafft.test
+# description: CTE relation-name guard for functions built with MAFFT (MIINT_HAS_MAFFT)
+# group: [sql]
+
+#
+# The MAFFT (MIINT_HAS_MAFFT) half of test/sql/cte_relation_name_guard.test, split out only
+# because these functions are not registered without it. See that file for
+# why a CTE passed by name must be rejected.
+#
+# Covers: align_mafft
+#
+
+require miint
+
+require-env MAFFT_AVAILABLE
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM align_mafft('c');
+----
+align_mafft: 'c' is a common table expression

@@ -1,4 +1,5 @@
 #include "search_sequences.hpp"
+#include "catalog_utils.hpp"
 #include "id_column_utils.hpp"
 #include "table_function_common.hpp"
 
@@ -105,12 +106,14 @@ unique_ptr<FunctionData> SearchSequencesTableFunction::Bind(ClientContext &conte
 	auto data = make_uniq<Data>();
 
 	data->query_table = input.inputs[0].GetValue<std::string>();
+	RejectCTERelationName(input, data->query_table);
 
 	auto db_it = input.named_parameters.find("db");
 	if (db_it == input.named_parameters.end()) {
 		throw BinderException("search_sequences_vsearch requires 'db' parameter (reference table name)");
 	}
 	data->ref_table = db_it->second.GetValue<std::string>();
+	RejectCTERelationName(input, data->ref_table);
 
 	// id is required — no silent 0.0 default that accepts everything.
 	auto id_it = input.named_parameters.find("id");

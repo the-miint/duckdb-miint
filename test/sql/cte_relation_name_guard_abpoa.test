@@ -1,0 +1,25 @@
+# name: test/sql/cte_relation_name_guard_abpoa.test
+# description: CTE relation-name guard for functions built with abPOA (MIINT_HAS_ABPOA)
+# group: [sql]
+
+#
+# The abPOA (MIINT_HAS_ABPOA) half of test/sql/cte_relation_name_guard.test, split out only
+# because these functions are not registered without it. See that file for
+# why a CTE passed by name must be rejected.
+#
+# Covers: align_abpoa, consensus_abpoa
+#
+
+require miint
+
+require-env ABPOA_AVAILABLE
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM align_abpoa('c');
+----
+align_abpoa: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM consensus_abpoa('c');
+----
+consensus_abpoa: 'c' is a common table expression

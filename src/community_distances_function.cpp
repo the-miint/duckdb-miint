@@ -53,6 +53,7 @@ unique_ptr<FunctionData> CommunityDistBind(ClientContext &context, TableFunction
                                            vector<LogicalType> &return_types, vector<string> &names) {
 	auto data = make_uniq<CommunityDistBindData>();
 	data->table_name = input.inputs[0].GetValue<string>();
+	RejectCTERelationName(input, data->table_name);
 	data->metric = StringUtil::Lower(input.inputs[1].GetValue<string>());
 	if (!miint::IsValidCommunityMetric(data->metric)) {
 		throw BinderException("community_distances: unknown metric '%s' (must be one of %s)", data->metric,

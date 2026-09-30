@@ -1,4 +1,5 @@
 #include "align_sortmerna_rrna.hpp"
+#include "catalog_utils.hpp"
 
 #include "align_sortmerna_common.hpp"
 #include "duckdb/common/exception.hpp"
@@ -16,6 +17,7 @@ unique_ptr<FunctionData> AlignSortMeRNARRNATableFunction::Bind(ClientContext &co
 		throw BinderException("align_sortmerna_rrna: query_table is required");
 	}
 	data->query_table = input.inputs[0].ToString();
+	RejectCTERelationName(input, data->query_table);
 	data->ref_paths = ParseSortMeRNARefPaths(input.named_parameters, "align_sortmerna_rrna");
 	ParseSortMeRNAConfigParams(input.named_parameters, data->config);
 

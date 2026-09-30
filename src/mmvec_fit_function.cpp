@@ -82,6 +82,8 @@ unique_ptr<FunctionData> MmvecFitBind(ClientContext &context, TableFunctionBindI
 	auto data = make_uniq<MmvecFitBindData>();
 	data->x_table = input.inputs[0].GetValue<string>();
 	data->y_table = input.inputs[1].GetValue<string>();
+	RejectCTERelationName(input, data->x_table);
+	RejectCTERelationName(input, data->y_table);
 
 	std::string batch_norm = "unbiased";
 	std::string optimizer = "lbfgs";

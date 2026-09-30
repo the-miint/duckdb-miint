@@ -1,4 +1,5 @@
 #include "align_sortmerna.hpp"
+#include "catalog_utils.hpp"
 
 #include "align_sortmerna_common.hpp"
 #include "sortmerna_result_utils.hpp"
@@ -17,6 +18,7 @@ unique_ptr<FunctionData> AlignSortMeRNATableFunction::Bind(ClientContext &contex
 		throw BinderException("align_sortmerna: query_table is required");
 	}
 	data->query_table = input.inputs[0].ToString();
+	RejectCTERelationName(input, data->query_table);
 	data->ref_paths = ParseSortMeRNARefPaths(input.named_parameters, "align_sortmerna");
 	ParseSortMeRNAConfigParams(input.named_parameters, data->config);
 

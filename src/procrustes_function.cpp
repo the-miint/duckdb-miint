@@ -338,6 +338,8 @@ unique_ptr<FunctionData> ProcrustesBind(ClientContext &context, TableFunctionBin
                                         vector<LogicalType> &return_types, vector<string> &names) {
 	const std::string ref_name = input.inputs[0].GetValue<string>();
 	const std::string other_name = input.inputs[1].GetValue<string>();
+	RejectCTERelationName(input, ref_name);
+	RejectCTERelationName(input, other_name);
 
 	std::string pairing_name;
 	int32_t n_dims_param = 0; // 0 = use all available axes
@@ -347,6 +349,7 @@ unique_ptr<FunctionData> ProcrustesBind(ClientContext &context, TableFunctionBin
 		const auto key = StringUtil::Lower(kv.first);
 		if (key == "pairing") {
 			pairing_name = kv.second.GetValue<string>();
+			RejectCTERelationName(input, pairing_name);
 		} else if (key == "n_dims") {
 			n_dims_param = kv.second.GetValue<int32_t>();
 		} else if (key == "permutations") {

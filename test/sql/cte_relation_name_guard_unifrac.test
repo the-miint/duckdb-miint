@@ -1,0 +1,100 @@
+# name: test/sql/cte_relation_name_guard_unifrac.test
+# description: CTE relation-name guard for functions built with UniFrac (MIINT_HAS_UNIFRAC)
+# group: [sql]
+
+#
+# The UniFrac (MIINT_HAS_UNIFRAC) half of test/sql/cte_relation_name_guard.test, split out only
+# because these functions are not registered without it. See that file for
+# why a CTE passed by name must be rejected.
+#
+# Covers: pcoa, permanova, progressive_pcoa_from_distances, progressive_pcoa_from_features, progressive_pcoa_from_unifrac, rarefy_feature_table, unifrac_distances, unifrac_faith_pd, unifrac_pcoa, unifrac_permanova
+#
+
+require miint
+
+require-env UNIFRAC_AVAILABLE
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM unifrac_distances('c', 'nope');
+----
+unifrac_distances: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM unifrac_distances('nope', 'c');
+----
+unifrac_distances: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM unifrac_faith_pd('c', 'nope');
+----
+unifrac_faith_pd: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM unifrac_faith_pd('nope', 'c');
+----
+unifrac_faith_pd: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM unifrac_pcoa('c', 'nope');
+----
+unifrac_pcoa: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM unifrac_pcoa('nope', 'c');
+----
+unifrac_pcoa: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM pcoa('c');
+----
+pcoa: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM progressive_pcoa_from_distances('c');
+----
+progressive_pcoa_from_distances: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM progressive_pcoa_from_unifrac('c', 'nope');
+----
+progressive_pcoa_from_unifrac: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM progressive_pcoa_from_unifrac('nope', 'c');
+----
+progressive_pcoa_from_unifrac: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM progressive_pcoa_from_features('c', 'braycurtis');
+----
+progressive_pcoa_from_features: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM unifrac_permanova('c', 'nope', 'nope');
+----
+unifrac_permanova: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM unifrac_permanova('nope', 'c', 'nope');
+----
+unifrac_permanova: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM unifrac_permanova('nope', 'nope', 'c');
+----
+unifrac_permanova: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM permanova('c', 'nope');
+----
+permanova: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM permanova('nope', 'c');
+----
+permanova: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM rarefy_feature_table('c');
+----
+rarefy_feature_table: 'c' is a common table expression

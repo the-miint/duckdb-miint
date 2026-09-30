@@ -1,4 +1,5 @@
 #include "save_minimap2_index.hpp"
+#include "catalog_utils.hpp"
 #include "sequence_table_reader.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -16,6 +17,7 @@ unique_ptr<FunctionData> SaveMinimap2IndexTableFunction::Bind(ClientContext &con
 	}
 
 	data->subject_table = input.inputs[0].ToString();
+	RejectCTERelationName(input, data->subject_table);
 	data->output_path = input.inputs[1].ToString();
 
 	// Validate subject table exists and has correct schema; capture for the

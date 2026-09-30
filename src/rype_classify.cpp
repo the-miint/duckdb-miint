@@ -70,6 +70,7 @@ unique_ptr<FunctionData> RypeClassifyTableFunction::Bind(ClientContext &context,
 		throw BinderException("rype_classify requires sequence_table parameter");
 	}
 	data->sequence_table = input.inputs[1].ToString();
+	RejectCTERelationName(input, data->sequence_table);
 
 	// Optional: id_column (defaults to 'read_id')
 	auto id_col_param = input.named_parameters.find("id_column");

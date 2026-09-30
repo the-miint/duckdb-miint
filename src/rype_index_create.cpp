@@ -188,12 +188,14 @@ unique_ptr<FunctionData> RypeIndexCreateTableFunction::Bind(ClientContext &conte
 		throw BinderException("rype_index_create requires chunk_table and output_path parameters");
 	}
 	data->chunk_table = input.inputs[0].ToString();
+	RejectCTERelationName(input, data->chunk_table);
 	data->output_path = input.inputs[1].ToString();
 
 	// Optional: mapping_table (feature_idx, bucket_name). Empty => single bucket.
 	auto mapping_param = input.named_parameters.find("mapping_table");
 	if (mapping_param != input.named_parameters.end() && !mapping_param->second.IsNull()) {
 		data->mapping_table = mapping_param->second.ToString();
+		RejectCTERelationName(input, data->mapping_table);
 	}
 
 	auto k_param = input.named_parameters.find("k");

@@ -1,0 +1,45 @@
+# name: test/sql/cte_relation_name_guard_vsearch.test
+# description: CTE relation-name guard for functions built with vsearch (MIINT_HAS_VSEARCH)
+# group: [sql]
+
+#
+# The vsearch (MIINT_HAS_VSEARCH) half of test/sql/cte_relation_name_guard.test, split out only
+# because these functions are not registered without it. See that file for
+# why a CTE passed by name must be rejected.
+#
+# Covers: cluster_sequences_vsearch, detect_chimera_uchime, detect_chimera_uchime_denovo, search_sequences_vsearch
+#
+
+require miint
+
+require-env VSEARCH_AVAILABLE
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM cluster_sequences_vsearch('c');
+----
+cluster_sequences_vsearch: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM search_sequences_vsearch('c', db := 'nope');
+----
+search_sequences_vsearch: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM search_sequences_vsearch('nope', db := 'c');
+----
+search_sequences_vsearch: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM detect_chimera_uchime('c', db := 'nope');
+----
+detect_chimera_uchime: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM detect_chimera_uchime('nope', db := 'c');
+----
+detect_chimera_uchime: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM detect_chimera_uchime_denovo('c');
+----
+detect_chimera_uchime_denovo: 'c' is a common table expression

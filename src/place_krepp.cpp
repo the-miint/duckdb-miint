@@ -1,4 +1,5 @@
 #include "place_krepp.hpp"
+#include "catalog_utils.hpp"
 
 #include "alignment_functions_internal.hpp"
 #include "id_column_utils.hpp"
@@ -37,6 +38,7 @@ unique_ptr<FunctionData> PlaceKreppTableFunction::Bind(ClientContext &context, T
 		throw BinderException("place_krepp requires a query_table parameter");
 	}
 	data->query_table = query_param->second.ToString();
+	RejectCTERelationName(input, data->query_table);
 
 	auto index_param = input.named_parameters.find("index_path");
 	if (index_param == input.named_parameters.end() || index_param->second.IsNull()) {

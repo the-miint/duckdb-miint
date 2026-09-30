@@ -1,0 +1,49 @@
+# name: test/sql/cte_relation_name_guard_gpl_boundary.test
+# description: CTE relation-name guard for functions built with the gpl-boundary client (MIINT_HAS_GPL_BOUNDARY)
+# group: [sql]
+
+#
+# The the gpl-boundary client (MIINT_HAS_GPL_BOUNDARY) half of test/sql/cte_relation_name_guard.test, split out only
+# because these functions are not registered without it. See that file for
+# why a CTE passed by name must be rejected.
+#
+# PHYLOGENY_FASTTREE_AVAILABLE is run_tests.sh's compile-time MIINT_HAS_GPL_BOUNDARY
+# gate, not a runtime-binary check: the guard fires in Bind, before any
+# gpl-boundary process is located, so GPL_BOUNDARY_AVAILABLE is not needed.
+#
+# Covers: align_bowtie2, align_bowtie2_sharded, phylogeny_fasttree, save_bowtie2_index
+#
+
+require miint
+
+require-env PHYLOGENY_FASTTREE_AVAILABLE
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM align_bowtie2('c', 'nope');
+----
+align_bowtie2: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM align_bowtie2('nope', 'c');
+----
+align_bowtie2: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM align_bowtie2_sharded('c', shard_directory := 'nope_dir', read_to_shard := 'nope');
+----
+align_bowtie2_sharded: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM align_bowtie2_sharded('nope', shard_directory := 'nope_dir', read_to_shard := 'c');
+----
+align_bowtie2_sharded: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM save_bowtie2_index('c', 'nope_dir');
+----
+save_bowtie2_index: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM phylogeny_fasttree('c');
+----
+phylogeny_fasttree: 'c' is a common table expression

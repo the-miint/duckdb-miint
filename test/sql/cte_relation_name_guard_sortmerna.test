@@ -1,0 +1,25 @@
+# name: test/sql/cte_relation_name_guard_sortmerna.test
+# description: CTE relation-name guard for functions built with SortMeRNA (MIINT_HAS_SORTMERNA)
+# group: [sql]
+
+#
+# The SortMeRNA (MIINT_HAS_SORTMERNA) half of test/sql/cte_relation_name_guard.test, split out only
+# because these functions are not registered without it. See that file for
+# why a CTE passed by name must be rejected.
+#
+# Covers: align_sortmerna, align_sortmerna_rrna
+#
+
+require miint
+
+require-env SORTMERNA_AVAILABLE
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM align_sortmerna('c', ref_paths := ['nope.fa']);
+----
+align_sortmerna: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM align_sortmerna_rrna('c');
+----
+align_sortmerna_rrna: 'c' is a common table expression

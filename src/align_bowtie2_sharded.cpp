@@ -495,6 +495,7 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 	}
 	auto bd = make_uniq<AlignBowtie2ShardedBindData>();
 	bd->query_table = input.inputs[0].ToString();
+	RejectCTERelationName(input, bd->query_table);
 
 	auto shard_dir_param = input.named_parameters.find("shard_directory");
 	if (shard_dir_param == input.named_parameters.end() || shard_dir_param->second.IsNull()) {
@@ -507,6 +508,7 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 		throw BinderException("align_bowtie2_sharded requires read_to_shard parameter");
 	}
 	bd->read_to_shard_table = read_to_shard_param->second.ToString();
+	RejectCTERelationName(input, bd->read_to_shard_table);
 
 	auto &fs = FileSystem::GetFileSystem(context);
 	if (!fs.DirectoryExists(bd->shard_directory)) {

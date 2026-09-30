@@ -8,6 +8,8 @@
 
 namespace duckdb {
 
+struct TableFunctionBindInput;
+
 struct TableOrViewColumns {
 	vector<string> names;
 	vector<LogicalType> types;
@@ -37,6 +39,22 @@ bool HasColumn(const TableOrViewColumns &columns, const std::string &col);
 // `function_name` prefixes the message and is quoted back as the remedy, matching
 // the convention at read_ncbi.cpp's assembly-accession error.
 void RejectRelationNameAsLiteral(ClientContext &context, const std::string &function_name, const std::string &literal);
+
+// Guard for every table-function argument that is the NAME of a relation to read.
+// Throws if `relation_name` names a CTE in scope at the call site; returns silently
+// otherwise. Call it in Bind, right where the name is extracted, before anything
+// resolves it.
+//
+// A CTE lives only in the binder of the query that defines it, while relation names
+// are resolved through the catalog and read over a helper connection — neither can
+// see it. Without this guard a CTE fails as "does not exist", or, when a table of
+// the same name exists, the TABLE is silently read instead of the CTE that SQL
+// scoping says the name means. Keyed off the caller's binder, so it honours scoping:
+// a view body cannot see the caller's CTEs, and inside a CTE's own body the name
+// still means the catalog relation; neither is rejected.
+//
+// The function name in the message is taken from input.table_function.
+void RejectCTERelationName(TableFunctionBindInput &input, const std::string &relation_name);
 
 // Make the caller's TEMP tables and views resolvable on a helper connection (#193).
 //

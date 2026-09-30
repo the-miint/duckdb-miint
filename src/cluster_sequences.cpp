@@ -1,4 +1,5 @@
 #include "cluster_sequences.hpp"
+#include "catalog_utils.hpp"
 #include "id_column_utils.hpp"
 #include "sequence_table_reader.hpp"
 
@@ -83,6 +84,7 @@ unique_ptr<FunctionData> ClusterSequencesTableFunction::Bind(ClientContext &cont
 	auto data = make_uniq<Data>();
 
 	data->input_table = input.inputs[0].GetValue<std::string>();
+	RejectCTERelationName(input, data->input_table);
 
 	// Validate table has read_id (VARCHAR, BIGINT, or UUID) and sequence1
 	// (VARCHAR). Capture the read_id type so the output id columns mirror it.

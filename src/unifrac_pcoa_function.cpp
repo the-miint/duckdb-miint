@@ -247,6 +247,8 @@ unique_ptr<FunctionData> UnifracPcoaBind(ClientContext &context, TableFunctionBi
                                          vector<LogicalType> &return_types, vector<string> &names) {
 	const std::string table_name = input.inputs[0].GetValue<string>();
 	const std::string tree_name = input.inputs[1].GetValue<string>();
+	RejectCTERelationName(input, table_name);
+	RejectCTERelationName(input, tree_name);
 	if (table_name.empty()) {
 		throw BinderException("unifrac_pcoa: feature-table name must not be empty");
 	}
@@ -512,6 +514,7 @@ void UnifracPcoaExecute(ClientContext &, TableFunctionInput &input, DataChunk &o
 unique_ptr<FunctionData> PcoaFromDistancesBind(ClientContext &context, TableFunctionBindInput &input,
                                                vector<LogicalType> &return_types, vector<string> &names) {
 	const std::string table_name = input.inputs[0].GetValue<string>();
+	RejectCTERelationName(input, table_name);
 	if (table_name.empty()) {
 		throw BinderException("pcoa: distance-table name must not be empty");
 	}
@@ -1176,6 +1179,7 @@ miint::progressive::DistanceBlock QueryDistanceBlock(ClientContext &context, con
 unique_ptr<FunctionData> ProgressivePcoaFromDistancesBind(ClientContext &context, TableFunctionBindInput &input,
                                                           vector<LogicalType> &return_types, vector<string> &names) {
 	const std::string table_name = input.inputs[0].GetValue<string>();
+	RejectCTERelationName(input, table_name);
 	if (table_name.empty()) {
 		throw BinderException("progressive_pcoa_from_distances: distance-table name must not be empty");
 	}
@@ -1931,6 +1935,8 @@ unique_ptr<FunctionData> ProgressivePcoaFromUnifracBind(ClientContext &context, 
                                                         vector<LogicalType> &return_types, vector<string> &names) {
 	const std::string table_name = input.inputs[0].GetValue<string>();
 	const std::string tree_name = input.inputs[1].GetValue<string>();
+	RejectCTERelationName(input, table_name);
+	RejectCTERelationName(input, tree_name);
 	if (table_name.empty()) {
 		throw BinderException("progressive_pcoa_from_unifrac: feature-table name must not be empty");
 	}
@@ -2141,6 +2147,7 @@ unique_ptr<FunctionData> ProgressivePcoaFromUnifracBind(ClientContext &context, 
 unique_ptr<FunctionData> ProgressivePcoaFromFeaturesBind(ClientContext &context, TableFunctionBindInput &input,
                                                          vector<LogicalType> &return_types, vector<string> &names) {
 	const std::string table_name = input.inputs[0].GetValue<string>();
+	RejectCTERelationName(input, table_name);
 	const std::string metric = StringUtil::Lower(input.inputs[1].GetValue<string>());
 	if (table_name.empty()) {
 		throw BinderException("progressive_pcoa_from_features: feature-table name must not be empty");

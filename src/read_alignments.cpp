@@ -1,4 +1,5 @@
 #include "read_alignments.hpp"
+#include "catalog_utils.hpp"
 #include "reference_table_reader.hpp"
 #include "remote_file_helper.hpp"
 #include "table_function_common.hpp"
@@ -74,6 +75,7 @@ unique_ptr<FunctionData> ReadAlignmentsTableFunction::Bind(ClientContext &contex
 		}
 
 		reference_lengths_table = table_value.ToString();
+		RejectCTERelationName(input, reference_lengths_table.value());
 
 		// Validate table or view exists (use TABLE_ENTRY lookup which returns either)
 		EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, reference_lengths_table.value(), QueryErrorContext());

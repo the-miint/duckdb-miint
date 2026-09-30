@@ -223,6 +223,7 @@ unique_ptr<FunctionData> MmvecRanksBind(ClientContext &context, TableFunctionBin
                                         vector<LogicalType> &return_types, vector<string> &names) {
 	auto data = make_uniq<MmvecRanksBindData>();
 	data->model_table = input.inputs[0].GetValue<string>();
+	RejectCTERelationName(input, data->model_table);
 	data->types = ResolveModelIdTypes(context, data->model_table, "mmvec_ranks");
 
 	// `rank` and `prob` side by side rather than as two functions: Probs is
@@ -348,6 +349,8 @@ unique_ptr<FunctionData> MmvecPredictBind(ClientContext &context, TableFunctionB
 	auto data = make_uniq<MmvecPredictBindData>();
 	data->model_table = input.inputs[0].GetValue<string>();
 	data->x_table = input.inputs[1].GetValue<string>();
+	RejectCTERelationName(input, data->model_table);
+	RejectCTERelationName(input, data->x_table);
 	data->types = ResolveModelIdTypes(context, data->model_table, "mmvec_predict");
 	data->sample_id_type = ResolveFeatureTableIdType(context, data->x_table, "sample_id", "mmvec_predict");
 
@@ -430,6 +433,9 @@ unique_ptr<FunctionData> MmvecScoreBind(ClientContext &context, TableFunctionBin
 	data->model_table = input.inputs[0].GetValue<string>();
 	data->x_table = input.inputs[1].GetValue<string>();
 	data->y_table = input.inputs[2].GetValue<string>();
+	RejectCTERelationName(input, data->model_table);
+	RejectCTERelationName(input, data->x_table);
+	RejectCTERelationName(input, data->y_table);
 
 	// Nothing here mirrors an id type -- the output is one number -- but all three
 	// relations are still validated at bind, so a mis-shaped input is a binder error

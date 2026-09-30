@@ -117,6 +117,7 @@ static unique_ptr<FunctionData> WoltkaOguBind(ClientContext &context, TableFunct
                                               vector<LogicalType> &return_types, vector<string> &names) {
 	auto data = make_uniq<WoltkaOguData>();
 	data->source = input.inputs[0].GetValue<string>();
+	RejectCTERelationName(input, data->source);
 	data->seq_id_col = input.inputs[1].GetValue<string>();
 
 	if (data->source.empty()) {

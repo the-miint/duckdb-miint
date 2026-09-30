@@ -1,4 +1,5 @@
 #include "unifrac_table_functions.hpp"
+#include "catalog_utils.hpp"
 
 #include <climits>
 #include <memory>
@@ -112,6 +113,8 @@ unique_ptr<FunctionData> UnifracDistancesBind(ClientContext &context, TableFunct
                                               vector<LogicalType> &return_types, vector<string> &names) {
 	const std::string table_name = input.inputs[0].GetValue<string>();
 	const std::string tree_name = input.inputs[1].GetValue<string>();
+	RejectCTERelationName(input, table_name);
+	RejectCTERelationName(input, tree_name);
 	if (table_name.empty()) {
 		throw BinderException("unifrac_distances: feature-table name must not be empty");
 	}

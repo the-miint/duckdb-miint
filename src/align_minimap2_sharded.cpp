@@ -1,4 +1,5 @@
 #include "align_minimap2_sharded.hpp"
+#include "catalog_utils.hpp"
 #include "align_common.hpp"
 #include "shard_debug.hpp"
 #include "shard_progress.hpp"
@@ -54,6 +55,7 @@ unique_ptr<FunctionData> AlignMinimap2ShardedTableFunction::Bind(ClientContext &
 		throw BinderException("align_minimap2_sharded requires query_table parameter");
 	}
 	data->query_table = input.inputs[0].ToString();
+	RejectCTERelationName(input, data->query_table);
 
 	// Required: shard_directory named parameter
 	auto shard_dir_param = input.named_parameters.find("shard_directory");
@@ -68,6 +70,7 @@ unique_ptr<FunctionData> AlignMinimap2ShardedTableFunction::Bind(ClientContext &
 		throw BinderException("align_minimap2_sharded requires read_to_shard parameter");
 	}
 	data->read_to_shard_table = read_to_shard_param->second.ToString();
+	RejectCTERelationName(input, data->read_to_shard_table);
 
 	// Validate shard_directory exists
 	auto &fs = FileSystem::GetFileSystem(context);

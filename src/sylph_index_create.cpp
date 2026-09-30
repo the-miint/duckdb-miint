@@ -73,6 +73,7 @@ unique_ptr<FunctionData> SylphIndexCreateTableFunction::Bind(ClientContext &cont
 		throw BinderException("sylph_index_create requires source_table and output_path parameters");
 	}
 	data->source_table = input.inputs[0].ToString();
+	RejectCTERelationName(input, data->source_table);
 	data->output_path = input.inputs[1].ToString();
 
 	// genome_id is required — it defines what a genome is.

@@ -446,6 +446,7 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 		throw InvalidInputException("phylogeny_fasttree: a non-NULL input table name is required");
 	}
 	const std::string table_name = input.inputs[0].GetValue<std::string>();
+	RejectCTERelationName(input, table_name);
 
 	auto bind_data = make_uniq<PhylogenyFastTreeBindData>();
 	bind_data->table_name = table_name;

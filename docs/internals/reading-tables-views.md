@@ -227,6 +227,31 @@ silently returns 0 rows for the same construct, which is its own defect.
 
 The user-facing remedy is to materialize first — `.read_all()`, or a TEMP table.
 
+## CTEs: reject them in Bind
+
+A CTE exists only in the binder of the query that defines it. It is not a catalog
+object, and no helper connection can see it, so a relation name that means a CTE
+can never be read by this recipe. Left alone, it fails in one of two ways: "does
+not exist", or — when a table or view of the same name exists — the function
+silently reads *that* instead of the CTE SQL scoping says the name refers to.
+
+So every relation-name argument calls `RejectCTERelationName(input, name)`
+(`src/include/catalog_utils.hpp`) in `Bind`, on the line after the name is
+extracted and before anything resolves it. It checks the caller's binder
+(`TableFunctionBindInput::binder`) the way `Binder::Bind(BaseTableRef)` does, so it
+follows SQL scoping. A view body cannot see the caller's CTEs. Inside a CTE's own
+body, or a recursive CTE's anchor, the name still means the catalog relation:
+DuckDB marks that self-binding `CANNOT_BE_REFERENCED`. Neither case is rejected. COPY
+options have no binder and no CTE in scope, so they need nothing.
+
+When adding a relation-name argument, add a case for it to
+`test/sql/cte_relation_name_guard.test` (or the `_<feature>` sibling if the
+function is registered only with an optional dependency). Each case passes the CTE
+in exactly one argument, so it fails if that argument's guard is missing.
+
+Actually *reading* a CTE needs a `LogicalType::TABLE` in-out sibling per function
+and cannot be applied mechanically — see #286.
+
 ## Schema Validation for Tables/Views
 
 ```cpp

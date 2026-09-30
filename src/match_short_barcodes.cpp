@@ -190,6 +190,8 @@ static unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindIn
 	auto data = make_uniq<MatchData>();
 	data->query_table = input.inputs[0].GetValue<std::string>();
 	data->ref_table = input.inputs[1].GetValue<std::string>();
+	RejectCTERelationName(input, data->query_table);
+	RejectCTERelationName(input, data->ref_table);
 
 	ValidateTableExists(context, data->query_table);
 	ValidateTableExists(context, data->ref_table);

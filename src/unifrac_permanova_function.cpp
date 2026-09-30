@@ -276,6 +276,9 @@ unique_ptr<FunctionData> UnifracPermanovaBind(ClientContext &context, TableFunct
 	const std::string table_name = input.inputs[0].GetValue<string>();
 	const std::string tree_name = input.inputs[1].GetValue<string>();
 	const std::string metadata_name = input.inputs[2].GetValue<string>();
+	RejectCTERelationName(input, table_name);
+	RejectCTERelationName(input, tree_name);
+	RejectCTERelationName(input, metadata_name);
 	if (table_name.empty() || tree_name.empty() || metadata_name.empty()) {
 		throw BinderException("unifrac_permanova: all three positional arguments (table, tree, metadata) "
 		                      "must be non-empty");
@@ -464,6 +467,8 @@ unique_ptr<FunctionData> PermanovaFromDistancesBind(ClientContext &context, Tabl
                                                     vector<LogicalType> &return_types, vector<string> &names) {
 	const std::string table_name = input.inputs[0].GetValue<string>();
 	const std::string metadata_name = input.inputs[1].GetValue<string>();
+	RejectCTERelationName(input, table_name);
+	RejectCTERelationName(input, metadata_name);
 	if (table_name.empty() || metadata_name.empty()) {
 		throw BinderException("permanova: both positional arguments (distances, metadata) must be non-empty");
 	}

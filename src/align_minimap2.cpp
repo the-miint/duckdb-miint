@@ -1,4 +1,5 @@
 #include "align_minimap2.hpp"
+#include "catalog_utils.hpp"
 #include "align_common.hpp"
 #include "shard_debug.hpp"
 #include "duckdb/common/printer.hpp"
@@ -21,11 +22,13 @@ unique_ptr<FunctionData> AlignMinimap2TableFunction::Bind(ClientContext &context
 	}
 
 	data->query_table = input.inputs[0].ToString();
+	RejectCTERelationName(input, data->query_table);
 
 	// Parse subject_table named parameter
 	auto subject_param = input.named_parameters.find("subject_table");
 	if (subject_param != input.named_parameters.end() && !subject_param->second.IsNull()) {
 		data->subject_table = subject_param->second.ToString();
+		RejectCTERelationName(input, data->subject_table);
 	}
 
 	// Parse index_path named parameter

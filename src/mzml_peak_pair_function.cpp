@@ -52,6 +52,7 @@ static unique_ptr<FunctionData> PeakPairBind(ClientContext &context, TableFuncti
 	auto data = make_uniq<MzmlPeakPairData>();
 
 	auto relation = input.inputs[0].GetValue<string>();
+	RejectCTERelationName(input, relation);
 	auto formula_str = input.inputs[1].GetValue<string>();
 
 	auto quoted_relation = KeywordHelper::WriteOptionallyQuoted(relation);

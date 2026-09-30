@@ -43,6 +43,7 @@ unique_ptr<FunctionData> ClusterKmeansBind(ClientContext &context, TableFunction
                                            vector<LogicalType> &return_types, vector<string> &names) {
 	auto data = make_uniq<ClusterKmeansBindData>();
 	data->table_name = input.inputs[0].GetValue<string>();
+	RejectCTERelationName(input, data->table_name);
 
 	bool has_k = false;
 	for (auto &kv : input.named_parameters) {

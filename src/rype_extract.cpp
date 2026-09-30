@@ -47,6 +47,7 @@ static unique_ptr<RypeExtractData> BindExtraction(ClientContext &context, TableF
 	}
 
 	data->sequence_table = input.inputs[0].ToString();
+	RejectCTERelationName(input, data->sequence_table);
 	data->k = static_cast<size_t>(input.inputs[1].GetValue<int64_t>());
 	data->w = static_cast<size_t>(input.inputs[2].GetValue<int64_t>());
 

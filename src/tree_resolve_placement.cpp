@@ -1,4 +1,5 @@
 #include "tree_resolve_placement.hpp"
+#include "catalog_utils.hpp"
 #include "placement_table_reader.hpp"
 #include "tree_table_reader.hpp"
 #include "duckdb/common/vector_size.hpp"
@@ -16,6 +17,8 @@ unique_ptr<FunctionData> TreeResolvePlacementTableFunction::Bind(ClientContext &
                                                                  vector<std::string> &names) {
 	auto tree_table_name = input.inputs[0].ToString();
 	auto placements_table_name = input.inputs[1].ToString();
+	RejectCTERelationName(input, tree_table_name);
+	RejectCTERelationName(input, placements_table_name);
 
 	// Validate schemas at bind time for early error detection
 	ValidateTreeTableSchema(context, tree_table_name);

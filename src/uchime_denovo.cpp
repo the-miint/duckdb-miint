@@ -169,6 +169,7 @@ unique_ptr<FunctionData> UchimeDenovoTableFunction::Bind(ClientContext &context,
 	auto data = make_uniq<Data>();
 
 	data->input_table = input.inputs[0].GetValue<std::string>();
+	RejectCTERelationName(input, data->input_table);
 
 	auto get_col_override = [&](const std::string &param_name, std::string &out) {
 		auto it = input.named_parameters.find(param_name);

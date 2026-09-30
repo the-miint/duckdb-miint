@@ -1,4 +1,5 @@
 #include "cluster_upgma.hpp"
+#include "catalog_utils.hpp"
 
 #include "unifrac_function_common.hpp"
 
@@ -42,6 +43,7 @@ unique_ptr<FunctionData> ClusterUpgmaBind(ClientContext &, TableFunctionBindInpu
                                           vector<LogicalType> &return_types, vector<string> &names) {
 	auto data = make_uniq<ClusterUpgmaBindData>();
 	data->table_name = input.inputs[0].GetValue<string>();
+	RejectCTERelationName(input, data->table_name);
 
 	// Emit the read_newick tree-table schema verbatim, so cluster_upgma output is
 	// a valid tree table for every downstream tree consumer.

@@ -75,6 +75,8 @@ unique_ptr<FunctionData> ShearTreeTableFunction::Bind(ClientContext &context, Ta
                                                       vector<LogicalType> &return_types, vector<std::string> &names) {
 	auto tree_table_name = input.inputs[0].ToString();
 	auto tips_table_name = input.inputs[1].ToString();
+	RejectCTERelationName(input, tree_table_name);
+	RejectCTERelationName(input, tips_table_name);
 
 	// Validate schemas at bind time for early error detection.
 	ValidateTreeTableSchema(context, tree_table_name);

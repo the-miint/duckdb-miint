@@ -767,6 +767,7 @@ unique_ptr<FunctionData> Bind(ClientContext &, TableFunctionBindInput &input, ve
 	};
 
 	get_string_param("relation", bind->relation_name, /*required=*/true);
+	RejectCTERelationName(input, bind->relation_name);
 	get_string_param("secret", bind->secret_name, /*required=*/false);
 	string target_url = "aspera://webin2.ebi.ac.uk/";
 	get_string_param("target_url", target_url, /*required=*/false);

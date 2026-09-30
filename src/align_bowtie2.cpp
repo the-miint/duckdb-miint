@@ -247,6 +247,8 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 	auto bd = make_uniq<AlignBowtie2BindData>();
 	bd->query_table = input.inputs[0].ToString();
 	bd->subject_table = input.inputs[1].ToString();
+	RejectCTERelationName(input, bd->query_table);
+	RejectCTERelationName(input, bd->subject_table);
 
 	// Validate query + subject tables (existence + read_id type). Both may
 	// be VARCHAR or BIGINT; the captured types drive the output schema and

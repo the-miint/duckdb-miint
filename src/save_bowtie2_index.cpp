@@ -1,4 +1,5 @@
 #include "save_bowtie2_index.hpp"
+#include "catalog_utils.hpp"
 
 #include "align_bowtie2_daemon_common.hpp"
 #include "sequence_table_reader.hpp"
@@ -57,6 +58,7 @@ unique_ptr<FunctionData> SaveBowtie2IndexTableFunction::Bind(ClientContext &cont
 		throw BinderException("save_bowtie2_index requires subject_table and output_path parameters");
 	}
 	data->subject_table = input.inputs[0].ToString();
+	RejectCTERelationName(input, data->subject_table);
 	data->output_path = input.inputs[1].ToString();
 
 	// Validate the subject table exists and has the right column types (read_id

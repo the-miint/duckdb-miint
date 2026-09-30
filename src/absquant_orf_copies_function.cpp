@@ -67,6 +67,9 @@ unique_ptr<FunctionData> AbsQuantOrfCopiesBind(ClientContext &context, TableFunc
 	data->counts_table = input.inputs[0].GetValue<string>();
 	data->coords_table = input.inputs[1].GetValue<string>();
 	data->params_table = input.inputs[2].GetValue<string>();
+	RejectCTERelationName(input, data->counts_table);
+	RejectCTERelationName(input, data->coords_table);
+	RejectCTERelationName(input, data->params_table);
 
 	// No options and no named parameters: pysyndna exposes exactly one metric
 	// for this workflow, and there is no threshold to set -- no standard curve,

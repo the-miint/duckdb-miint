@@ -39,12 +39,14 @@ unique_ptr<FunctionData> UchimeRefTableFunction::Bind(ClientContext &context, Ta
 	auto data = make_uniq<Data>();
 
 	data->query_table = input.inputs[0].GetValue<std::string>();
+	RejectCTERelationName(input, data->query_table);
 
 	auto db_it = input.named_parameters.find("db");
 	if (db_it == input.named_parameters.end()) {
 		throw BinderException("detect_chimera_uchime requires 'db' parameter (reference table name)");
 	}
 	data->ref_table = db_it->second.GetValue<std::string>();
+	RejectCTERelationName(input, data->ref_table);
 
 	// read_id mirrors the query table's id type; the parent id columns mirror the
 	// reference table's id type. Accept VARCHAR/BIGINT/UUID for both.

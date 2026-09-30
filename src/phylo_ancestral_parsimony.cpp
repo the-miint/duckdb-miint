@@ -125,6 +125,8 @@ unique_ptr<FunctionData> PhyloAncestralParsimonyTableFunction::Bind(ClientContex
                                                                     vector<std::string> &names) {
 	auto tree_table_name = input.inputs[0].ToString();
 	auto traits_table_name = input.inputs[1].ToString();
+	RejectCTERelationName(input, tree_table_name);
+	RejectCTERelationName(input, traits_table_name);
 
 	// Validate schemas at bind time for early error detection.
 	ValidateTreeTableSchema(context, tree_table_name);
@@ -135,6 +137,7 @@ unique_ptr<FunctionData> PhyloAncestralParsimonyTableFunction::Bind(ClientContex
 	if (input.inputs.size() >= 3) {
 		data->has_cost_matrix = true;
 		data->cost_matrix_table_name = input.inputs[2].ToString();
+		RejectCTERelationName(input, data->cost_matrix_table_name);
 		auto info = GetTableOrViewColumns(context, data->cost_matrix_table_name, "Cost matrix table");
 		for (const char *required : {"from_state", "to_state", "cost"}) {
 			if (!HasColumn(info, required)) {

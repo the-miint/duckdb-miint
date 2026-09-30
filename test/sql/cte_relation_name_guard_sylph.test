@@ -1,0 +1,25 @@
+# name: test/sql/cte_relation_name_guard_sylph.test
+# description: CTE relation-name guard for functions built with sylph (MIINT_HAS_SYLPH)
+# group: [sql]
+
+#
+# The sylph (MIINT_HAS_SYLPH) half of test/sql/cte_relation_name_guard.test, split out only
+# because these functions are not registered without it. See that file for
+# why a CTE passed by name must be rejected.
+#
+# Covers: sylph_index_create, sylph_profile
+#
+
+require miint
+
+require-env SYLPH_AVAILABLE
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM sylph_index_create('c', 'nope.syldb');
+----
+sylph_index_create: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM sylph_profile('c', 'nope.syldb');
+----
+sylph_profile: 'c' is a common table expression

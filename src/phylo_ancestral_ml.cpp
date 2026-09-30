@@ -1,4 +1,5 @@
 #include "phylo_ancestral_ml.hpp"
+#include "catalog_utils.hpp"
 #include "tree_table_reader.hpp"
 #include "phylo_traits_reader.hpp"
 #include "NewickTree.hpp"
@@ -38,6 +39,8 @@ unique_ptr<FunctionData> PhyloAncestralMLTableFunction::Bind(ClientContext &cont
                                                              vector<std::string> &names) {
 	auto tree_table_name = input.inputs[0].ToString();
 	auto traits_table_name = input.inputs[1].ToString();
+	RejectCTERelationName(input, tree_table_name);
+	RejectCTERelationName(input, traits_table_name);
 
 	ValidateTreeTableSchema(context, tree_table_name);
 	ValidateTraitsTableSchema(context, traits_table_name);

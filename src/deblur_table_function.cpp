@@ -91,6 +91,7 @@ static unique_ptr<FunctionData> DeblurBind(ClientContext &context, TableFunction
                                            vector<LogicalType> &return_types, vector<std::string> &names) {
 	auto data = make_uniq<DeblurData>();
 	data->input_table = input.inputs[0].GetValue<std::string>();
+	RejectCTERelationName(input, data->input_table);
 
 	auto get_col_override = [&](const std::string &param_name, std::string &out) {
 		auto it = input.named_parameters.find(param_name);

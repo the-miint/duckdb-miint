@@ -53,6 +53,7 @@ unique_ptr<FunctionData> PickAnchorsBind(ClientContext &context, TableFunctionBi
                                          vector<LogicalType> &return_types, vector<string> &names) {
 	auto data = make_uniq<PickAnchorsData>();
 	data->table_name = input.inputs[0].GetValue<string>();
+	RejectCTERelationName(input, data->table_name);
 	if (data->table_name.empty()) {
 		throw BinderException("pick_anchors: coordinate-table name must not be empty");
 	}

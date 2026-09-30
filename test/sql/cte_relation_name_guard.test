@@ -1,0 +1,525 @@
+# name: test/sql/cte_relation_name_guard.test
+# description: Relation-name parameters must reject a CTE of that name instead of misreading it
+# group: [sql]
+
+#
+# WHY THIS MATTERS
+#
+# Every miint function that takes a relation *by name* resolves it through the
+# catalog and reads it over a helper connection (see
+# docs/internals/reading-tables-views.md). A CTE is neither: it exists only in
+# the binder of the query that defines it. So a CTE passed by name can never be
+# read, and there are two failure modes:
+#
+#   1. No catalog relation shares the name -> "Table or view 'toy' does not
+#      exist", while the user is looking at `WITH toy AS (...)`.
+#   2. A catalog relation DOES share the name -> the function silently reads
+#      the TABLE, not the CTE that SQL scoping says the name refers to. This is
+#      a wrong answer with no error, and is the reason the guard exists.
+#
+# The guard (RejectCTERelationName, src/catalog_utils.cpp) runs in Bind, where
+# DuckDB hands table functions the caller's binder, and rejects any
+# relation-name argument that names a CTE in scope.
+#
+# Actually reading a CTE is tracked in #286. When a function gains that, flip
+# its case below from `statement error` to a result check rather than deleting it.
+#
+
+require miint
+
+statement ok
+CREATE TABLE foo (read_id VARCHAR, sequence1 VARCHAR, abundance BIGINT);
+
+statement ok
+INSERT INTO foo VALUES ('a', 'AATTGGCC', 10), ('b', 'ATATATAT', 20), ('c', 'AATTGGGG', 30);
+
+# Control: the table by name works, and deblur folds 'a' into 'c' (10 -> 9).
+query III
+SELECT read_id, sequence, abundance FROM deblur('foo') ORDER BY read_id;
+----
+a	AATTGGCC	9
+b	ATATATAT	20
+c	AATTGGGG	30
+
+# ==============================================================================
+# Failure mode 2: a CTE shadowing a real table must not be silently ignored.
+# Before the guard this returned all three rows of TABLE foo, although the CTE
+# holds only 'c'.
+# ==============================================================================
+
+statement error
+WITH foo AS (SELECT * FROM foo WHERE read_id = 'c') SELECT * FROM deblur('foo');
+----
+is a common table expression
+
+# ==============================================================================
+# Failure mode 1: a CTE with no catalog namesake gets the CTE error, not
+# "does not exist". This is the form from the original report.
+# ==============================================================================
+
+statement error
+WITH toy AS (SELECT * FROM foo),
+     deblurred AS (SELECT * FROM deblur('toy'))
+SELECT * FROM deblurred;
+----
+is a common table expression
+
+# SQL identifiers are case-insensitive, so the CTE `Toy` is the relation 'toy'.
+statement error
+WITH Toy AS (SELECT * FROM foo) SELECT * FROM deblur('toy');
+----
+is a common table expression
+
+# An outer CTE is in scope inside a FROM-clause subquery.
+statement error
+WITH toy AS (SELECT * FROM foo) SELECT * FROM (SELECT * FROM deblur('toy'));
+----
+is a common table expression
+
+# The per-sample path extracts the same argument.
+statement error
+WITH toy AS (SELECT *, 's1' AS sample FROM foo) SELECT * FROM deblur('toy', sample_id := 'sample');
+----
+is a common table expression
+
+# ==============================================================================
+# Controls: the guard follows SQL scoping, not string matching.
+# ==============================================================================
+
+# An unrelated CTE in the same query does not trip it.
+query III
+WITH other AS (SELECT 1 AS x) SELECT read_id, sequence, abundance FROM deblur('foo') ORDER BY read_id;
+----
+a	AATTGGCC	9
+b	ATATATAT	20
+c	AATTGGGG	30
+
+# Inside a CTE's own body its name is not yet in scope: plain SQL resolves
+# `WITH foo AS (SELECT * FROM foo)` to TABLE foo, so a relation-name argument
+# there must read the table too, not be rejected. DuckDB marks that self-binding
+# CANNOT_BE_REFERENCED; the guard must honour it as Binder::Bind(BaseTableRef)
+# does. The expected counts are what the same queries give with plain
+# `FROM foo` in place of deblur('foo').
+query I
+WITH foo AS (SELECT * FROM deblur('foo')) SELECT count(*) FROM foo;
+----
+3
+
+query I
+WITH foo AS MATERIALIZED (SELECT * FROM deblur('foo')) SELECT count(*) FROM foo;
+----
+3
+
+# A recursive CTE's anchor also sees the table: 3 anchor rows, each recursed once.
+query I
+WITH RECURSIVE foo(read_id, n) AS (
+    SELECT read_id, 1 FROM deblur('foo')
+    UNION ALL SELECT read_id, n + 1 FROM foo WHERE n < 2
+) SELECT count(*) FROM foo;
+----
+6
+
+# ...but in the recursive term the name IS the CTE (its working table), so the
+# guard must still fire there.
+statement error
+WITH RECURSIVE foo(read_id, n) AS (
+    SELECT read_id, 1 FROM foo
+    UNION ALL SELECT d.read_id, 9 FROM deblur('foo') d WHERE false
+) SELECT count(*) FROM foo;
+----
+is a common table expression
+
+# A view body is bound in its own scope, so a caller's CTE does not reach a
+# relation name inside it: the view reads TABLE foo, exactly as a plain
+# `SELECT * FROM foo` inside the view would. Rejecting here would be wrong.
+statement ok
+CREATE VIEW deblurred_foo AS SELECT * FROM deblur('foo');
+
+query III
+WITH foo AS (SELECT * FROM foo WHERE read_id = 'c') SELECT read_id, sequence, abundance FROM deblurred_foo ORDER BY read_id;
+----
+a	AATTGGCC	9
+b	ATATATAT	20
+c	AATTGGGG	30
+
+# The remedy the error message names, followed literally in the shadowing case.
+# It must suggest a NEW name: this CTE's body reads TABLE foo, so a view that
+# reused the name 'foo' would reference itself and never bind.
+statement error
+WITH foo AS (SELECT * FROM foo WHERE read_id = 'c') SELECT * FROM deblur('foo');
+----
+e.g. CREATE TEMP VIEW foo_view AS
+
+statement ok
+CREATE TEMP VIEW foo_view AS SELECT * FROM foo WHERE read_id = 'c';
+
+# ...and it yields exactly what the CTE meant: 'c' alone.
+query III
+SELECT read_id, sequence, abundance FROM deblur('foo_view');
+----
+c	AATTGGGG	30
+
+# ==============================================================================
+# A second shadowing case, through a different reader family
+# (tree_table_reader rather than deblur's own schema check).
+# ==============================================================================
+
+statement ok
+CREATE TABLE gtree AS SELECT * FROM (VALUES
+    (0, 'A',    CAST(NULL AS DOUBLE), CAST(NULL AS BIGINT), 2),
+    (1, 'B',    NULL, NULL, 2),
+    (2, 'E',    NULL, NULL, 4),
+    (3, 'C',    NULL, NULL, 4),
+    (4, 'root', NULL, NULL, NULL)
+) AS v(node_index, name, branch_length, edge_id, parent_index);
+
+statement ok
+CREATE TABLE gtraits AS SELECT * FROM (VALUES
+    ('A', 't', '0'), ('B', 't', '1'), ('C', 't', '0')
+) AS v(name, trait, value);
+
+# Control: the table itself resolves.
+query I
+SELECT count(*) > 0 FROM tree_resolve_multifurcations('gtree');
+----
+true
+
+statement error
+WITH gtree AS (SELECT * FROM gtree WHERE node_index < 2) SELECT * FROM tree_resolve_multifurcations('gtree');
+----
+is a common table expression
+
+# ==============================================================================
+# Every relation-name argument of every always-registered table function.
+#
+# Each case passes the CTE `c` in exactly ONE relation position and a name that
+# is not a CTE ('nope') in every other, so the expected message -- which names
+# both the function and 'c' -- pins which argument's guard fired. Without that
+# argument's guard the call fails differently ("does not exist" or similar),
+# so each case fails if its guard is removed.
+#
+# Functions registered only with an optional dependency live in the sibling
+# files test/sql/cte_relation_name_guard_<feature>.test.
+# ==============================================================================
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM absquant_fit_models('c', 'nope', 'nope', 0.5);
+----
+absquant_fit_models: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM absquant_fit_models('nope', 'c', 'nope', 0.5);
+----
+absquant_fit_models: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM absquant_fit_models('nope', 'nope', 'c', 0.5);
+----
+absquant_fit_models: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM absquant_cell_counts('c', 'nope', 'nope', 'nope', 'nope', 'x', 0.5);
+----
+absquant_cell_counts: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM absquant_cell_counts('nope', 'c', 'nope', 'nope', 'nope', 'x', 0.5);
+----
+absquant_cell_counts: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM absquant_cell_counts('nope', 'nope', 'c', 'nope', 'nope', 'x', 0.5);
+----
+absquant_cell_counts: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM absquant_cell_counts('nope', 'nope', 'nope', 'c', 'nope', 'x', 0.5);
+----
+absquant_cell_counts: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM absquant_cell_counts('nope', 'nope', 'nope', 'nope', 'c', 'x', 0.5);
+----
+absquant_cell_counts: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM absquant_orf_copies('c', 'nope', 'nope');
+----
+absquant_orf_copies: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM absquant_orf_copies('nope', 'c', 'nope');
+----
+absquant_orf_copies: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM absquant_orf_copies('nope', 'nope', 'c');
+----
+absquant_orf_copies: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM alignment_slice('c', 0, 10);
+----
+alignment_slice: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM align_minimap2('c', subject_table := 'nope');
+----
+align_minimap2: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM align_minimap2('nope', subject_table := 'c');
+----
+align_minimap2: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM align_minimap2_sharded('c', shard_directory := 'nope_dir', read_to_shard := 'nope');
+----
+align_minimap2_sharded: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM align_minimap2_sharded('nope', shard_directory := 'nope_dir', read_to_shard := 'c');
+----
+align_minimap2_sharded: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM blast('c');
+----
+blast: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM cluster_kmeans('c');
+----
+cluster_kmeans: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM cluster_upgma('c');
+----
+cluster_upgma: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM community_distances('c', 'braycurtis');
+----
+community_distances: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM compute_pileup('c', 'nope');
+----
+compute_pileup: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM compute_pileup('nope', 'c');
+----
+compute_pileup: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM ena_upload_reads(relation := 'c');
+----
+ena_upload_reads: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM massql('QUERY scaninfo(MS1DATA)', 'c');
+----
+massql: 'c' is a common table expression
+
+# massql cannot read TEMP relations at all (#207), so for it the message must not
+# stop at the TEMP VIEW example.
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM massql('QUERY scaninfo(MS1DATA)', 'c');
+----
+#207: use CREATE VIEW or CREATE TABLE there
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM match_short_barcodes('c', 'nope');
+----
+match_short_barcodes: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM match_short_barcodes('nope', 'c');
+----
+match_short_barcodes: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM mmvec_fit('c', 'nope');
+----
+mmvec_fit: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM mmvec_fit('nope', 'c');
+----
+mmvec_fit: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM mmvec_predict('c', 'nope');
+----
+mmvec_predict: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM mmvec_predict('nope', 'c');
+----
+mmvec_predict: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM mmvec_ranks('c');
+----
+mmvec_ranks: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM mmvec_score('c', 'nope', 'nope');
+----
+mmvec_score: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM mmvec_score('nope', 'c', 'nope');
+----
+mmvec_score: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM mmvec_score('nope', 'nope', 'c');
+----
+mmvec_score: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM mzml_peak_pair('c', 'C6H12O6');
+----
+mzml_peak_pair: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM phylo_ancestral_ml('c', 'nope');
+----
+phylo_ancestral_ml: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM phylo_ancestral_ml('nope', 'c');
+----
+phylo_ancestral_ml: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM phylo_ancestral_parsimony('c', 'nope');
+----
+phylo_ancestral_parsimony: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM phylo_ancestral_parsimony('nope', 'c');
+----
+phylo_ancestral_parsimony: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM phylo_ancestral_parsimony('gtree', 'gtraits', 'c');
+----
+phylo_ancestral_parsimony: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM phylo_ancestral_states('c', 'nope');
+----
+phylo_ancestral_states: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM phylo_ancestral_states('nope', 'c');
+----
+phylo_ancestral_states: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM phylo_independent_contrasts('c', 'nope');
+----
+phylo_independent_contrasts: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM phylo_independent_contrasts('nope', 'c');
+----
+phylo_independent_contrasts: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM pick_anchors('c');
+----
+pick_anchors: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM procrustes('c', 'nope');
+----
+procrustes: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM procrustes('nope', 'c');
+----
+procrustes: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM procrustes('nope', 'nope', pairing := 'c');
+----
+procrustes: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM read_alignments('data/sam/foo_has_header.sam', reference_lengths := 'c');
+----
+read_alignments: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM read_sam('data/sam/foo_has_header.sam', reference_lengths := 'c');
+----
+read_sam: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM rype_classify('nope.ryxdi', 'c');
+----
+rype_classify: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM rype_extract_minimizer_set('c', 16, 8);
+----
+rype_extract_minimizer_set: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM rype_extract_strand_minimizers('c', 16, 8);
+----
+rype_extract_strand_minimizers: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM rype_index_create('c', 'nope_dir/out.ryxdi');
+----
+rype_index_create: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM rype_index_create('nope', 'nope_dir/out.ryxdi', mapping_table := 'c');
+----
+rype_index_create: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM rype_log_ratio('nope_a.ryxdi', 'nope_b.ryxdi', 'c');
+----
+rype_log_ratio: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM save_minimap2_index('c', 'nope_dir/out.mmi');
+----
+save_minimap2_index: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM shear_tree('c', 'nope');
+----
+shear_tree: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM shear_tree('nope', 'c');
+----
+shear_tree: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM tree_resolve_multifurcations('c');
+----
+tree_resolve_multifurcations: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM tree_resolve_placement('c', 'nope');
+----
+tree_resolve_placement: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM tree_resolve_placement('nope', 'c');
+----
+tree_resolve_placement: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM woltka_ogu('c', 'seq_id');
+----
+woltka_ogu: 'c' is a common table expression

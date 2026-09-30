@@ -70,6 +70,7 @@ unique_ptr<FunctionData> RypeLogRatioTableFunction::Bind(ClientContext &context,
 		throw BinderException("rype_log_ratio requires sequence_table parameter");
 	}
 	data->sequence_table = input.inputs[2].ToString();
+	RejectCTERelationName(input, data->sequence_table);
 
 	// Optional: id_column (defaults to 'read_id')
 	auto id_col_param = input.named_parameters.find("id_column");

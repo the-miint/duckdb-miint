@@ -277,10 +277,14 @@ unique_ptr<FunctionData> KreppIndexCreateTableFunction::Bind(ClientContext &cont
 		throw BinderException("%s requires sequence_table and output_path parameters", kCallerName);
 	}
 	data->sequence_table = input.inputs[0].ToString();
+	RejectCTERelationName(input, data->sequence_table);
 	data->output_path = input.inputs[1].ToString();
 
 	ReadOptional<std::string>(input.named_parameters, "tree_table", data->tree_table,
 	                          [](const Value &v) { return v.ToString(); });
+	if (!data->tree_table.empty()) {
+		RejectCTERelationName(input, data->tree_table);
+	}
 	ReadOptional<std::string>(input.named_parameters, "newick_path", data->newick_path,
 	                          [](const Value &v) { return v.ToString(); });
 

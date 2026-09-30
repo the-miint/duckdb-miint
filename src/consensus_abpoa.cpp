@@ -63,6 +63,7 @@ static unique_ptr<FunctionData> ConsensusAbpoaBind(ClientContext &context, Table
 		throw BinderException("consensus_abpoa requires a sequence table name argument");
 	}
 	auto table_name = input.inputs[0].ToString();
+	RejectCTERelationName(input, table_name);
 
 	auto schema = ValidateSequenceTableSchema(context, table_name);
 	if (schema.has_sequence2) {

@@ -95,6 +95,11 @@ unique_ptr<FunctionData> AbsQuantCellCountsBind(ClientContext &context, TableFun
 	data->coverage_table = input.inputs[2].GetValue<string>();
 	data->lengths_table = input.inputs[3].GetValue<string>();
 	data->params_table = input.inputs[4].GetValue<string>();
+	RejectCTERelationName(input, data->counts_table);
+	RejectCTERelationName(input, data->models_table);
+	RejectCTERelationName(input, data->coverage_table);
+	RejectCTERelationName(input, data->lengths_table);
+	RejectCTERelationName(input, data->params_table);
 	data->options.min_coverage = input.inputs[6].GetValue<double>();
 	for (const auto &kv : input.named_parameters) {
 		if (StringUtil::Lower(kv.first) == "min_rsquared") {
