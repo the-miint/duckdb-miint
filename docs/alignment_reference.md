@@ -698,7 +698,7 @@ Trade-offs specific to multi-part indexes:
 
 A single-part `.mmi` (the default output of `minimap2 -d` with no `-I`, and always the case for `save_minimap2_index()`) is unaffected — behavior and performance are unchanged.
 
-`align_minimap2_sharded` handles a multi-part shard the same way, using the same part-streaming machinery (one cursor per shard): every read assigned to that shard is aligned against each of its parts in turn, and the shard's parts are dropped one at a time exactly as above. The reads assigned to a shard are already held in memory for the shard's lifetime, so no additional snapshot is needed. Peak index memory in sharded mode is therefore `ceil(threads / max_threads_per_shard)` concurrently active shards × the **largest single part** among them, rather than × the whole shard index.
+`align_minimap2_sharded` handles a multi-part shard the same way, using the same part-streaming machinery (one cursor per shard): every read assigned to that shard is aligned against each of its parts in turn, and the shard's parts are dropped one at a time exactly as above. The shard's reads are streamed again from the query snapshot for each part (see *Sharded alignment with minimap2* below), so they are never held in memory whole. Peak index memory in sharded mode is therefore `ceil(threads / max_threads_per_shard)` concurrently active shards × the **largest single part** among them, rather than × the whole shard index.
 
 #### Sharded alignment with minimap2
 
@@ -713,7 +713,7 @@ Align query sequences against multiple pre-built minimap2 index shards in parall
 - `preset` (VARCHAR, default: 'sr'): Minimap2 preset ('sr', 'map-ont', 'map-pb', etc.)
 - `max_secondary` (INTEGER, default: 5): Maximum secondary alignments per query. Set to 0 for primary only
 - `eqx` (BOOLEAN, default: true): Use =/X CIGAR operators instead of M
-- `progress` (BOOLEAN, default: false): Opt-in progress reporting. When true, emit clean, timestamped per-shard lines to **stderr** (`shard i/N 'name': index loaded, R reads` → `done - R reads, A alignments (T s)`). Pure side channel — results are byte-identical to the default, which emits nothing, so programmatic callers are unaffected unless they pass `progress := true`.
+- `progress` (BOOLEAN, default: false): Opt-in progress reporting. When true, emit clean, timestamped per-shard lines to **stderr** (`shard i/N 'name': index loaded, R reads` → `done - R reads, A alignments (T s)`). Reads are streamed, so the start line's `R` is the number of `read_to_shard` rows routed to the shard; the done line's `R` is the number of reads actually aligned per index part, which is lower when `read_to_shard` names reads absent from `query_table`. Pure side channel — results are byte-identical to the default, which emits nothing, so programmatic callers are unaffected unless they pass `progress := true`.
 - `occ_filter` (optional): minimap2's `-f` high-occurrence minimizer filter, as for `align_minimap2` — see *Dense reference sets* above. The threshold is per index, so it applies to each shard independently.
 - `min_chain_coverage` (FLOAT, default: 0.0 = disabled, range 0.0–1.0): Chain-coverage pre-filter, as for `align_minimap2` — see *Chain-coverage pre-filter* above.
 - `debug` (BOOLEAN, default: false): Emit per-shard diagnostic detail to **stderr**, including memory checkpoints. A side channel only.
@@ -738,8 +738,10 @@ Returns the same 21-column schema as `align_minimap2` and `read_alignments`.
 - Unmapped reads (flag 0x4) are automatically filtered out of results
 - Supports both single-end and paired-end query sequences
 - Supports views for both `query_table` and `read_to_shard`
-- **`query_table` is read exactly once**, at the start of the scan, into a per-call TEMP table keyed by shard. Earlier versions re-read it once per shard, which silently dropped reads whenever the relation was not stable across repeated reads (a view using `nextval()` / `random()` / `now()`, a view over a concurrently-written table, or a registered single-pass Arrow stream). Reading once removes that class of failure, and is also faster on multi-shard runs — measured 39% on an 8-shard, 200k-read workload — because the relation is scanned once instead of N times.
-- Because that snapshot is a TEMP table, a very large query set needs a usable `temp_directory`: TEMP data can only be offloaded there, never into a persistent database file. Single-shard runs skip the snapshot entirely (nothing is re-read, so there is nothing to guard against).
+- **`query_table` is read exactly once**, at the start of the scan, into a per-call TEMP snapshot holding `read_id` and the sequence columns (`qual1`/`qual2` are dropped, since alignment never reads them). Re-reading it once per shard would silently drop reads whenever the relation is not stable across repeated reads (a view using `nextval()` / `random()` / `now()`, a view over a concurrently-written table, or a registered single-pass Arrow stream).
+- **Each read is held once, however many shards it is routed to.** Each shard streams its reads from the snapshot in batches of 2048, once per index part, and holds only the batches currently being aligned. Memory for reads therefore scales with the query set, not with reads × shards and not with the size of the largest shard. v1.0.0–v1.0.1 instead snapshotted `query_table JOIN read_to_shard`, one full copy of each read per shard it was routed to. Routing every read to every shard (e.g. 1M long reads × 1000 shards) needed terabytes before the first alignment.
+- Because the snapshot is a TEMP table, a very large query set needs a usable `temp_directory`: TEMP data can only be offloaded there, never into a persistent database file. Budget one copy of the reads' IDs and sequences.
+- To pick out its reads, each shard scans `read_to_shard` and the snapshot once per index part, so scan cost grows with shard count × (routing rows + query set size). That scan is usually small next to the alignment itself. The earlier per-shard pre-fetch paid the same scans.
 
 **Examples:**
 ```sql

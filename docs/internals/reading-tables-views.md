@@ -136,10 +136,18 @@ Three remedies are in use. Pick by what the consumer actually needs:
    `per_subject_database` path uses this; it replaced a
    `ORDER BY ... LIMIT n OFFSET k` pager, which is why no such pager exists in
    `sequence_table_reader.hpp` any more.
-2. **One pass into a shard-keyed TEMP snapshot** — `MaterializeShardedQueryReads`.
-   For consumers that genuinely need repeated access *by key* and already
-   materialize comparable volume. `align_minimap2_sharded` uses this; it also
-   removed that function's N-scans-of-the-query-relation behaviour.
+2. **One pass into a TEMP snapshot, replayed as streams** — `MaterializeQueryReads`
+   plus a `QuerySequenceStream` per replay. For consumers that genuinely need
+   repeated passes. `align_minimap2` with a multi-part index replays the whole
+   snapshot once per part. `align_minimap2_sharded` streams it once per shard and
+   part, filtered by `BuildShardReadsSelect`. Snapshot the relation itself,
+   **never** a join that fans it out: an earlier `align_minimap2_sharded`
+   snapshotted `query JOIN read_to_shard`, one copy of each read per shard. With
+   all-shards routing (1M HiFi reads × 1000 shards) that was about a thousand
+   copies of the corpus, >8 TB spilled before the first alignment. The per-shard
+   filter needs care too. A JOIN (or `IN` in WHERE) can be flipped to build its
+   hash table on the snapshot side, sequences included, once per shard.
+   `BuildShardReadsSelect` explains the MARK-join shape that prevents that.
 3. **Keep streaming and fail loud** — for consumers whose whole value is bounded
    memory, where buffering would be the worse bug. `align_bowtie2_sharded` uses
    this: it counts reads delivered per shard and throws when the cursor comes up
@@ -167,7 +175,7 @@ before trusting it. `test/sql/rype_single_read.test` documents both forms.
 
 | Reader | Reads relation | Status |
 | --- | --- | --- |
-| `align_minimap2` (default + `per_subject_database`) | once | fixed, remedy (1) |
+| `align_minimap2` (default + `per_subject_database`) | once | fixed, remedy (1); multi-part index uses remedy (2) |
 | `align_minimap2_sharded` | once | fixed, remedy (2) |
 | `align_bowtie2_sharded` | once per shard | fixed by remedy (3) — fails loud |
 | `rype_classify`, `rype_log_ratio`, `rype_extract_*` | once | fixed, remedy (1) — guarded by `test/sql/rype_single_read.test` |

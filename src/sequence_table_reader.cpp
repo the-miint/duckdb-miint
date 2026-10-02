@@ -318,28 +318,6 @@ static void ProcessSingleChunk(DataChunk &chunk, const SequenceTableSchema &sche
 	}
 }
 
-// Helper to process all chunks from a query result into SequenceRecordBatch.
-// Returns total number of rows processed.
-static idx_t ProcessQueryResultChunks(QueryResult &result, const SequenceTableSchema &schema,
-                                      miint::SequenceRecordBatch &output,
-                                      std::vector<miint::SequenceRecordBatch> *sub_batches = nullptr,
-                                      idx_t sub_batch_size = 0) {
-	idx_t total_rows = 0;
-	// Reusable temp vectors — allocated once, cleared per chunk
-	std::vector<std::string> temp_read_ids, temp_seq1, temp_seq2;
-
-	while (true) {
-		auto chunk = result.Fetch();
-		if (!chunk || chunk->size() == 0) {
-			break;
-		}
-		total_rows += chunk->size();
-		ProcessSingleChunk(*chunk, schema, output, temp_read_ids, temp_seq1, temp_seq2, sub_batches, sub_batch_size);
-	}
-
-	return total_rows;
-}
-
 // Helper to build column list for sequence queries based on schema
 static std::string BuildSequenceColumnList(const SequenceTableSchema &schema, const std::string &prefix = "") {
 	std::string columns = prefix + "read_id, " + prefix + "sequence1";
@@ -355,19 +333,20 @@ static std::string BuildSequenceColumnList(const SequenceTableSchema &schema, co
 	return columns;
 }
 
-std::string BuildShardedQueryReadsSelect(const std::string &query_table, const std::string &read_to_shard_table,
-                                         const SequenceTableSchema &schema) {
-	// No ORDER BY: alignment does not depend on read order. Clustering by
-	// shard_name would let a snapshot's zonemaps prune each shard's scan, but it
-	// costs a payload-carrying sort of the whole corpus on the blocking startup
-	// path — a losing trade at the shard counts seen in practice (single digits to
-	// low tens), and only worth revisiting in the hundreds.
+std::string BuildShardReadsSelect(const std::string &snapshot_table, const std::string &read_to_shard_table,
+                                  const SequenceTableSchema &schema, const std::string &shard_name) {
+	// See the header for why membership is a projected IN (MARK join) and not a
+	// JOIN. No ORDER BY: alignment does not depend on read order.
 	//
-	// The join is on native types: ValidateReadToShardSchema enforces that both
+	// The IN compares native types: ValidateReadToShardSchema enforces that both
 	// read_id columns share a type, so VARCHAR/BIGINT/UUID all compare directly.
-	return "SELECT rts.shard_name, " + BuildSequenceColumnList(schema, "q.") + " FROM " +
-	       KeywordHelper::WriteOptionallyQuoted(query_table) + " q JOIN " +
-	       KeywordHelper::WriteOptionallyQuoted(read_to_shard_table) + " rts ON q.read_id = rts.read_id";
+	// shard_name is a user-supplied row value from read_to_shard, so it must be
+	// quoted rather than concatenated — same reasoning as ReadShardNameCounts.
+	const std::string columns = BuildSequenceColumnList(schema);
+	return "SELECT " + columns + " FROM (SELECT " + columns + ", read_id IN (SELECT read_id FROM " +
+	       KeywordHelper::WriteOptionallyQuoted(read_to_shard_table) +
+	       " WHERE shard_name = " + KeywordHelper::WriteQuoted(shard_name, '\'') + ") AS _miint_in_shard FROM " +
+	       KeywordHelper::WriteOptionallyQuoted(snapshot_table) + ") WHERE _miint_in_shard";
 }
 
 // Uniquified per call: these TEMP tables land in the *caller's* catalog (the
@@ -380,20 +359,6 @@ std::string BuildQueryReadsSelect(const std::string &query_table, const Sequence
 
 static std::string UniqueTempRelationName(const std::string &prefix) {
 	return prefix + StringUtil::Replace(UUID::ToString(UUID::GenerateRandomUUID()), "-", "");
-}
-
-std::string MaterializeShardedQueryReads(Connection &conn, const std::string &query_table,
-                                         const std::string &read_to_shard_table, const SequenceTableSchema &schema) {
-	const std::string tmp_name = UniqueTempRelationName("_miint_shard_reads_");
-	const std::string tmp_quoted = KeywordHelper::WriteOptionallyQuoted(tmp_name);
-
-	auto create_result = conn.Query("CREATE TEMP TABLE " + tmp_quoted + " AS " +
-	                                BuildShardedQueryReadsSelect(query_table, read_to_shard_table, schema));
-	if (create_result->HasError()) {
-		throw InvalidInputException("Failed to materialize shard-assigned reads from query table '%s': %s", query_table,
-		                            create_result->GetError());
-	}
-	return tmp_name;
 }
 
 std::string MaterializeQueryReads(Connection &conn, const std::string &query_table, const SequenceTableSchema &schema,
@@ -476,27 +441,6 @@ std::string MaterializeQueryReads(Connection &conn, const std::string &query_tab
 	return tmp_name;
 }
 
-void ReadShardReadsFrom(ClientContext &context, const std::string &source_sql, const SequenceTableSchema &schema,
-                        const std::string &shard_name, miint::SequenceRecordBatch &output) {
-	auto conn = MakeReadOnlyHelperConnection(context);
-
-	// shard_name is a user-supplied row value from read_to_shard, so it must be
-	// quoted rather than concatenated — same reasoning as ReadShardNameCounts.
-	const std::string query = "SELECT " + BuildSequenceColumnList(schema) + " FROM " + source_sql +
-	                          " src WHERE src.shard_name = " + KeywordHelper::WriteQuoted(shard_name, '\'');
-
-	auto query_result = conn.Query(query);
-	if (query_result->HasError()) {
-		throw InvalidInputException("Failed to read reads for shard '%s': %s", shard_name, query_result->GetError());
-	}
-
-	output.clear();
-	output.is_paired = schema.has_sequence2;
-
-	auto &materialized = query_result->Cast<MaterializedQueryResult>();
-	ProcessQueryResultChunks(materialized, schema, output);
-}
-
 QuerySequenceStream::QuerySequenceStream(ClientContext &context, const std::string &table_name,
                                          const SequenceTableSchema &schema, idx_t sub_batch_size)
     : owned_conn_(make_uniq<Connection>(DatabaseInstance::GetDatabase(context))), conn_ptr_(owned_conn_.get()),
@@ -506,24 +450,33 @@ QuerySequenceStream::QuerySequenceStream(ClientContext &context, const std::stri
 	// inheriting is safe — the Connection& overload below deliberately does not,
 	// because those callers pass a connection they created TEMP objects on.
 	InheritTempObjects(context, *owned_conn_);
-	InitStream(table_name);
+	// Same projection the snapshot was built with, so replaying a snapshot binds
+	// against exactly the columns it holds.
+	InitStream(BuildQueryReadsSelect(table_name, schema_), "query table '" + table_name + "'");
 }
 
 QuerySequenceStream::QuerySequenceStream(Connection &conn, const std::string &table_name,
                                          const SequenceTableSchema &schema, idx_t sub_batch_size)
     : owned_conn_(nullptr), conn_ptr_(&conn), schema_(schema), sub_batch_size_(sub_batch_size),
       partial_(schema.has_sequence2) {
-	InitStream(table_name);
+	InitStream(BuildQueryReadsSelect(table_name, schema_), "query table '" + table_name + "'");
 }
 
-void QuerySequenceStream::InitStream(const std::string &table_name) {
+QuerySequenceStream::QuerySequenceStream(ClientContext &context, const SelectSql &select,
+                                         const SequenceTableSchema &schema, idx_t sub_batch_size)
+    : owned_conn_(make_uniq<Connection>(DatabaseInstance::GetDatabase(context))), conn_ptr_(owned_conn_.get()),
+      schema_(schema), sub_batch_size_(sub_batch_size), partial_(schema.has_sequence2) {
+	// Same reasoning as the table-name form above.
+	InheritTempObjects(context, *owned_conn_);
+	InitStream(select.sql, "query '" + select.sql + "'");
+}
+
+void QuerySequenceStream::InitStream(const std::string &select_sql, const std::string &source) {
 	partial_.reserve(sub_batch_size_);
 
-	// Same projection the snapshot was built with, so replaying a snapshot binds
-	// against exactly the columns it holds.
-	stream_ = conn_ptr_->SendQuery(BuildQueryReadsSelect(table_name, schema_));
+	stream_ = conn_ptr_->SendQuery(select_sql);
 	if (stream_->HasError()) {
-		throw InvalidInputException("Failed to read from query table '%s': %s", table_name, stream_->GetError());
+		throw InvalidInputException("Failed to read from %s: %s", source, stream_->GetError());
 	}
 }
 
@@ -538,6 +491,12 @@ miint::SequenceRecordBatch QuerySequenceStream::FetchSubBatch() {
 	while (!exhausted_ && partial_.size() < sub_batch_size_) {
 		auto chunk = stream_->Fetch();
 		if (!chunk || chunk->size() == 0) {
+			// Fetch() returns null for both a clean end-of-stream AND a mid-stream
+			// query error (e.g. out of memory partway through) — HasError() is what
+			// tells them apart. Same check as MaterializeQueryReads.
+			if (stream_->HasError()) {
+				throw InvalidInputException("Failed to read sequences mid-stream: %s", stream_->GetError());
+			}
 			exhausted_ = true;
 			break;
 		}
@@ -549,6 +508,7 @@ miint::SequenceRecordBatch QuerySequenceStream::FetchSubBatch() {
 			// Exact fit — return as-is
 			miint::SequenceRecordBatch result = std::move(partial_);
 			partial_ = MakeSubBatch(schema_.has_sequence2, sub_batch_size_);
+			rows_delivered_ += result.size();
 			return result;
 		}
 		// Chunk pushed partial_ past sub_batch_size_ — split: return exactly
@@ -556,13 +516,20 @@ miint::SequenceRecordBatch QuerySequenceStream::FetchSubBatch() {
 		miint::SequenceRecordBatch result = partial_.SubRange(0, sub_batch_size_);
 		miint::SequenceRecordBatch remainder = partial_.SubRange(sub_batch_size_, partial_.size() - sub_batch_size_);
 		partial_ = std::move(remainder);
+		rows_delivered_ += result.size();
 		return result;
 	}
 
 	// Stream exhausted — return whatever remains
 	miint::SequenceRecordBatch result = std::move(partial_);
 	partial_ = miint::SequenceRecordBatch(schema_.has_sequence2);
+	rows_delivered_ += result.size();
 	return result;
+}
+
+idx_t QuerySequenceStream::RowsDelivered() const {
+	std::lock_guard<std::mutex> lock(mutex_);
+	return rows_delivered_;
 }
 
 LoadedSingleEndSequences LoadSingleEndSequences(Connection &conn, const std::string &table_name,

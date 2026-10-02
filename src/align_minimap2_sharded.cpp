@@ -80,9 +80,15 @@ unique_ptr<FunctionData> AlignMinimap2ShardedTableFunction::Bind(ClientContext &
 	// column type and how the per-shard read extracts the id column.
 	data->query_schema = ValidateSequenceTableSchema(context, data->query_table, /*allow_bigint=*/true);
 
+	// Minimap2Aligner::align never reads quality scores. Same as align_minimap2:
+	// dropping the flags keeps qual1/qual2 out of the query snapshot and every
+	// shard stream, which for long-read FASTQ roughly halves what is held.
+	data->query_schema.has_qual1 = false;
+	data->query_schema.has_qual2 = false;
+
 	// Validate read_to_shard table schema. Its `read_id` column must share the
-	// query table's id type — the strict equality check lets the shard join in
-	// BuildShardedQueryReadsSelect compare natively, without implicit casts.
+	// query table's id type — the strict equality check lets the shard filter in
+	// BuildShardReadsSelect compare natively, without implicit casts.
 	ValidateReadToShardSchema(context, data->read_to_shard_table, data->query_schema.id_type);
 
 	// Subject side: sharded mode always uses prebuilt .mmi indexes whose
@@ -173,26 +179,25 @@ unique_ptr<GlobalTableFunctionState> AlignMinimap2ShardedTableFunction::InitGlob
 	}
 	gstate->total_associations.store(total, std::memory_order_relaxed);
 
-	// Decide once what shards read their sequences from (#229 — see
-	// docs/internals/reading-tables-views.md § "Read the relation ONCE").
-	//
-	// Multi-shard: snapshot the shard-assigned reads into a TEMP table, so the query
-	// relation is read exactly once instead of once per shard. Re-reading it
-	// silently drops reads for any relation not stable across re-evaluation.
-	//
-	// Single shard: read the same rows inline. Nothing is re-read, so a snapshot
-	// would only add a write and a scan.
-	if (data.shards.size() > 1) {
-		gstate->snapshot_conn = make_uniq<Connection>(DatabaseInstance::GetDatabase(context));
-		InheritTempObjects(context, *gstate->snapshot_conn);
-		gstate->query_snapshot = MaterializeShardedQueryReads(*gstate->snapshot_conn, data.query_table,
-		                                                      data.read_to_shard_table, data.query_schema);
-		gstate->shard_read_source = KeywordHelper::WriteOptionallyQuoted(gstate->query_snapshot);
-		SHARD_DBG(*gstate, "InitGlobal: query snapshot '%s' materialized", gstate->query_snapshot.c_str());
-	} else {
-		gstate->shard_read_source =
-		    "(" + BuildShardedQueryReadsSelect(data.query_table, data.read_to_shard_table, data.query_schema) + ")";
+	// Read the query relation exactly once, into a snapshot every shard streams
+	// its reads from (see GlobalState::query_snapshot). One copy of the reads,
+	// however many shards each is routed to.
+	gstate->snapshot_conn = make_uniq<Connection>(DatabaseInstance::GetDatabase(context));
+	InheritTempObjects(context, *gstate->snapshot_conn);
+	idx_t snapshot_row_count = 0;
+	gstate->query_snapshot =
+	    MaterializeQueryReads(*gstate->snapshot_conn, data.query_table, data.query_schema, snapshot_row_count);
+	// This runs on the query's calling thread, never a TaskScheduler worker, so
+	// nothing will return the allocation it just freed to the OS on its own —
+	// see MakeFreedMemoryFlusher.
+	MakeFreedMemoryFlusher(context)();
+	// No reads at all: every shard would load its index only to align nothing.
+	// Leaving no shard to claim ends the scan before any index is opened.
+	if (snapshot_row_count == 0) {
+		gstate->next_shard_idx = gstate->shard_count;
 	}
+	SHARD_DBG(*gstate, "InitGlobal: query snapshot '%s' materialized (%zu reads)", gstate->query_snapshot.c_str(),
+	          static_cast<size_t>(snapshot_row_count));
 
 	SHARD_DBG_MEM(*gstate, "InitGlobal: shards=%zu db_threads=%zu max_tps=%zu max_active=%zu MaxThreads=%zu",
 	              static_cast<size_t>(gstate->shard_count), static_cast<size_t>(db_threads),
@@ -211,9 +216,21 @@ AlignMinimap2ShardedTableFunction::InitLocal(ExecutionContext &context, TableFun
 	return lstate;
 }
 
-// Sub-batch size for claiming ranges from pre-fetched shard sequences.
-// Controls granularity of per-thread work claiming via atomic counter.
+// Sub-batch size a shard's stream hands each worker per claim.
 static constexpr idx_t SHARD_READ_BATCH_SIZE = 2048;
+
+// Opens a stream over the reads routed to `shard_name`. Every stream of a shard
+// (its first part in ClaimWork, each later part in Advance's `prepare`) comes
+// through here, so all of them read exactly the same rows.
+static std::shared_ptr<QuerySequenceStream>
+OpenShardStream(ClientContext &context, const AlignMinimap2ShardedTableFunction::GlobalState &gstate,
+                const AlignMinimap2ShardedTableFunction::Data &bind_data, const std::string &shard_name) {
+	return std::make_shared<QuerySequenceStream>(
+	    context,
+	    QuerySequenceStream::SelectSql {BuildShardReadsSelect(gstate.query_snapshot, bind_data.read_to_shard_table,
+	                                                          bind_data.query_schema, shard_name)},
+	    bind_data.query_schema, SHARD_READ_BATCH_SIZE);
+}
 
 std::shared_ptr<ActiveShard> AlignMinimap2ShardedTableFunction::ClaimWork(ClientContext &context, GlobalState &gstate,
                                                                           const Data &bind_data, LocalState &lstate) {
@@ -241,7 +258,7 @@ std::shared_ptr<ActiveShard> AlignMinimap2ShardedTableFunction::ClaimWork(Client
 
 			// Phase 2: Try to claim a new shard if under the active shard limit
 			bool has_unclaimed = gstate.next_shard_idx < bind_data.shards.size();
-			// For small shards (≤ batch_size reads), allow one shard per thread
+			// For small shards (≤ one sub-batch of reads), allow one shard per thread
 			// instead of the normal limit, so all threads stay busy
 			idx_t max_active = gstate.max_active_shards;
 			if (has_unclaimed && bind_data.shards[gstate.next_shard_idx].read_count <= SHARD_READ_BATCH_SIZE) {
@@ -251,9 +268,8 @@ std::shared_ptr<ActiveShard> AlignMinimap2ShardedTableFunction::ClaimWork(Client
 				shard_idx = gstate.next_shard_idx++;
 				active = std::make_shared<ActiveShard>();
 				active->shard_idx = shard_idx;
-				// batch_size set later after ID materialization
 				active->active_workers.store(1, std::memory_order_release);
-				// ready=false (default); set to true after index + IDs loaded
+				// ready=false (default); set to true after index loaded + stream opened
 				gstate.active_shards.push_back(active);
 				SHARD_DBG(gstate, "ClaimWork: NEW shard %zu '%s' (active_shards=%zu)", static_cast<size_t>(shard_idx),
 				          bind_data.shards[shard_idx].name.c_str(), static_cast<size_t>(gstate.active_shards.size()));
@@ -309,37 +325,13 @@ std::shared_ptr<ActiveShard> AlignMinimap2ShardedTableFunction::ClaimWork(Client
 	              shard_info.name.c_str(), active->parts->IsMultiPart() ? "multi-part, first part" : "single-part",
 	              static_cast<long>(load_ms));
 
-	// Phase 4b: pre-fetch this shard's sequences in one query, from whatever
-	// InitGlobal chose as the source (snapshot table, or an inline subquery for the
-	// single-shard case). Wrapped in try-catch to prevent deadlock if it fails —
-	// without cleanup, the ActiveShard would remain in active_shards with
-	// ready=false, blocking all waiters.
-	idx_t seq_count;
+	// Phase 4b: open this shard's read stream over the query snapshot. Wrapped in
+	// try-catch to prevent deadlock if it fails — without cleanup, the ActiveShard
+	// would remain in active_shards with ready=false, blocking all waiters.
 	try {
-		SHARD_DBG(gstate, "ClaimWork: PRE-FETCHING sequences for shard %zu '%s'", static_cast<size_t>(shard_idx),
-		          shard_info.name.c_str());
-		auto fetch_start = std::chrono::steady_clock::now();
-		ReadShardReadsFrom(context, gstate.shard_read_source, bind_data.query_schema, shard_info.name,
-		                   active->shard_sequences);
-		auto fetch_ms =
-		    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - fetch_start)
-		        .count();
-		seq_count = active->shard_sequences.size();
-		active->batch_size = std::min(SHARD_READ_BATCH_SIZE, std::max<idx_t>(1, seq_count));
-		// A shard can legitimately match zero reads (read_to_shard may name
-		// read_ids absent from query_table — the estimate-vs-actual reconciliation
-		// below exists for exactly that). Without this, the first claim falls
-		// straight into Advance and the cursor walks and fully decodes every
-		// remaining part of this shard's index, potentially many GB, to align
-		// nothing against them. Mirrors align_minimap2's zero-row guard.
-		if (seq_count == 0) {
-			active->parts->MarkExhausted();
-		}
-		SHARD_DBG_MEM(gstate, "ClaimWork: PRE-FETCHED %zu sequences for shard %zu in %ldms (batch_size=%zu)",
-		              static_cast<size_t>(seq_count), static_cast<size_t>(shard_idx), static_cast<long>(fetch_ms),
-		              static_cast<size_t>(active->batch_size));
+		active->stream = OpenShardStream(context, gstate, bind_data, shard_info.name);
 	} catch (...) {
-		SHARD_DBG(gstate, "ClaimWork: ID/SEQUENCE FETCH FAILED shard %zu", static_cast<size_t>(shard_idx));
+		SHARD_DBG(gstate, "ClaimWork: STREAM OPEN FAILED shard %zu", static_cast<size_t>(shard_idx));
 		active->exhausted.store(true, std::memory_order_release);
 		active->active_workers.fetch_sub(1, std::memory_order_acq_rel);
 		{
@@ -351,23 +343,7 @@ std::shared_ptr<ActiveShard> AlignMinimap2ShardedTableFunction::ClaimWork(Client
 		throw;
 	}
 
-	// Adjust total_associations based on actual sequence count vs GROUP BY estimate.
-	// Must use separate fetch_add/fetch_sub to avoid unsigned underflow when seq_count < estimated.
-	idx_t estimated = bind_data.shards[shard_idx].read_count;
-	if (seq_count > estimated) {
-		auto old_total = gstate.total_associations.fetch_add(seq_count - estimated, std::memory_order_relaxed);
-		SHARD_DBG(gstate, "ClaimWork: adjusted total_associations %zu -> %zu (shard %zu: estimated=%zu, actual=%zu)",
-		          static_cast<size_t>(old_total), static_cast<size_t>(old_total + seq_count - estimated),
-		          static_cast<size_t>(shard_idx), static_cast<size_t>(estimated), static_cast<size_t>(seq_count));
-	} else if (seq_count < estimated) {
-		auto old_total = gstate.total_associations.fetch_sub(estimated - seq_count, std::memory_order_relaxed);
-		SHARD_DBG(gstate, "ClaimWork: adjusted total_associations %zu -> %zu (shard %zu: estimated=%zu, actual=%zu)",
-		          static_cast<size_t>(old_total), static_cast<size_t>(old_total - (estimated - seq_count)),
-		          static_cast<size_t>(shard_idx), static_cast<size_t>(estimated), static_cast<size_t>(seq_count));
-	}
-
 	// Phase 5: Publish under lock to prevent lost wake-ups with CV
-	active->total_reads = seq_count;
 	active->start_time = std::chrono::steady_clock::now();
 	{
 		std::lock_guard<std::mutex> guard(gstate.lock);
@@ -375,10 +351,12 @@ std::shared_ptr<ActiveShard> AlignMinimap2ShardedTableFunction::ClaimWork(Client
 	}
 	gstate.cv.notify_all();
 	if (gstate.progress) {
-		shard_progress::Emit("minimap2",
-		                     shard_progress::FormatShardStart(static_cast<uint64_t>(shard_idx) + 1,
-		                                                      static_cast<uint64_t>(gstate.shard_count),
-		                                                      shard_info.name, static_cast<int64_t>(seq_count)));
+		// Reads are streamed, so the exact count is only known once the shard is
+		// done; the start line reports the read_to_shard rows routed to it.
+		shard_progress::Emit("minimap2", shard_progress::FormatShardStart(static_cast<uint64_t>(shard_idx) + 1,
+		                                                                  static_cast<uint64_t>(gstate.shard_count),
+		                                                                  shard_info.name,
+		                                                                  static_cast<int64_t>(shard_info.read_count)));
 	}
 	return active;
 }
@@ -419,7 +397,7 @@ void AlignMinimap2ShardedTableFunction::ReleaseWork(GlobalState &gstate, LocalSt
 				                     shard_progress::FormatShardDone(
 				                         static_cast<uint64_t>(active->shard_idx) + 1,
 				                         static_cast<uint64_t>(gstate.shard_count), lstate.current_shard_name,
-				                         active->total_reads,
+				                         active->stream->RowsDelivered(),
 				                         active->alignments_emitted.load(std::memory_order_relaxed), elapsed_s));
 			}
 		}
@@ -474,45 +452,74 @@ void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFun
 			// Attached to the shard's current part under the cursor lock below.
 		}
 
-		// Attach to the shard's current part and claim a batch offset into the
-		// pre-fetched sequence list together — see Minimap2PartCursor's
-		// WithCurrentPart on why the claim may not happen outside it.
+		// Pick up the stream of the part this thread is attached to. Attaching and
+		// reading `stream` happen together inside the cursor, so the reads this
+		// thread drains always belong to the part its aligner holds — see
+		// Minimap2PartCursor's WithCurrentPart.
 		auto &active = local_state.current_active_shard;
-		idx_t seq_count = active->shard_sequences.size();
-		struct PartClaim {
-			idx_t offset;
-			bool on_last_part;
-		};
-		const PartClaim claim = active->parts->WithCurrentPart(local_state.part, *local_state.aligner, [&]() {
-			const PartClaim claimed {active->next_batch_offset, active->parts->CurrentIsLastPart()};
-			active->next_batch_offset += active->batch_size;
-			return claimed;
-		});
-		const idx_t my_offset = claim.offset;
+		auto stream =
+		    active->parts->WithCurrentPart(local_state.part, *local_state.aligner, [&]() { return active->stream; });
 
-		if (my_offset >= seq_count) {
+		miint::SequenceRecordBatch query_batch;
+		try {
+			query_batch = stream->FetchSubBatch();
+		} catch (...) {
+			// The shard's read query failed mid-stream (e.g. out of memory). Same
+			// guard, for the same reason, as the one around Advance below.
+			active->exhausted.store(true, std::memory_order_release);
+			ReleaseWork(global_state, local_state);
+			throw;
+		}
+
+		if (query_batch.empty()) {
 			// This thread has no work left against the current part. For a
 			// multi-part shard, move on to the next part (the leader loads it and
-			// resets the offset counter under the lock; everyone else waits) and
-			// re-walk shard_sequences from 0 against it. Only when no part is left
-			// is the shard exhausted.
-			SHARD_DBG(global_state, "Execute: shard %zu offset %zu >= seq_count %zu, current part exhausted",
-			          static_cast<size_t>(active->shard_idx), static_cast<size_t>(my_offset),
-			          static_cast<size_t>(seq_count));
+			// opens its stream; everyone else waits) and stream the shard's reads
+			// again against it. Only when no part is left is the shard exhausted.
+			//
+			// The stream has returned empty, so RowsDelivered() is now the exact
+			// number of reads this shard aligns against every part.
+			const idx_t delivered = stream->RowsDelivered();
+			SHARD_DBG(global_state, "Execute: shard %zu current part exhausted after %zu reads",
+			          static_cast<size_t>(active->shard_idx), static_cast<size_t>(delivered));
+			// Progress was estimated from read_to_shard's row count, which also
+			// counts reads absent from query_table. Correct it to the exact count,
+			// once per shard (every part streams the same rows).
+			if (!active->progress_reconciled.exchange(true, std::memory_order_acq_rel)) {
+				const idx_t estimated = bind_data.shards[active->shard_idx].read_count;
+				if (delivered > estimated) {
+					global_state.total_associations.fetch_add(delivered - estimated, std::memory_order_relaxed);
+				} else {
+					global_state.total_associations.fetch_sub(estimated - delivered, std::memory_order_relaxed);
+				}
+			}
+			// A shard can legitimately match zero reads (read_to_shard may name
+			// read_ids absent from query_table). Without this, Advance walks and
+			// fully decodes every remaining part of this shard's index, potentially
+			// many GB, to align nothing against them. Mirrors align_minimap2's
+			// zero-row guard.
+			if (delivered == 0) {
+				active->parts->MarkExhausted();
+			}
+			std::shared_ptr<QuerySequenceStream> next_stream;
 			bool advanced;
 			try {
 				advanced = active->parts->Advance(
-				    local_state.part, *local_state.aligner, /*prepare=*/nullptr,
-				    /*publish=*/[&]() {
-					    active->next_batch_offset = 0;
+				    local_state.part, *local_state.aligner,
+				    /*prepare=*/
+				    [&]() {
+					    next_stream = OpenShardStream(context, global_state, bind_data, local_state.current_shard_name);
+				    },
+				    /*publish=*/
+				    [&]() {
+					    active->stream = std::move(next_stream);
 					    // Every read is aligned again against the incoming part, so
 					    // the denominator has to grow with it, or Progress() saturates
 					    // at 100% the moment part 1 finishes and sits there for the
 					    // rest of the shard. Part count isn't knowable up front (the
 					    // cursor discovers parts as it walks the file), so the estimate
-					    // grows as each part is found — the same moving-estimate
-					    // treatment ClaimWork already gives its GROUP BY count.
-					    global_state.total_associations.fetch_add(seq_count, std::memory_order_relaxed);
+					    // grows as each part is found.
+					    global_state.total_associations.fetch_add(delivered, std::memory_order_relaxed);
 					    SHARD_DBG_MEM(global_state, "Execute: shard %zu next part loaded, publishing",
 					                  static_cast<size_t>(active->shard_idx));
 				    });
@@ -520,50 +527,28 @@ void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFun
 				// Advance loads an index part and can throw for reasons that are
 				// realistic in exactly the low-memory regime this streaming exists
 				// for (bad_alloc on a later part, an unnamed sequence, a seek
-				// failure). Letting that escape Execute would skip ReleaseWork:
-				// this worker's active_workers count would stay up and the shard
-				// would never be marked exhausted, so a thread parked in
-				// ClaimWork's wait is never woken and the query HANGS instead of
-				// failing. Same guard ClaimWork puts around its own index load.
+				// failure), and `prepare` runs a query that can fail. Letting that
+				// escape Execute would skip ReleaseWork: this worker's
+				// active_workers count would stay up and the shard would never be
+				// marked exhausted, so a thread parked in ClaimWork's wait is never
+				// woken and the query HANGS instead of failing. Same guard ClaimWork
+				// puts around its own index load.
 				active->exhausted.store(true, std::memory_order_release);
 				ReleaseWork(global_state, local_state);
 				throw;
 			}
 			if (advanced) {
-				continue; // re-attach to the newer part and claim from offset 0
+				continue; // re-attach to the newer part and stream from its start
 			}
 			active->exhausted.store(true, std::memory_order_release);
 			ReleaseWork(global_state, local_state);
 			continue;
 		}
-
-		// Clamp batch count to remaining sequences. "Last batch" means the last
-		// batch of the LAST part — on an earlier part there is always more work.
-		idx_t batch_count = std::min(active->batch_size, seq_count - my_offset);
-		bool is_last_batch = claim.on_last_part && (my_offset + batch_count >= seq_count);
 
 		// Track progress by sequences claimed (before align, so progress updates during I/O)
-		global_state.associations_processed.fetch_add(batch_count, std::memory_order_relaxed);
-
-		// Extract sub-batch from pre-fetched sequences (no per-batch SQL round-trip)
-		auto query_batch = active->shard_sequences.SubRange(my_offset, batch_count);
-		SHARD_DBG(global_state, "Execute: shard %zu SUB-RANGE offset=%zu count=%zu (is_last=%s)",
-		          static_cast<size_t>(active->shard_idx), static_cast<size_t>(my_offset),
-		          static_cast<size_t>(query_batch.size()), is_last_batch ? "yes" : "no");
-
-		if (query_batch.empty()) {
-			// No sequences found for these IDs (shouldn't happen, but handle gracefully)
-			if (is_last_batch) {
-				active->exhausted.store(true, std::memory_order_release);
-			}
-			ReleaseWork(global_state, local_state);
-			continue;
-		}
-
-		if (is_last_batch) {
-			// Last batch - mark exhausted so no new workers join
-			active->exhausted.store(true, std::memory_order_release);
-		}
+		global_state.associations_processed.fetch_add(query_batch.size(), std::memory_order_relaxed);
+		SHARD_DBG(global_state, "Execute: shard %zu fetched sub-batch (%zu reads)",
+		          static_cast<size_t>(active->shard_idx), static_cast<size_t>(query_batch.size()));
 
 		// Align batch — release old buffer capacity before allocating new results
 		local_state.result_buffer.clear();
@@ -572,24 +557,22 @@ void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFun
 		              static_cast<size_t>(active->shard_idx));
 		local_state.buffer_offset = 0;
 
-		if (!query_batch.empty()) {
-			auto align_start = std::chrono::steady_clock::now();
-			local_state.aligner->align(query_batch, local_state.result_buffer);
-			auto align_ms =
-			    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - align_start)
-			        .count();
-			// Filter out unmapped reads
-			FilterMappedOnly(local_state.result_buffer);
-			if (global_state.progress) {
-				active->alignments_emitted.fetch_add(local_state.result_buffer.size(), std::memory_order_relaxed);
-			}
-			SHARD_DBG_MEM(global_state, "Execute: shard %zu ALIGN %zu reads -> %zu results in %ldms",
-			              static_cast<size_t>(active->shard_idx), static_cast<size_t>(query_batch.size()),
-			              static_cast<size_t>(local_state.result_buffer.size()), static_cast<long>(align_ms));
+		auto align_start = std::chrono::steady_clock::now();
+		local_state.aligner->align(query_batch, local_state.result_buffer);
+		auto align_ms =
+		    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - align_start)
+		        .count();
+		// Filter out unmapped reads
+		FilterMappedOnly(local_state.result_buffer);
+		if (global_state.progress) {
+			active->alignments_emitted.fetch_add(local_state.result_buffer.size(), std::memory_order_relaxed);
 		}
+		SHARD_DBG_MEM(global_state, "Execute: shard %zu ALIGN %zu reads -> %zu results in %ldms",
+		              static_cast<size_t>(active->shard_idx), static_cast<size_t>(query_batch.size()),
+		              static_cast<size_t>(local_state.result_buffer.size()), static_cast<long>(align_ms));
 
-		// If this was the last batch and we got results, we'll output them in the next iteration.
-		// If no results, we'll loop back and ReleaseWork will happen when we try to claim the next batch.
+		// Results (if any) are output on the next iteration; an empty result loops
+		// straight back to fetch the next sub-batch.
 	}
 }
 
