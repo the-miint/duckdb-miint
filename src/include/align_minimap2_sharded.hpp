@@ -116,6 +116,11 @@ public:
 		std::unique_ptr<Connection> snapshot_conn;
 		std::string query_snapshot; // unquoted; empty => no snapshot to drop
 
+		// Resolved once in InitGlobal and handed to every shard's cursor. Built
+		// here rather than per shard in ClaimWork because it reads a client
+		// setting, and ClaimWork runs on worker threads once per shard loaded.
+		std::function<void()> flush_freed_memory;
+
 		idx_t MaxThreads() const override {
 			return max_active_shards * max_threads_per_shard;
 		}

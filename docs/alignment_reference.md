@@ -686,9 +686,32 @@ A minimap2 index (`.mmi`) normally loads entirely into memory — there is no la
 minimap2 -d ref.mmi -I 2G ref.fa
 ```
 
-`align_minimap2(index_path := 'ref.mmi')` detects a multi-part index automatically and streams it one part at a time: every query is aligned against part 1, then part 2, and so on. Loading the next part always drops the reference to the previous one first, so there is no point where two parts are held onto indefinitely — verified by live RSS polling across part transitions, which shows memory plateau rather than accumulate as later parts load. (A worker still finishing an alignment against the outgoing part briefly overlaps with the incoming part loading, but that overlap is bounded by one in-flight alignment batch, not a whole extra part.) Detecting whether the index is multi-part at all (right after part 1 loads) only peeks the 4-byte magic header that marks the start of every part on disk — it never decodes part 2 to check for its existence, so there is no transient double-residency at startup either. Peak memory tracks the **largest single part** plus a fixed baseline (DuckDB engine + per-thread working memory), not the sum of all parts and not the whole index — pick `-I` so that largest part fits your budget. An even split matters more than a small `-I` value on its own: a lopsided split (e.g. one huge part, one small) gives up most of the benefit, since peak memory is set by whichever part is biggest. `save_minimap2_index()` always builds a single-part index, so this only applies to indexes built with the minimap2 CLI.
+`align_minimap2(index_path := 'ref.mmi')` detects a multi-part index automatically and streams it one part at a time: every query is aligned against part 1, then part 2, and so on. Loading the next part always drops the reference to the previous one first, so there is no point where two parts are held onto indefinitely — verified by live RSS polling across part transitions, which shows memory plateau rather than accumulate as later parts load. (A worker still finishing an alignment against the outgoing part briefly overlaps with the incoming part loading, but that overlap is bounded by one in-flight alignment batch, not a whole extra part.) Detecting whether the index is multi-part at all (right after part 1 loads) only peeks the 4-byte magic header that marks the start of every part on disk — it never decodes part 2 to check for its existence, so there is no transient double-residency at startup either. Index memory tracks the **largest single part**, not the sum of all parts and not the whole index — pick `-I` so that largest part fits your budget. An even split matters more than a small `-I` value on its own: a lopsided split (e.g. one huge part, one small) gives up most of the benefit, since peak memory is set by whichever part is biggest. `save_minimap2_index()` always builds a single-part index, so this only applies to indexes built with the minimap2 CLI.
 
-A multi-part index also requires the query relation to be replayed once per part, so `align_minimap2` snapshots it into a TEMP table up front (dropping `qual1`/`qual2`, which alignment never reads) rather than streaming it once. That snapshot is built by streaming the query relation and appending each chunk as it arrives, rather than one query that pulls the whole corpus through before returning — so the snapshot's own working set while it's being written is bounded to roughly a chunk at a time, not the whole corpus. The snapshot's *final storage*, like any TEMP table, is buffer-managed and respects `memory_limit`/spills to `temp_directory`. Budget headroom for the query corpus (read IDs + sequences only, post-`qual` drop) on top of the largest-part budget above; for a corpus in the tens of millions of short reads this is comparably sized to a single index part.
+A multi-part index also requires the query relation to be replayed once per part, so `align_minimap2` snapshots it into a TEMP table up front (dropping `qual1`/`qual2`, which alignment never reads) rather than streaming it once. That snapshot is built by streaming the query relation and appending each chunk as it arrives, rather than one query that pulls the whole corpus through before returning — so the snapshot's own working set while it's being written is bounded to roughly a chunk at a time, not the whole corpus. The snapshot's *final storage*, like any TEMP table, is buffer-managed and respects `memory_limit`/spills to `temp_directory`.
+
+**Sizing a multi-part job: `memory_limit` does not cover the index.** As noted above, index
+memory is extension heap rather than buffer-manager tracked, so `memory_limit` bounds the
+snapshot (and every other DuckDB structure) and *nothing else*. The snapshot is needed for
+the whole scan, so it is resident alongside a part the entire time, and the two budgets add:
+
+```
+peak RSS  ≈  largest single part  +  min(corpus size, memory_limit)  +  ~0.5 GB baseline
+```
+
+The index term does not grow with thread count — each part is freed, and its pages
+returned to the OS, the moment its last reference drops — so threads buy speed here, not
+memory: on a 4-part 8.4 GB CHM13 index over 10M read pairs, 8 threads peak at 5.85 GB in
+143 s against 1 thread's 5.88 GB in 544 s.
+
+Set `memory_limit` to at most `<hard ceiling> − <largest part> − 0.5 GB`, not to the
+ceiling itself. On a job capped at 8 GB (SLURM `--mem 8gb`, a container `--memory 8g`)
+against a 4-part CHM13 index whose largest part is 4.4 GB, `SET memory_limit='4GB'` is
+OOM-killed at ~7.9 GB — it asks for 4.4 + 4.0 + baseline — while `SET memory_limit='1GB'`
+completes the same work at 5.9 GB peak. Nothing warns you about this: DuckDB's accounting is
+correct about its own half, the kernel kills the process over the other half. Lowering
+`memory_limit` costs only spill I/O on the snapshot, which is sequential and cheap relative
+to alignment.
 
 Trade-offs specific to multi-part indexes:
 - Runtime is roughly linear in part count — every query is aligned against every part in turn, unlike `align_minimap2_sharded`, which aligns each read against exactly one shard it was pre-assigned to. Prefer sharding when reads can be assigned to shards ahead of time.
@@ -698,7 +721,16 @@ Trade-offs specific to multi-part indexes:
 
 A single-part `.mmi` (the default output of `minimap2 -d` with no `-I`, and always the case for `save_minimap2_index()`) is unaffected — behavior and performance are unchanged.
 
-`align_minimap2_sharded` handles a multi-part shard the same way, using the same part-streaming machinery (one cursor per shard): every read assigned to that shard is aligned against each of its parts in turn, and the shard's parts are dropped one at a time exactly as above. The reads assigned to a shard are already held in memory for the shard's lifetime, so no additional snapshot is needed. Peak index memory in sharded mode is therefore `ceil(threads / max_threads_per_shard)` concurrently active shards × the **largest single part** among them, rather than × the whole shard index.
+`align_minimap2_sharded` handles a multi-part shard the same way, using the same part-streaming machinery (one cursor per shard): every read assigned to that shard is aligned against each of its parts in turn, and the shard's parts are dropped one at a time exactly as above. Peak *index* memory in sharded mode is `ceil(threads / max_threads_per_shard)` concurrently active shards × the **largest single part** among them, rather than × the whole shard index.
+
+**But the corpus term is different here, and it is the one that will kill you.** A shard's reads are pre-fetched in one go into an in-memory batch and held for the shard's lifetime, so no snapshot is needed — and, unlike `align_minimap2`'s snapshot, that batch is *not* buffer-managed: it does not respect `memory_limit` and it cannot spill to `temp_directory`. Lowering `memory_limit` does nothing for it. Measured against the same 4-part 8.4 GB CHM13 index as one shard, 8 threads, 8 GB cap, `memory_limit='1GB'`:
+
+| reads assigned to the shard | peak RSS | outcome |
+|---|---|---|
+| 1,000,000 pairs | 7.12 GB (4.9 GB part + 1.6 GB reads + baseline) | completes |
+| 2,000,000 pairs | 8.00 GB | **OOM-killed during the pre-fetch** |
+
+Budget roughly 1.6 GB per million read pairs on top of the largest part, and size `read_to_shard` so no single shard exceeds that. For a large corpus against a multi-part reference, prefer `align_minimap2(index_path := ...)`: its snapshot spills, so the same 8 GB cap handles ~10M pairs against this index at 5.9 GB peak. Sharding is for splitting the *reference* across many indexes with reads pre-assigned, not for streaming a big corpus past one big index.
 
 #### Sharded alignment with minimap2
 
@@ -732,7 +764,7 @@ Returns the same 21-column schema as `align_minimap2` and `read_alignments`.
 **Behavior:**
 - At bind time, reads the `read_to_shard` table to discover shards and validate that each `<shard_name>.mmi` file exists in `shard_directory`
 - Shards are processed in parallel (one DuckDB thread per shard), each loading its `.mmi` index independently
-- A shard whose `.mmi` is multi-part (built with `minimap2 -I <batch>`, see *Large references* above) is streamed one part at a time; its reads are aligned against every part, and peak memory per active shard is the largest single part. Runtime for that shard scales with its part count, and the query's progress estimate grows as each new part is discovered (the part count is not knowable before the file is walked), so the reported percentage can step backwards when a shard rolls onto its next part
+- A shard whose `.mmi` is multi-part (built with `minimap2 -I <batch>`, see *Large references* above) is streamed one part at a time; its reads are aligned against every part, and peak *index* memory per active shard is the largest single part — on top of that shard's reads, which are held in memory and do not respect `memory_limit` (see the budget table under *Large references*). Runtime for that shard scales with its part count, and the query's progress estimate grows as each new part is discovered (the part count is not knowable before the file is walked), so the reported percentage can step backwards when a shard rolls onto its next part
 - For each shard, only the reads assigned to that shard (via the `read_to_shard` mapping) are queried
 - A read can appear in multiple shards (mapped to multiple shard_name values) and will be aligned against each
 - Unmapped reads (flag 0x4) are automatically filtered out of results

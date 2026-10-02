@@ -679,7 +679,6 @@ TEST_CASE("Minimap2PartCursor walks concurrent workers through every part exactl
 	queries.quals1 = {{}, {}};
 
 	std::atomic<int> publishes {0};
-	std::atomic<int> attached_advances {0};
 	constexpr int kWorkers = 4;
 	std::vector<std::vector<std::string>> seen(kWorkers); // per worker: mapped reference per part visited
 	std::vector<std::thread> workers;
@@ -706,9 +705,6 @@ TEST_CASE("Minimap2PartCursor walks concurrent workers through every part exactl
 						}
 					}
 					seen[w].insert(seen[w].end(), refs.begin(), refs.end());
-				}
-				if (att.attached) {
-					attached_advances++;
 				}
 				if (!cursor.Advance(att, aligner, nullptr, [&]() { publishes++; })) {
 					break;
@@ -737,20 +733,49 @@ TEST_CASE("Minimap2PartCursor walks concurrent workers through every part exactl
 		union_seen.insert(seen[w].begin(), seen[w].end());
 	}
 	REQUIRE(union_seen == std::set<std::string> {"part1_ref", "part2_ref"});
-	// Every thread flushes its OWN detach, not just the leader's: whichever
-	// thread drops the last reference to a part is the one that actually frees
-	// it, and that is rarely the leader. So the hook must fire at least once per
-	// Advance that had a part attached to give up, on top of the leader's own
-	// post-reset flush per transition. Asserted as a floor, not an exact count,
-	// so tightening when the flush fires stays a free change.
-	REQUIRE(flushes.load() >= attached_advances.load());
-	REQUIRE(flushes.load() >= publishes.load() + 1);
+	// The freed-memory hook is each part's shared_ptr deleter, so it fires exactly
+	// once per part, at the moment that part's mm_idx_t is actually gone: twice
+	// here, for the two parts, no matter how many workers detached from each or
+	// how the transition was raced. An exact count, not a floor, because the
+	// count is the thing that regressed: flushing from every thread that MIGHT
+	// have released the part costs up to kWorkers + 1 process-wide purges per
+	// transition for one real free, and all but one of them purge nothing.
+	REQUIRE(flushes.load() == 2);
 
 	// Exhausted stays exhausted, without touching the reader again.
 	Minimap2Aligner late(config);
 	Minimap2PartCursor::Attachment late_att;
 	REQUIRE(cursor.WithCurrentPart(late_att, late, [&]() { return cursor.CurrentIsLastPart(); }));
 	REQUIRE_FALSE(cursor.Advance(late_att, late, nullptr, nullptr));
+
+	std::remove(part1.c_str());
+	std::remove(part2.c_str());
+	std::remove(multipart.c_str());
+}
+
+// A scan that ends early -- a LIMIT satisfied, a cancelled query, an error
+// thrown mid-pipeline -- destroys the cursor while it still owns a part. That
+// release has to purge like any other, or the last part a query touched stays
+// resident for the life of the process. Covers the path the exhaustion test
+// above cannot reach, since exhausting the reader releases the final part first.
+TEST_CASE("Minimap2PartCursor flushes a part it still owns when destroyed", "[Minimap2Aligner]") {
+	const std::string part1 = "data/shards/test_part_cursor_abandon_p1.mmi";
+	const std::string part2 = "data/shards/test_part_cursor_abandon_p2.mmi";
+	const std::string multipart = "data/shards/test_part_cursor_abandon.mmi";
+	build_multipart_mmi_fixture(part1, part2, multipart);
+
+	Minimap2Config config;
+	config.preset = "sr";
+	config.k = 5;
+
+	int flushes = 0;
+	{
+		Minimap2PartCursor cursor(multipart, config, [&]() { flushes++; });
+		REQUIRE(cursor.IsMultiPart());
+		// Part 1 is loaded and still owned; nothing has been released yet.
+		REQUIRE(flushes == 0);
+	}
+	REQUIRE(flushes == 1);
 
 	std::remove(part1.c_str());
 	std::remove(part2.c_str());

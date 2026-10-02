@@ -169,6 +169,7 @@ private:
 	unique_ptr<Connection> owned_conn_;
 	Connection *conn_ptr_;
 	unique_ptr<QueryResult> stream_;
+	std::string table_name_; // for error messages only
 	SequenceTableSchema schema_;
 	idx_t sub_batch_size_;
 	miint::SequenceRecordBatch partial_; // Partially-filled sub-batch carried across Fetch() calls

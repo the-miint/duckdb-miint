@@ -166,6 +166,7 @@ unique_ptr<GlobalTableFunctionState> AlignMinimap2ShardedTableFunction::InitGlob
 	gstate->max_active_shards = std::max<idx_t>(1, std::min(derived, gstate->shard_count));
 	gstate->debug = data.debug;
 	gstate->progress = data.progress;
+	gstate->flush_freed_memory = MakeFreedMemoryFlusher(context);
 	gstate->start_time = std::chrono::steady_clock::now();
 	idx_t total = 0;
 	for (const auto &shard : data.shards) {
@@ -289,7 +290,7 @@ std::shared_ptr<ActiveShard> AlignMinimap2ShardedTableFunction::ClaimWork(Client
 	auto load_start = std::chrono::steady_clock::now();
 	try {
 		active->parts = std::make_unique<miint::Minimap2PartCursor>(shard_info.index_path, bind_data.config,
-		                                                            MakeFreedMemoryFlusher(context));
+		                                                            gstate.flush_freed_memory);
 	} catch (...) {
 		// Remove failed shard from active list and notify waiters
 		SHARD_DBG(gstate, "ClaimWork: LOAD FAILED shard %zu", static_cast<size_t>(shard_idx));
@@ -479,6 +480,17 @@ void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFun
 		// WithCurrentPart on why the claim may not happen outside it.
 		auto &active = local_state.current_active_shard;
 		idx_t seq_count = active->shard_sequences.size();
+
+		// Anything that throws while this worker holds a shard has to run this
+		// first. An exception escaping Execute skips ReleaseWork, so this
+		// worker's active_workers count stays up and the shard is never marked
+		// exhausted — a thread parked in ClaimWork's wait is then never woken and
+		// the query HANGS instead of failing. Same guard ClaimWork puts around
+		// its own index load.
+		auto fail_shard = [&]() {
+			active->exhausted.store(true, std::memory_order_release);
+			ReleaseWork(global_state, local_state);
+		};
 		struct PartClaim {
 			idx_t offset;
 			bool on_last_part;
@@ -519,14 +531,9 @@ void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFun
 			} catch (...) {
 				// Advance loads an index part and can throw for reasons that are
 				// realistic in exactly the low-memory regime this streaming exists
-				// for (bad_alloc on a later part, an unnamed sequence, a seek
-				// failure). Letting that escape Execute would skip ReleaseWork:
-				// this worker's active_workers count would stay up and the shard
-				// would never be marked exhausted, so a thread parked in
-				// ClaimWork's wait is never woken and the query HANGS instead of
-				// failing. Same guard ClaimWork puts around its own index load.
-				active->exhausted.store(true, std::memory_order_release);
-				ReleaseWork(global_state, local_state);
+				// for: bad_alloc on a later part, an unnamed sequence, a seek
+				// failure.
+				fail_shard();
 				throw;
 			}
 			if (advanced) {
@@ -545,8 +552,19 @@ void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFun
 		// Track progress by sequences claimed (before align, so progress updates during I/O)
 		global_state.associations_processed.fetch_add(batch_count, std::memory_order_relaxed);
 
-		// Extract sub-batch from pre-fetched sequences (no per-batch SQL round-trip)
-		auto query_batch = active->shard_sequences.SubRange(my_offset, batch_count);
+		// Extract sub-batch from pre-fetched sequences (no per-batch SQL round-trip).
+		// Guarded for the same reason as Advance above: SubRange copies the batch's
+		// sequences, align() allocates per-read results, and result_buffer grows —
+		// all bad_alloc candidates in the low-memory regime this feature targets,
+		// and multi-part streaming multiplies the number of align() calls by the
+		// part count.
+		miint::SequenceRecordBatch query_batch;
+		try {
+			query_batch = active->shard_sequences.SubRange(my_offset, batch_count);
+		} catch (...) {
+			fail_shard();
+			throw;
+		}
 		SHARD_DBG(global_state, "Execute: shard %zu SUB-RANGE offset=%zu count=%zu (is_last=%s)",
 		          static_cast<size_t>(active->shard_idx), static_cast<size_t>(my_offset),
 		          static_cast<size_t>(query_batch.size()), is_last_batch ? "yes" : "no");
@@ -574,7 +592,12 @@ void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFun
 
 		if (!query_batch.empty()) {
 			auto align_start = std::chrono::steady_clock::now();
-			local_state.aligner->align(query_batch, local_state.result_buffer);
+			try {
+				local_state.aligner->align(query_batch, local_state.result_buffer);
+			} catch (...) {
+				fail_shard();
+				throw;
+			}
 			auto align_ms =
 			    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - align_start)
 			        .count();

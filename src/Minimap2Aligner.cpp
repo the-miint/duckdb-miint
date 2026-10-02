@@ -142,13 +142,22 @@ void Minimap2Aligner::InitOptions(const Minimap2Config &config, mm_idxopt_t &iop
 // false positive here (trailing junk that happens to start with the magic) fails
 // no differently than a full confirming read would.
 //
-// `reader` always wraps a validated .mmi file on every path that reaches here
-// (Bind rejects anything is_index_file() doesn't accept), so this is always the
-// FILE*-backed (is_idx) branch of mm_idx_reader_t and fp.idx is the member in
-// play. fgetpos/fsetpos (fpos_t), not ftell/fseek (long): a first part at or
-// beyond 2GiB would silently wrap or fail ftell's 32-bit `long` on an LLP64
-// platform (Windows), landing the rewind mid-part-2 instead of at its start.
+// mm_idx_reader_t::fp is a UNION (ext/minimap2/index.c): fp.idx is a FILE* only
+// when is_idx is set, and fp.seq (an mm_bseq_file_t*) is the live member
+// otherwise, for a reader built over a plain FASTA/FASTQ reference. Both SQL
+// entry points gate on is_index_file(), but load_index()/SharedMinimap2Index are
+// public C++ and accept a reference file, where reading fp.idx would reinterpret
+// a mm_bseq_file_t* as a FILE* and segfault. A sequence reader is generating a
+// single index in memory and has no "next part" by construction, so say so here
+// rather than leaving the invariant to the callers.
+//
+// fgetpos/fsetpos (fpos_t), not ftell/fseek (long): a first part at or beyond
+// 2GiB would silently wrap or fail ftell's 32-bit `long` on an LLP64 platform
+// (Windows), landing the rewind mid-part-2 instead of at its start.
 static bool NextPartExists(mm_idx_reader_t *reader) {
+	if (!reader->is_idx) {
+		return false;
+	}
 	fpos_t rewind_pos;
 	if (fgetpos(reader->fp.idx, &rewind_pos) != 0) {
 		throw std::runtime_error("Failed to read index file position while probing for a next part");

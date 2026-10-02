@@ -9,7 +9,7 @@ Minimap2PartCursor::Minimap2PartCursor(const std::string &index_path, const Mini
                                        std::function<void()> flush_freed_memory)
     : reader_(std::make_unique<Minimap2IndexReader>(index_path, config)),
       flush_freed_memory_(std::move(flush_freed_memory)) {
-	current_ = reader_->ReadNextPart();
+	current_ = AdoptPart(reader_->ReadNextPart());
 	if (!current_) {
 		throw std::runtime_error("Index file '" + index_path + "' contains no parts");
 	}
@@ -25,10 +25,28 @@ std::shared_ptr<SharedMinimap2Index> Minimap2PartCursor::ReleaseSinglePart() {
 	return std::move(current_);
 }
 
-void Minimap2PartCursor::FlushFreedMemory() {
-	if (flush_freed_memory_) {
-		flush_freed_memory_();
+// The purge has to happen after the mm_idx_t is gone and on the thread that
+// actually freed it, and neither is knowable from the outside: a part is read by
+// whichever worker led the previous transition, and released by whichever one
+// happens to drop the last reference — often a worker still inside align() when
+// the leader has already moved on. Hanging the flush off the shared_ptr's
+// deleter answers both questions for free, and replaces what would otherwise be
+// a flush on every thread that might have been the last one (a process-wide
+// purge per worker per transition, all but one of them purging nothing, most of
+// them racing the leader's multi-GB read of the next part).
+std::shared_ptr<SharedMinimap2Index> Minimap2PartCursor::AdoptPart(std::shared_ptr<SharedMinimap2Index> part) {
+	if (!part || !flush_freed_memory_) {
+		return part;
 	}
+	// Aliasing constructor: the new shared_ptr points at the same object but owns
+	// `part` inside its deleter, so the index is destroyed (mm_idx_destroy) by the
+	// reset below and the flush observes memory that is already free.
+	auto flush = flush_freed_memory_;
+	auto *raw = part.get();
+	return std::shared_ptr<SharedMinimap2Index>(raw, [part, flush](SharedMinimap2Index *) mutable {
+		part.reset();
+		flush();
+	});
 }
 
 void Minimap2PartCursor::EnsureAttached(Attachment &att, Minimap2Aligner &aligner) {
@@ -65,20 +83,8 @@ bool Minimap2PartCursor::Advance(Attachment &att, Minimap2Aligner &aligner, cons
 	// Detach FIRST, before either leading or waiting: a thread that waits while
 	// still attached pins the outgoing part for the whole load, and an idle one
 	// pins it for the rest of the query. See the class comment.
-	const bool was_attached = att.attached;
 	aligner.detach_shared_index();
 	att.attached = false;
-
-	// Threads exhaust a part at different times, so whichever thread's detach
-	// above happens to drop the LAST reference is the one that actually frees
-	// the part's mm_idx_t — not necessarily the thread that goes on to lead. So
-	// flush on every thread that held a reference, not just the leader. A thread
-	// that never attached (it arrived mid-transition) freed nothing, and
-	// purging its arena would only make it re-fault the blocks it is about to
-	// reuse on the next part.
-	if (was_attached) {
-		FlushFreedMemory();
-	}
 
 	std::unique_lock<std::mutex> lock(lock_);
 
@@ -95,22 +101,21 @@ bool Minimap2PartCursor::Advance(Attachment &att, Minimap2Aligner &aligner, cons
 			continue;
 		}
 
-		// Become the leader for this transition.
+		// Become the leader for this transition. Clearing current_ under the lock
+		// stops any thread arriving from here on from attaching to the outgoing
+		// part; releasing it only after unlocking keeps the part's destructor —
+		// and the process-wide purge its deleter runs — off the critical section
+		// every other worker is about to block on.
 		advancing_ = true;
-		current_.reset(); // free the just-finished part before loading the next
+		auto outgoing = std::move(current_);
 		lock.unlock();
-
-		// This reset is a second, separate potential last-reference drop (every
-		// other thread may have already detached above, making the leader's own
-		// reset the one that actually frees the part) — flush again here in case
-		// that's what just happened.
-		FlushFreedMemory();
+		outgoing.reset(); // free the just-finished part before loading the next
 
 		std::shared_ptr<SharedMinimap2Index> next_index;
 		bool next_has_successor = false;
 		std::exception_ptr load_error;
 		try {
-			next_index = reader_->ReadNextPart();
+			next_index = AdoptPart(reader_->ReadNextPart());
 			if (next_index) {
 				// Probe for the part after this one while this thread still has
 				// the reader to itself; CurrentIsLastPart() then answers from the

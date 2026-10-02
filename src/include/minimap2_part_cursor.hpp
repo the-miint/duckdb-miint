@@ -42,16 +42,16 @@ namespace miint {
 // while part 2 loaded fully.
 //
 // Protocol (caller side):
-//   { std::lock_guard<std::mutex> g(cursor.Lock());
-//     cursor.EnsureAttached(lstate.part, *lstate.aligner);
-//     <claim this thread's next unit of work against the current part> }
+//   cursor.WithCurrentPart(lstate.part, *lstate.aligner, [&]() {
+//       <claim this thread's next unit of work against the current part> });
 //   ... align it ...
 //   when the current part has no work left for this thread:
 //     if (!cursor.Advance(lstate.part, *lstate.aligner, prepare, publish)) done;
 //     else loop back (a newer part exists — re-attach and retry)
-// Claiming work inside the same critical section as EnsureAttached is what
-// makes the per-part reset in `publish` race-free: a thread can never take
-// work belonging to part k+1 while its aligner is still attached to part k.
+// Claiming work inside WithCurrentPart's critical section, rather than through a
+// lock the caller takes itself, is what makes the per-part reset in `publish`
+// race-free: a thread can never take work belonging to part k+1 while its
+// aligner is still attached to part k.
 class Minimap2PartCursor {
 public:
 	// Per-thread record of which part of WHICH cursor that thread's aligner is
@@ -73,10 +73,12 @@ public:
 	// Minimap2IndexReader::AtEof) for whether a part 2 exists. Throws
 	// std::runtime_error on open/load failure or an index with no parts.
 	//
-	// `flush_freed_memory` is invoked on the calling thread right after every
-	// point where this cursor may have just dropped the last reference to a part.
-	// DuckDB does not return a busy worker's freed memory to the OS on its own —
-	// see MakeFreedMemoryFlusher in align_common.hpp. May be empty.
+	// `flush_freed_memory` runs immediately after each part's mm_idx_t is
+	// destroyed, on whichever thread happened to drop its last reference — it is
+	// installed as the part's shared_ptr deleter, so it fires exactly once per
+	// part, at the moment the memory is actually free, and never when a release
+	// dropped nothing. DuckDB does not return a busy worker's freed memory to the
+	// OS on its own; see MakeFreedMemoryFlusher in align_common.hpp. May be empty.
 	Minimap2PartCursor(const std::string &index_path, const Minimap2Config &config,
 	                   std::function<void()> flush_freed_memory);
 
@@ -160,7 +162,9 @@ public:
 	void MarkExhausted();
 
 private:
-	void FlushFreedMemory();
+	// Re-seats a part the reader just handed back so that destroying it also runs
+	// flush_freed_memory_. Every part this cursor owns goes through here.
+	std::shared_ptr<SharedMinimap2Index> AdoptPart(std::shared_ptr<SharedMinimap2Index> part);
 	void EnsureAttached(Attachment &att, Minimap2Aligner &aligner);
 
 	std::unique_ptr<Minimap2IndexReader> reader_;

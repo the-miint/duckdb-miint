@@ -235,11 +235,45 @@ idles) or was never a `TaskScheduler` worker to begin with (e.g. a table functio
 accounting correctly shows the memory as released (`duckdb_memory()`), but the physical
 pages stay resident — invisible to `memory_limit` and to an OS/cgroup ceiling. A table
 function with a large allocate-then-free burst outside the normal per-batch execution loop
-needs to flush explicitly. Prefer `Allocator::ThreadFlush(background_threads_setting,
-/*threshold=*/0, /*thread_count=*/1)` — it mirrors the scheduler's own forced flush and
-purges only the calling thread's arena — over `Allocator::FlushAll()`, which purges every
-arena in the process and is meant for genuinely global events (buffer-pool eviction
-pressure, DB shutdown). See `FlushThisThreadsFreedMemory` in `align_common.hpp` for a
-concrete use: `align_minimap2` calls it after the corpus-snapshot materialization, and both
-`align_minimap2` and `align_minimap2_sharded` hand it to `Minimap2PartCursor`, which calls it
-after every point where a multi-part index transition may have freed a part.
+needs to flush explicitly.
+
+**A per-thread flush is not enough for a cross-thread free.** jemalloc returns a freed
+block to the arena it was *allocated* from, not to the arena of the thread doing the
+freeing. `BlockAllocator::ThreadFlush(background_threads_setting, /*threshold=*/0,
+/*thread_count=*/1)` mirrors the scheduler's own forced flush but purges only the calling
+thread's arena, so it is the right tool only where the freeing thread is also the
+allocating one. Where it is not — anything the worker pool built and one thread later
+dropped — it purges one arena and leaves the rest dirty, which shows up as peak RSS
+scaling with thread count rather than with the data. Measured on a 4-part 8.4 GB CHM13
+minimap2 index under an 8 GB cap, one 100k-read corpus, identical work each time:
+1 thread 4.91 GB, 2 threads 6.15 GB, 4 threads 6.20 GB, 6 and 8 threads both OOM-killed
+just under 8 GB. Two further ways `ThreadFlush` can quietly do nothing: it is a jemalloc
+no-op entirely when `allocator_background_threads` is on, and it returns early unless
+`thread.peak.read` exceeds the threshold.
+
+`BlockAllocator::FlushAll()` purges every arena and has neither guard, but it does not
+clear the block allocator's own per-thread block cache (only `ThreadFlush` does), so a
+flush covering a cross-thread free calls both. Note what that pairing does *not* buy:
+`ThreadFlush`'s `Clear()` moves this thread's cached block ids onto a global queue, and
+`FlushAll()` only hands those blocks back when passed an `extra_memory` size — so on a
+block-allocator build the pool itself stays resident either way. The jemalloc arena purge
+is the part that returns pages. Its cost is that every thread re-faults whatever it had
+cached, so it belongs at genuinely global events (buffer-pool eviction pressure, DB
+shutdown, a multi-GB free like the ones below) and never in a per-batch path.
+
+`MakeFreedMemoryFlusher` in `align_common.hpp` is that pair, resolved once from the
+database. Both of its uses are cross-thread frees, which is why neither can use
+`ThreadFlush` alone:
+
+- `align_minimap2` calls it after materializing the corpus snapshot, which the whole
+  worker pool wrote and the query's calling thread drops.
+- Both alignment functions hand it to `Minimap2PartCursor`, which installs it as the
+  **shared_ptr deleter of each index part**. An index part is read by whichever worker led
+  the previous transition and released by whichever one happens to drop the last
+  reference — frequently a worker still inside `align()` after the leader has moved on.
+  Hanging the flush off the deleter means it runs exactly once per part, on that thread,
+  after `mm_idx_destroy`. The alternative — flushing from every thread that might have
+  been the last — costs a process-wide purge per worker per transition, all but one of
+  them purging nothing and most of them racing the leader's multi-GB read of the next
+  part. Bind a purge to the destructor of the thing being freed, not to the places you
+  guess it might be freed from.

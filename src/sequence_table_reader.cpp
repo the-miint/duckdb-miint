@@ -370,14 +370,14 @@ std::string BuildShardedQueryReadsSelect(const std::string &query_table, const s
 	       KeywordHelper::WriteOptionallyQuoted(read_to_shard_table) + " rts ON q.read_id = rts.read_id";
 }
 
-// Uniquified per call: these TEMP tables land in the *caller's* catalog (the
-// connection inherits it, which is what lets worker connections see them), so a
-// fixed name would collide across concurrent queries in one session. Name shape
-// follows MaterializeRypeInputTempTable.
 std::string BuildQueryReadsSelect(const std::string &query_table, const SequenceTableSchema &schema) {
 	return "SELECT " + BuildSequenceColumnList(schema) + " FROM " + KeywordHelper::WriteOptionallyQuoted(query_table);
 }
 
+// Uniquified per call: these TEMP tables land in the *caller's* catalog (the
+// connection inherits it, which is what lets worker connections see them), so a
+// fixed name would collide across concurrent queries in one session. Name shape
+// follows MaterializeRypeInputTempTable.
 static std::string UniqueTempRelationName(const std::string &prefix) {
 	return prefix + StringUtil::Replace(UUID::ToString(UUID::GenerateRandomUUID()), "-", "");
 }
@@ -521,6 +521,7 @@ void QuerySequenceStream::InitStream(const std::string &table_name) {
 
 	// Same projection the snapshot was built with, so replaying a snapshot binds
 	// against exactly the columns it holds.
+	table_name_ = table_name;
 	stream_ = conn_ptr_->SendQuery(BuildQueryReadsSelect(table_name, schema_));
 	if (stream_->HasError()) {
 		throw InvalidInputException("Failed to read from query table '%s': %s", table_name, stream_->GetError());
@@ -539,6 +540,16 @@ miint::SequenceRecordBatch QuerySequenceStream::FetchSubBatch() {
 		auto chunk = stream_->Fetch();
 		if (!chunk || chunk->size() == 0) {
 			exhausted_ = true;
+			// Fetch() returns null for both a clean end-of-stream AND a
+			// mid-stream query error — HasError() is what tells them apart, the
+			// same distinction MaterializeQueryReads makes. Without it a source
+			// that fails partway (a truncated gzip behind a read_fastx view, a
+			// malformed row deep in the relation) ends the scan quietly and
+			// align_minimap2 returns a successful, silently short result.
+			if (stream_->HasError()) {
+				throw InvalidInputException("Failed to read from query table '%s': %s", table_name_,
+				                            stream_->GetError());
+			}
 			break;
 		}
 		ProcessSingleChunk(*chunk, schema_, partial_, temp_read_ids_, temp_seq1_, temp_seq2_);

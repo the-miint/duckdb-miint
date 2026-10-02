@@ -270,12 +270,11 @@ inline idx_t OutputSAMRecordBatch(DataChunk &output, const miint::SAMRecordBatch
 	return count;
 }
 
-// Returns a callable that hands freed memory on the calling thread back to the
-// OS. DuckDB's own flush only ever runs from TaskScheduler::ExecuteForever's
-// idle-timeout path (see docs/internals/duckdb-engine-notes.md) — neither a
-// table function's InitGlobal (the query's calling thread) nor a busy
-// multi-part worker thread ever reaches it, so both need an explicit flush
-// after freeing a corpus- or index-part-sized amount of memory.
+// Returns a callable that hands freed memory back to the OS. DuckDB's own flush
+// only ever runs from TaskScheduler::ExecuteForever's idle-timeout path — neither
+// a table function's InitGlobal (the query's calling thread) nor a busy
+// multi-part worker thread ever reaches it, so both need an explicit flush after
+// freeing a corpus- or index-part-sized amount of memory.
 //
 // Goes through BlockAllocator, exactly as task_scheduler.cpp does, NOT through
 // Allocator directly. The two are not interchangeable: BlockAllocator::ThreadFlush
@@ -285,12 +284,22 @@ inline idx_t OutputSAMRecordBatch(DataChunk &output, const miint::SAMRecordBatch
 // silent no-op in exactly the build where the block allocator holds the cache and
 // jemalloc is absent (the loadable extension; see embedded-tools.md).
 //
-// threshold=0 / thread_count=1 mirrors the scheduler's own forced flush at thread
-// exit, purging just the calling thread rather than FlushAll()'s process-wide
-// purge. The allocator reference and setting are resolved once here so the
-// callable outlives any particular ClientContext use — it is stored inside
-// Minimap2PartCursor for the life of a scan, and the database (which owns the
-// BlockAllocator) outlives every scan on it.
+// Calls both halves because neither covers the other: only ThreadFlush clears the
+// block allocator's per-thread cache, and only FlushAll purges every arena rather
+// than the caller's. The second is the load-bearing one here — every free this
+// helper exists for is made on a different thread than the one that allocated, so
+// a per-thread purge leaves the memory resident. docs/internals/duckdb-engine-notes.md
+// § Allocator has the mechanism and the measurements; do not restate them here.
+//
+// The cost is that every thread re-faults whatever it had cached, so callers must
+// reach for this only at genuinely global events — once per index part, once per
+// snapshot — never per batch. In align_minimap2_sharded several shards stream
+// concurrently, so one shard's part release also purges arenas serving the others;
+// that cross-shard cost has not been measured (the numbers in the engine notes are
+// align_minimap2 only). The allocator reference and setting are resolved
+// once here so the callable outlives any particular ClientContext use: it is
+// stored inside Minimap2PartCursor for the life of a scan, and the database
+// (which owns the BlockAllocator) outlives every scan on it.
 inline std::function<void()> MakeFreedMemoryFlusher(ClientContext &context) {
 	const auto &block_allocator = BlockAllocator::Get(DatabaseInstance::GetDatabase(context));
 	if (!block_allocator.SupportsFlush()) {
@@ -300,6 +309,7 @@ inline std::function<void()> MakeFreedMemoryFlusher(ClientContext &context) {
 	const bool background_threads = Settings::Get<AllocatorBackgroundThreadsSetting>(context);
 	return [&block_allocator, background_threads]() {
 		block_allocator.ThreadFlush(background_threads, /*threshold=*/0, /*thread_count=*/1);
+		block_allocator.FlushAll();
 	};
 }
 

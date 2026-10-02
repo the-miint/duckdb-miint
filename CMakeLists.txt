@@ -702,10 +702,24 @@ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
     set(MINIMAP2_ARCH_FLAGS "aarch64=1")
 endif()
 
-# Detect DuckDB's jemalloc (not present on musl/macOS/Windows builds).
-# DUCKDB_EXTENSION_JEMALLOC_SHOULD_LINK is set during extension registration,
-# before add_subdirectory, so it's available here.
-if(DUCKDB_EXTENSION_JEMALLOC_SHOULD_LINK)
+# Detect DuckDB's jemalloc. A hand-copy of DuckDB's own gate (the block setting
+# JEMALLOC_ENABLED in duckdb/CMakeLists.txt) and it has to be: DuckDB includes
+# extension_build_tools.cmake -- which add_subdirectory's us -- two lines BEFORE
+# that block runs, so JEMALLOC_ENABLED and DUCKDB_EXTENSION_JEMALLOC_SHOULD_LINK
+# are both still empty here. Keep in sync on every DuckDB bump; a silent desync
+# is what left minimap2 on glibc malloc from the v1.5.2 bump until it was found
+# by measuring RSS. See embedded-tools.md for why the allocator choice matters.
+if(ENABLE_JEMALLOC
+   AND CMAKE_SIZEOF_VOID_P EQUAL 8
+   AND NOT FORCE_32_BIT
+   AND OS_NAME STREQUAL "linux"
+   AND NOT EMSCRIPTEN
+   AND NOT CLANG_TIDY
+   AND NOT ANDROID
+   AND NOT ZOS
+   AND NOT BSD
+   AND NOT WASM_ENABLED
+   AND NOT MUSL_ENABLED)
     set(MIINT_HAS_JEMALLOC TRUE)
     set(MINIMAP2_ALLOC_FLAGS "-DMIINT_USE_JEMALLOC -include ${CMAKE_CURRENT_SOURCE_DIR}/src/include/mm_alloc.h")
     message(STATUS "DuckDB jemalloc detected — minimap2 will use jemalloc allocator")
