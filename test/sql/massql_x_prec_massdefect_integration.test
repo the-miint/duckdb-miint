@@ -11,6 +11,6 @@ CREATE TABLE g AS SELECT * FROM read_mzml('data/cache/GNPS00002_A3_p.mzML');
 
 # Ground truth from MassQL Python test_defect(): 21 scans
 query I
-SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_prec_massdefect(g, 0.1, 0.2)
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_prec_massdefect('g', 0.1, 0.2)
 ----
 21

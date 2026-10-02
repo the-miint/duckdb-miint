@@ -336,7 +336,7 @@ at least one read on it — the quantity
 
 ```sql
 SELECT sample_id, genome_id AS feature_id, proportion_covered AS coverage
-FROM genome_coverage_per_sample(alignments, genome_lengths, contig_to_genome);
+FROM genome_coverage_per_sample('alignments', 'genome_lengths', 'contig_to_genome');
 ```
 
 Its job here is to decide **which genomes are likely present**: reads spread across a

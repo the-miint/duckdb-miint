@@ -330,7 +330,7 @@ CREATE VIEW groups AS SELECT sample_id, body_site AS grouping FROM metadata;
 -- Aggregated within/between distribution (the group-cohesion question)
 SELECT comparison, count(*) AS n,
        quantile_cont(distance, [0.25, 0.5, 0.75]) AS quartiles
-FROM beta_group_distances(dm, groups)
+FROM beta_group_distances('dm', 'groups')
 GROUP BY comparison ORDER BY comparison;
 ```
 
@@ -339,7 +339,7 @@ Returns `(sample_a, sample_b, distance, group_a, group_b, comparison)` where `co
 **Per-group-vs-rest:** the condensed table holds each pair once, so a naive `GROUP BY group_a` attributes a between-pair only to `sample_a`'s group. To get, for each group, its within-group distances and its distances to every other group, attribute each *between* pair to **both** its groups but each *within* pair to its group only once (both endpoints share it):
 
 ```sql
-WITH bg AS (SELECT * FROM beta_group_distances(dm, groups))
+WITH bg AS (SELECT * FROM beta_group_distances('dm', 'groups'))
 SELECT grp, comparison, count(*) AS n, avg(distance) AS mean FROM (
     -- within pairs: count once for their (single) group
     SELECT group_a AS grp, comparison, distance FROM bg WHERE comparison = 'within'
@@ -356,7 +356,7 @@ SELECT grp, comparison, count(*) AS n, avg(distance) AS mean FROM (
 The `k` nearest neighbors of every sample (both orientations of the condensed table are considered). Returns `(sample_id, neighbor, distance, rank)`, `rank` in `1..k`, ties broken by neighbor id:
 
 ```sql
-SELECT * FROM beta_knn(dm, 5) ORDER BY sample_id, rank;
+SELECT * FROM beta_knn('dm', 5) ORDER BY sample_id, rank;
 ```
 
 #### `beta_knn_from_sample(distances, k, source)`
@@ -364,7 +364,7 @@ SELECT * FROM beta_knn(dm, 5) ORDER BY sample_id, rank;
 The `k` samples nearest one `source` sample. Returns `(neighbor, distance)`, nearest first:
 
 ```sql
-SELECT * FROM beta_knn_from_sample(dm, 10, 'Sample1');
+SELECT * FROM beta_knn_from_sample('dm', 10, 'Sample1');
 ```
 
 #### Correlating two distance matrices (Mantel)
@@ -735,7 +735,7 @@ Pairwise comparison of cumulative coverage curves between metadata groups, with 
 ```sql
 WITH curves AS (
     SELECT group_id, list(proportion_covered ORDER BY rank) AS curve
-    FROM cumulative_coverage_curve(positions, roster, 4719737)
+    FROM cumulative_coverage_curve('positions', 'roster', 4719737)
     GROUP BY group_id
 ),
 pairs AS (

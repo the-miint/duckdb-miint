@@ -83,7 +83,7 @@ INSERT INTO reflen VALUES ('circ30k', 30000, true), ('plas5k', 5000, true), ('ci
 query IIIIIIIII
 SELECT read_id, is_read1, reference, round(coverage, 6), round(identity, 6),
        query_length, n_fragments, mixed_strand, max_ref_gap
-FROM circular_query_coverage(aln, reflen)
+FROM circular_query_coverage('aln', 'reflen')
 ORDER BY read_id, is_read1;
 ----
 chimera_backwards	false	circ200k	1.0	1.0	6000	2	false	48999
@@ -118,7 +118,7 @@ FROM aln WHERE read_id = 'junction_mismatch';
 # The identity term is safe here only because this fixture uses extended CIGARs. See the
 # legacy-M case further down for why it must not be applied unconditionally.
 query I
-SELECT read_id FROM circular_query_coverage(aln, reflen)
+SELECT read_id FROM circular_query_coverage('aln', 'reflen')
 WHERE coverage >= 0.90 AND identity >= 0.99
   AND NOT mixed_strand AND COALESCE(max_ref_gap, 0) <= 100
 ORDER BY read_id;
@@ -149,7 +149,7 @@ junction_rev	0.5
 
 # ...and pooled they are fully explained, so the same floor now admits all six.
 query I
-SELECT count(*) FROM circular_query_coverage(aln, reflen)
+SELECT count(*) FROM circular_query_coverage('aln', 'reflen')
 WHERE read_id LIKE 'junction%' AND coverage >= 0.90;
 ----
 6
@@ -159,7 +159,7 @@ WHERE read_id LIKE 'junction%' AND coverage >= 0.90;
 # figure unconditionally instead of branching on "is this reference circular".
 query I
 SELECT c.coverage = cigar_query_coverage(a.cigar, 'aligned')
-FROM circular_query_coverage(aln, reflen) c
+FROM circular_query_coverage('aln', 'reflen') c
 JOIN aln a ON a.read_id = c.read_id
 WHERE c.read_id = 'clipped';
 ----
@@ -178,7 +178,7 @@ WITH per_record AS (
 ),
 pooled AS (
   SELECT read_id, round(coverage, 6) AS pooled
-  FROM circular_query_coverage(aln, reflen) WHERE read_id = 'junction_ragged'
+  FROM circular_query_coverage('aln', 'reflen') WHERE read_id = 'junction_ragged'
 )
 SELECT s.summed, p.pooled FROM per_record s JOIN pooled p USING (read_id);
 ----
@@ -187,7 +187,7 @@ SELECT s.summed, p.pooled FROM per_record s JOIN pooled p USING (read_id);
 # Unmapped records, secondary records, and references with no recorded length produce no
 # rows at all.
 query I
-SELECT count(*) FROM circular_query_coverage(aln, reflen)
+SELECT count(*) FROM circular_query_coverage('aln', 'reflen')
 WHERE read_id IN ('unmapped_read', 'orphan');
 ----
 0
@@ -195,7 +195,7 @@ WHERE read_id IN ('unmapped_read', 'orphan');
 # Paired-end reads are never pooled across mates: R1 and R2 stay separate groups even
 # though they share read_id and query length.
 query I
-SELECT count(*) FROM circular_query_coverage(aln, reflen) WHERE read_id = 'pe_read';
+SELECT count(*) FROM circular_query_coverage('aln', 'reflen') WHERE read_id = 'pe_read';
 ----
 2
 
@@ -209,7 +209,7 @@ statement ok
 INSERT INTO aln_bad VALUES ('junction_fwd', 2048, 'circ30k', 9001, 10001, '1000=500S');
 
 statement error
-SELECT * FROM circular_query_coverage(aln_bad, reflen);
+SELECT * FROM circular_query_coverage('aln_bad', 'reflen');
 ----
 report different query lengths
 
@@ -236,13 +236,13 @@ INSERT INTO aln_legacy VALUES
 
 query IIII
 SELECT read_id, round(coverage, 6), identity IS NULL, max_ref_gap
-FROM circular_query_coverage(aln_legacy, reflen);
+FROM circular_query_coverage('aln_legacy', 'reflen');
 ----
 junction	1.0	true	0
 
 # The read is recovered by a gate built from the aligner-independent columns.
 query I
-SELECT count(*) FROM circular_query_coverage(aln_legacy, reflen)
+SELECT count(*) FROM circular_query_coverage('aln_legacy', 'reflen')
 WHERE coverage >= 0.90 AND NOT mixed_strand AND COALESCE(max_ref_gap, 0) <= 100;
 ----
 1
@@ -250,7 +250,7 @@ WHERE coverage >= 0.90 AND NOT mixed_strand AND COALESCE(max_ref_gap, 0) <= 100;
 # The trap this documents: adding an identity term to that same gate rejects the read
 # outright, because NULL >= 0.99 is NULL rather than false.
 query I
-SELECT count(*) FROM circular_query_coverage(aln_legacy, reflen)
+SELECT count(*) FROM circular_query_coverage('aln_legacy', 'reflen')
 WHERE coverage >= 0.90 AND identity >= 0.99
   AND NOT mixed_strand AND COALESCE(max_ref_gap, 0) <= 100;
 ----
@@ -265,7 +265,7 @@ statement ok
 INSERT INTO aln_mixed VALUES ('mixed', 0, 'circ30k', 101, 131, '10M20=');
 
 query I
-SELECT identity IS NULL FROM circular_query_coverage(aln_mixed, reflen);
+SELECT identity IS NULL FROM circular_query_coverage('aln_mixed', 'reflen');
 ----
 true
 
@@ -288,7 +288,7 @@ INSERT INTO aln_nopos VALUES
 query IIII
 SELECT round(coverage, 6), n_fragments, max_ref_gap,
        (coverage >= 0.90 AND NOT mixed_strand AND COALESCE(max_ref_gap, 0) <= 100) AS passes_gate
-FROM circular_query_coverage(aln_nopos, reflen);
+FROM circular_query_coverage('aln_nopos', 'reflen');
 ----
 0.5	1	NULL	false
 
@@ -304,7 +304,7 @@ INSERT INTO aln_nostart VALUES
 
 query III
 SELECT round(coverage, 6), n_fragments, max_ref_gap
-FROM circular_query_coverage(aln_nostart, reflen);
+FROM circular_query_coverage('aln_nostart', 'reflen');
 ----
 0.5	1	NULL
 
@@ -324,13 +324,13 @@ INSERT INTO aln_ins VALUES
 
 query III
 SELECT round(coverage, 6), round(identity, 6), n_fragments
-FROM circular_query_coverage(aln_ins, reflen);
+FROM circular_query_coverage('aln_ins', 'reflen');
 ----
 0.998333	0.998333	2
 
 query III
 SELECT round(coverage, 6), round(identity, 6), n_fragments
-FROM circular_query_coverage(aln_ins, reflen, coverage_type := 'mapped');
+FROM circular_query_coverage('aln_ins', 'reflen', coverage_type := 'mapped');
 ----
 1.0	0.998333	2
 
@@ -349,14 +349,14 @@ INSERT INTO aln_split_encoding VALUES
 
 query III
 SELECT round(coverage, 6), identity IS NULL, max_ref_gap
-FROM circular_query_coverage(aln_split_encoding, reflen);
+FROM circular_query_coverage('aln_split_encoding', 'reflen');
 ----
 1.0	true	0
 
 # With extended CIGARs identity is always a number -- never NULL for any row the macro
 # emits -- so the aligner is the only thing that determines whether it is usable.
 query I
-SELECT count(*) FROM circular_query_coverage(aln, reflen) WHERE identity IS NULL;
+SELECT count(*) FROM circular_query_coverage('aln', 'reflen') WHERE identity IS NULL;
 ----
 0
 
@@ -372,7 +372,7 @@ INSERT INTO aln_anon VALUES
   (NULL, 2048, 'circ30k',     1,  3001, '3000H3000M');
 
 query I
-SELECT count(*) FROM circular_query_coverage(aln_anon, reflen);
+SELECT count(*) FROM circular_query_coverage('aln_anon', 'reflen');
 ----
 1
 
@@ -384,7 +384,7 @@ CREATE TABLE reflen_dup AS SELECT * FROM reflen UNION ALL SELECT * FROM reflen;
 
 query III
 SELECT read_id, n_fragments, max_ref_gap
-FROM circular_query_coverage(aln, reflen_dup)
+FROM circular_query_coverage('aln', 'reflen_dup')
 WHERE read_id = 'control';
 ----
 control	1	NULL
@@ -396,7 +396,7 @@ CREATE TABLE reflen_conflict AS SELECT * FROM reflen
 UNION ALL SELECT 'circ30k', 999, true;
 
 statement error
-SELECT * FROM circular_query_coverage(aln, reflen_conflict);
+SELECT * FROM circular_query_coverage('aln', 'reflen_conflict');
 ----
 has more than one recorded length
 
@@ -410,7 +410,7 @@ statement ok
 INSERT INTO reflen_null VALUES ('circ30k', NULL, true), ('plas5k', 5000, true), ('circ200k', 200000, true);
 
 statement error
-SELECT * FROM circular_query_coverage(aln, reflen_null);
+SELECT * FROM circular_query_coverage('aln', 'reflen_null');
 ----
 missing or non-positive length
 
@@ -418,7 +418,7 @@ statement ok
 CREATE TABLE reflen_zero AS SELECT reference, 0::BIGINT AS length, is_circular FROM reflen;
 
 statement error
-SELECT * FROM circular_query_coverage(aln, reflen_zero);
+SELECT * FROM circular_query_coverage('aln', 'reflen_zero');
 ----
 missing or non-positive length
 
@@ -433,14 +433,14 @@ CREATE TABLE reflen_linear AS SELECT reference, length, false AS is_circular FRO
 query II
 SELECT max_ref_gap,
        (coverage >= 0.90 AND NOT mixed_strand AND COALESCE(max_ref_gap, 0) <= 100) AS passes_gate
-FROM circular_query_coverage(aln, reflen_linear) WHERE read_id = 'junction_fwd';
+FROM circular_query_coverage('aln', 'reflen_linear') WHERE read_id = 'junction_fwd';
 ----
 30000	false
 
 query II
 SELECT max_ref_gap,
        (coverage >= 0.90 AND NOT mixed_strand AND COALESCE(max_ref_gap, 0) <= 100) AS passes_gate
-FROM circular_query_coverage(aln, reflen) WHERE read_id = 'junction_fwd';
+FROM circular_query_coverage('aln', 'reflen') WHERE read_id = 'junction_fwd';
 ----
 0	true
 
@@ -450,7 +450,7 @@ FROM circular_query_coverage(aln, reflen) WHERE read_id = 'junction_fwd';
 # rather than being filtered out and losing the pooled figure.
 query II
 SELECT round(coverage, 6), n_fragments
-FROM circular_query_coverage(aln, reflen_linear) WHERE read_id = 'junction_fwd';
+FROM circular_query_coverage('aln', 'reflen_linear') WHERE read_id = 'junction_fwd';
 ----
 1.0	2
 
@@ -461,7 +461,7 @@ CREATE TABLE reflen_mixed AS
 SELECT reference, length, reference <> 'plas5k' AS is_circular FROM reflen;
 
 query III
-SELECT read_id, reference, max_ref_gap FROM circular_query_coverage(aln, reflen_mixed)
+SELECT read_id, reference, max_ref_gap FROM circular_query_coverage('aln', 'reflen_mixed')
 WHERE read_id IN ('junction_fwd', 'multiwrap') ORDER BY read_id;
 ----
 junction_fwd	circ30k	0
@@ -473,7 +473,7 @@ statement ok
 CREATE TABLE reflen_undeclared AS SELECT reference, length, NULL::BOOLEAN AS is_circular FROM reflen;
 
 statement error
-SELECT * FROM circular_query_coverage(aln, reflen_undeclared);
+SELECT * FROM circular_query_coverage('aln', 'reflen_undeclared');
 ----
 does not say whether it is circular
 
@@ -491,7 +491,7 @@ INSERT INTO aln_tie VALUES
   ('tie', 2048, 'circ30k', 20001, 23001, '3000=3000H');
 
 query I
-SELECT max_ref_gap FROM circular_query_coverage(aln_tie, reflen);
+SELECT max_ref_gap FROM circular_query_coverage('aln_tie', 'reflen');
 ----
 3000
 
@@ -501,6 +501,6 @@ statement ok
 CREATE TABLE aln_tie_rev AS SELECT * FROM aln_tie ORDER BY position DESC;
 
 query I
-SELECT max_ref_gap FROM circular_query_coverage(aln_tie_rev, reflen);
+SELECT max_ref_gap FROM circular_query_coverage('aln_tie_rev', 'reflen');
 ----
 3000

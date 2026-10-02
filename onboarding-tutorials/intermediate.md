@@ -367,9 +367,9 @@ SELECT genome_id,
        covered,
        round(proportion_covered * 100, 4) AS pct_covered
 FROM genome_coverage(
-    filtered_alignments,
-    ecoli_total_length,
-    ecoli_genome_id
+    'filtered_alignments',
+    'ecoli_total_length',
+    'ecoli_genome_id'
 );
 ```
 

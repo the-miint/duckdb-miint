@@ -56,7 +56,7 @@ INSERT INTO regions VALUES
 # s5, s7 and s8 contribute no rows at all.
 
 query TTTIIIIR
-SELECT * FROM region_coverage(positions, regions) ORDER BY region_id, sample_id;
+SELECT * FROM region_coverage('positions', 'regions') ORDER BY region_id, sample_id;
 ----
 s1	g1	R1	50	60	5	10	0.5
 s2	g1	R1	50	60	10	10	1.0
@@ -76,7 +76,7 @@ s4	g2	R3	5	15	5	10	0.5
 
 query TTII
 SELECT sample_id, region_id, covered, region_length
-FROM region_coverage(positions, regions)
+FROM region_coverage('positions', 'regions')
 WHERE (sample_id, region_id) IN (('s1','R1'), ('s3','R2'), ('s2','R1'))
 ORDER BY sample_id;
 ----
@@ -89,7 +89,7 @@ s3	R2	50	50
 # separate code paths (LEAST and GREATEST) and a containing alignment exercises both.
 
 query TI
-SELECT sample_id, covered FROM region_coverage(positions, regions)
+SELECT sample_id, covered FROM region_coverage('positions', 'regions')
 WHERE region_id = 'R1' AND covered > region_length;
 ----
 
@@ -105,7 +105,7 @@ CREATE TABLE edge_pos AS SELECT * FROM (VALUES
   ('e_lo_out', 'g1', 45, 50)) t(sample_id, genome_id, start, stop);
 
 query TI
-SELECT sample_id, covered FROM region_coverage(edge_pos, regions)
+SELECT sample_id, covered FROM region_coverage('edge_pos', 'regions')
 WHERE region_id = 'R1' ORDER BY sample_id;
 ----
 e_hi_in	1
@@ -118,7 +118,7 @@ e_lo_in	1
 # an unmerged sum just quietly inflates the proportion.
 
 query I
-SELECT covered FROM region_coverage(positions, regions)
+SELECT covered FROM region_coverage('positions', 'regions')
 WHERE sample_id = 's6' AND region_id = 'R1';
 ----
 8
@@ -135,7 +135,7 @@ WHERE sample_id = 's6' AND region_id = 'R1';
 
 query II
 SELECT rc.covered, merge_then_clip.covered
-FROM (SELECT covered FROM region_coverage(positions, regions)
+FROM (SELECT covered FROM region_coverage('positions', 'regions')
       WHERE sample_id = 's9' AND region_id = 'R1') rc,
      (SELECT SUM(LEAST(ci.stop, 60) - GREATEST(ci.start, 50)) AS covered
       FROM (SELECT UNNEST(compress_intervals(start, stop)) AS ci
@@ -179,7 +179,7 @@ FROM gc_len;
 
 query IIR
 SELECT covered, region_length, proportion_covered
-FROM region_coverage(gc_pos, gc_whole);
+FROM region_coverage('gc_pos', 'gc_whole');
 ----
 26	100	0.26
 
@@ -196,7 +196,7 @@ FROM region_coverage(gc_pos, gc_whole);
 query TTIIT
 SELECT typeof(rc.covered), typeof(gc.covered), rc.covered, gc.covered,
        abs(rc.proportion_covered - gc.proportion_covered) < 1e-12 AS prop_agrees
-FROM region_coverage(gc_pos, gc_whole) rc, genome_coverage(gc_aln, gc_len, gc_map) gc;
+FROM region_coverage('gc_pos', 'gc_whole') rc, genome_coverage('gc_aln', 'gc_len', 'gc_map') gc;
 ----
 BIGINT	BIGINT	26	26	true
 
@@ -234,19 +234,19 @@ SELECT genome_id, 1 AS region_start, total_length + 1 AS region_stop, genome_id 
 FROM mc_len;
 
 query IR
-SELECT covered::BIGINT, proportion_covered FROM genome_coverage(mc_aln, mc_len, mc_map);
+SELECT covered::BIGINT, proportion_covered FROM genome_coverage('mc_aln', 'mc_len', 'mc_map');
 ----
 150	0.5
 
 statement error
-SELECT COUNT(*) FROM region_coverage(mc_pos, mc_whole);
+SELECT COUNT(*) FROM region_coverage('mc_pos', 'mc_whole');
 ----
 no genome_id in regions matches any genome_id in positions
 
 # The message must name both domains, so the caller can see the contig/genome mixup
 # rather than guessing at it.
 statement error
-SELECT COUNT(*) FROM region_coverage(mc_pos, mc_whole);
+SELECT COUNT(*) FROM region_coverage('mc_pos', 'mc_whole');
 ----
 regions has genome_id like 'gA'; positions has genome_id like 'c1'
 
@@ -256,7 +256,7 @@ statement ok
 CREATE VIEW mc_pos_empty AS SELECT * FROM mc_pos WHERE false;
 
 query I
-SELECT COUNT(*) FROM region_coverage(mc_pos_empty, mc_whole);
+SELECT COUNT(*) FROM region_coverage('mc_pos_empty', 'mc_whole');
 ----
 0
 
@@ -268,7 +268,7 @@ CREATE TABLE mc_reg_partial AS SELECT * FROM (VALUES
   ('cZ', 1, 101, 'cZ')) t(genome_id, region_start, region_stop, region_id);
 
 query I
-SELECT COUNT(*) FROM region_coverage(mc_pos, mc_reg_partial);
+SELECT COUNT(*) FROM region_coverage('mc_pos', 'mc_reg_partial');
 ----
 1
 
@@ -285,7 +285,7 @@ SELECT p.sample_id, m.genome_id, p.start, p.stop
 FROM mc_pos p JOIN mc_map m ON p.genome_id = m.contig_id;
 
 query IR
-SELECT covered, proportion_covered FROM region_coverage(mc_pos_renamed, mc_whole);
+SELECT covered, proportion_covered FROM region_coverage('mc_pos_renamed', 'mc_whole');
 ----
 50	0.16666666666666666
 
@@ -302,8 +302,8 @@ query IIT
 SELECT s.covered, s.total,
        abs(s.covered::DOUBLE / s.total - gc.proportion_covered) < 1e-12 AS prop_agrees
 FROM (SELECT SUM(covered)::BIGINT AS covered, SUM(region_length)::BIGINT AS total
-      FROM region_coverage(mc_pos, mc_reg)) s,
-     genome_coverage(mc_aln, mc_len, mc_map) gc;
+      FROM region_coverage('mc_pos', 'mc_reg')) s,
+     genome_coverage('mc_aln', 'mc_len', 'mc_map') gc;
 ----
 150	300	true
 
@@ -335,8 +335,8 @@ FROM mc_pos p JOIN mc_offsets o ON p.genome_id = o.contig_id;
 query IIIT
 SELECT rc.covered, rc.region_length, rc.covered = 150 AS covered_is_real_total,
        abs(rc.proportion_covered - gc.proportion_covered) < 1e-12 AS matches_genome_coverage
-FROM region_coverage(mc_pos_genome_frame, mc_whole) rc,
-     genome_coverage(mc_aln, mc_len, mc_map) gc;
+FROM region_coverage('mc_pos_genome_frame', 'mc_whole') rc,
+     genome_coverage('mc_aln', 'mc_len', 'mc_map') gc;
 ----
 150	300	true	true
 
@@ -355,7 +355,7 @@ SELECT p.sample_id, o.genome_id,
 FROM mc_pos p JOIN mc_offsets_zero o ON p.genome_id = o.contig_id;
 
 query I
-SELECT covered FROM region_coverage(mc_pos_zero_frame, mc_whole);
+SELECT covered FROM region_coverage('mc_pos_zero_frame', 'mc_whole');
 ----
 50
 
@@ -373,7 +373,7 @@ query III
 SELECT COUNT(*) AS n_bins_with_coverage,
        SUM(covered)::BIGINT AS summed,
        SUM(region_length)::BIGINT AS spanned
-FROM region_coverage(mc_pos_genome_frame, mc_bins);
+FROM region_coverage('mc_pos_genome_frame', 'mc_bins');
 ----
 6	150	300
 
@@ -391,7 +391,7 @@ CREATE TABLE big_reg AS SELECT * FROM (VALUES
   ('G000436435', 1000000, 1005000, 'PC351')) t(genome_id, region_start, region_stop, region_id);
 
 query IIR
-SELECT covered, region_length, proportion_covered FROM region_coverage(big_pos, big_reg);
+SELECT covered, region_length, proportion_covered FROM region_coverage('big_pos', 'big_reg');
 ----
 5000	5000	1.0
 
@@ -413,7 +413,7 @@ CREATE TABLE ov_reg AS SELECT * FROM (VALUES
 
 query TIIR
 SELECT region_id, covered, region_length, proportion_covered
-FROM region_coverage(ov_pos, ov_reg) ORDER BY region_id;
+FROM region_coverage('ov_pos', 'ov_reg') ORDER BY region_id;
 ----
 OV1	20	100	0.2
 OV2	10	100	0.1
@@ -425,7 +425,7 @@ OV2	10	100	0.1
 # conflation region_presence exists to prevent.
 
 query T
-SELECT sample_id FROM region_coverage(positions, regions)
+SELECT sample_id FROM region_coverage('positions', 'regions')
 WHERE region_id = 'R1' AND sample_id IN ('s3', 's4', 's5', 's7');
 ----
 
@@ -443,8 +443,8 @@ CREATE TABLE roster AS SELECT UNNEST(['s1','s2','s3','s4','s5','s6','s7','s8','s
 query TTIR
 SELECT p.sample_id, p.state, COALESCE(c.covered, 0) AS covered,
        COALESCE(c.proportion_covered, 0.0) AS proportion_covered
-FROM region_presence(positions, regions, roster) p
-LEFT JOIN region_coverage(positions, regions) c
+FROM region_presence('positions', 'regions', 'roster') p
+LEFT JOIN region_coverage('positions', 'regions') c
        ON c.sample_id = p.sample_id AND c.genome_id = p.genome_id
       AND c.region_id = p.region_id
       AND c.region_start = p.region_start AND c.region_stop = p.region_stop
@@ -486,8 +486,8 @@ CREATE TABLE rd_roster AS SELECT UNNEST(['s1','s2']) AS sample_id;
 
 query TIITI
 SELECT p.sample_id, p.region_start, p.region_stop, p.state, COALESCE(c.covered, 0)
-FROM region_presence(rd_pos, rd_reg, rd_roster) p
-LEFT JOIN region_coverage(rd_pos, rd_reg) c
+FROM region_presence('rd_pos', 'rd_reg', 'rd_roster') p
+LEFT JOIN region_coverage('rd_pos', 'rd_reg') c
        ON c.sample_id = p.sample_id AND c.genome_id = p.genome_id
       AND c.region_id = p.region_id
       AND c.region_start = p.region_start AND c.region_stop = p.region_stop
@@ -508,12 +508,12 @@ s2	700	750	present	50
 # NOT EXISTS is keyed on the tuple that actually identifies a region.
 
 query III
-SELECT (SELECT COUNT(*) FROM region_coverage(rd_pos, rd_reg)),
-       (SELECT COUNT(*) FROM region_presence(rd_pos, rd_reg, rd_roster)
+SELECT (SELECT COUNT(*) FROM region_coverage('rd_pos', 'rd_reg')),
+       (SELECT COUNT(*) FROM region_presence('rd_pos', 'rd_reg', 'rd_roster')
         WHERE state = 'present'),
-       (SELECT COUNT(*) FROM region_presence(rd_pos, rd_reg, rd_roster) p
+       (SELECT COUNT(*) FROM region_presence('rd_pos', 'rd_reg', 'rd_roster') p
         WHERE p.state = 'present' AND NOT EXISTS (
-            SELECT 1 FROM region_coverage(rd_pos, rd_reg) c
+            SELECT 1 FROM region_coverage('rd_pos', 'rd_reg') c
             WHERE c.sample_id = p.sample_id AND c.genome_id = p.genome_id
               AND c.region_id = p.region_id
               AND c.region_start = p.region_start AND c.region_stop = p.region_stop));
@@ -521,12 +521,12 @@ SELECT (SELECT COUNT(*) FROM region_coverage(rd_pos, rd_reg)),
 3	3	0
 
 query III
-SELECT (SELECT COUNT(*) FROM region_coverage(positions, regions)),
-       (SELECT COUNT(*) FROM region_presence(positions, regions, roster)
+SELECT (SELECT COUNT(*) FROM region_coverage('positions', 'regions')),
+       (SELECT COUNT(*) FROM region_presence('positions', 'regions', 'roster')
         WHERE state = 'present'),
-       (SELECT COUNT(*) FROM region_presence(positions, regions, roster) p
+       (SELECT COUNT(*) FROM region_presence('positions', 'regions', 'roster') p
         WHERE p.state = 'present' AND NOT EXISTS (
-            SELECT 1 FROM region_coverage(positions, regions) c
+            SELECT 1 FROM region_coverage('positions', 'regions') c
             WHERE c.sample_id = p.sample_id AND c.genome_id = p.genome_id
               AND c.region_id = p.region_id
               AND c.region_start = p.region_start AND c.region_stop = p.region_stop));
@@ -555,7 +555,7 @@ CREATE TABLE null_sample AS
 SELECT * FROM guard_ok UNION ALL SELECT NULL::VARCHAR, 'g1', 50::BIGINT, 60::BIGINT;
 
 statement error
-SELECT * FROM region_coverage(null_sample, regions);
+SELECT * FROM region_coverage('null_sample', 'regions');
 ----
 NULL values in sample_id or genome_id column of positions
 
@@ -564,7 +564,7 @@ CREATE TABLE null_genome AS
 SELECT * FROM guard_ok UNION ALL SELECT 's9', NULL::VARCHAR, 50::BIGINT, 60::BIGINT;
 
 statement error
-SELECT * FROM region_coverage(null_genome, regions);
+SELECT * FROM region_coverage('null_genome', 'regions');
 ----
 NULL values in sample_id or genome_id column of positions
 
@@ -581,7 +581,7 @@ CREATE TABLE null_and_degenerate AS
 SELECT * FROM guard_ok UNION ALL SELECT NULL::VARCHAR, 'g1', 60::BIGINT, 60::BIGINT;
 
 statement error
-SELECT * FROM region_coverage(null_and_degenerate, regions);
+SELECT * FROM region_coverage('null_and_degenerate', 'regions');
 ----
 NULL values in sample_id or genome_id column of positions
 
@@ -595,7 +595,7 @@ CREATE TABLE null_offgenome AS
 SELECT * FROM guard_ok UNION ALL SELECT NULL::VARCHAR, 'g99', 10::BIGINT, 20::BIGINT;
 
 statement error
-SELECT * FROM region_coverage(null_offgenome, regions);
+SELECT * FROM region_coverage('null_offgenome', 'regions');
 ----
 NULL values in sample_id or genome_id column of positions
 
@@ -613,7 +613,7 @@ CREATE TABLE degen_pos AS SELECT * FROM (VALUES
   ('sd', 'g1', 56, NULL)) t(sample_id, genome_id, start, stop);
 
 query I
-SELECT covered FROM region_coverage(degen_pos, regions) WHERE region_id = 'R1';
+SELECT covered FROM region_coverage('degen_pos', 'regions') WHERE region_id = 'R1';
 ----
 5
 
@@ -634,7 +634,7 @@ CREATE TABLE reg_null AS SELECT * FROM (VALUES
   ('g1', NULL::BIGINT, 60::BIGINT, 'RN')) t(genome_id, region_start, region_stop, region_id);
 
 statement error
-SELECT * FROM region_coverage(positions, reg_null);
+SELECT * FROM region_coverage('positions', 'reg_null');
 ----
 got genome_id=g1, region_start=NULL, region_stop=60, region_id=RN
 
@@ -643,7 +643,7 @@ CREATE TABLE reg_null_g AS SELECT * FROM (VALUES
   (NULL::VARCHAR, 50::BIGINT, 60::BIGINT, 'RN')) t(genome_id, region_start, region_stop, region_id);
 
 statement error
-SELECT * FROM region_coverage(positions, reg_null_g);
+SELECT * FROM region_coverage('positions', 'reg_null_g');
 ----
 got genome_id=NULL, region_start=50, region_stop=60, region_id=RN
 
@@ -652,7 +652,7 @@ CREATE TABLE reg_null_stop AS SELECT * FROM (VALUES
   ('g1', 50::BIGINT, NULL::BIGINT, 'RN')) t(genome_id, region_start, region_stop, region_id);
 
 statement error
-SELECT * FROM region_coverage(positions, reg_null_stop);
+SELECT * FROM region_coverage('positions', 'reg_null_stop');
 ----
 got genome_id=g1, region_start=50, region_stop=NULL, region_id=RN
 
@@ -661,7 +661,7 @@ CREATE TABLE reg_null_id AS SELECT * FROM (VALUES
   ('g1', 50::BIGINT, 60::BIGINT, NULL::VARCHAR)) t(genome_id, region_start, region_stop, region_id);
 
 statement error
-SELECT * FROM region_coverage(positions, reg_null_id);
+SELECT * FROM region_coverage('positions', 'reg_null_id');
 ----
 got genome_id=g1, region_start=50, region_stop=60, region_id=NULL
 
@@ -670,14 +670,14 @@ CREATE TABLE reg_zero AS SELECT * FROM (VALUES
   ('g1', 55, 55, 'RZ')) t(genome_id, region_start, region_stop, region_id);
 
 statement error
-SELECT * FROM region_coverage(positions, reg_zero);
+SELECT * FROM region_coverage('positions', 'reg_zero');
 ----
 region is zero-width (region_id 'RZ': [55, 55))
 
 # The zero-width branch's remedy names the filter that fixes a bin expansion.
 
 statement error
-SELECT * FROM region_coverage(positions, reg_zero);
+SELECT * FROM region_coverage('positions', 'reg_zero');
 ----
 filter them with WHERE region_stop > region_start
 
@@ -686,7 +686,7 @@ CREATE TABLE reg_inv AS SELECT * FROM (VALUES
   ('g1', 60, 50, 'RI')) t(genome_id, region_start, region_stop, region_id);
 
 statement error
-SELECT * FROM region_coverage(positions, reg_inv);
+SELECT * FROM region_coverage('positions', 'reg_inv');
 ----
 coordinates are inverted (region_id 'RI': [60, 50))
 
@@ -696,7 +696,7 @@ coordinates are inverted (region_id 'RI': [60, 50))
 # inverted remedy with no assertion at all.
 
 statement error
-SELECT * FROM region_coverage(positions, reg_inv);
+SELECT * FROM region_coverage('positions', 'reg_inv');
 ----
 region_stop must be greater than region_start
 
@@ -716,12 +716,12 @@ CREATE TABLE mixed_reg AS SELECT * FROM (VALUES
   ('g1', 700, 650, 'BAD')) t(genome_id, region_start, region_stop, region_id);
 
 statement error
-SELECT COUNT(*) FROM region_coverage(positions, mixed_reg);
+SELECT COUNT(*) FROM region_coverage('positions', 'mixed_reg');
 ----
 coordinates are inverted (region_id 'BAD': [700, 650))
 
 query I
-SELECT COUNT(*) FROM region_coverage(positions, mixed_reg) WHERE region_id = 'GOOD';
+SELECT COUNT(*) FROM region_coverage('positions', 'mixed_reg') WHERE region_id = 'GOOD';
 ----
 4
 
@@ -740,7 +740,7 @@ CREATE TABLE vc_reg AS SELECT * FROM (VALUES
 
 query IIIIR
 SELECT region_start, region_stop, covered, region_length, proportion_covered
-FROM region_coverage(vc_pos, vc_reg);
+FROM region_coverage('vc_pos', 'vc_reg');
 ----
 50	60	10	10	1.0
 
@@ -757,7 +757,7 @@ CREATE TABLE int_reg AS SELECT * FROM (VALUES
 
 query TTIR
 SELECT typeof(region_start), typeof(covered), covered, proportion_covered
-FROM region_coverage(int_pos, int_reg);
+FROM region_coverage('int_pos', 'int_reg');
 ----
 BIGINT	BIGINT	50	0.5
 
@@ -776,7 +776,7 @@ CREATE TABLE uu_reg AS SELECT * FROM (VALUES
 
 query TTTI
 SELECT typeof(sample_id), typeof(genome_id), typeof(region_id), covered
-FROM region_coverage(uu_pos, uu_reg);
+FROM region_coverage('uu_pos', 'uu_reg');
 ----
 UUID	BIGINT	BIGINT	5
 
@@ -797,26 +797,26 @@ statement ok
 CREATE TABLE rc_s.pos_q AS SELECT * FROM positions;
 
 query I
-SELECT covered FROM region_coverage(pos_view, regions)
+SELECT covered FROM region_coverage('pos_view', 'regions')
 WHERE sample_id = 's6' AND region_id = 'R1';
 ----
 8
 
 query I
-SELECT covered FROM region_coverage(pos_temp, regions)
+SELECT covered FROM region_coverage('pos_temp', 'regions')
 WHERE sample_id = 's6' AND region_id = 'R1';
 ----
 8
 
 query I
-SELECT covered FROM region_coverage(rc_s.pos_q, regions)
+SELECT covered FROM region_coverage('rc_s.pos_q', 'regions')
 WHERE sample_id = 's6' AND region_id = 'R1';
 ----
 8
 
 query I
 WITH pos_cte AS (SELECT * FROM positions)
-SELECT covered FROM region_coverage(pos_cte, regions)
+SELECT covered FROM region_coverage('pos_cte', 'regions')
 WHERE sample_id = 's6' AND region_id = 'R1';
 ----
 8
@@ -842,7 +842,7 @@ WHERE sample_id = 's6' AND region_id = 'R1';
 
 query I
 WITH reg AS (SELECT * FROM positions)
-SELECT covered FROM region_coverage(reg, regions)
+SELECT covered FROM region_coverage('reg', 'regions')
 WHERE sample_id = 's6' AND region_id = 'R1';
 ----
 8
@@ -851,7 +851,7 @@ statement ok
 CREATE TABLE reg AS SELECT * FROM positions;
 
 query I
-SELECT covered FROM region_coverage(reg, regions)
+SELECT covered FROM region_coverage('reg', 'regions')
 WHERE sample_id = 's6' AND region_id = 'R1';
 ----
 8
@@ -864,14 +864,14 @@ WHERE sample_id = 's6' AND region_id = 'R1';
 
 query I
 WITH checked AS (SELECT * FROM positions)
-SELECT covered FROM region_coverage(checked, regions)
+SELECT covered FROM region_coverage('checked', 'regions')
 WHERE sample_id = 's6' AND region_id = 'R1';
 ----
 8
 
 query I
 WITH clipped AS (SELECT * FROM positions), merged AS (SELECT * FROM regions)
-SELECT covered FROM region_coverage(clipped, merged)
+SELECT covered FROM region_coverage('clipped', 'merged')
 WHERE sample_id = 's6' AND region_id = 'R1';
 ----
 8
@@ -883,7 +883,7 @@ WHERE sample_id = 's6' AND region_id = 'R1';
 
 statement error
 WITH _rc_reg AS (SELECT * FROM positions)
-SELECT covered FROM region_coverage(_rc_reg, regions) WHERE sample_id = 's6';
+SELECT covered FROM region_coverage('_rc_reg', 'regions') WHERE sample_id = 's6';
 ----
 not found in FROM clause
 
@@ -891,7 +891,7 @@ statement ok
 CREATE TABLE _rc_reg AS SELECT * FROM positions;
 
 statement error
-SELECT covered FROM region_coverage(_rc_reg, regions) WHERE sample_id = 's6';
+SELECT covered FROM region_coverage('_rc_reg', 'regions') WHERE sample_id = 's6';
 ----
 not found in FROM clause
 
@@ -906,12 +906,12 @@ statement ok
 CREATE TABLE empty_reg AS SELECT * FROM regions WHERE FALSE;
 
 query I
-SELECT COUNT(*) FROM region_coverage(empty_pos, regions);
+SELECT COUNT(*) FROM region_coverage('empty_pos', 'regions');
 ----
 0
 
 query I
-SELECT COUNT(*) FROM region_coverage(positions, empty_reg);
+SELECT COUNT(*) FROM region_coverage('positions', 'empty_reg');
 ----
 0
 
@@ -929,7 +929,7 @@ CREATE TABLE dup_reg AS
 SELECT * FROM regions UNION ALL SELECT * FROM regions;
 
 query I
-SELECT covered FROM region_coverage(dup_pos, regions)
+SELECT covered FROM region_coverage('dup_pos', 'regions')
 WHERE sample_id = 's6' AND region_id = 'R1';
 ----
 8
@@ -939,7 +939,7 @@ WHERE sample_id = 's6' AND region_id = 'R1';
 # the output shape, which is the contract, whichever mechanism delivers it.
 
 query II
-SELECT COUNT(*), SUM(covered)::BIGINT FROM region_coverage(positions, dup_reg);
+SELECT COUNT(*), SUM(covered)::BIGINT FROM region_coverage('positions', 'dup_reg');
 ----
 8	188
 
@@ -958,7 +958,7 @@ CREATE TABLE xg_reg AS SELECT * FROM (VALUES
   ('gA', 50, 60, 'RA')) t(genome_id, region_start, region_stop, region_id);
 
 query TTI
-SELECT genome_id, region_id, covered FROM region_coverage(xg_pos, xg_reg);
+SELECT genome_id, region_id, covered FROM region_coverage('xg_pos', 'xg_reg');
 ----
 gA	RA	10
 
@@ -981,7 +981,7 @@ FROM range(0, 10) t(b);
 
 query TIIIR
 SELECT region_id, region_start, region_stop, covered, proportion_covered
-FROM region_coverage(bin_pos, bin_reg) ORDER BY region_start;
+FROM region_coverage('bin_pos', 'bin_reg') ORDER BY region_start;
 ----
 bin_3	31	41	6	0.6
 bin_4	41	51	4	0.4
@@ -992,7 +992,7 @@ bin_4	41	51	4	0.4
 
 query TR
 SELECT region_id, ROUND(AVG(proportion_covered), 3) AS mean_prop
-FROM region_coverage(positions, regions)
+FROM region_coverage('positions', 'regions')
 GROUP BY region_id
 ORDER BY mean_prop DESC, region_id;
 ----

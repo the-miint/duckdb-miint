@@ -20,36 +20,36 @@ CREATE TABLE spectra AS SELECT * FROM read_mzml('data/mzml/basic_3spectra.mzML')
 #   Spectrum 1: (150, 250) -> X=150, X+100=250 YES
 #   Spectrum 2: (120,220,320,420) -> X=120->220, X=220->320, X=320->420 YES
 query I
-SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_offset_pair(spectra, 100.0)
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_offset_pair('spectra', 100.0)
 ----
 2
 
 # delta=200: only spectrum 2 (120->320, 220->420)
 query I
-SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_offset_pair(spectra, 200.0)
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_offset_pair('spectra', 200.0)
 ----
 1
 
 query I
-SELECT DISTINCT spectrum_index FROM mzml_x_offset_pair(spectra, 200.0)
+SELECT DISTINCT spectrum_index FROM mzml_x_offset_pair('spectra', 200.0)
 ----
 2
 
 # delta=300: only spectrum 2 (120->420)
 query I
-SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_offset_pair(spectra, 300.0)
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_offset_pair('spectra', 300.0)
 ----
 1
 
 # delta=500: no matches
 query I
-SELECT COUNT(*) FROM mzml_x_offset_pair(spectra, 500.0)
+SELECT COUNT(*) FROM mzml_x_offset_pair('spectra', 500.0)
 ----
 0
 
 # Explicit tolerance override
 query I
-SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_offset_pair(spectra, 100.0, tolerance := 0.01)
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_offset_pair('spectra', 100.0, tolerance := 0.01)
 ----
 2
 
@@ -59,25 +59,25 @@ SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_offset_pair(spectra, 100.0, to
 # Spectrum 1: 150,250 -> no triplet (only 2 peaks)
 # Spectrum 2: 120,220,320,420 -> X=120: 120,220,320 YES; X=220: 220,320,420 YES
 query I
-SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_offset_triplet(spectra, 100.0, 200.0)
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_offset_triplet('spectra', 100.0, 200.0)
 ----
 1
 
 query I
-SELECT DISTINCT spectrum_index FROM mzml_x_offset_triplet(spectra, 100.0, 200.0)
+SELECT DISTINCT spectrum_index FROM mzml_x_offset_triplet('spectra', 100.0, 200.0)
 ----
 2
 
 # delta2=100, delta3=300: need X, X+100, X+300
 # Spectrum 2: X=120: 120,220,420 YES
 query I
-SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_offset_triplet(spectra, 100.0, 300.0)
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_offset_triplet('spectra', 100.0, 300.0)
 ----
 1
 
 # delta2=100, delta3=500: no matches
 query I
-SELECT COUNT(*) FROM mzml_x_offset_triplet(spectra, 100.0, 500.0)
+SELECT COUNT(*) FROM mzml_x_offset_triplet('spectra', 100.0, 500.0)
 ----
 0
 
@@ -85,20 +85,20 @@ SELECT COUNT(*) FROM mzml_x_offset_triplet(spectra, 100.0, 500.0)
 
 # MS1 peaks at 100, 200, 300. MS2 precursors at 200, 300. Both match MS1 peaks.
 query I
-SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_ms1_ms2_prec(spectra)
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_ms1_ms2_prec('spectra')
 ----
 2
 
 # With tight tolerance: exact match still works
 query I
-SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_ms1_ms2_prec(spectra, tolerance := 0.01)
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_ms1_ms2_prec('spectra', tolerance := 0.01)
 ----
 2
 
 # With very tight tolerance: might miss if precursor doesn't exactly match MS1 peak
 # In our test data, precursor_mz=200.0 and MS1 peak=200.0 -> exact match
 query I
-SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_ms1_ms2_prec(spectra, tolerance := 0.001)
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_ms1_ms2_prec('spectra', tolerance := 0.001)
 ----
 2
 
@@ -113,12 +113,12 @@ SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_ms1_ms2_prec(spectra, toleranc
 #   X=320: 320+100=420 -> spectrum 2 has 420 YES
 # Result: spectrum 2 matches
 query I
-SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_offset_pair_range(spectra, 100.0, 200.0, 400.0)
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_offset_pair_range('spectra', 100.0, 200.0, 400.0)
 ----
 1
 
 query I
-SELECT DISTINCT spectrum_index FROM mzml_x_offset_pair_range(spectra, 100.0, 200.0, 400.0)
+SELECT DISTINCT spectrum_index FROM mzml_x_offset_pair_range('spectra', 100.0, 200.0, 400.0)
 ----
 2
 
@@ -126,12 +126,12 @@ SELECT DISTINCT spectrum_index FROM mzml_x_offset_pair_range(spectra, 100.0, 200
 # X=120: 120+100=220 -> spectrum 2 YES
 # X=150: 150+100=250 -> spectrum 1 YES
 query I
-SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_offset_pair_range(spectra, 100.0, 100.0, 200.0)
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_x_offset_pair_range('spectra', 100.0, 100.0, 200.0)
 ----
 2
 
 # X in [500, 600]: no X candidates
 query I
-SELECT COUNT(*) FROM mzml_x_offset_pair_range(spectra, 100.0, 500.0, 600.0)
+SELECT COUNT(*) FROM mzml_x_offset_pair_range('spectra', 100.0, 500.0, 600.0)
 ----
 0

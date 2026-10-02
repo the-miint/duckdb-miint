@@ -394,7 +394,7 @@ CREATE VIEW original AS
 
 -- qcd_reads: the external tool's surviving reads, each carrying the ORIGINAL
 -- sequence_index (project/rename so both sides share `sequence_index` + `sequence`).
-SELECT * FROM infer_trim(original, qcd_reads) ORDER BY sequence_index;
+SELECT * FROM infer_trim('original', 'qcd_reads') ORDER BY sequence_index;
 ```
 
 Semantics:

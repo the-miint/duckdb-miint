@@ -30,7 +30,7 @@ statement ok
 INSERT INTO subject_total_length VALUES ('genome_A', 100);
 
 query TIR
-SELECT * FROM genome_coverage(alignments, subject_total_length, subject_genome_id);
+SELECT * FROM genome_coverage('alignments', 'subject_total_length', 'subject_genome_id');
 ----
 genome_A	22	0.22
 
@@ -42,7 +42,7 @@ genome_A	22	0.22
 # This pins the type because the accidental HUGEINT was not free: it is 16 bytes
 # instead of 8, and COPY to Parquet wrote it as DOUBLE.
 query T
-SELECT typeof(covered) FROM genome_coverage(alignments, subject_total_length, subject_genome_id);
+SELECT typeof(covered) FROM genome_coverage('alignments', 'subject_total_length', 'subject_genome_id');
 ----
 BIGINT
 
@@ -68,7 +68,7 @@ statement ok
 INSERT INTO subject_total_length VALUES ('genome_A', 100);
 
 query TIR
-SELECT * FROM genome_coverage(alignments, subject_total_length, subject_genome_id);
+SELECT * FROM genome_coverage('alignments', 'subject_total_length', 'subject_genome_id');
 ----
 genome_A	16	0.16
 
@@ -94,7 +94,7 @@ statement ok
 INSERT INTO subject_total_length VALUES ('genome_A', 100);
 
 query TIR
-SELECT * FROM genome_coverage(alignments, subject_total_length, subject_genome_id);
+SELECT * FROM genome_coverage('alignments', 'subject_total_length', 'subject_genome_id');
 ----
 genome_A	22	0.22
 
@@ -120,7 +120,7 @@ statement ok
 INSERT INTO subject_total_length VALUES ('genome_A', 100), ('genome_B', 200);
 
 query TIR
-SELECT * FROM genome_coverage(alignments, subject_total_length, subject_genome_id) ORDER BY genome_id;
+SELECT * FROM genome_coverage('alignments', 'subject_total_length', 'subject_genome_id') ORDER BY genome_id;
 ----
 genome_A	11	0.11
 genome_B	21	0.105
@@ -147,7 +147,7 @@ statement ok
 INSERT INTO subject_total_length VALUES ('genome_A', 100);
 
 query TIR
-SELECT * FROM genome_coverage(alignments, subject_total_length, subject_genome_id);
+SELECT * FROM genome_coverage('alignments', 'subject_total_length', 'subject_genome_id');
 ----
 genome_A	11	0.11
 
@@ -174,7 +174,7 @@ statement ok
 INSERT INTO total_length_6a VALUES ('genomeX', 100000);
 
 query TIR
-SELECT * FROM genome_coverage(sam_alignments, total_length_6a, genome_id_6a);
+SELECT * FROM genome_coverage('sam_alignments', 'total_length_6a', 'genome_id_6a');
 ----
 genomeX	286	0.00286
 
@@ -195,7 +195,7 @@ statement ok
 INSERT INTO total_length_6b VALUES ('genome1', 1000), ('genome2', 100000);
 
 query TIR
-SELECT * FROM genome_coverage(sam_alignments, total_length_6b, genome_id_6b) ORDER BY genome_id;
+SELECT * FROM genome_coverage('sam_alignments', 'total_length_6b', 'genome_id_6b') ORDER BY genome_id;
 ----
 genome1	10	0.01
 genome2	276	0.00276
@@ -234,14 +234,14 @@ statement ok
 INSERT INTO gc7_sg_dup VALUES ('contig1', 'genome_A'), ('contig1', 'genome_A');
 
 query TIR
-SELECT * FROM genome_coverage(gc7_aln, gc7_tl, gc7_sg_dup);
+SELECT * FROM genome_coverage('gc7_aln', 'gc7_tl', 'gc7_sg_dup');
 ----
 genome_A	11	0.11
 
 # ... and is identical to the duplicate-free mapping, proving the dedupe changed
 # nothing for callers who were already correct.
 query TIR
-SELECT * FROM genome_coverage(gc7_aln, gc7_tl, gc7_sg);
+SELECT * FROM genome_coverage('gc7_aln', 'gc7_tl', 'gc7_sg');
 ----
 genome_A	11	0.11
 
@@ -253,7 +253,7 @@ statement ok
 INSERT INTO gc7_tl_missing VALUES ('some_other_genome', 100);
 
 statement error
-SELECT * FROM genome_coverage(gc7_aln, gc7_tl_missing, gc7_sg);
+SELECT * FROM genome_coverage('gc7_aln', 'gc7_tl_missing', 'gc7_sg');
 ----
 no total_length entry for genome_id 'genome_A'
 
@@ -265,7 +265,7 @@ statement ok
 INSERT INTO gc7_tl_zero VALUES ('genome_A', 0);
 
 statement error
-SELECT * FROM genome_coverage(gc7_aln, gc7_tl_zero, gc7_sg);
+SELECT * FROM genome_coverage('gc7_aln', 'gc7_tl_zero', 'gc7_sg');
 ----
 total_length must be positive for genome_id 'genome_A'
 
@@ -277,7 +277,7 @@ statement ok
 INSERT INTO gc7_tl_null VALUES ('genome_A', NULL);
 
 statement error
-SELECT * FROM genome_coverage(gc7_aln, gc7_tl_null, gc7_sg);
+SELECT * FROM genome_coverage('gc7_aln', 'gc7_tl_null', 'gc7_sg');
 ----
 total_length must be positive for genome_id 'genome_A'
 
@@ -291,7 +291,7 @@ statement ok
 INSERT INTO gc7_tl_extra VALUES ('genome_A', 100), ('genome_uncovered', 500);
 
 query TIR
-SELECT * FROM genome_coverage(gc7_aln, gc7_tl_extra, gc7_sg);
+SELECT * FROM genome_coverage('gc7_aln', 'gc7_tl_extra', 'gc7_sg');
 ----
 genome_A	11	0.11
 
@@ -321,12 +321,12 @@ statement ok
 INSERT INTO gc8_tl_bi VALUES (77, 100);
 
 query IIR
-SELECT * FROM genome_coverage(gc8_aln, gc8_tl_bi, gc8_sg_bi);
+SELECT * FROM genome_coverage('gc8_aln', 'gc8_tl_bi', 'gc8_sg_bi');
 ----
 77	11	0.11
 
 query T
-SELECT typeof(genome_id) FROM genome_coverage(gc8_aln, gc8_tl_bi, gc8_sg_bi);
+SELECT typeof(genome_id) FROM genome_coverage('gc8_aln', 'gc8_tl_bi', 'gc8_sg_bi');
 ----
 BIGINT
 
@@ -343,7 +343,7 @@ statement ok
 INSERT INTO gc8_tl_uu VALUES ('33333333-3333-3333-3333-333333333333', 100);
 
 query TIR
-SELECT * FROM genome_coverage(gc8_aln, gc8_tl_uu, gc8_sg_uu);
+SELECT * FROM genome_coverage('gc8_aln', 'gc8_tl_uu', 'gc8_sg_uu');
 ----
 33333333-3333-3333-3333-333333333333	11	0.11
 
@@ -358,7 +358,7 @@ statement ok
 INSERT INTO gc8_tl_vc VALUES ('77', 100);
 
 query IIR
-SELECT * FROM genome_coverage(gc8_aln, gc8_tl_vc, gc8_sg_bi);
+SELECT * FROM genome_coverage('gc8_aln', 'gc8_tl_vc', 'gc8_sg_bi');
 ----
 77	11	0.11
 

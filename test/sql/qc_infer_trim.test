@@ -30,7 +30,7 @@ CREATE TABLE qcd AS SELECT * FROM (VALUES
 
 # Core cases: left+right, omission (NULL/NULL), untrimmed, left-only, right-only
 query III
-SELECT * FROM infer_trim(original, qcd) ORDER BY sequence_index;
+SELECT * FROM infer_trim('original', 'qcd') ORDER BY sequence_index;
 ----
 1	2	2
 2	NULL	NULL
@@ -40,7 +40,7 @@ SELECT * FROM infer_trim(original, qcd) ORDER BY sequence_index;
 
 # The omitted read is the ONLY one with NULL coordinates (falls out of LEFT JOIN)
 query I
-SELECT count(*) FROM infer_trim(original, qcd) WHERE trimmed_5p IS NULL;
+SELECT count(*) FROM infer_trim('original', 'qcd') WHERE trimmed_5p IS NULL;
 ----
 1
 
@@ -60,17 +60,17 @@ statement ok
 CREATE TABLE qcd_bad AS SELECT 10::BIGINT AS sequence_index, 'ZZZZ' AS sequence;
 
 statement error
-SELECT * FROM infer_trim(original_bad, qcd_bad);
+SELECT * FROM infer_trim('original_bad', 'qcd_bad');
 ----
 not a contiguous substring
 
 statement error
-SELECT count(*) FROM infer_trim(original_bad, qcd_bad);
+SELECT count(*) FROM infer_trim('original_bad', 'qcd_bad');
 ----
 not a contiguous substring
 
 statement error
-SELECT sequence_index FROM infer_trim(original_bad, qcd_bad);
+SELECT sequence_index FROM infer_trim('original_bad', 'qcd_bad');
 ----
 not a contiguous substring
 
@@ -85,7 +85,7 @@ statement ok
 CREATE TABLE qcd_long AS SELECT 11::BIGINT AS sequence_index, 'ACGTACGTAC' AS sequence;
 
 statement error
-SELECT trimmed_3p FROM infer_trim(original_short, qcd_long);
+SELECT trimmed_3p FROM infer_trim('original_short', 'qcd_long');
 ----
 not a contiguous substring
 
@@ -99,7 +99,7 @@ statement ok
 CREATE TABLE qcd_nullseq AS SELECT 12::BIGINT AS sequence_index, NULL::VARCHAR AS sequence;
 
 statement error
-SELECT count(*) FROM infer_trim(original_nseq, qcd_nullseq);
+SELECT count(*) FROM infer_trim('original_nseq', 'qcd_nullseq');
 ----
 is NULL
 
@@ -109,7 +109,7 @@ statement ok
 CREATE TABLE qcd_emptyseq AS SELECT 12::BIGINT AS sequence_index, '' AS sequence;
 
 statement error
-SELECT count(*) FROM infer_trim(original_nseq, qcd_emptyseq);
+SELECT count(*) FROM infer_trim('original_nseq', 'qcd_emptyseq');
 ----
 is empty
 
@@ -121,7 +121,7 @@ statement ok
 CREATE TABLE qcd_present AS SELECT 13::BIGINT AS sequence_index, 'ACGT' AS sequence;
 
 statement error
-SELECT count(*) FROM infer_trim(original_null, qcd_present);
+SELECT count(*) FROM infer_trim('original_null', 'qcd_present');
 ----
 original sequence for sequence_index=13 is NULL
 
@@ -139,7 +139,7 @@ statement ok
 CREATE TABLE qcd_rep AS SELECT 20::BIGINT AS sequence_index, 'ACGT' AS sequence;
 
 query III
-SELECT * FROM infer_trim(original_rep, qcd_rep);
+SELECT * FROM infer_trim('original_rep', 'qcd_rep');
 ----
 20	0	4
 
@@ -156,7 +156,7 @@ SELECT o.sequence_index,
        substr(o.sequence, t.trimmed_5p + 1,
               length(o.sequence) - t.trimmed_5p - t.trimmed_3p) AS reconstructed
 FROM original_view o
-JOIN infer_trim(original_view, qcd) t USING (sequence_index)
+JOIN infer_trim('original_view', 'qcd') t USING (sequence_index)
 WHERE t.trimmed_5p IS NOT NULL
 ORDER BY o.sequence_index;
 ----

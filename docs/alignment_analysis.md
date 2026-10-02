@@ -854,7 +854,7 @@ INSERT INTO contig_to_genome VALUES
   ('contig3', 'genomeB');
 
 -- Compute genome coverage, filter to genomes with >50% coverage
-SELECT * FROM genome_coverage(alignments, genome_lengths, contig_to_genome)
+SELECT * FROM genome_coverage('alignments', 'genome_lengths', 'contig_to_genome')
 WHERE proportion_covered > 0.5;
 ```
 
@@ -906,7 +906,7 @@ CREATE TABLE alignments AS
   SELECT 'sampleB', reference, position, stop_position
   FROM read_alignments('sampleB.bam');
 
-SELECT * FROM genome_coverage_per_sample(alignments, genome_lengths, contig_to_genome)
+SELECT * FROM genome_coverage_per_sample('alignments', 'genome_lengths', 'contig_to_genome')
 ORDER BY sample_id, genome_id;
 ```
 
@@ -914,7 +914,7 @@ Feeding per-sample coverage into [absolute quantification](absolute_quantificati
 
 ```sql
 SELECT sample_id, genome_id AS feature_id, proportion_covered AS coverage
-FROM genome_coverage_per_sample(alignments, genome_lengths, contig_to_genome);
+FROM genome_coverage_per_sample('alignments', 'genome_lengths', 'contig_to_genome');
 ```
 
 **If you need the pooled number per sample.** Some workflows want each sample compared against coverage computed across the whole study rather than within the sample. There is no parameter for this — but it is one join, because `genome_coverage` already produces exactly that number:
@@ -922,7 +922,7 @@ FROM genome_coverage_per_sample(alignments, genome_lengths, contig_to_genome);
 ```sql
 -- Broadcast the pooled (all-sample) coverage to every sample.
 SELECT s.sample_id, g.genome_id, g.covered, g.proportion_covered
-FROM genome_coverage(alignments, genome_lengths, contig_to_genome) g
+FROM genome_coverage('alignments', 'genome_lengths', 'contig_to_genome') g
 CROSS JOIN (SELECT DISTINCT sample_id FROM alignments) s;
 ```
 
@@ -1000,17 +1000,17 @@ CREATE TABLE regions AS SELECT * FROM (VALUES
 CREATE VIEW roster AS SELECT sample_id FROM sample_metadata;
 
 -- Three-state calls per sample
-SELECT * FROM region_presence(positions, regions, roster);
+SELECT * FROM region_presence('positions', 'regions', 'roster');
 
 -- How many samples carry the region, keeping non-detections separate
-SELECT state, COUNT(*) FROM region_presence(positions, regions, roster)
+SELECT state, COUNT(*) FROM region_presence('positions', 'regions', 'roster')
 GROUP BY state;
 
 -- Feed presence into PERMANOVA as a metadata variable. Non-detections are
 -- DROPPED rather than pooled with 'absent'.
 CREATE TABLE region_md AS
     SELECT sample_id, state AS pc351
-    FROM region_presence(positions, regions, roster)
+    FROM region_presence('positions', 'regions', 'roster')
     WHERE region_id = 'PC351' AND state IN ('present', 'absent');
 
 SELECT * FROM permanova('dm', 'region_md', variables := ['pc351'],
@@ -1022,7 +1022,7 @@ SELECT * FROM permanova('dm', 'region_md', variables := ['pc351'],
 Long form is deliberate — it is what `read_biom`, `woltka_ogu` and the diversity functions already consume. For a sample x region matrix, `PIVOT`:
 
 ```sql
-PIVOT (SELECT sample_id, region_id, state FROM region_presence(positions, regions, roster))
+PIVOT (SELECT sample_id, region_id, state FROM region_presence('positions', 'regions', 'roster'))
 ON region_id USING first(state);
 ```
 
@@ -1091,8 +1091,8 @@ The coordinates are emitted alongside `region_id` because the join is keyed on t
 SELECT p.sample_id, p.state,
        COALESCE(c.covered, 0)             AS covered,
        COALESCE(c.proportion_covered, 0)  AS proportion_covered
-FROM region_presence(positions, regions, roster) p
-LEFT JOIN region_coverage(positions, regions) c
+FROM region_presence('positions', 'regions', 'roster') p
+LEFT JOIN region_coverage('positions', 'regions') c
        ON c.sample_id = p.sample_id AND c.genome_id = p.genome_id
       AND c.region_id = p.region_id
       AND c.region_start = p.region_start AND c.region_stop = p.region_stop
@@ -1124,12 +1124,12 @@ CREATE TABLE regions AS SELECT * FROM (VALUES
 ) t(genome_id, region_start, region_stop, region_id);
 
 -- Per-sample breadth of one differential region, region-relative denominator
-SELECT * FROM region_coverage(positions, regions)
+SELECT * FROM region_coverage('positions', 'regions')
 ORDER BY proportion_covered DESC;
 
 -- Rank regions by how consistently the cohort covers them
 SELECT region_id, AVG(proportion_covered) AS mean_prop, COUNT(*) AS n_samples
-FROM region_coverage(positions, regions)
+FROM region_coverage('positions', 'regions')
 GROUP BY region_id
 ORDER BY mean_prop DESC;
 ```
@@ -1141,7 +1141,7 @@ CREATE TABLE whole AS
 SELECT genome_id, 1 AS region_start, total_length + 1 AS region_stop, genome_id AS region_id
 FROM genome_lengths;
 
-SELECT * FROM region_coverage(positions, whole);
+SELECT * FROM region_coverage('positions', 'whole');
 ```
 
 > **A multi-contig genome needs one extra step first** — see [Multi-contig genomes](#multi-contig-genomes) immediately below.
@@ -1157,7 +1157,7 @@ There are two correct approaches, and one trap.
 ```sql
 SELECT SUM(covered) AS covered,
        SUM(covered)::DOUBLE / SUM(region_length) AS proportion_covered
-FROM region_coverage(positions, contig_regions)
+FROM region_coverage('positions', 'contig_regions')
 GROUP BY sample_id;
 ```
 
@@ -1180,7 +1180,7 @@ SELECT p.sample_id, o.genome_id,
        p.stop  + o.contig_offset AS stop
 FROM positions p JOIN contig_offsets o ON p.genome_id = o.contig_id;
 
-SELECT * FROM region_coverage(genome_frame_positions, genome_bins);
+SELECT * FROM region_coverage('genome_frame_positions', 'genome_bins');
 ```
 
 This reproduces `genome_coverage` exactly on a whole-genome region, and the per-bin numbers sum back to the whole-genome total — both pinned in `test/sql/region_coverage.test`.
@@ -1244,7 +1244,7 @@ FROM alignments WHERE reference = 'G000436435';
 
 CREATE TABLE roster AS SELECT sample_id, country AS group_id FROM sample_metadata;
 
-SELECT * FROM cumulative_coverage_curve(positions, roster, 4719737)
+SELECT * FROM cumulative_coverage_curve('positions', 'roster', 4719737)
 ORDER BY group_id, rank;
 ```
 
@@ -1254,7 +1254,7 @@ The percentile x-axis micov plots is a window function on the output, which is w
 SELECT group_id,
        rank * 100.0 / NULLIF(COUNT(*) OVER (PARTITION BY group_id) - 1, 0) AS pct_of_group,
        proportion_covered
-FROM cumulative_coverage_curve(positions, roster, 4719737);
+FROM cumulative_coverage_curve('positions', 'roster', 4719737);
 ```
 
 Plotting stays outside miint, as does the Monte Carlo null — for the latter, resample `sample_id`s in SQL and call again.
@@ -1368,7 +1368,7 @@ does not catch those: a chimera the aligner splits scores 1.0 on every fragment.
 returns what it observed and you set the policy:
 
 ```sql
-SELECT * FROM circular_query_coverage(alignments, reference_lengths)
+SELECT * FROM circular_query_coverage('alignments', 'reference_lengths')
 WHERE coverage >= 0.90
   AND NOT mixed_strand
   AND COALESCE(max_ref_gap, 0) <= 100;
@@ -1451,12 +1451,12 @@ regardless of aligner.
   instead of double-counting them. To reduce to one reference per read first:
   ```sql
   -- best reference per read, ties broken deterministically
-  SELECT * FROM circular_query_coverage(alignments, reference_lengths)
+  SELECT * FROM circular_query_coverage('alignments', 'reference_lengths')
   QUALIFY ROW_NUMBER() OVER (PARTITION BY read_id, is_read1
                              ORDER BY coverage DESC, identity DESC NULLS LAST, reference) = 1;
 
   -- or keep only reads that one reference explains unambiguously
-  SELECT * FROM circular_query_coverage(alignments, reference_lengths)
+  SELECT * FROM circular_query_coverage('alignments', 'reference_lengths')
   QUALIFY COUNT(*) OVER (PARTITION BY read_id, is_read1) = 1;
   ```
   Both are policies, not facts, which is why the macro reports the rows and leaves the choice
@@ -1499,7 +1499,7 @@ CREATE VIEW contig_lengths AS
 -- Reads confidently recruited to their own sample's assembly, including those crossing
 -- the origin of a circular contig.
 SELECT read_id, reference, coverage, identity
-FROM circular_query_coverage(recruited, contig_lengths)
+FROM circular_query_coverage('recruited', 'contig_lengths')
 WHERE coverage >= 0.90 AND identity >= 0.99
   AND NOT mixed_strand AND COALESCE(max_ref_gap, 0) <= 100;
 ```

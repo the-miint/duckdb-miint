@@ -54,7 +54,7 @@ INSERT INTO roster VALUES ('s1'),('s2'),('s3'),('s4'),('s5'),('s6'),('s7'),('s8'
 
 query TTTT
 SELECT sample_id, genome_id, region_id, state
-FROM region_presence(positions, regions, roster)
+FROM region_presence('positions', 'regions', 'roster')
 ORDER BY region_id, sample_id;
 ----
 s1	g1	R1	present
@@ -95,7 +95,7 @@ s8	g2	R3	not applicable
 # distinguishes a correct predicate from an off-by-one.
 
 query TT
-SELECT sample_id, state FROM region_presence(positions, regions, roster)
+SELECT sample_id, state FROM region_presence('positions', 'regions', 'roster')
 WHERE region_id = 'R1' AND sample_id IN ('s5', 's8') ORDER BY sample_id;
 ----
 s5	absent
@@ -112,7 +112,7 @@ statement ok
 CREATE TABLE edge_roster AS SELECT UNNEST(['e_hi_in','e_lo_in','e_hi_out','e_lo_out']) AS sample_id;
 
 query TT
-SELECT sample_id, state FROM region_presence(edge_pos, regions, edge_roster)
+SELECT sample_id, state FROM region_presence('edge_pos', 'regions', 'edge_roster')
 WHERE region_id = 'R1' ORDER BY sample_id;
 ----
 e_hi_in	present
@@ -130,7 +130,7 @@ SELECT COUNT(*),
        COUNT(DISTINCT (sample_id, genome_id, region_id, region_start, region_stop)),
        COUNT(DISTINCT (sample_id, genome_id, region_id)),
        COUNT(DISTINCT sample_id)
-FROM region_presence(positions, regions, roster);
+FROM region_presence('positions', 'regions', 'roster');
 ----
 24	24	24	8
 
@@ -142,7 +142,7 @@ statement ok
 CREATE TABLE dup_regions AS SELECT * FROM regions UNION ALL SELECT * FROM regions;
 
 query I
-SELECT COUNT(*) FROM region_presence(positions, dup_regions, dup_roster);
+SELECT COUNT(*) FROM region_presence('positions', 'dup_regions', 'dup_roster');
 ----
 24
 
@@ -166,8 +166,8 @@ CREATE TABLE r1_roster AS SELECT 'r1' AS sample_id;
 # the macro against itself cancels any symmetric defect, so a broken overlap
 # predicate would pass unnoticed.
 query TT
-SELECT (SELECT state FROM region_presence(raw_pos, regions, r1_roster) WHERE region_id='R1'),
-       (SELECT state FROM region_presence(merged_pos, regions, r1_roster) WHERE region_id='R1');
+SELECT (SELECT state FROM region_presence('raw_pos', 'regions', 'r1_roster') WHERE region_id='R1'),
+       (SELECT state FROM region_presence('merged_pos', 'regions', 'r1_roster') WHERE region_id='R1');
 ----
 present	present
 
@@ -178,7 +178,7 @@ statement ok
 CREATE TABLE small_roster AS SELECT UNNEST(['s1','s2']) AS sample_id;
 
 query TT
-SELECT sample_id, state FROM region_presence(positions, regions, small_roster)
+SELECT sample_id, state FROM region_presence('positions', 'regions', 'small_roster')
 WHERE region_id = 'R1' ORDER BY sample_id;
 ----
 s1	present
@@ -190,7 +190,7 @@ s2	present
 # long form makes that workaround unnecessary.
 
 query TTTT
-PIVOT (SELECT sample_id, region_id, state FROM region_presence(positions, regions, roster))
+PIVOT (SELECT sample_id, region_id, state FROM region_presence('positions', 'regions', 'roster'))
 ON region_id USING first(state) ORDER BY sample_id;
 ----
 s1	present	absent	not applicable
@@ -217,7 +217,7 @@ CREATE TABLE s1_roster AS SELECT 's1' AS sample_id;
 
 query IIT
 SELECT region_start, region_stop, state
-FROM region_presence(positions, ambiguous_regions, s1_roster)
+FROM region_presence('positions', 'ambiguous_regions', 's1_roster')
 ORDER BY region_start;
 ----
 50	60	present
@@ -241,12 +241,12 @@ CREATE TABLE roster_bigint AS SELECT UNNEST([101::BIGINT, 102::BIGINT, 103::BIGI
 
 query TTT
 SELECT typeof(sample_id), typeof(genome_id), typeof(region_id)
-FROM region_presence(pos_bigint, reg_bigint, roster_bigint) LIMIT 1;
+FROM region_presence('pos_bigint', 'reg_bigint', 'roster_bigint') LIMIT 1;
 ----
 BIGINT	BIGINT	VARCHAR
 
 query IT
-SELECT sample_id, state FROM region_presence(pos_bigint, reg_bigint, roster_bigint)
+SELECT sample_id, state FROM region_presence('pos_bigint', 'reg_bigint', 'roster_bigint')
 ORDER BY sample_id;
 ----
 101	present
@@ -263,7 +263,7 @@ CREATE TABLE roster_uuid AS SELECT UNNEST([
   '22222222-2222-2222-2222-222222222222'::UUID]) AS sample_id;
 
 query TT
-SELECT typeof(sample_id), state FROM region_presence(pos_uuid, regions, roster_uuid)
+SELECT typeof(sample_id), state FROM region_presence('pos_uuid', 'regions', 'roster_uuid')
 WHERE region_id = 'R1' ORDER BY sample_id;
 ----
 UUID	present
@@ -281,7 +281,7 @@ statement ok
 CREATE TABLE s.qual_pos AS SELECT * FROM positions;
 
 query TT
-SELECT sample_id, state FROM region_presence(s.qual_pos, regions, small_roster)
+SELECT sample_id, state FROM region_presence('s.qual_pos', 'regions', 'small_roster')
 WHERE region_id = 'R1' ORDER BY sample_id;
 ----
 s1	present
@@ -291,7 +291,7 @@ statement ok
 CREATE TEMP TABLE temp_pos AS SELECT * FROM positions;
 
 query TT
-SELECT sample_id, state FROM region_presence(temp_pos, regions, small_roster)
+SELECT sample_id, state FROM region_presence('temp_pos', 'regions', 'small_roster')
 WHERE region_id = 'R1' ORDER BY sample_id;
 ----
 s1	present
@@ -299,7 +299,7 @@ s2	present
 
 query TT
 WITH cte_pos AS (SELECT * FROM positions)
-SELECT sample_id, state FROM region_presence(cte_pos, regions, small_roster)
+SELECT sample_id, state FROM region_presence('cte_pos', 'regions', 'small_roster')
 WHERE region_id = 'R1' ORDER BY sample_id;
 ----
 s1	present
@@ -313,7 +313,7 @@ statement ok
 CREATE TABLE null_roster AS SELECT UNNEST(['s1', NULL]) AS sample_id;
 
 statement error
-SELECT * FROM region_presence(positions, regions, null_roster);
+SELECT * FROM region_presence('positions', 'regions', 'null_roster');
 ----
 NULL values in sample_id column 'sample_id'
 
@@ -322,7 +322,7 @@ CREATE TABLE null_bounds AS SELECT 'g1' AS genome_id, NULL::BIGINT AS region_sta
        60::BIGINT AS region_stop, 'RN' AS region_id;
 
 statement error
-SELECT * FROM region_presence(positions, null_bounds, roster);
+SELECT * FROM region_presence('positions', 'null_bounds', 'roster');
 ----
 region_start, region_stop and region_id must not be NULL
 
@@ -331,7 +331,7 @@ CREATE TABLE null_region_id AS SELECT 'g1' AS genome_id, 50::BIGINT AS region_st
        60::BIGINT AS region_stop, NULL::VARCHAR AS region_id;
 
 statement error
-SELECT * FROM region_presence(positions, null_region_id, roster);
+SELECT * FROM region_presence('positions', 'null_region_id', 'roster');
 ----
 region_start, region_stop and region_id must not be NULL
 
@@ -342,7 +342,7 @@ CREATE TABLE empty_region AS SELECT 'g1' AS genome_id, 60::BIGINT AS region_star
        60::BIGINT AS region_stop, 'RE' AS region_id;
 
 statement error
-SELECT * FROM region_presence(positions, empty_region, roster);
+SELECT * FROM region_presence('positions', 'empty_region', 'roster');
 ----
 region is zero-width
 
@@ -351,7 +351,7 @@ CREATE TABLE inverted_region AS SELECT 'g1' AS genome_id, 70::BIGINT AS region_s
        60::BIGINT AS region_stop, 'RI' AS region_id;
 
 statement error
-SELECT * FROM region_presence(positions, inverted_region, roster);
+SELECT * FROM region_presence('positions', 'inverted_region', 'roster');
 ----
 region coordinates are inverted
 
@@ -362,7 +362,7 @@ statement ok
 CREATE TABLE no_samples AS SELECT * FROM roster WHERE false;
 
 query I
-SELECT COUNT(*) FROM region_presence(positions, regions, no_samples);
+SELECT COUNT(*) FROM region_presence('positions', 'regions', 'no_samples');
 ----
 0
 
@@ -371,7 +371,7 @@ statement ok
 CREATE TABLE no_regions AS SELECT * FROM regions WHERE false;
 
 query I
-SELECT COUNT(*) FROM region_presence(positions, no_regions, roster);
+SELECT COUNT(*) FROM region_presence('positions', 'no_regions', 'roster');
 ----
 0
 
@@ -381,7 +381,7 @@ statement ok
 CREATE TABLE no_positions AS SELECT * FROM positions WHERE false;
 
 query TI
-SELECT state, COUNT(*) FROM region_presence(no_positions, regions, roster)
+SELECT state, COUNT(*) FROM region_presence('no_positions', 'regions', 'roster')
 GROUP BY state;
 ----
 not applicable	24
@@ -397,7 +397,7 @@ not applicable	24
 query TI
 SELECT pc351, COUNT(*) FROM (
     SELECT sample_id, state AS pc351
-    FROM region_presence(positions, regions, roster)
+    FROM region_presence('positions', 'regions', 'roster')
     WHERE region_id = 'R1' AND state IN ('present', 'absent')
 ) GROUP BY pc351 ORDER BY pc351;
 ----
@@ -426,7 +426,7 @@ statement ok
 CREATE TABLE zero_roster AS SELECT UNNEST(['z1','z2','z3','z4']) AS sample_id;
 
 query TT
-SELECT sample_id, state FROM region_presence(zero_pos, regions, zero_roster)
+SELECT sample_id, state FROM region_presence('zero_pos', 'regions', 'zero_roster')
 WHERE region_id = 'R1' ORDER BY sample_id;
 ----
 z1	not applicable
@@ -444,7 +444,7 @@ CREATE TABLE null_sample_pos AS SELECT * FROM (VALUES
   ('s1', 'g1', 40, 55), (NULL, 'g1', 50, 60)) t(sample_id, genome_id, start, stop);
 
 statement error
-SELECT * FROM region_presence(null_sample_pos, regions, roster);
+SELECT * FROM region_presence('null_sample_pos', 'regions', 'roster');
 ----
 NULL values in sample_id or genome_id column of positions
 
@@ -453,7 +453,7 @@ CREATE TABLE null_genome_pos AS SELECT * FROM (VALUES
   ('s1', 'g1', 40, 55), ('s2', NULL, 50, 60)) t(sample_id, genome_id, start, stop);
 
 statement error
-SELECT * FROM region_presence(null_genome_pos, regions, roster);
+SELECT * FROM region_presence('null_genome_pos', 'regions', 'roster');
 ----
 NULL values in sample_id or genome_id column of positions
 
@@ -462,19 +462,19 @@ NULL values in sample_id or genome_id column of positions
 # somewhere" is not actionable.
 
 statement error
-SELECT * FROM region_presence(positions, null_bounds, roster);
+SELECT * FROM region_presence('positions', 'null_bounds', 'roster');
 ----
 region_start=NULL
 
 statement error
-SELECT * FROM region_presence(positions, inverted_region, roster);
+SELECT * FROM region_presence('positions', 'inverted_region', 'roster');
 ----
 region_id 'RI': [70, 60)
 
 # A transposed BED row must NOT be told to filter itself out -- that would silently
 # delete a region the caller asked about. Only the zero-width branch names the filter.
 statement error
-SELECT * FROM region_presence(positions, empty_region, roster);
+SELECT * FROM region_presence('positions', 'empty_region', 'roster');
 ----
 filter them with WHERE region_stop > region_start
 
@@ -498,7 +498,7 @@ CREATE TABLE bin_regions_raw AS
 
 # Unfiltered, the zero-width bins are rejected -- loudly, and with the remedy named.
 statement error
-SELECT * FROM region_presence(tiny_pos, bin_regions_raw, tiny_roster);
+SELECT * FROM region_presence('tiny_pos', 'bin_regions_raw', 'tiny_roster');
 ----
 filter them with WHERE region_stop > region_start
 
@@ -510,7 +510,7 @@ CREATE TABLE bin_regions AS SELECT * FROM bin_regions_raw WHERE region_stop > re
 # third state, not drop the sample and not call it 'absent'.
 query TTIIT
 SELECT sample_id, region_id, region_start, region_stop, state
-FROM region_presence(tiny_pos, bin_regions, tiny_roster)
+FROM region_presence('tiny_pos', 'bin_regions', 'tiny_roster')
 ORDER BY sample_id, region_start;
 ----
 t1	B0	1	2	present
@@ -533,7 +533,7 @@ SELECT COUNT(*) FROM bin_regions_ok WHERE region_stop <= region_start;
 0
 
 query TT
-SELECT region_id, state FROM region_presence(positions, bin_regions_ok, small_roster)
+SELECT region_id, state FROM region_presence('positions', 'bin_regions_ok', 'small_roster')
 WHERE sample_id = 's1' AND state = 'present' ORDER BY region_id;
 ----
 C3	present
@@ -554,7 +554,7 @@ CREATE TABLE reg_gvarchar AS SELECT '77' AS genome_id, 50::BIGINT AS region_star
 
 query TTT
 SELECT typeof(genome_id), genome_id, state
-FROM region_presence(pos_gint, reg_gvarchar, s1_roster);
+FROM region_presence('pos_gint', 'reg_gvarchar', 's1_roster');
 ----
 VARCHAR	77	present
 
@@ -578,7 +578,7 @@ statement ok
 CREATE TABLE vros AS SELECT UNNEST(['s1','s2','s3']) AS sample_id;
 
 query TT
-SELECT sample_id, state FROM region_presence(vpos, vreg, vros) ORDER BY sample_id;
+SELECT sample_id, state FROM region_presence('vpos', 'vreg', 'vros') ORDER BY sample_id;
 ----
 s1	present
 s2	present
@@ -590,14 +590,14 @@ CREATE TABLE vreg_inv AS SELECT * FROM (VALUES
   ('g1', '100', '9', 'BADINV')) t(genome_id, region_start, region_stop, region_id);
 
 statement error
-SELECT * FROM region_presence(vpos, vreg_inv, vros);
+SELECT * FROM region_presence('vpos', 'vreg_inv', 'vros');
 ----
 region coordinates are inverted
 
 # Coordinates come back as BIGINT regardless of how they went in.
 query TT
 SELECT typeof(region_start), typeof(region_stop)
-FROM region_presence(vpos, vreg, vros) LIMIT 1;
+FROM region_presence('vpos', 'vreg', 'vros') LIMIT 1;
 ----
 BIGINT	BIGINT
 
@@ -611,7 +611,7 @@ CREATE TABLE bad_null_null AS SELECT * FROM (VALUES
   ('s1', 'g1', 40, 55), (NULL, 'g1', NULL, NULL)) t(sample_id, genome_id, start, stop);
 
 statement error
-SELECT * FROM region_presence(bad_null_null, regions, roster);
+SELECT * FROM region_presence('bad_null_null', 'regions', 'roster');
 ----
 NULL values in sample_id or genome_id column of positions
 
@@ -620,7 +620,7 @@ CREATE TABLE bad_null_degen AS SELECT * FROM (VALUES
   ('s1', 'g1', 40, 55), (NULL, 'g1', 60, 50)) t(sample_id, genome_id, start, stop);
 
 statement error
-SELECT * FROM region_presence(bad_null_degen, regions, roster);
+SELECT * FROM region_presence('bad_null_degen', 'regions', 'roster');
 ----
 NULL values in sample_id or genome_id column of positions
 
@@ -629,7 +629,7 @@ CREATE TABLE bad_genome_null AS SELECT * FROM (VALUES
   ('s1', 'g1', 40, 55), ('s2', NULL, NULL, NULL)) t(sample_id, genome_id, start, stop);
 
 statement error
-SELECT * FROM region_presence(bad_genome_null, regions, roster);
+SELECT * FROM region_presence('bad_genome_null', 'regions', 'roster');
 ----
 NULL values in sample_id or genome_id column of positions
 
@@ -640,7 +640,7 @@ CREATE TABLE bad_offroster AS SELECT * FROM (VALUES
   ('s1', 'g1', 40, 55), (NULL, 'g1', NULL, NULL)) t(sample_id, genome_id, start, stop);
 
 statement error
-SELECT * FROM region_presence(bad_offroster, regions, small_roster);
+SELECT * FROM region_presence('bad_offroster', 'regions', 'small_roster');
 ----
 NULL values in sample_id or genome_id column of positions
 
@@ -659,7 +659,7 @@ statement ok
 CREATE TABLE roster2 AS SELECT * FROM roster;
 
 query TT
-SELECT sample_id, state FROM region_presence(cov, reg, roster2)
+SELECT sample_id, state FROM region_presence('cov', 'reg', 'roster2')
 WHERE region_id = 'R1' AND sample_id IN ('s1','s3') ORDER BY sample_id;
 ----
 s1	present
@@ -670,7 +670,7 @@ statement ok
 CREATE TABLE genome_cov AS SELECT * FROM positions;
 
 query TT
-SELECT sample_id, state FROM region_presence(genome_cov, reg, roster)
+SELECT sample_id, state FROM region_presence('genome_cov', 'reg', 'roster')
 WHERE region_id = 'R1' AND sample_id IN ('s1','s3') ORDER BY sample_id;
 ----
 s1	present
@@ -686,12 +686,12 @@ CREATE TABLE dup_positions AS
 
 query II
 SELECT COUNT(*), COUNT(DISTINCT (sample_id, genome_id, region_id, region_start, region_stop))
-FROM region_presence(dup_positions, regions, roster);
+FROM region_presence('dup_positions', 'regions', 'roster');
 ----
 24	24
 
 query TT
-SELECT sample_id, state FROM region_presence(dup_positions, regions, roster)
+SELECT sample_id, state FROM region_presence('dup_positions', 'regions', 'roster')
 WHERE region_id = 'R1' AND sample_id IN ('s1','s3') ORDER BY sample_id;
 ----
 s1	present
@@ -712,7 +712,7 @@ CREATE TABLE leak_roster AS SELECT UNNEST(['a','b','c']) AS sample_id;
 
 query TIIT
 SELECT sample_id, region_start, region_stop, state
-FROM region_presence(leak_pos, ambiguous_regions, leak_roster)
+FROM region_presence('leak_pos', 'ambiguous_regions', 'leak_roster')
 ORDER BY sample_id, region_start;
 ----
 a	50	60	present

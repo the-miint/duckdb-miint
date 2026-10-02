@@ -311,7 +311,7 @@ Single-end only (no `sequence2`/`qual2`). Any additional projected columns are i
 
 **Parameters:**
 - `READ_GROUP` (STRUCT, optional): Emits an `@RG` header line and a per-record `RG:Z` tag. An `ID` field is required; any other fields (`PL`, `DS`, `SM`, `LB`, `PU`, `CN`, …) are passed through. Field names are case-insensitive (upper-cased to the SAM codes). Example: `READ_GROUP {ID: 'qiita', PL: 'PACBIO', DS: 'READTYPE=CCS'}`. `DS:READTYPE=CCS` is the field `lima` keys on to treat the input as CCS.
-- `TAGS` (STRUCT, optional): Maps a 2-character BAM aux tag to a projected **integer** column, written as a signed 32-bit (`i`) tag per record. A NULL cell omits the tag for that record. Example: `TAGS {zm: zmw}` writes `zm:i:<zmw>` (PacBio ZMW hole number). Non-integer columns are rejected at bind. Note: struct keys are lower-cased unless quoted, so an uppercase tag needs a quoted key (e.g. `TAGS {'NM': edit_distance}`); the `RG` tag is reserved for `READ_GROUP`.
+- `TAGS` (STRUCT, optional): Maps a 2-character BAM aux tag to a projected **integer** column, written as a signed 32-bit (`i`) tag per record. A NULL cell omits the tag for that record. Example: `TAGS {zm: 'zmw'}` writes `zm:i:<zmw>` (PacBio ZMW hole number). Non-integer columns are rejected at bind. Note: struct keys are lower-cased unless quoted, so an uppercase tag needs a quoted key (e.g. `TAGS {'NM': 'edit_distance'}`); the `RG` tag is reserved for `READ_GROUP`.
 - `COMPRESSION_LEVEL` (0–9, optional): BAM compression level (default: HTSlib's level 6).
 
 `REFERENCE_LENGTHS` is **not** accepted — a uBAM is headerless by construction. Use `FORMAT BAM` for aligned records.
@@ -324,7 +324,7 @@ COPY (SELECT read_id, sequence1, qual1, zmw FROM reads)
 TO 'out.bam' (
   FORMAT UBAM,
   READ_GROUP {ID: 'qiita', PL: 'PACBIO', DS: 'READTYPE=CCS'},
-  TAGS {zm: zmw}
+  TAGS {zm: 'zmw'}
 );
 
 -- Minimal uBAM (no @RG, no tags).

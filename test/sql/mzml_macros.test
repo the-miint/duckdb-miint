@@ -15,7 +15,7 @@ CREATE TABLE spectra AS SELECT * FROM read_mzml('data/mzml/basic_3spectra.mzML')
 
 # Row count: 3+2+4 = 9 peaks total
 query I
-SELECT COUNT(*) FROM mzml_peaks(spectra)
+SELECT COUNT(*) FROM mzml_peaks('spectra')
 ----
 9
 
@@ -27,14 +27,14 @@ SELECT typeof(spectrum_index), typeof(spectrum_id), typeof(scan_number), typeof(
        typeof(precursor_mz), typeof(precursor_charge), typeof(precursor_intensity),
        typeof(ms1_scan_index),
        typeof(mz), typeof(intensity), typeof(i_norm), typeof(i_tic), typeof(neutral_loss)
-FROM mzml_peaks(spectra) LIMIT 1
+FROM mzml_peaks('spectra') LIMIT 1
 ----
 INTEGER	VARCHAR	INTEGER	INTEGER	DOUBLE	VARCHAR	VARCHAR	DOUBLE	DOUBLE	DOUBLE	INTEGER	DOUBLE	INTEGER	DOUBLE	DOUBLE	DOUBLE	DOUBLE	DOUBLE
 
 # Correct mz/intensity/i_norm values for spectrum 0
 query IRRR
 SELECT spectrum_index, mz, intensity, round(i_norm, 4)
-FROM mzml_peaks(spectra)
+FROM mzml_peaks('spectra')
 WHERE spectrum_index = 0
 ORDER BY mz
 ----
@@ -45,7 +45,7 @@ ORDER BY mz
 # MS2 metadata preserved: precursor_mz populated for ms_level=2
 query IRRI
 SELECT spectrum_index, precursor_mz, precursor_intensity, precursor_charge
-FROM mzml_peaks(spectra)
+FROM mzml_peaks('spectra')
 WHERE spectrum_index = 1
 LIMIT 1
 ----
@@ -56,7 +56,7 @@ query III
 SELECT spectrum_index,
        precursor_mz IS NULL AS no_precursor,
        ms1_scan_index IS NULL AS no_ms1_idx
-FROM mzml_peaks(spectra)
+FROM mzml_peaks('spectra')
 WHERE ms_level = 1
 LIMIT 1
 ----
@@ -65,18 +65,18 @@ LIMIT 1
 # ----- mzml_scaninfo tests (unfiltered) -----
 
 statement ok
-CREATE TABLE all_peaks AS SELECT * FROM mzml_peaks(spectra);
+CREATE TABLE all_peaks AS SELECT * FROM mzml_peaks('spectra');
 
 # Row count: 3 scans
 query I
-SELECT COUNT(*) FROM mzml_scaninfo(all_peaks)
+SELECT COUNT(*) FROM mzml_scaninfo('all_peaks')
 ----
 3
 
 # total_ion_current and base_peak_intensity match originals; i_norm=1.0 unfiltered
 query IRRR
 SELECT spectrum_index, total_ion_current, base_peak_intensity, i_norm
-FROM mzml_scaninfo(all_peaks)
+FROM mzml_scaninfo('all_peaks')
 ORDER BY spectrum_index
 ----
 0	8000.0	5000.0	1.0
@@ -86,7 +86,7 @@ ORDER BY spectrum_index
 # MS2 metadata preserved through scaninfo
 query IRRI
 SELECT spectrum_index, precursor_mz, precursor_intensity, precursor_charge
-FROM mzml_scaninfo(all_peaks)
+FROM mzml_scaninfo('all_peaks')
 WHERE spectrum_index = 1
 ----
 1	200.0	5000.0	2
@@ -96,7 +96,7 @@ WHERE spectrum_index = 1
 # Filter mz > 150 on spectrum 0: 2 peaks remain (mz=200, mz=300)
 query I
 SELECT COUNT(*)
-FROM mzml_peaks(spectra)
+FROM mzml_peaks('spectra')
 WHERE spectrum_index = 0 AND mz > 150
 ----
 2
@@ -104,24 +104,24 @@ WHERE spectrum_index = 0 AND mz > 150
 # scaninfo after mz filter: total_ion_current = 7000.0, base_peak = 5000.0
 statement ok
 CREATE VIEW filtered_peaks AS
-SELECT * FROM mzml_peaks(spectra)
+SELECT * FROM mzml_peaks('spectra')
 WHERE spectrum_index = 0 AND mz > 150;
 
 query IRR
 SELECT spectrum_index, total_ion_current, base_peak_intensity
-FROM mzml_scaninfo(filtered_peaks)
+FROM mzml_scaninfo('filtered_peaks')
 ----
 0	7000.0	5000.0
 
 # Filter ms_level = 2: only MS2 scans in result
 statement ok
 CREATE VIEW ms2_peaks AS
-SELECT * FROM mzml_peaks(spectra)
+SELECT * FROM mzml_peaks('spectra')
 WHERE ms_level = 2;
 
 query I
 SELECT COUNT(*)
-FROM mzml_scaninfo(ms2_peaks)
+FROM mzml_scaninfo('ms2_peaks')
 ----
 2
 
@@ -156,7 +156,7 @@ CREATE TABLE missing_opt AS SELECT * FROM read_mzml('data/mzml/missing_optional.
 
 query I
 SELECT i_norm IS NULL
-FROM mzml_peaks(missing_opt)
+FROM mzml_peaks('missing_opt')
 ----
 1
 
@@ -166,7 +166,7 @@ CREATE TABLE zero_int AS SELECT * FROM read_mzml('data/mzml/zero_intensity.mzML'
 
 query R
 SELECT i_norm
-FROM mzml_peaks(zero_int)
+FROM mzml_peaks('zero_int')
 LIMIT 1
 ----
 nan

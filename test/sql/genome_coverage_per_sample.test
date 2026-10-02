@@ -41,7 +41,7 @@ statement ok
 INSERT INTO subject_total_length VALUES ('genome_A', 100);
 
 query TTIR
-SELECT * FROM genome_coverage_per_sample(alignments, subject_total_length, subject_genome_id)
+SELECT * FROM genome_coverage_per_sample('alignments', 'subject_total_length', 'subject_genome_id')
 ORDER BY sample_id;
 ----
 s1	genome_A	22	0.22
@@ -52,7 +52,7 @@ s2	genome_A	11	0.11
 # bug report against genome_coverage -- it has no sample column and cannot do
 # better -- it is why callers with multiple samples need the sibling.
 query TIR
-SELECT * FROM genome_coverage(alignments, subject_total_length, subject_genome_id);
+SELECT * FROM genome_coverage('alignments', 'subject_total_length', 'subject_genome_id');
 ----
 genome_A	22	0.22
 
@@ -70,7 +70,7 @@ INSERT INTO alignments VALUES
     ('s2', 'contig1', 10, 21);
 
 query TTIR
-SELECT * FROM genome_coverage_per_sample(alignments, subject_total_length, subject_genome_id)
+SELECT * FROM genome_coverage_per_sample('alignments', 'subject_total_length', 'subject_genome_id')
 ORDER BY sample_id;
 ----
 s1	genome_A	16	0.16
@@ -95,7 +95,7 @@ INSERT INTO alignments VALUES
     ('s2', 'contig2', 30, 41);
 
 query TTIR
-SELECT * FROM genome_coverage_per_sample(alignments, subject_total_length, subject_genome_id)
+SELECT * FROM genome_coverage_per_sample('alignments', 'subject_total_length', 'subject_genome_id')
 ORDER BY sample_id;
 ----
 s1	genome_A	22	0.22
@@ -124,7 +124,7 @@ INSERT INTO alignments VALUES
     ('s2', 'contig2', 30, 51);
 
 query TTIR
-SELECT * FROM genome_coverage_per_sample(alignments, subject_total_length, subject_genome_id)
+SELECT * FROM genome_coverage_per_sample('alignments', 'subject_total_length', 'subject_genome_id')
 ORDER BY sample_id, genome_id;
 ----
 s1	genome_A	11	0.11
@@ -134,7 +134,7 @@ s2	genome_B	21	0.105
 # A sample with no alignments on a given genome produces no row for it -- s2 has
 # nothing on genome_A. Absence, not a zero row.
 query I
-SELECT count(*) FROM genome_coverage_per_sample(alignments, subject_total_length, subject_genome_id)
+SELECT count(*) FROM genome_coverage_per_sample('alignments', 'subject_total_length', 'subject_genome_id')
 WHERE sample_id = 's2' AND genome_id = 'genome_A';
 ----
 0
@@ -164,7 +164,7 @@ INSERT INTO alignments VALUES
 # s1 keeps only its mapped contig; s2 has nothing mapped at all and so vanishes
 # entirely rather than appearing with zero coverage.
 query TTIR
-SELECT * FROM genome_coverage_per_sample(alignments, subject_total_length, subject_genome_id)
+SELECT * FROM genome_coverage_per_sample('alignments', 'subject_total_length', 'subject_genome_id')
 ORDER BY sample_id;
 ----
 s1	genome_A	11	0.11
@@ -184,8 +184,8 @@ INSERT INTO alignments VALUES
 query I
 SELECT count(*) FROM (
     SELECT p.covered AS a, g.covered AS b, p.proportion_covered AS c, g.proportion_covered AS d
-    FROM genome_coverage_per_sample(alignments, subject_total_length, subject_genome_id) p
-    FULL JOIN genome_coverage(alignments, subject_total_length, subject_genome_id) g
+    FROM genome_coverage_per_sample('alignments', 'subject_total_length', 'subject_genome_id') p
+    FULL JOIN genome_coverage('alignments', 'subject_total_length', 'subject_genome_id') g
       ON p.genome_id = g.genome_id
 ) WHERE a IS DISTINCT FROM b OR c IS DISTINCT FROM d;
 ----
@@ -217,14 +217,14 @@ statement ok
 INSERT INTO tl_bigint VALUES (77, 100);
 
 query IIIR
-SELECT * FROM genome_coverage_per_sample(aln_bigint, tl_bigint, sg_bigint) ORDER BY sample_id;
+SELECT * FROM genome_coverage_per_sample('aln_bigint', 'tl_bigint', 'sg_bigint') ORDER BY sample_id;
 ----
 1001	77	11	0.11
 1002	77	21	0.21
 
 query TT
 SELECT typeof(sample_id), typeof(genome_id)
-FROM genome_coverage_per_sample(aln_bigint, tl_bigint, sg_bigint) LIMIT 1;
+FROM genome_coverage_per_sample('aln_bigint', 'tl_bigint', 'sg_bigint') LIMIT 1;
 ----
 BIGINT	BIGINT
 
@@ -249,14 +249,14 @@ statement ok
 INSERT INTO tl_uuid VALUES ('33333333-3333-3333-3333-333333333333', 100);
 
 query TTIR
-SELECT * FROM genome_coverage_per_sample(aln_uuid, tl_uuid, sg_uuid) ORDER BY sample_id;
+SELECT * FROM genome_coverage_per_sample('aln_uuid', 'tl_uuid', 'sg_uuid') ORDER BY sample_id;
 ----
 11111111-1111-1111-1111-111111111111	33333333-3333-3333-3333-333333333333	11	0.11
 22222222-2222-2222-2222-222222222222	33333333-3333-3333-3333-333333333333	21	0.21
 
 query TT
 SELECT typeof(sample_id), typeof(genome_id)
-FROM genome_coverage_per_sample(aln_uuid, tl_uuid, sg_uuid) LIMIT 1;
+FROM genome_coverage_per_sample('aln_uuid', 'tl_uuid', 'sg_uuid') LIMIT 1;
 ----
 UUID	UUID
 
@@ -267,7 +267,7 @@ UUID	UUID
 # a type mismatch between them would be a nasty surprise for anyone UNION-ing
 # their output.
 query T
-SELECT typeof(covered) FROM genome_coverage_per_sample(aln_bigint, tl_bigint, sg_bigint) LIMIT 1;
+SELECT typeof(covered) FROM genome_coverage_per_sample('aln_bigint', 'tl_bigint', 'sg_bigint') LIMIT 1;
 ----
 BIGINT
 
@@ -275,7 +275,7 @@ BIGINT
 # above proves the numbers match on single-sample input; this proves a caller can
 # UNION ALL the two results without a cast.
 query T
-SELECT typeof(covered) FROM genome_coverage(alignments, subject_total_length, subject_genome_id) LIMIT 1;
+SELECT typeof(covered) FROM genome_coverage('alignments', 'subject_total_length', 'subject_genome_id') LIMIT 1;
 ----
 BIGINT
 
@@ -304,7 +304,7 @@ INSERT INTO sam_tl VALUES ('genomeX', 100000);
 # sampleA sees both contigs (286 bases, as in genome_coverage.test); sampleB was
 # filtered to G1234 only and so sees 10.
 query TTIR
-SELECT * FROM genome_coverage_per_sample(sam_aln, sam_tl, sam_sg) ORDER BY sample_id;
+SELECT * FROM genome_coverage_per_sample('sam_aln', 'sam_tl', 'sam_sg') ORDER BY sample_id;
 ----
 sampleA	genomeX	286	0.00286
 sampleB	genomeX	10	0.0001
@@ -337,7 +337,7 @@ statement ok
 CREATE TABLE p3_empty (sample_id VARCHAR, reference VARCHAR, position BIGINT, stop_position BIGINT);
 
 query I
-SELECT count(*) FROM genome_coverage_per_sample(p3_empty, p3_tl, p3_sg);
+SELECT count(*) FROM genome_coverage_per_sample('p3_empty', 'p3_tl', 'p3_sg');
 ----
 0
 
@@ -351,7 +351,7 @@ statement ok
 CREATE VIEW p3_view AS SELECT * FROM p3_base WHERE sample_id = 's1';
 
 query TTIR
-SELECT * FROM genome_coverage_per_sample(p3_view, p3_tl, p3_sg);
+SELECT * FROM genome_coverage_per_sample('p3_view', 'p3_tl', 'p3_sg');
 ----
 s1	genome_A	11	0.11
 
@@ -359,7 +359,7 @@ statement ok
 CREATE TEMP VIEW p3_tview AS SELECT * FROM p3_base WHERE sample_id = 's2';
 
 query TTIR
-SELECT * FROM genome_coverage_per_sample(p3_tview, p3_tl, p3_sg);
+SELECT * FROM genome_coverage_per_sample('p3_tview', 'p3_tl', 'p3_sg');
 ----
 s2	genome_A	21	0.21
 
@@ -379,7 +379,7 @@ INSERT INTO p3_degen VALUES
     ('s_inv', 'contig1', 30, 21);
 
 query TTIR
-SELECT * FROM genome_coverage_per_sample(p3_degen, p3_tl, p3_sg) ORDER BY sample_id;
+SELECT * FROM genome_coverage_per_sample('p3_degen', 'p3_tl', 'p3_sg') ORDER BY sample_id;
 ----
 s_inv	genome_A	9	0.09
 s_zero	genome_A	11	0.11
@@ -398,13 +398,13 @@ statement ok
 INSERT INTO p3_nullsample VALUES (NULL, 'contig1', 10, 21), ('s1', 'contig1', 10, 31);
 
 statement error
-SELECT * FROM genome_coverage_per_sample(p3_nullsample, p3_tl, p3_sg);
+SELECT * FROM genome_coverage_per_sample('p3_nullsample', 'p3_tl', 'p3_sg');
 ----
 NULL values in sample_id column 'sample_id'
 
 # A table with no NULLs is unaffected -- the guard must not cost correct callers.
 query TTIR
-SELECT * FROM genome_coverage_per_sample(p3_base, p3_tl, p3_sg) ORDER BY sample_id;
+SELECT * FROM genome_coverage_per_sample('p3_base', 'p3_tl', 'p3_sg') ORDER BY sample_id;
 ----
 s1	genome_A	11	0.11
 s2	genome_A	21	0.21
@@ -430,7 +430,7 @@ statement ok
 INSERT INTO p3_sg2 VALUES ('contig1', 'genome_A'), ('contig2', 'genome_B');
 
 statement error
-SELECT * FROM genome_coverage_per_sample(p3_two, p3_tl, p3_sg2);
+SELECT * FROM genome_coverage_per_sample('p3_two', 'p3_tl', 'p3_sg2');
 ----
 no total_length entry for genome_id 'genome_B'
 
@@ -443,7 +443,7 @@ statement ok
 INSERT INTO p3_tl_zero VALUES ('genome_A', 0);
 
 statement error
-SELECT * FROM genome_coverage_per_sample(p3_base, p3_tl_zero, p3_sg);
+SELECT * FROM genome_coverage_per_sample('p3_base', 'p3_tl_zero', 'p3_sg');
 ----
 total_length must be positive for genome_id 'genome_A'
 
@@ -457,7 +457,7 @@ statement ok
 INSERT INTO p3_tl_null VALUES ('genome_A', NULL);
 
 statement error
-SELECT * FROM genome_coverage_per_sample(p3_base, p3_tl_null, p3_sg);
+SELECT * FROM genome_coverage_per_sample('p3_base', 'p3_tl_null', 'p3_sg');
 ----
 total_length must be positive for genome_id 'genome_A'
 
@@ -470,7 +470,7 @@ statement ok
 INSERT INTO p3_tl_extra VALUES ('genome_A', 100), ('genome_unused', 500);
 
 query TTIR
-SELECT * FROM genome_coverage_per_sample(p3_base, p3_tl_extra, p3_sg) ORDER BY sample_id;
+SELECT * FROM genome_coverage_per_sample('p3_base', 'p3_tl_extra', 'p3_sg') ORDER BY sample_id;
 ----
 s1	genome_A	11	0.11
 s2	genome_A	21	0.21
@@ -490,7 +490,7 @@ statement ok
 INSERT INTO p3_sg_dup VALUES ('contig1', 'genome_A'), ('contig1', 'genome_A');
 
 query TTIR
-SELECT * FROM genome_coverage_per_sample(p3_base, p3_tl, p3_sg_dup) ORDER BY sample_id;
+SELECT * FROM genome_coverage_per_sample('p3_base', 'p3_tl', 'p3_sg_dup') ORDER BY sample_id;
 ----
 s1	genome_A	11	0.11
 s2	genome_A	21	0.21
@@ -498,7 +498,7 @@ s2	genome_A	21	0.21
 # The duplicate-free mapping must give the identical answer -- proving the
 # dedupe changed nothing for callers who were already correct.
 query TTIR
-SELECT * FROM genome_coverage_per_sample(p3_base, p3_tl, p3_sg) ORDER BY sample_id;
+SELECT * FROM genome_coverage_per_sample('p3_base', 'p3_tl', 'p3_sg') ORDER BY sample_id;
 ----
 s1	genome_A	11	0.11
 s2	genome_A	21	0.21
@@ -518,7 +518,7 @@ statement ok
 INSERT INTO p3_tl_multi VALUES ('genome_A', 100), ('genome_B', 200);
 
 query TTIR
-SELECT * FROM genome_coverage_per_sample(p3_base, p3_tl_multi, p3_sg_multi)
+SELECT * FROM genome_coverage_per_sample('p3_base', 'p3_tl_multi', 'p3_sg_multi')
 ORDER BY sample_id, genome_id;
 ----
 s1	genome_A	11	0.11
@@ -553,12 +553,12 @@ INSERT INTO p3_tl_vc VALUES ('77', 100);
 
 query TIIR
 SELECT sample_id, genome_id, covered, proportion_covered
-FROM genome_coverage_per_sample(p3_aln1, p3_tl_vc, p3_sg_bi);
+FROM genome_coverage_per_sample('p3_aln1', 'p3_tl_vc', 'p3_sg_bi');
 ----
 s1	77	11	0.11
 
 query T
-SELECT typeof(genome_id) FROM genome_coverage_per_sample(p3_aln1, p3_tl_vc, p3_sg_bi);
+SELECT typeof(genome_id) FROM genome_coverage_per_sample('p3_aln1', 'p3_tl_vc', 'p3_sg_bi');
 ----
 BIGINT
 
@@ -572,7 +572,7 @@ statement ok
 INSERT INTO p3_tl_unconv VALUES ('genome_A', 100);
 
 statement error
-SELECT * FROM genome_coverage_per_sample(p3_aln1, p3_tl_unconv, p3_sg_bi);
+SELECT * FROM genome_coverage_per_sample('p3_aln1', 'p3_tl_unconv', 'p3_sg_bi');
 ----
 Could not convert string 'genome_A' to INT64
 
@@ -590,7 +590,7 @@ statement ok
 INSERT INTO p3_no_sample VALUES ('contig1', 10, 21);
 
 statement error
-SELECT * FROM genome_coverage_per_sample(p3_no_sample, p3_tl, p3_sg);
+SELECT * FROM genome_coverage_per_sample('p3_no_sample', 'p3_tl', 'p3_sg');
 ----
 Referenced column "sample_id" not found
 
@@ -610,13 +610,13 @@ INSERT INTO p3_prune_tl VALUES ('genome_A', 0);
 
 # proportion_covered -- the column the guard protects -- is not selected here.
 statement error
-SELECT covered FROM genome_coverage_per_sample(p3_base, p3_prune_tl, p3_sg);
+SELECT covered FROM genome_coverage_per_sample('p3_base', 'p3_prune_tl', 'p3_sg');
 ----
 total_length must be positive for genome_id 'genome_A'
 
 # count(*) projects no columns at all.
 statement error
-SELECT count(*) FROM genome_coverage_per_sample(p3_base, p3_prune_tl, p3_sg);
+SELECT count(*) FROM genome_coverage_per_sample('p3_base', 'p3_prune_tl', 'p3_sg');
 ----
 total_length must be positive for genome_id 'genome_A'
 

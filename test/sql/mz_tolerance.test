@@ -116,7 +116,7 @@ CREATE TABLE spectra AS SELECT * FROM read_mzml('data/mzml/basic_3spectra.mzML')
 # Find MS2 peaks near mz=150 with 0.1 Da tolerance (spectrum 1, mz=150.0)
 query IR
 SELECT spectrum_index, mz
-FROM mzml_peaks(spectra)
+FROM mzml_peaks('spectra')
 WHERE ms_level = 2 AND mz_within(mz, 150.0, 0.1)
 ----
 1	150.0
@@ -125,7 +125,7 @@ WHERE ms_level = 2 AND mz_within(mz, 150.0, 0.1)
 # NOTE: depends on Cycle 1 (neutral_loss column)
 query IRR
 SELECT spectrum_index, mz, neutral_loss
-FROM mzml_peaks(spectra)
+FROM mzml_peaks('spectra')
 WHERE ms_level = 2 AND mz_within(neutral_loss, 80.0, 0.5)
 ----
 2	220.0	80.0

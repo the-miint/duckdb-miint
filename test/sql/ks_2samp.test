@@ -497,7 +497,7 @@ INSERT INTO cc_roster VALUES ('s1','A'), ('s2','A'), ('s3','A'), ('s4','B'), ('s
 query I
 WITH curves AS (
     SELECT group_id, list(proportion_covered ORDER BY rank) AS curve
-    FROM cumulative_coverage_curve(cc_pos, cc_roster, 1000)
+    FROM cumulative_coverage_curve('cc_pos', 'cc_roster', 1000)
     GROUP BY group_id
 )
 SELECT abs((ks_2samp(a.curve, b.curve)).statistic - 1.0/3.0) < 1e-15

@@ -19,50 +19,50 @@ CREATE TABLE spectra AS SELECT * FROM read_mzml('data/mzml/basic_3spectra.mzML')
 
 # Exclude 150.0: Spec 1 has 150 -> excluded. Spec 2 (4 peaks) remains.
 query I
-SELECT COUNT(*) FROM mzml_excluded_ms2prod(spectra, 150.0, 0.5)
+SELECT COUNT(*) FROM mzml_excluded_ms2prod('spectra', 150.0, 0.5)
 ----
 4
 
 query I
-SELECT DISTINCT spectrum_index FROM mzml_excluded_ms2prod(spectra, 150.0, 0.5)
+SELECT DISTINCT spectrum_index FROM mzml_excluded_ms2prod('spectra', 150.0, 0.5)
 ----
 2
 
 # Exclude 220.0: Spec 2 has 220 -> excluded. Spec 1 (2 peaks) remains.
 query I
-SELECT COUNT(*) FROM mzml_excluded_ms2prod(spectra, 220.0, 0.5)
+SELECT COUNT(*) FROM mzml_excluded_ms2prod('spectra', 220.0, 0.5)
 ----
 2
 
 query I
-SELECT DISTINCT spectrum_index FROM mzml_excluded_ms2prod(spectra, 220.0, 0.5)
+SELECT DISTINCT spectrum_index FROM mzml_excluded_ms2prod('spectra', 220.0, 0.5)
 ----
 1
 
 # Exclude 999.0: No match -> all MS2 scans kept (6 peaks)
 query I
-SELECT COUNT(*) FROM mzml_excluded_ms2prod(spectra, 999.0, 0.5)
+SELECT COUNT(*) FROM mzml_excluded_ms2prod('spectra', 999.0, 0.5)
 ----
 6
 
 # Wide tolerance: 250.0 +/- 200 -> catches all MS2 peaks -> all excluded
 query I
-SELECT COUNT(*) FROM mzml_excluded_ms2prod(spectra, 250.0, 200.0)
+SELECT COUNT(*) FROM mzml_excluded_ms2prod('spectra', 250.0, 200.0)
 ----
 0
 
 # Tight tolerance: 150.0 +/- 0.01 -> still exact match on 150
 query I
-SELECT COUNT(*) FROM mzml_excluded_ms2prod(spectra, 150.0, 0.01)
+SELECT COUNT(*) FROM mzml_excluded_ms2prod('spectra', 150.0, 0.01)
 ----
 4
 
 # Composition with scaninfo
 statement ok
-CREATE VIEW excluded_view AS SELECT * FROM mzml_excluded_ms2prod(spectra, 150.0, 0.5);
+CREATE VIEW excluded_view AS SELECT * FROM mzml_excluded_ms2prod('spectra', 150.0, 0.5);
 
 query I
-SELECT COUNT(*) FROM mzml_scaninfo(excluded_view)
+SELECT COUNT(*) FROM mzml_scaninfo('excluded_view')
 ----
 1
 
@@ -71,13 +71,13 @@ SELECT COUNT(*) FROM mzml_scaninfo(excluded_view)
 
 # Exclude 200.0: The only MS1 scan (spec 0) has 200 -> all excluded
 query I
-SELECT COUNT(*) FROM mzml_excluded_ms1mz(spectra, 200.0, 0.5)
+SELECT COUNT(*) FROM mzml_excluded_ms1mz('spectra', 200.0, 0.5)
 ----
 0
 
 # Exclude 150.0: No MS1 peak near 150 -> spec 0 kept (3 peaks)
 query I
-SELECT COUNT(*) FROM mzml_excluded_ms1mz(spectra, 150.0, 0.5)
+SELECT COUNT(*) FROM mzml_excluded_ms1mz('spectra', 150.0, 0.5)
 ----
 3
 
@@ -86,29 +86,29 @@ SELECT COUNT(*) FROM mzml_excluded_ms1mz(spectra, 150.0, 0.5)
 
 # Exclude prec=200: Spec 1 (prec=200) excluded -> spec 2 (4 peaks) remains
 query I
-SELECT COUNT(*) FROM mzml_excluded_ms2prec(spectra, 200.0, 0.5)
+SELECT COUNT(*) FROM mzml_excluded_ms2prec('spectra', 200.0, 0.5)
 ----
 4
 
 query I
-SELECT DISTINCT spectrum_index FROM mzml_excluded_ms2prec(spectra, 200.0, 0.5)
+SELECT DISTINCT spectrum_index FROM mzml_excluded_ms2prec('spectra', 200.0, 0.5)
 ----
 2
 
 # Exclude prec=300: Spec 2 (prec=300) excluded -> spec 1 (2 peaks) remains
 query I
-SELECT COUNT(*) FROM mzml_excluded_ms2prec(spectra, 300.0, 0.5)
+SELECT COUNT(*) FROM mzml_excluded_ms2prec('spectra', 300.0, 0.5)
 ----
 2
 
 query I
-SELECT DISTINCT spectrum_index FROM mzml_excluded_ms2prec(spectra, 300.0, 0.5)
+SELECT DISTINCT spectrum_index FROM mzml_excluded_ms2prec('spectra', 300.0, 0.5)
 ----
 1
 
 # Exclude prec=999: No match -> all MS2 scans kept (6 peaks)
 query I
-SELECT COUNT(*) FROM mzml_excluded_ms2prec(spectra, 999.0, 0.5)
+SELECT COUNT(*) FROM mzml_excluded_ms2prec('spectra', 999.0, 0.5)
 ----
 6
 
@@ -119,17 +119,17 @@ statement ok
 CREATE TABLE empty_spectra AS SELECT * FROM read_mzml('data/mzml/empty_spectra.mzML');
 
 query I
-SELECT COUNT(*) FROM mzml_excluded_ms2prod(empty_spectra, 100.0, 0.5)
+SELECT COUNT(*) FROM mzml_excluded_ms2prod('empty_spectra', 100.0, 0.5)
 ----
 0
 
 query I
-SELECT COUNT(*) FROM mzml_excluded_ms1mz(empty_spectra, 100.0, 0.5)
+SELECT COUNT(*) FROM mzml_excluded_ms1mz('empty_spectra', 100.0, 0.5)
 ----
 0
 
 query I
-SELECT COUNT(*) FROM mzml_excluded_ms2prec(empty_spectra, 100.0, 0.5)
+SELECT COUNT(*) FROM mzml_excluded_ms2prec('empty_spectra', 100.0, 0.5)
 ----
 0
 
@@ -138,12 +138,12 @@ statement ok
 CREATE TABLE ms1_only AS SELECT * FROM read_mzml('data/mzml/missing_optional.mzML');
 
 query I
-SELECT COUNT(*) FROM mzml_excluded_ms2prod(ms1_only, 100.0, 0.5)
+SELECT COUNT(*) FROM mzml_excluded_ms2prod('ms1_only', 100.0, 0.5)
 ----
 0
 
 query I
-SELECT COUNT(*) FROM mzml_excluded_ms2prec(ms1_only, 100.0, 0.5)
+SELECT COUNT(*) FROM mzml_excluded_ms2prec('ms1_only', 100.0, 0.5)
 ----
 0
 
@@ -153,12 +153,12 @@ statement ok
 CREATE TABLE orphan AS SELECT * FROM read_mzml('data/mzml/orphan_ms2.mzML');
 
 query I
-SELECT COUNT(*) FROM mzml_excluded_ms1mz(orphan, 100.0, 0.5)
+SELECT COUNT(*) FROM mzml_excluded_ms1mz('orphan', 100.0, 0.5)
 ----
 0
 
 # Exclude prec=200 from orphan: spec 0 (prec=200) excluded, spec 1 (prec=300, 2 peaks) remains
 query I
-SELECT COUNT(*) FROM mzml_excluded_ms2prec(orphan, 200.0, 0.5)
+SELECT COUNT(*) FROM mzml_excluded_ms2prec('orphan', 200.0, 0.5)
 ----
 2

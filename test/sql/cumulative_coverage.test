@@ -356,7 +356,7 @@ INSERT INTO roster VALUES
 
 query TITIR
 SELECT group_id, rank, sample_id, covered, proportion_covered
-FROM cumulative_coverage_curve(positions, roster, 200)
+FROM cumulative_coverage_curve('positions', 'roster', 200)
 ORDER BY group_id, rank;
 ----
 g1	0	sD	0	0.0
@@ -373,7 +373,7 @@ g2	1	sE	60	0.3
 # Fails with a 3-row g1 curve starting at sA if the roster LEFT JOIN is dropped.
 
 query TII
-SELECT sample_id, rank, covered FROM cumulative_coverage_curve(positions, roster, 200)
+SELECT sample_id, rank, covered FROM cumulative_coverage_curve('positions', 'roster', 200)
 WHERE group_id = 'g1' AND rank = 0;
 ----
 sD	0	0
@@ -384,7 +384,7 @@ sD	0	0
 # matters because micov's Monte Carlo null calls this ~100x per genome per group.
 
 query TI
-SELECT sample_id, rank FROM cumulative_coverage_curve(positions, roster, 200)
+SELECT sample_id, rank FROM cumulative_coverage_curve('positions', 'roster', 200)
 WHERE group_id = 'g1' AND sample_id IN ('sA', 'sB') ORDER BY rank;
 ----
 sA	1
@@ -394,7 +394,7 @@ statement ok
 SET threads = 1;
 
 query TI
-SELECT sample_id, rank FROM cumulative_coverage_curve(positions, roster, 200)
+SELECT sample_id, rank FROM cumulative_coverage_curve('positions', 'roster', 200)
 WHERE group_id = 'g1' AND sample_id IN ('sA', 'sB') ORDER BY rank;
 ----
 sA	1
@@ -424,7 +424,7 @@ CREATE TABLE inv_roster AS SELECT * FROM (VALUES
   ('sA', 'g'), ('sB', 'g')) t(sample_id, group_id);
 
 query ITI
-SELECT rank, sample_id, covered FROM cumulative_coverage_curve(inv_pos, inv_roster, 200)
+SELECT rank, sample_id, covered FROM cumulative_coverage_curve('inv_pos', 'inv_roster', 200)
 ORDER BY rank;
 ----
 0	sA	0
@@ -439,7 +439,7 @@ CREATE TABLE zw_pos AS SELECT * FROM (VALUES
   ('sB',  1, 51)) t(sample_id, start, stop);
 
 query ITI
-SELECT rank, sample_id, covered FROM cumulative_coverage_curve(zw_pos, inv_roster, 200)
+SELECT rank, sample_id, covered FROM cumulative_coverage_curve('zw_pos', 'inv_roster', 200)
 ORDER BY rank;
 ----
 0	sA	0
@@ -458,7 +458,7 @@ CREATE TABLE half_null AS SELECT * FROM (VALUES
   ('sB', NULL::BIGINT, 100::BIGINT)) t(sample_id, start, stop);
 
 statement error
-SELECT * FROM cumulative_coverage_curve(half_null, inv_roster, 200);
+SELECT * FROM cumulative_coverage_curve('half_null', 'inv_roster', 200);
 ----
 start and stop must both be NULL or both be present
 
@@ -488,7 +488,7 @@ statement ok
 CREATE TABLE over_roster AS SELECT * FROM (VALUES ('sA', 'g')) t(sample_id, group_id);
 
 statement error
-SELECT * FROM cumulative_coverage_curve(over_pos, over_roster, 100);
+SELECT * FROM cumulative_coverage_curve('over_pos', 'over_roster', 100);
 ----
 covered (500) exceeds genome_length (100)
 
@@ -496,7 +496,7 @@ covered (500) exceeds genome_length (100)
 
 query IR
 SELECT covered, proportion_covered
-FROM cumulative_coverage_curve(over_pos, over_roster, 500);
+FROM cumulative_coverage_curve('over_pos', 'over_roster', 500);
 ----
 500	1.0
 
@@ -509,7 +509,7 @@ CREATE TABLE pos_extra AS
 SELECT * FROM positions UNION ALL SELECT 'sX', 1, 1000;
 
 query TII
-SELECT sample_id, rank, covered FROM cumulative_coverage_curve(pos_extra, roster, 200)
+SELECT sample_id, rank, covered FROM cumulative_coverage_curve('pos_extra', 'roster', 200)
 WHERE group_id = 'g1' ORDER BY rank;
 ----
 sD	0	0
@@ -522,17 +522,17 @@ sC	3	100
 # silently absurd proportion. NULL would make every proportion NULL.
 
 statement error
-SELECT * FROM cumulative_coverage_curve(positions, roster, 0);
+SELECT * FROM cumulative_coverage_curve('positions', 'roster', 0);
 ----
 genome_length must be positive
 
 statement error
-SELECT * FROM cumulative_coverage_curve(positions, roster, -5);
+SELECT * FROM cumulative_coverage_curve('positions', 'roster', -5);
 ----
 genome_length must be positive
 
 statement error
-SELECT * FROM cumulative_coverage_curve(positions, roster, NULL);
+SELECT * FROM cumulative_coverage_curve('positions', 'roster', NULL);
 ----
 genome_length must be positive
 
@@ -542,24 +542,24 @@ genome_length must be positive
 # is not. A genome length is a count of bases.
 
 statement error
-SELECT * FROM cumulative_coverage_curve(positions, roster, 1.6);
+SELECT * FROM cumulative_coverage_curve('positions', 'roster', 1.6);
 ----
 genome_length must be a whole number of bases (got 1.6)
 
 statement error
-SELECT * FROM cumulative_coverage_curve(positions, roster, 0.4);
+SELECT * FROM cumulative_coverage_curve('positions', 'roster', 0.4);
 ----
 genome_length must be a whole number of bases (got 0.4)
 
 # An integral value that happens to arrive as DOUBLE or VARCHAR is fine.
 
 query I
-SELECT COUNT(*) FROM cumulative_coverage_curve(positions, roster, 200.0);
+SELECT COUNT(*) FROM cumulative_coverage_curve('positions', 'roster', 200.0);
 ----
 6
 
 query I
-SELECT COUNT(*) FROM cumulative_coverage_curve(positions, roster, '200');
+SELECT COUNT(*) FROM cumulative_coverage_curve('positions', 'roster', '200');
 ----
 6
 
@@ -576,7 +576,7 @@ CREATE TABLE pos_nullsample AS
 SELECT * FROM positions UNION ALL SELECT NULL, 5, 25;
 
 statement error
-SELECT * FROM cumulative_coverage_curve(pos_nullsample, roster, 200);
+SELECT * FROM cumulative_coverage_curve('pos_nullsample', 'roster', 200);
 ----
 NULL values in sample_id column of positions
 
@@ -585,7 +585,7 @@ CREATE TABLE roster_nullsample AS
 SELECT * FROM roster UNION ALL SELECT NULL, 'g1';
 
 statement error
-SELECT * FROM cumulative_coverage_curve(positions, roster_nullsample, 200);
+SELECT * FROM cumulative_coverage_curve('positions', 'roster_nullsample', 200);
 ----
 NULL values in sample_id or group_id column of roster
 
@@ -594,7 +594,7 @@ CREATE TABLE roster_nullgroup AS
 SELECT * FROM roster UNION ALL SELECT 'sZ', NULL;
 
 statement error
-SELECT * FROM cumulative_coverage_curve(positions, roster_nullgroup, 200);
+SELECT * FROM cumulative_coverage_curve('positions', 'roster_nullgroup', 200);
 ----
 NULL values in sample_id or group_id column of roster
 
@@ -616,7 +616,7 @@ SELECT 's' || i AS sample_id, 'grp' AS group_id FROM range(0, 30) t(i);
 
 statement ok
 CREATE TABLE big_curve AS
-SELECT rank, sample_id, covered FROM cumulative_coverage_curve(big_pos, big_roster, 3000);
+SELECT rank, sample_id, covered FROM cumulative_coverage_curve('big_pos', 'big_roster', 3000);
 
 statement ok
 CREATE TABLE big_feed AS
@@ -669,20 +669,20 @@ statement ok
 CREATE TABLE cc_s.pos_q AS SELECT * FROM positions;
 
 query TII
-SELECT sample_id, rank, covered FROM cumulative_coverage_curve(pos_view, roster_temp, 200)
+SELECT sample_id, rank, covered FROM cumulative_coverage_curve('pos_view', 'roster_temp', 200)
 WHERE group_id = 'g1' AND rank = 2;
 ----
 sB	2	15
 
 query TII
-SELECT sample_id, rank, covered FROM cumulative_coverage_curve(cc_s.pos_q, roster, 200)
+SELECT sample_id, rank, covered FROM cumulative_coverage_curve('cc_s.pos_q', 'roster', 200)
 WHERE group_id = 'g1' AND rank = 2;
 ----
 sB	2	15
 
 query TII
 WITH pos_cte AS (SELECT * FROM positions)
-SELECT sample_id, rank, covered FROM cumulative_coverage_curve(pos_cte, roster, 200)
+SELECT sample_id, rank, covered FROM cumulative_coverage_curve('pos_cte', 'roster', 200)
 WHERE group_id = 'g1' AND rank = 2;
 ----
 sB	2	15
@@ -704,7 +704,7 @@ CREATE TABLE uu_roster AS SELECT * FROM (VALUES
 
 query TTII
 SELECT typeof(sample_id), typeof(group_id), rank, covered
-FROM cumulative_coverage_curve(uu_pos, uu_roster, 200) ORDER BY rank;
+FROM cumulative_coverage_curve('uu_pos', 'uu_roster', 200) ORDER BY rank;
 ----
 UUID	BIGINT	0	10
 UUID	BIGINT	1	50
@@ -725,7 +725,7 @@ statement ok
 CREATE TABLE dup_pos AS SELECT * FROM positions UNION ALL SELECT * FROM positions;
 
 query TII
-SELECT sample_id, rank, covered FROM cumulative_coverage_curve(positions, dup_roster, 200)
+SELECT sample_id, rank, covered FROM cumulative_coverage_curve('positions', 'dup_roster', 200)
 WHERE group_id = 'g1' ORDER BY rank;
 ----
 sD	0	0
@@ -734,7 +734,7 @@ sB	2	15
 sC	3	100
 
 query TII
-SELECT sample_id, rank, covered FROM cumulative_coverage_curve(dup_pos, roster, 200)
+SELECT sample_id, rank, covered FROM cumulative_coverage_curve('dup_pos', 'roster', 200)
 WHERE group_id = 'g1' ORDER BY rank;
 ----
 sD	0	0
@@ -763,7 +763,7 @@ CREATE TABLE vc_roster AS SELECT * FROM (VALUES
 
 query TTII
 SELECT typeof(covered), sample_id, rank, covered
-FROM cumulative_coverage_curve(vc_pos, vc_roster, 200) ORDER BY rank;
+FROM cumulative_coverage_curve('vc_pos', 'vc_roster', 200) ORDER BY rank;
 ----
 BIGINT	sC	0	11
 BIGINT	sB	1	31
@@ -781,13 +781,13 @@ statement ok
 CREATE TABLE empty_pos AS SELECT * FROM positions WHERE FALSE;
 
 query I
-SELECT COUNT(*) FROM cumulative_coverage_curve(positions, empty_roster, 200);
+SELECT COUNT(*) FROM cumulative_coverage_curve('positions', 'empty_roster', 200);
 ----
 0
 
 query III
 SELECT COUNT(*), SUM(covered), SUM(proportion_covered)
-FROM cumulative_coverage_curve(empty_pos, roster, 200);
+FROM cumulative_coverage_curve('empty_pos', 'roster', 200);
 ----
 6	0	0.0
 
@@ -800,7 +800,7 @@ query TRR
 SELECT group_id,
        ROUND(rank * 100.0 / NULLIF(COUNT(*) OVER (PARTITION BY group_id) - 1, 0), 1) AS pct,
        ROUND(proportion_covered, 4)
-FROM cumulative_coverage_curve(positions, roster, 200)
+FROM cumulative_coverage_curve('positions', 'roster', 200)
 WHERE group_id = 'g1'
 ORDER BY rank;
 ----
@@ -828,7 +828,7 @@ g1	100.0	0.5
 
 query II
 WITH checked AS (SELECT * FROM roster)
-SELECT rank, covered FROM cumulative_coverage_curve(positions, checked, 200)
+SELECT rank, covered FROM cumulative_coverage_curve('positions', 'checked', 200)
 WHERE group_id = 'g1' AND rank = 2;
 ----
 2	15
@@ -837,7 +837,7 @@ statement ok
 CREATE TABLE checked AS SELECT * FROM roster;
 
 query II
-SELECT rank, covered FROM cumulative_coverage_curve(positions, checked, 200)
+SELECT rank, covered FROM cumulative_coverage_curve('positions', 'checked', 200)
 WHERE group_id = 'g1' AND rank = 2;
 ----
 2	15
@@ -853,7 +853,7 @@ statement ok
 CREATE TABLE _cc_len AS SELECT * FROM positions;
 
 query II
-SELECT rank, covered FROM cumulative_coverage_curve(_cc_len, roster, 200)
+SELECT rank, covered FROM cumulative_coverage_curve('_cc_len', 'roster', 200)
 WHERE group_id = 'g1' AND rank = 2;
 ----
 2	15
@@ -864,7 +864,7 @@ WHERE group_id = 'g1' AND rank = 2;
 
 query II
 WITH ranked AS (SELECT * FROM positions), feed AS (SELECT * FROM roster)
-SELECT rank, covered FROM cumulative_coverage_curve(ranked, feed, 200)
+SELECT rank, covered FROM cumulative_coverage_curve('ranked', 'feed', 200)
 WHERE group_id = 'g1' AND rank = 2;
 ----
 2	15

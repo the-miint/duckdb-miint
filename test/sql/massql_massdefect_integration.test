@@ -13,7 +13,7 @@ statement ok
 CREATE TABLE g AS SELECT * FROM read_mzml('data/cache/GNPS00002_A3_p.mzML');
 
 statement ok
-CREATE TABLE gp AS SELECT * FROM mzml_ms2_peaks(g);
+CREATE TABLE gp AS SELECT * FROM mzml_ms2_peaks('g');
 
 # MS2 peaks with mass defect in [0.9, 1.0)
 query I

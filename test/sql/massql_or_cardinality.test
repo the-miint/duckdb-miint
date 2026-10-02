@@ -18,26 +18,26 @@ CREATE TABLE spectra AS SELECT * FROM read_mzml('data/mzml/basic_3spectra.mzML')
 
 # target_list=[150.0, 250.0], cardinality=2: spectrum 1 has both -> match
 query I
-SELECT DISTINCT spectrum_index FROM mzml_or_cardinality(spectra, [150.0, 250.0], 0.5, 2, 2)
+SELECT DISTINCT spectrum_index FROM mzml_or_cardinality('spectra', [150.0, 250.0], 0.5, 2, 2)
 ----
 1
 
 # target_list=[120, 220, 320], cardinality exactly 2:
 # spectrum 2 has all 3 matches (card=3 > max=2) -> no match
 query I
-SELECT COUNT(*) FROM mzml_or_cardinality(spectra, [120.0, 220.0, 320.0], 0.5, 2, 2)
+SELECT COUNT(*) FROM mzml_or_cardinality('spectra', [120.0, 220.0, 320.0], 0.5, 2, 2)
 ----
 0
 
 # cardinality 2-3: spectrum 2 has 3 matches (within range) -> match
 query I
-SELECT DISTINCT spectrum_index FROM mzml_or_cardinality(spectra, [120.0, 220.0, 320.0], 0.5, 2, 3)
+SELECT DISTINCT spectrum_index FROM mzml_or_cardinality('spectra', [120.0, 220.0, 320.0], 0.5, 2, 3)
 ----
 2
 
 # cardinality 3-3: spectrum 2 has exactly 3 -> match
 query I
-SELECT DISTINCT spectrum_index FROM mzml_or_cardinality(spectra, [120.0, 220.0, 320.0], 0.5, 3, 3)
+SELECT DISTINCT spectrum_index FROM mzml_or_cardinality('spectra', [120.0, 220.0, 320.0], 0.5, 3, 3)
 ----
 2
 
@@ -46,18 +46,18 @@ SELECT DISTINCT spectrum_index FROM mzml_or_cardinality(spectra, [120.0, 220.0, 
 # Let's use targets that both spectra can match.
 # targets=[150, 120], card 1-2: spectrum 1 has 150 (card=1), spectrum 2 has 120 (card=1)
 query I
-SELECT COUNT(DISTINCT spectrum_index) FROM mzml_or_cardinality(spectra, [150.0, 120.0], 0.5, 1, 2)
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_or_cardinality('spectra', [150.0, 120.0], 0.5, 1, 2)
 ----
 2
 
 # No targets match
 query I
-SELECT COUNT(*) FROM mzml_or_cardinality(spectra, [999.0, 998.0], 0.5, 1, 2)
+SELECT COUNT(*) FROM mzml_or_cardinality('spectra', [999.0, 998.0], 0.5, 1, 2)
 ----
 0
 
 # cardinality min > possible: no match
 query I
-SELECT COUNT(*) FROM mzml_or_cardinality(spectra, [150.0, 250.0], 0.5, 3, 3)
+SELECT COUNT(*) FROM mzml_or_cardinality('spectra', [150.0, 250.0], 0.5, 3, 3)
 ----
 0

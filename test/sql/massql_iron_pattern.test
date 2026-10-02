@@ -23,7 +23,7 @@ SELECT COUNT(DISTINCT spectrum_index) FROM iron_peaks
 
 # Scaninfo composition works
 query I
-SELECT COUNT(*) FROM mzml_scaninfo(iron_peaks)
+SELECT COUNT(*) FROM mzml_scaninfo('iron_peaks')
 ----
 370
 
@@ -50,39 +50,39 @@ CREATE TABLE iron_peaks_tbl AS SELECT * FROM iron_peaks;
 
 # scansum: one row per matching scan, all with positive intensity
 query I
-SELECT COUNT(*) FROM mzml_scansum(iron_peaks_tbl)
+SELECT COUNT(*) FROM mzml_scansum('iron_peaks_tbl')
 ----
 370
 
 query I
-SELECT COUNT(*) FROM mzml_scansum(iron_peaks_tbl) WHERE total_intensity <= 0
+SELECT COUNT(*) FROM mzml_scansum('iron_peaks_tbl') WHERE total_intensity <= 0
 ----
 0
 
 # scannum: same count as distinct scans
 query I
-SELECT COUNT(*) FROM mzml_scannum(iron_peaks_tbl)
+SELECT COUNT(*) FROM mzml_scannum('iron_peaks_tbl')
 ----
 370
 
 # scanmaxint: one row per scan, all positive
 query I
-SELECT COUNT(*) FROM mzml_scanmaxint(iron_peaks_tbl)
+SELECT COUNT(*) FROM mzml_scanmaxint('iron_peaks_tbl')
 ----
 370
 
 query I
-SELECT COUNT(*) FROM mzml_scanmaxint(iron_peaks_tbl) WHERE max_intensity <= 0
+SELECT COUNT(*) FROM mzml_scanmaxint('iron_peaks_tbl') WHERE max_intensity <= 0
 ----
 0
 
 # scanmz: distinct precursor_mz values, at least 1
 query I
-SELECT COUNT(*) > 0 FROM mzml_scanmz(iron_peaks_tbl)
+SELECT COUNT(*) > 0 FROM mzml_scanmz('iron_peaks_tbl')
 ----
 1
 
 query I
-SELECT COUNT(*) <= 370 FROM mzml_scanmz(iron_peaks_tbl)
+SELECT COUNT(*) <= 370 FROM mzml_scanmz('iron_peaks_tbl')
 ----
 1

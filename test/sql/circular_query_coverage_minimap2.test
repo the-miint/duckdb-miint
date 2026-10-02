@@ -77,7 +77,7 @@ multiwrap	0.3333
 query IIIIIII
 SELECT read_id, reference, round(coverage, 6), round(identity, 6),
        query_length, n_fragments, mixed_strand
-FROM circular_query_coverage(aln, reflen)
+FROM circular_query_coverage('aln', 'reflen')
 ORDER BY read_id;
 ----
 chimera	circ200k	1.0	1.0	6000	2	false
@@ -92,7 +92,7 @@ multiwrap	plas5k	1.0	1.0	15000	3	false
 # the read wraps three times. A single fragment (control), or a pair on opposite strands
 # (inverted), leaves no same-strand pair to measure and reports NULL.
 query II
-SELECT read_id, max_ref_gap FROM circular_query_coverage(aln, reflen)
+SELECT read_id, max_ref_gap FROM circular_query_coverage('aln', 'reflen')
 WHERE read_id <> 'chimera' ORDER BY read_id;
 ----
 control	NULL
@@ -105,7 +105,7 @@ multiwrap	0
 # Asserted as a threshold rather than an exact value: the aligner's choice of how far to
 # extend through the breakpoint is not something this test should pin.
 query I
-SELECT max_ref_gap > 1000 FROM circular_query_coverage(aln, reflen) WHERE read_id = 'chimera';
+SELECT max_ref_gap > 1000 FROM circular_query_coverage('aln', 'reflen') WHERE read_id = 'chimera';
 ----
 true
 
@@ -113,7 +113,7 @@ true
 # reference discontinuity and the inverted repeat on strand -- even though both reach
 # coverage 1.0 and identity 1.0, which is why the evidence columns are reported.
 query I
-SELECT read_id FROM circular_query_coverage(aln, reflen)
+SELECT read_id FROM circular_query_coverage('aln', 'reflen')
 WHERE coverage >= 0.90 AND identity >= 0.99
   AND NOT mixed_strand AND COALESCE(max_ref_gap, 0) <= 100
 ORDER BY read_id;

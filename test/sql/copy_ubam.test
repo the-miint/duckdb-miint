@@ -29,7 +29,7 @@ SELECT * FROM (VALUES
 statement ok
 COPY (SELECT read_id, sequence1, qual1, zmw FROM reads ORDER BY zmw)
 TO '__TEST_DIR__/ccs.bam'
-(FORMAT UBAM, READ_GROUP {ID: 'qiita', PL: 'PACBIO', DS: 'READTYPE=CCS'}, TAGS {zm: zmw});
+(FORMAT UBAM, READ_GROUP {ID: 'qiita', PL: 'PACBIO', DS: 'READTYPE=CCS'}, TAGS {zm: 'zmw'});
 
 # SEQ/QUAL and verbatim record names round-trip via read_sequences_sam.
 query III
@@ -121,21 +121,21 @@ Column 'read_id' must be VARCHAR, BIGINT, or UUID
 # TAGS pointing at a non-integer column.
 statement error
 COPY (SELECT read_id, sequence1, qual1, 'x' AS notint FROM reads)
-TO '__TEST_DIR__/e.bam' (FORMAT UBAM, TAGS {zm: notint});
+TO '__TEST_DIR__/e.bam' (FORMAT UBAM, TAGS {zm: 'notint'});
 ----
 must be an integer type
 
 # TAGS pointing at a column that isn't in the projection.
 statement error
 COPY (SELECT read_id, sequence1, qual1 FROM reads)
-TO '__TEST_DIR__/e.bam' (FORMAT UBAM, TAGS {zm: missing_col});
+TO '__TEST_DIR__/e.bam' (FORMAT UBAM, TAGS {zm: 'missing_col'});
 ----
 not found
 
 # TAGS tag name that isn't exactly two characters.
 statement error
 COPY (SELECT read_id, sequence1, qual1, zmw FROM reads)
-TO '__TEST_DIR__/e.bam' (FORMAT UBAM, TAGS {zmw: zmw});
+TO '__TEST_DIR__/e.bam' (FORMAT UBAM, TAGS {zmw: 'zmw'});
 ----
 exactly 2 characters
 

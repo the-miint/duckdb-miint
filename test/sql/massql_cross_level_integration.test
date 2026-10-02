@@ -21,20 +21,20 @@ SELECT ms_level, COUNT(*) FROM g GROUP BY ms_level ORDER BY ms_level
 
 # MS1 spectra linked from MS2 product ion 84.96 Da
 query I
-SELECT COUNT(DISTINCT spectrum_index) FROM mzml_ms1_where_ms2prod(g, 84.96, 0.1)
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_ms1_where_ms2prod('g', 84.96, 0.1)
 ----
 20
 
 # MS2 peaks from spectra whose parent MS1 has a peak near 100.08
 # 100.08 is common in MS1 scans, so most MS2 spectra link to a matching MS1
 query I
-SELECT COUNT(DISTINCT spectrum_index) FROM mzml_ms2_where_ms1mz(g, 100.08, 0.1)
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_ms2_where_ms1mz('g', 100.08, 0.1)
 ----
 79
 
 # MS2 peaks with product near 84.96 (common fragment)
 statement ok
-CREATE TABLE gp AS SELECT * FROM mzml_ms2_peaks(g);
+CREATE TABLE gp AS SELECT * FROM mzml_ms2_peaks('g');
 
 query I
 SELECT COUNT(DISTINCT spectrum_index) FROM gp WHERE mz_within(mz, 84.96, 0.1)
@@ -43,12 +43,12 @@ SELECT COUNT(DISTINCT spectrum_index) FROM gp WHERE mz_within(mz, 84.96, 0.1)
 
 # X-offset pair: 2 Da offset (isotope pattern)
 query I
-SELECT COUNT(*) > 0 FROM mzml_x_offset_pair(g, 2.0, 0.05)
+SELECT COUNT(*) > 0 FROM mzml_x_offset_pair('g', 2.0, 0.05)
 ----
 true
 
 # OR cardinality: spectra with at least 2 of [84.96, 95.09, 56.97]
 query I
-SELECT COUNT(DISTINCT spectrum_index) FROM mzml_or_cardinality(g, [84.96, 95.09, 56.97], 0.1, 2, 3)
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_or_cardinality('g', [84.96, 95.09, 56.97], 0.1, 2, 3)
 ----
 50

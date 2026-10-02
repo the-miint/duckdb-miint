@@ -72,14 +72,14 @@ CREATE TABLE spectra AS SELECT * FROM read_mzml('data/mzml/basic_3spectra.mzML')
 # MS2 precursors: 200.0 (defect=0.0) and 300.0 (defect=0.0)
 # Filter for defect in [0.0, 0.0] -> both match
 query I
-SELECT COUNT(DISTINCT spectrum_index) FROM mzml_ms2_peaks(spectra)
+SELECT COUNT(DISTINCT spectrum_index) FROM mzml_ms2_peaks('spectra')
 WHERE mz_massdefect_within(precursor_mz, 0.0, 0.0)
 ----
 2
 
 # Filter for defect in [0.1, 0.9] -> neither match (defect=0.0)
 query I
-SELECT COUNT(*) FROM mzml_ms2_peaks(spectra)
+SELECT COUNT(*) FROM mzml_ms2_peaks('spectra')
 WHERE mz_massdefect_within(precursor_mz, 0.1, 0.9)
 ----
 0
