@@ -27,7 +27,7 @@
 # opt-in rather than a global switch, so each reader family needs its own case:
 #   - align_minimap2          -> src/sequence_table_reader.cpp
 #   - align_minimap2_sharded  -> src/include/align_common.hpp +
-#                                MaterializeShardedQueryReads
+#                                MaterializeQueryReads
 #   - community_distances     -> src/unifrac_function_common.cpp
 #   - shear_tree              -> src/tree_table_reader.cpp + src/shear_tree.cpp
 #   - compute_pileup          -> src/compute_pileup.cpp
@@ -254,19 +254,20 @@ SELECT query_id, ref_id FROM match_short_barcodes('tmp_obs', 'tmp_bc', max_nm :=
 o1	bc1
 
 # ==============================================================================
-# align_minimap2_sharded -- MaterializeShardedQueryReads
+# align_minimap2_sharded -- MaterializeQueryReads
 # ==============================================================================
 #
-# The sharded reader both reads a user relation AND creates one: with more than one
-# shard it snapshots the shard-assigned reads into a temp table once, so the query
-# relation is read exactly once instead of once per shard (#229). Because the helper
+# The sharded reader both reads a user relation AND creates one: it snapshots the
+# query relation into a temp table once, and every shard streams its reads from that
+# snapshot, so the query relation is read exactly once instead of once per shard
+# (#229). Because the helper
 # connection inherits the caller's catalog, that table lands in the user's session,
 # so it must be uniquely named -- concurrent queries would otherwise collide on one
 # name -- and dropped explicitly instead of dying with the connection. Both
 # properties are asserted below.
 #
-# TWO shards deliberately: a single-shard call reads the relation inline and creates
-# no temp table at all, so it cannot exercise either property.
+# TWO shards, so each shard's stream reads the shared snapshot while the other's may
+# still be open.
 #
 
 statement ok
@@ -301,8 +302,8 @@ CREATE TEMP TABLE tmp_read_to_shard AS SELECT * FROM (VALUES
     ('sq2', 'tmpres_shard2')
 ) AS t(read_id, shard_name);
 
-# Both the query table and read_to_shard are TEMP -- the snapshot's JOIN has to
-# resolve them on an inheriting helper connection.
+# Both the query table and read_to_shard are TEMP -- the snapshot and every shard
+# stream have to resolve them on inheriting helper connections.
 query II
 SELECT read_id, reference
 FROM align_minimap2_sharded('tmp_shard_queries',
@@ -319,12 +320,12 @@ sq2	ref2
 # would accumulate one relation per query, and `SHOW TABLES` would be full of miint
 # internals.
 query I
-SELECT count(*) FROM duckdb_tables() WHERE table_name LIKE '\_miint\_shard\_reads\_%' ESCAPE '\';
+SELECT count(*) FROM duckdb_tables() WHERE table_name LIKE '\_miint\_query\_reads\_%' ESCAPE '\';
 ----
 0
 
 # ...and nothing must survive a FAILURE either. This TEMP view binds and then throws
-# while being read, so the snapshot's CREATE ... AS SELECT fails mid-flight.
+# while being read, so building the snapshot fails mid-flight.
 #
 # Note what this does and does not cover: the throw happens while the snapshot is
 # being built, so it proves a failed create leaves no relation behind. It does not
@@ -345,7 +346,7 @@ SELECT count(*) FROM align_minimap2_sharded('tmp_shard_boom',
 induced failure
 
 query I
-SELECT count(*) FROM duckdb_tables() WHERE table_name LIKE '\_miint\_shard\_reads\_%' ESCAPE '\';
+SELECT count(*) FROM duckdb_tables() WHERE table_name LIKE '\_miint\_query\_reads\_%' ESCAPE '\';
 ----
 0
 

@@ -746,10 +746,13 @@ TEST_CASE("Minimap2PartCursor walks concurrent workers through every part exactl
 	REQUIRE(flushes.load() >= attached_advances.load());
 	REQUIRE(flushes.load() >= publishes.load() + 1);
 
-	// Exhausted stays exhausted, without touching the reader again.
+	// Exhausted stays exhausted, without touching the reader again. A thread
+	// arriving after the last part is gone attaches to nothing and is sent
+	// straight back out by Advance.
 	Minimap2Aligner late(config);
 	Minimap2PartCursor::Attachment late_att;
-	REQUIRE(cursor.WithCurrentPart(late_att, late, [&]() { return cursor.CurrentIsLastPart(); }));
+	cursor.WithCurrentPart(late_att, late, []() {});
+	REQUIRE_FALSE(late_att.attached);
 	REQUIRE_FALSE(cursor.Advance(late_att, late, nullptr, nullptr));
 
 	std::remove(part1.c_str());

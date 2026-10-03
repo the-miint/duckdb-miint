@@ -796,7 +796,8 @@ void OpenCurrentShardStream(AlignBowtie2ShardedLocalState &local, const AlignBow
 	// (e.g. shard names containing a single quote could rewrite the predicate
 	// and silently send reads to the wrong index). WriteQuoted wraps the
 	// value in single quotes and doubles any embedded single quote, matching
-	// the convention already used in sequence_table_reader.cpp:377.
+	// the convention already used in BuildShardReadsSelect
+	// (src/sequence_table_reader.cpp).
 	select += " WHERE rts.shard_name = " + KeywordHelper::WriteQuoted(shard.name, '\'');
 
 	local.input_stream = local.input_conn->SendQuery(select);
