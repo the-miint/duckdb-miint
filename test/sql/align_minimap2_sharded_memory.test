@@ -16,7 +16,9 @@ require miint
 # than what it can offload to disk. The corpus is 400 reads x (5 kb sequence +
 # 5 kb quality) = ~4 MB, and every read is routed to all 60 shards: one copy of
 # the reads fits in memory_limit comfortably, a per-(read, shard) copy (~240 MB,
-# or ~120 MB without quality) cannot.
+# or ~120 MB without quality) cannot. The routing snapshot the function also
+# takes is reads x shards rows, but ids only (24,000 x ~25 B), which is why
+# snapshotting routing is not a reintroduction of the bug above.
 
 statement ok
 SELECT setseed(0.5);
@@ -53,6 +55,15 @@ FROM mem_reads r, range(60) t(s);
 statement ok
 SET temp_directory = '';
 
+# Pin the thread count: max_active_shards is ceil(threads / max_threads_per_shard),
+# so on a many-core runner more shards are resident at once, each with its own
+# read stream and in-flight sub-batches. What this test asserts is that the
+# function does not hold reads x shards — a property of the snapshot, independent
+# of threads — so leaving the concurrency to the host would only make the 64MB
+# budget below pass or fail by core count.
+statement ok
+SET threads = 4;
+
 statement ok
 SET memory_limit = '64MB';
 
@@ -72,6 +83,9 @@ FROM align_minimap2_sharded('mem_reads',
 
 statement ok
 RESET memory_limit;
+
+statement ok
+RESET threads;
 
 statement ok
 RESET temp_directory;

@@ -15,8 +15,7 @@ Minimap2PartCursor::Minimap2PartCursor(const std::string &index_path, const Mini
 	}
 	// AtEof()'s probe can throw std::runtime_error too (fgetpos/fsetpos failure);
 	// callers wrap everything from this constructor the same way.
-	has_next_part_ = !reader_->AtEof();
-	is_multi_part_ = has_next_part_;
+	is_multi_part_ = !reader_->AtEof();
 }
 
 std::shared_ptr<SharedMinimap2Index> Minimap2PartCursor::ReleaseSinglePart() {
@@ -48,10 +47,6 @@ void Minimap2PartCursor::EnsureAttached(Attachment &att, Minimap2Aligner &aligne
 	}
 	aligner.attach_shared_index(current_);
 	att.attached = true;
-}
-
-bool Minimap2PartCursor::CurrentIsLastPart() const {
-	return parts_exhausted_ || !has_next_part_;
 }
 
 void Minimap2PartCursor::MarkExhausted() {
@@ -107,18 +102,11 @@ bool Minimap2PartCursor::Advance(Attachment &att, Minimap2Aligner &aligner, cons
 		FlushFreedMemory();
 
 		std::shared_ptr<SharedMinimap2Index> next_index;
-		bool next_has_successor = false;
 		std::exception_ptr load_error;
 		try {
 			next_index = reader_->ReadNextPart();
-			if (next_index) {
-				// Probe for the part after this one while this thread still has
-				// the reader to itself; CurrentIsLastPart() then answers from the
-				// flag without touching the file.
-				next_has_successor = !reader_->AtEof();
-				if (prepare) {
-					prepare();
-				}
+			if (next_index && prepare) {
+				prepare();
 			}
 		} catch (...) {
 			load_error = std::current_exception();
@@ -141,7 +129,6 @@ bool Minimap2PartCursor::Advance(Attachment &att, Minimap2Aligner &aligner, cons
 		}
 
 		current_ = std::move(next_index);
-		has_next_part_ = next_has_successor;
 		if (publish) {
 			publish();
 		}

@@ -31,6 +31,39 @@ struct ShardInfo {
 	idx_t read_count;       // Number of reads for this shard (for priority ordering)
 };
 
+// The TEMP snapshots every shard stream reads from: the query relation and the
+// routing relation, each read exactly once (#229) and then replayed once per
+// shard and index part.
+//
+// Held by shared_ptr, and pinned by every QuerySequenceStream opened over them,
+// because the DROP must wait for the last open stream. DuckDB does not guarantee
+// that local states die before the global one, and a LocalState keeps its
+// ActiveShard — with that shard's live StreamQueryResult — whenever the scan ends
+// without draining (a LIMIT above the function is the ordinary case). Dropping a
+// table out from under a live stream is not something the reader survives, so
+// ownership decides when it happens: the stream that reads these tables holds
+// them (see QuerySequenceStream's `source_keepalive`), rather than any holder
+// maintaining a destruction order it cannot enforce.
+//
+// The connection is part of the handle for the same reason it was part of the
+// state before: the tables were created on a connection that inherits the
+// caller's TEMP catalog, so they live in the user's session, and a missed drop
+// leaves them visible in SHOW TABLES rather than dying with us.
+struct QuerySnapshots {
+	std::unique_ptr<Connection> conn;
+	std::string query_reads;   // unquoted; empty => nothing to drop
+	std::string read_to_shard; // unquoted; empty => nothing to drop
+
+	~QuerySnapshots() {
+		if (!conn) {
+			return;
+		}
+		// DropHelperTempRelation is no-op on an empty name and never propagates.
+		DropHelperTempRelation(*conn, KeywordHelper::WriteOptionallyQuoted(read_to_shard));
+		DropHelperTempRelation(*conn, KeywordHelper::WriteOptionallyQuoted(query_reads));
+	}
+};
+
 // A shard that is currently being processed by one or more threads.
 // `parts` owns the shard's .mmi and, for a multi-part shard, walks its workers
 // through the parts one at a time (see Minimap2PartCursor). The shard's reads
@@ -102,19 +135,13 @@ public:
 		std::atomic<idx_t> total_associations {0};
 		std::atomic<idx_t> associations_processed {0};
 
-		// TEMP snapshot of the query relation (MaterializeQueryReads), which every
-		// shard's stream reads its reads from (BuildShardReadsSelect). Taken even for
-		// a single shard: a multi-part shard replays its reads once per part, and
-		// re-reading the query relation instead would silently drop rows for any
-		// relation not stable across re-evaluation (#229 — see
+		// TEMP snapshots of the query and routing relations, which every shard's
+		// stream reads from (BuildShardReadsSelect). Taken even for a single shard:
+		// a multi-part shard replays its reads once per part, and re-reading the
+		// user's relations instead would silently drop rows for any relation not
+		// stable across re-evaluation (#229 — see
 		// docs/internals/reading-tables-views.md § "Read the relation ONCE").
-		//
-		// The connection is held for the life of the state so the destructor can
-		// drop the TEMP table: it was created on an inheriting connection, so it
-		// lives in the caller's catalog, and a missed drop leaks a relation into the
-		// user's session (visible in SHOW TABLES) instead of dying with us.
-		std::unique_ptr<Connection> snapshot_conn;
-		std::string query_snapshot; // unquoted; empty => no snapshot to drop
+		std::shared_ptr<QuerySnapshots> snapshots;
 
 		idx_t MaxThreads() const override {
 			return max_active_shards * max_threads_per_shard;
@@ -122,14 +149,8 @@ public:
 
 		GlobalState() = default;
 
-		~GlobalState() override {
-			// Close the open shard streams over the snapshot before dropping it
-			// (an early-terminated query, e.g. LIMIT, never drains them).
-			active_shards.clear();
-			if (snapshot_conn) {
-				DropHelperTempRelation(*snapshot_conn, KeywordHelper::WriteOptionallyQuoted(query_snapshot));
-			}
-		}
+		// No destructor: the snapshots are dropped by ~QuerySnapshots once the last
+		// shard still streaming them is gone, which may be after this state dies.
 	};
 
 	struct LocalState : public LocalTableFunctionState {

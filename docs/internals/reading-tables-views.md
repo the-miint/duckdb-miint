@@ -140,7 +140,9 @@ Three remedies are in use. Pick by what the consumer actually needs:
    plus a `QuerySequenceStream` per replay. For consumers that genuinely need
    repeated passes. `align_minimap2` with a multi-part index replays the whole
    snapshot once per part. `align_minimap2_sharded` streams it once per shard and
-   part, filtered by `BuildShardReadsSelect`. Snapshot the relation itself,
+   part, filtered by `BuildShardReadsSelect` — and snapshots its **routing**
+   relation (`read_to_shard`) the same way, because that filter re-reads routing
+   on exactly the same schedule as the reads. Snapshot the relation itself,
    **never** a join that fans it out: an earlier `align_minimap2_sharded`
    snapshotted `query JOIN read_to_shard`, one copy of each read per shard. With
    all-shards routing (1M HiFi reads × 1000 shards) that was about a thousand
@@ -176,7 +178,7 @@ before trusting it. `test/sql/rype_single_read.test` documents both forms.
 | Reader | Reads relation | Status |
 | --- | --- | --- |
 | `align_minimap2` (default + `per_subject_database`) | once | fixed, remedy (1); multi-part index uses remedy (2) |
-| `align_minimap2_sharded` | once | fixed, remedy (2) |
+| `align_minimap2_sharded` | query once; routing once in the scan, plus a separate bind-time scan for shard discovery | fixed, remedy (2) on both relations |
 | `align_bowtie2_sharded` | once per shard | fixed by remedy (3) — fails loud |
 | `rype_classify`, `rype_log_ratio`, `rype_extract_*` | once | fixed, remedy (1) — guarded by `test/sql/rype_single_read.test` |
 | `per_sample_table_function` (`DiscoverSamples` + per-sample re-read) | once per sample | **exposed** — shared by `woltka_ogu`, `sylph_profile`, `detect_chimera_uchime`, `align_abpoa`, `consensus_abpoa`, `align_mafft`, `uchime_denovo`, `deblur`, `massql` |

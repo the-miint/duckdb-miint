@@ -42,16 +42,16 @@ namespace miint {
 // while part 2 loaded fully.
 //
 // Protocol (caller side):
-//   { std::lock_guard<std::mutex> g(cursor.Lock());
-//     cursor.EnsureAttached(lstate.part, *lstate.aligner);
-//     <claim this thread's next unit of work against the current part> }
+//   auto work = cursor.WithCurrentPart(lstate.part, *lstate.aligner,
+//                                      [&]() { <claim this thread's next unit> });
 //   ... align it ...
 //   when the current part has no work left for this thread:
 //     if (!cursor.Advance(lstate.part, *lstate.aligner, prepare, publish)) done;
 //     else loop back (a newer part exists — re-attach and retry)
-// Claiming work inside the same critical section as EnsureAttached is what
-// makes the per-part reset in `publish` race-free: a thread can never take
-// work belonging to part k+1 while its aligner is still attached to part k.
+// Claiming work inside WithCurrentPart's critical section (rather than through
+// an exposed mutex) is what makes the per-part reset in `publish` race-free: a
+// thread can never take work belonging to part k+1 while its aligner is still
+// attached to part k.
 class Minimap2PartCursor {
 public:
 	// Per-thread record of which part of WHICH cursor that thread's aligner is
@@ -117,15 +117,6 @@ public:
 		return claim();
 	}
 
-	// Only valid from inside a WithCurrentPart `claim` (it reads state the lock
-	// guards). True when no part follows the current one. Reads a flag refreshed
-	// once per load, never the file, so a caller may ask per unit of work. Lets
-	// a caller stop admitting new workers once the very last unit has been
-	// claimed, without ever mistaking "last batch of part k" for "last batch of
-	// the index". False while a leader is mid-transition (a next part exists —
-	// it is being loaded), which is the conservative answer there.
-	bool CurrentIsLastPart() const;
-
 	// The calling thread has no work left against the part `att` is on. Detaches
 	// its aligner, then either leads the transition to the next part or waits
 	// for the thread already doing so.
@@ -143,9 +134,9 @@ public:
 	//             replay stream over the query snapshot). May throw: the query
 	//             fails and every waiter is released.
 	//   publish — leader only, UNDER the lock, immediately before the generation
-	//             bump. Swaps the caller's per-part work source into place
-	//             (install the stream opened in `prepare`, reset a batch offset
-	//             to 0). Must not throw.
+	//             bump. Swaps the caller's per-part work source into place —
+	//             both callers install the replay stream `prepare` opened over
+	//             their query snapshot. Must not throw.
 	//
 	// Returns true once a part newer than `att.generation` exists to retry
 	// against (whether this thread loaded it or another did), false once the
@@ -167,10 +158,6 @@ private:
 	std::shared_ptr<SharedMinimap2Index> current_;
 	std::function<void()> flush_freed_memory_;
 	bool is_multi_part_ = false;
-	// Whether a part follows current_. Refreshed by the leader right after each
-	// load, while it alone owns the reader, so CurrentIsLastPart() never has to
-	// touch the file (it is asked once per claimed batch, not once per part).
-	bool has_next_part_ = false;
 
 	std::mutex lock_;
 	std::condition_variable cv_;

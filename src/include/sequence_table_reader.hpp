@@ -7,6 +7,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/query_result.hpp"
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -54,14 +55,24 @@ std::vector<miint::AlignmentSubject> ReadSubjectTable(ClientContext &context, co
 // below for a single streaming pass instead.
 
 // SELECT yielding BuildQueryReadsSelect's columns for every row of
-// `snapshot_table` that `read_to_shard` assigns to `shard_name`, meant to be
+// `snapshot_table` that `routing_snapshot` assigns to `shard_name`, meant to be
 // streamed (QuerySequenceStream's SelectSql form), once per shard and index part.
 //
-// `snapshot_table` is a MaterializeQueryReads snapshot — the query relation
-// itself (#229), with no shard join — so a read routed to N shards is held once,
-// not N times. The earlier shard-keyed snapshot of `query JOIN read_to_shard` was
-// the other way round, and all-shards routing of 1M HiFi reads over 1000 shards
-// made it ~1000 copies of the corpus before the first alignment.
+// BOTH relations are snapshots, and for the same #229 reason: this SELECT is
+// re-run once per shard and part, so naming the user's relations here would read
+// each of them many times over. `snapshot_table` is a MaterializeQueryReads
+// snapshot and `routing_snapshot` a MaterializeReadToShard one.
+//
+// `snapshot_table` is the query relation itself, with no shard join — so a read
+// routed to N shards is held once, not N times. The earlier shard-keyed snapshot
+// of `query JOIN read_to_shard` was the other way round, and all-shards routing
+// of 1M HiFi reads over 1000 shards made it ~1000 copies of the corpus before
+// the first alignment.
+//
+// Duplicate (read_id, shard_name) rows in the routing relation align the read
+// ONCE against that shard: `IN` is set membership, so a read listed twice for a
+// shard is indistinguishable from one listed once. v1.0.0-v1.0.1 joined instead
+// and emitted the alignment twice.
 //
 // Membership is an `IN (subquery)` in the SELECT list, deliberately not a JOIN or
 // an IN in WHERE. DuckDB plans a projected IN as a MARK join, which it never
@@ -71,7 +82,7 @@ std::vector<miint::AlignmentSubject> ReadSubjectTable(ClientContext &context, co
 // case, where `shard_name = x` is estimated at 20% of a table holding reads x
 // shards rows — and would then hash the whole corpus, sequences included, once
 // per shard.
-std::string BuildShardReadsSelect(const std::string &snapshot_table, const std::string &read_to_shard_table,
+std::string BuildShardReadsSelect(const std::string &snapshot_table, const std::string &routing_snapshot,
                                   const SequenceTableSchema &schema, const std::string &shard_name);
 
 // The projection every read of a sequence relation uses: exactly the columns
@@ -104,6 +115,22 @@ std::string BuildQueryReadsSelect(const std::string &query_table, const Sequence
 // index part for nothing (align_minimap2's multi-part path).
 std::string MaterializeQueryReads(Connection &conn, const std::string &query_table, const SequenceTableSchema &schema,
                                   idx_t &out_row_count);
+
+// The same one-pass TEMP snapshot, for align_minimap2_sharded's routing relation
+// (`read_to_shard`). Holds (read_id, shard_name) only.
+//
+// Routing is read as many times as the reads are — once per shard and index part
+// — so it needs the #229 guarantee just as much: a routing view built on
+// `random()`, or one over a table another connection is writing, would otherwise
+// send a read to one set of shards on part 1 and a different set on part 2, and
+// the reads it stopped naming would simply never be aligned. Note that bind-time
+// shard discovery (ReadShardNameCounts) reads the user's relation separately and
+// before this, so the shard LIST can still come from a different observation than
+// the membership; this snapshot is what makes membership stable for the scan.
+//
+// Returns the unquoted TEMP table name; the caller MUST drop it via
+// DropHelperTempRelation.
+std::string MaterializeReadToShard(Connection &conn, const std::string &read_to_shard_table, idx_t &out_row_count);
 
 // Labels and single-end sequences loaded from a table for vsearch operations.
 struct LoadedSingleEndSequences {
@@ -148,13 +175,29 @@ public:
 	// BuildQueryReadsSelect's columns for `schema`, in that order (e.g.
 	// BuildShardReadsSelect). Wrapped in its own type so it cannot be passed where
 	// a table name is expected, or the reverse.
+	//
+	// `label` names the stream in error messages. Without it the message quotes
+	// the generated SQL, which for a shard read is a two-UUID-table MARK-join
+	// SELECT — accurate and unreadable. Say "reads for shard 'x'" instead.
 	struct SelectSql {
 		std::string sql;
+		std::string label;
 	};
 
 	// Owns an internal Connection that inherits the caller's TEMP objects.
+	//
+	// `source_keepalive`, if given, is held for the life of the stream. A SELECT
+	// over a caller-owned TEMP table must not outlive that table, and the stream
+	// is the thing that actually reads it — so it pins it, rather than the
+	// caller maintaining a destruction order it cannot enforce.
 	QuerySequenceStream(ClientContext &context, const SelectSql &select, const SequenceTableSchema &schema,
-	                    idx_t sub_batch_size = STANDARD_VECTOR_SIZE);
+	                    idx_t sub_batch_size = STANDARD_VECTOR_SIZE, std::shared_ptr<void> source_keepalive = nullptr);
+
+	// Closes the stream before any member (the owned connection, the keepalive)
+	// is destroyed, so neither the connection nor the source table can go away
+	// underneath a live StreamQueryResult. Doing this in the body rather than by
+	// member declaration order means reordering the members cannot break it.
+	~QuerySequenceStream();
 
 	// Fetch the next sub-batch. Returns an empty batch when the stream is exhausted.
 	// Thread-safe — serializes access to the underlying stream via mutex.
@@ -169,11 +212,21 @@ public:
 	idx_t RowsDelivered() const;
 
 private:
+	// Both ClientContext& forms above are this one: create an owned connection,
+	// inherit the caller's TEMP objects, stream `select_sql`. They differ only in
+	// how they build the SELECT and how they name it in errors, so the setup
+	// lives here once. `source` names what is being read, for error messages.
+	QuerySequenceStream(ClientContext &context, const std::string &select_sql, const std::string &source,
+	                    const SequenceTableSchema &schema, idx_t sub_batch_size,
+	                    std::shared_ptr<void> source_keepalive = nullptr);
+
 	// Only one of these two is populated: owned_conn_ for the ClientContext&
 	// constructor, nullptr for the Connection& constructor. conn_ptr_ always
 	// points to the live connection.
 	unique_ptr<Connection> owned_conn_;
 	Connection *conn_ptr_;
+	// Whatever the SELECT reads from and does not own — see the SelectSql ctor.
+	std::shared_ptr<void> source_keepalive_;
 	unique_ptr<QueryResult> stream_;
 	SequenceTableSchema schema_;
 	idx_t sub_batch_size_;

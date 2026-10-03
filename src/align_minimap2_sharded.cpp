@@ -179,25 +179,33 @@ unique_ptr<GlobalTableFunctionState> AlignMinimap2ShardedTableFunction::InitGlob
 	}
 	gstate->total_associations.store(total, std::memory_order_relaxed);
 
-	// Read the query relation exactly once, into a snapshot every shard streams
-	// its reads from (see GlobalState::query_snapshot). One copy of the reads,
-	// however many shards each is routed to.
-	gstate->snapshot_conn = make_uniq<Connection>(DatabaseInstance::GetDatabase(context));
-	InheritTempObjects(context, *gstate->snapshot_conn);
+	// Read the query and routing relations exactly once each, into snapshots
+	// every shard streams from (see GlobalState::snapshots). One copy of the
+	// reads, however many shards each is routed to.
+	gstate->snapshots = std::make_shared<QuerySnapshots>();
+	gstate->snapshots->conn = make_uniq<Connection>(DatabaseInstance::GetDatabase(context));
+	InheritTempObjects(context, *gstate->snapshots->conn);
 	idx_t snapshot_row_count = 0;
-	gstate->query_snapshot =
-	    MaterializeQueryReads(*gstate->snapshot_conn, data.query_table, data.query_schema, snapshot_row_count);
+	gstate->snapshots->query_reads =
+	    MaterializeQueryReads(*gstate->snapshots->conn, data.query_table, data.query_schema, snapshot_row_count);
+	idx_t routing_row_count = 0;
+	if (snapshot_row_count == 0) {
+		// No reads at all: every shard would load its index only to align nothing.
+		// Leaving no shard to claim ends the scan before any index is opened — and
+		// with no shard to open a stream, the routing snapshot would be a full copy
+		// of a reads x shards relation that nothing ever reads.
+		gstate->next_shard_idx = gstate->shard_count;
+	} else {
+		gstate->snapshots->read_to_shard =
+		    MaterializeReadToShard(*gstate->snapshots->conn, data.read_to_shard_table, routing_row_count);
+	}
 	// This runs on the query's calling thread, never a TaskScheduler worker, so
 	// nothing will return the allocation it just freed to the OS on its own —
 	// see MakeFreedMemoryFlusher.
 	MakeFreedMemoryFlusher(context)();
-	// No reads at all: every shard would load its index only to align nothing.
-	// Leaving no shard to claim ends the scan before any index is opened.
-	if (snapshot_row_count == 0) {
-		gstate->next_shard_idx = gstate->shard_count;
-	}
-	SHARD_DBG(*gstate, "InitGlobal: query snapshot '%s' materialized (%zu reads)", gstate->query_snapshot.c_str(),
-	          static_cast<size_t>(snapshot_row_count));
+	SHARD_DBG(*gstate, "InitGlobal: snapshots '%s' (%zu reads) / '%s' (%zu routing rows) materialized",
+	          gstate->snapshots->query_reads.c_str(), static_cast<size_t>(snapshot_row_count),
+	          gstate->snapshots->read_to_shard.c_str(), static_cast<size_t>(routing_row_count));
 
 	SHARD_DBG_MEM(*gstate, "InitGlobal: shards=%zu db_threads=%zu max_tps=%zu max_active=%zu MaxThreads=%zu",
 	              static_cast<size_t>(gstate->shard_count), static_cast<size_t>(db_threads),
@@ -225,11 +233,15 @@ static constexpr idx_t SHARD_READ_BATCH_SIZE = 2048;
 static std::shared_ptr<QuerySequenceStream>
 OpenShardStream(ClientContext &context, const AlignMinimap2ShardedTableFunction::GlobalState &gstate,
                 const AlignMinimap2ShardedTableFunction::Data &bind_data, const std::string &shard_name) {
+	// The stream holds the snapshots it reads from, so they cannot be dropped
+	// while it is open however the scan ends — see QuerySnapshots.
 	return std::make_shared<QuerySequenceStream>(
 	    context,
-	    QuerySequenceStream::SelectSql {BuildShardReadsSelect(gstate.query_snapshot, bind_data.read_to_shard_table,
-	                                                          bind_data.query_schema, shard_name)},
-	    bind_data.query_schema, SHARD_READ_BATCH_SIZE);
+	    QuerySequenceStream::SelectSql {BuildShardReadsSelect(gstate.snapshots->query_reads,
+	                                                          gstate.snapshots->read_to_shard, bind_data.query_schema,
+	                                                          shard_name),
+	                                    "reads for shard '" + shard_name + "'"},
+	    bind_data.query_schema, SHARD_READ_BATCH_SIZE, gstate.snapshots);
 }
 
 std::shared_ptr<ActiveShard> AlignMinimap2ShardedTableFunction::ClaimWork(ClientContext &context, GlobalState &gstate,
@@ -273,7 +285,7 @@ std::shared_ptr<ActiveShard> AlignMinimap2ShardedTableFunction::ClaimWork(Client
 				gstate.active_shards.push_back(active);
 				SHARD_DBG(gstate, "ClaimWork: NEW shard %zu '%s' (active_shards=%zu)", static_cast<size_t>(shard_idx),
 				          bind_data.shards[shard_idx].name.c_str(), static_cast<size_t>(gstate.active_shards.size()));
-				break; // exit lock to load index + materialize IDs
+				break; // exit lock to load the index and open the shard's read stream
 			}
 
 			// Phase 3: Can't join or start - check if waiting is worthwhile
@@ -299,39 +311,26 @@ std::shared_ptr<ActiveShard> AlignMinimap2ShardedTableFunction::ClaimWork(Client
 	}
 	// Lock released
 
-	// Phase 4: Load index OUTSIDE lock
+	// Phase 4: load the index and open this shard's read stream, both OUTSIDE the
+	// lock. Either can throw, and either way the cleanup is the same: without it
+	// the ActiveShard stays in active_shards with ready=false, so every thread
+	// parked in the wait above is never woken and the query hangs instead of
+	// failing. Same guard Execute puts around Advance.
 	auto &shard_info = bind_data.shards[shard_idx];
 	SHARD_DBG(gstate, "ClaimWork: LOADING index '%s'", shard_info.index_path.c_str());
 	auto load_start = std::chrono::steady_clock::now();
 	try {
 		active->parts = std::make_unique<miint::Minimap2PartCursor>(shard_info.index_path, bind_data.config,
 		                                                            MakeFreedMemoryFlusher(context));
-	} catch (...) {
-		// Remove failed shard from active list and notify waiters
-		SHARD_DBG(gstate, "ClaimWork: LOAD FAILED shard %zu", static_cast<size_t>(shard_idx));
-		active->exhausted.store(true, std::memory_order_release);
-		active->active_workers.fetch_sub(1, std::memory_order_acq_rel);
-		{
-			std::lock_guard<std::mutex> guard(gstate.lock);
-			auto &shards = gstate.active_shards;
-			shards.erase(std::remove(shards.begin(), shards.end(), active), shards.end());
-		}
-		gstate.cv.notify_all();
-		throw;
-	}
-	auto load_ms =
-	    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - load_start).count();
-	SHARD_DBG_MEM(gstate, "ClaimWork: LOADED index shard %zu '%s' (%s) in %ldms", static_cast<size_t>(shard_idx),
-	              shard_info.name.c_str(), active->parts->IsMultiPart() ? "multi-part, first part" : "single-part",
-	              static_cast<long>(load_ms));
-
-	// Phase 4b: open this shard's read stream over the query snapshot. Wrapped in
-	// try-catch to prevent deadlock if it fails — without cleanup, the ActiveShard
-	// would remain in active_shards with ready=false, blocking all waiters.
-	try {
+		auto load_ms =
+		    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - load_start)
+		        .count();
+		SHARD_DBG_MEM(gstate, "ClaimWork: LOADED index shard %zu '%s' (%s) in %ldms", static_cast<size_t>(shard_idx),
+		              shard_info.name.c_str(), active->parts->IsMultiPart() ? "multi-part, first part" : "single-part",
+		              static_cast<long>(load_ms));
 		active->stream = OpenShardStream(context, gstate, bind_data, shard_info.name);
 	} catch (...) {
-		SHARD_DBG(gstate, "ClaimWork: STREAM OPEN FAILED shard %zu", static_cast<size_t>(shard_idx));
+		SHARD_DBG(gstate, "ClaimWork: SETUP FAILED shard %zu", static_cast<size_t>(shard_idx));
 		active->exhausted.store(true, std::memory_order_release);
 		active->active_workers.fetch_sub(1, std::memory_order_acq_rel);
 		{

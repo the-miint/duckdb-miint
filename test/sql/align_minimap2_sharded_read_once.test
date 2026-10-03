@@ -1,0 +1,84 @@
+# name: test/sql/align_minimap2_sharded_read_once.test
+# description: align_minimap2_sharded reads read_to_shard once, not once per shard
+# group: [sql]
+
+require miint
+
+# #229 for the ROUTING relation. The per-shard read query filters the query
+# snapshot with `read_id IN (SELECT read_id FROM read_to_shard WHERE
+# shard_name = ...)`, and that query is re-run once per shard and index part.
+# Naming the user's relation there read it that many times, so a routing
+# relation that is not stable across repeated reads assigned each read to a
+# different set of shards on every pass — reads it stopped naming were simply
+# never aligned, with no error. The fix snapshots (read_id, shard_name) once in
+# InitGlobal and filters against the snapshot.
+#
+# The volatility below lives in `shard_name` itself, which the filter must
+# evaluate. Putting it in an unreferenced column instead would let column
+# pruning delete it from the plan, and the test would pass against the defect
+# (see docs/internals/reading-tables-views.md § "Audit status").
+
+statement ok
+SELECT setseed(0.25);
+
+statement ok
+CREATE TABLE ro_ref AS
+SELECT 'ref1' AS read_id,
+       string_agg(substr('ACGT', 1 + floor(random() * 4)::INTEGER, 1), '' ORDER BY i) AS sequence1
+FROM range(20000) t(i);
+
+# 200 reads, each an exact 5 kb substring of the reference, so each has exactly
+# one primary alignment against whichever shard it is routed to.
+statement ok
+CREATE TABLE ro_reads AS
+SELECT 'read' || i AS read_id,
+       substr((SELECT sequence1 FROM ro_ref), 1 + (i * 71) % 15000, 5000) AS sequence1
+FROM range(200) t(i);
+
+# Both shards index the same reference, so routing never changes WHETHER a read
+# aligns — only which shard reports it. That isolates the read-once property:
+# any shortfall below is routing lost between passes, not alignment failure.
+query I
+SELECT success FROM save_minimap2_index('ro_ref', '__TEST_DIR__/shard_a.mmi', preset := 'map-hifi');
+----
+true
+
+query I
+SELECT success FROM save_minimap2_index('ro_ref', '__TEST_DIR__/shard_b.mmi', preset := 'map-hifi');
+----
+true
+
+# Each read is routed to exactly one shard, but WHICH one is redrawn on every
+# read of this view.
+statement ok
+CREATE VIEW ro_routing AS
+SELECT read_id,
+       CASE WHEN random() < 0.5 THEN 'shard_a' ELSE 'shard_b' END AS shard_name
+FROM ro_reads;
+
+# Every read aligns exactly once: 200 rows over 200 distinct reads.
+#
+# Re-reading the view instead draws each read's shard independently for shard_a's
+# pass and for shard_b's, so a read is claimed by both (two rows) or by neither
+# (none) a quarter of the time each. Both counts fall short of 200, and the
+# distinct count is the sharper of the two — with 200 reads it survives only if
+# all 200 draws happen to agree, which is 2^-200.
+query II
+SELECT count(*), count(DISTINCT read_id)
+FROM align_minimap2_sharded('ro_reads',
+    shard_directory := '__TEST_DIR__',
+    read_to_shard := 'ro_routing',
+    preset := 'map-hifi',
+    max_secondary := 0)
+WHERE flags & 4 = 0;
+----
+200	200
+
+statement ok
+DROP VIEW ro_routing;
+
+statement ok
+DROP TABLE ro_reads;
+
+statement ok
+DROP TABLE ro_ref;
