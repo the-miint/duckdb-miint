@@ -57,7 +57,7 @@ std::unordered_set<std::string> ReadTipNames(ClientContext &context, const std::
 }
 
 bool GetBoolParam(TableFunctionBindInput &input, const std::string &key, bool default_value) {
-	auto it = input.named_parameters.find(key);
+	auto it = input.named_parameters.find(Identifier(key));
 	if (it == input.named_parameters.end() || it->second.IsNull()) {
 		return default_value;
 	}

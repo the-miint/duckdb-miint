@@ -16,7 +16,7 @@ namespace duckdb {
 
 TableOrViewColumns GetTableOrViewColumns(ClientContext &context, const std::string &table_name,
                                          const std::string &entity_type) {
-	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, table_name, QueryErrorContext());
+	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, QualifiedName(Identifier(table_name)), QueryErrorContext());
 	auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
 
 	if (!entry) {
@@ -30,7 +30,7 @@ TableOrViewColumns GetTableOrViewColumns(ClientContext &context, const std::stri
 		auto &columns = table.GetColumns();
 		for (idx_t i = 0; i < columns.LogicalColumnCount(); i++) {
 			auto &col = columns.GetColumn(LogicalIndex(i));
-			result.names.push_back(col.Name());
+			result.names.push_back(col.Name().GetIdentifierName());
 			result.types.push_back(col.Type());
 		}
 		result.is_physical_table = true;
@@ -38,7 +38,7 @@ TableOrViewColumns GetTableOrViewColumns(ClientContext &context, const std::stri
 		auto &view = entry->Cast<ViewCatalogEntry>();
 		view.BindView(context);
 		auto col_info = view.GetColumnInfo();
-		result.names = col_info->names;
+		result.names = IdentifiersToStrings(col_info->names);
 		result.types = col_info->types;
 		result.is_physical_table = false;
 	} else {
@@ -51,7 +51,7 @@ TableOrViewColumns GetTableOrViewColumns(ClientContext &context, const std::stri
 void RejectRelationNameAsLiteral(ClientContext &context, const std::string &function_name, const std::string &literal) {
 	// Unqualified lookup first. This honours the session search_path, so a bare name
 	// naming a table in a non-default schema is caught.
-	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, literal, QueryErrorContext());
+	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, QualifiedName(Identifier(literal)), QueryErrorContext());
 	auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
 
 	if (!entry && literal.find('.') != std::string::npos) {
@@ -64,8 +64,8 @@ void RejectRelationNameAsLiteral(ClientContext &context, const std::string &func
 		// "NC_001416" / name "1", which does not exist, and we fall through. The guard
 		// still keys off catalog residency, never off the string's shape.
 		auto qname = QualifiedName::Parse(literal);
-		EntryLookupInfo qualified_lookup(CatalogType::TABLE_ENTRY, qname.name, QueryErrorContext());
-		entry = Catalog::GetEntry(context, qname.catalog, qname.schema, qualified_lookup, OnEntryNotFound::RETURN_NULL);
+		EntryLookupInfo qualified_lookup(CatalogType::TABLE_ENTRY, qname, QueryErrorContext());
+		entry = Catalog::GetEntry(context, qualified_lookup, OnEntryNotFound::RETURN_NULL);
 	}
 
 	if (!entry) {
@@ -94,7 +94,7 @@ void RejectCTERelationName(TableFunctionBindInput &input, const std::string &rel
 	// REGULAR_BINDERs, which keeps a caller's CTE out of a view body. Inside a CTE's
 	// own body (or a recursive CTE's anchor) the lookup returns a CANNOT_BE_REFERENCED
 	// self-binding, and there the name still means the catalog relation.
-	auto cte = input.binder->GetCTEBinding(BindingAlias(relation_name));
+	auto cte = input.binder->GetCTEBinding(BindingAlias(Identifier(relation_name)));
 	if (!cte || !cte->CanBeReferenced()) {
 		return;
 	}
@@ -108,7 +108,7 @@ void RejectCTERelationName(TableFunctionBindInput &input, const std::string &rel
 	                      "under a different name and pass that name instead, e.g. CREATE TEMP VIEW %s AS ...; "
 	                      "(massql and some sample_id modes cannot read TEMP relations yet, #207: use CREATE VIEW or "
 	                      "CREATE TABLE there).",
-	                      input.table_function.name, relation_name, suggested);
+	                      input.table_function.GetName().GetIdentifierName(), relation_name, suggested);
 }
 
 void InheritTempObjects(ClientContext &context, Connection &conn) {

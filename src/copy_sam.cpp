@@ -160,7 +160,7 @@ static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, Copy
                                                     SAMOutputFormat default_format) {
 	auto result = make_uniq<SAMCopyBindData>();
 	result->file_path = input.info.file_path;
-	result->names = names;
+	result->names = IdentifiersToStrings(names);
 	result->format = default_format;
 
 	// Detect and cache column indices
@@ -233,9 +233,9 @@ static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, Copy
 	// Parse options
 	bool compression_specified = false;
 	for (auto &option : input.info.options) {
-		if (StringUtil::CIEquals(option.first, "include_header")) {
+		if (option.first == "include_header") {
 			result->include_header = option.second[0].GetValue<bool>();
-		} else if (StringUtil::CIEquals(option.first, "compression")) {
+		} else if (option.first == "compression") {
 			compression_specified = true;
 			auto comp_value = option.second[0].ToString();
 			if (StringUtil::CIEquals(comp_value, "gzip") || StringUtil::CIEquals(comp_value, "gz")) {
@@ -246,12 +246,12 @@ static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, Copy
 				throw BinderException("Unknown compression type for COPY FORMAT SAM: %s (supported: gzip, none)",
 				                      comp_value);
 			}
-		} else if (StringUtil::CIEquals(option.first, "compression_level")) {
+		} else if (option.first == "compression_level") {
 			result->compression_level = option.second[0].GetValue<int32_t>();
 			if (result->compression_level < 0 || result->compression_level > 9) {
 				throw BinderException("COMPRESSION_LEVEL must be between 0 and 9, got %d", result->compression_level);
 			}
-		} else if (StringUtil::CIEquals(option.first, "reference_lengths")) {
+		} else if (option.first == "reference_lengths") {
 			const auto &table_value = option.second[0];
 			if (table_value.type().id() != LogicalTypeId::VARCHAR) {
 				throw BinderException("reference_lengths must be a VARCHAR (table or view name)");
@@ -270,7 +270,7 @@ static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, Copy
 			if (entry->type != CatalogType::TABLE_ENTRY && entry->type != CatalogType::VIEW_ENTRY) {
 				throw BinderException("'%s' is not a table or view", result->reference_lengths_table.value());
 			}
-		} else if (StringUtil::CIEquals(option.first, "sequence_data")) {
+		} else if (option.first == "sequence_data") {
 			const auto &table_value = option.second[0];
 			if (table_value.type().id() != LogicalTypeId::VARCHAR) {
 				throw BinderException("SEQUENCE_DATA must be a VARCHAR (table or view name)");

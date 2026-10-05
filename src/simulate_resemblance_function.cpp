@@ -82,7 +82,7 @@ unique_ptr<FunctionData> SimGradientBind(ClientContext &context, TableFunctionBi
 	}
 
 	for (auto &kv : input.named_parameters) {
-		auto key = StringUtil::Lower(kv.first);
+		auto key = StringUtil::Lower(kv.first.GetIdentifierName());
 		if (key == "sp_width") {
 			data->sp_width = kv.second.GetValue<double>();
 		} else if (key == "noise") {
@@ -201,7 +201,7 @@ unique_ptr<FunctionData> SimClusterBind(ClientContext &context, TableFunctionBin
 	}
 
 	for (auto &kv : input.named_parameters) {
-		auto key = StringUtil::Lower(kv.first);
+		auto key = StringUtil::Lower(kv.first.GetIdentifierName());
 		if (key == "cluster_sizes") {
 			auto sizes = ListValue::GetChildren(kv.second);
 			if (sizes.empty()) {

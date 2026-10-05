@@ -196,7 +196,7 @@ private:
 // Reads an optional named parameter, leaving `target` alone when absent.
 // Same shape as place_krepp's, kept local for the same reason.
 template <typename T>
-void ReadOptional(const named_parameter_map_t &params, const char *key, T &target, T (*convert)(const Value &)) {
+void ReadOptional(const named_argument_map_t &params, const char *key, T &target, T (*convert)(const Value &)) {
 	auto it = params.find(key);
 	if (it != params.end() && !it->second.IsNull()) {
 		target = convert(it->second);
@@ -206,7 +206,7 @@ void ReadOptional(const named_parameter_map_t &params, const char *key, T &targe
 // k, w and h are uint8_t in krepp's config. Taking them as INTEGER and
 // narrowing silently would turn `k := 285` into k = 29 - a valid-looking build
 // with the wrong k - so the range is checked before the cast rather than after.
-uint8_t ReadByteParam(const named_parameter_map_t &params, const char *key, uint8_t fallback, bool *was_set = nullptr) {
+uint8_t ReadByteParam(const named_argument_map_t &params, const char *key, uint8_t fallback, bool *was_set = nullptr) {
 	auto it = params.find(key);
 	if (it == params.end() || it->second.IsNull()) {
 		return fallback;
@@ -222,7 +222,7 @@ uint8_t ReadByteParam(const named_parameter_map_t &params, const char *key, uint
 	return static_cast<uint8_t>(value);
 }
 
-uint32_t ReadUIntParam(const named_parameter_map_t &params, const char *key, uint32_t fallback) {
+uint32_t ReadUIntParam(const named_argument_map_t &params, const char *key, uint32_t fallback) {
 	auto it = params.find(key);
 	if (it == params.end() || it->second.IsNull()) {
 		return fallback;
@@ -370,7 +370,7 @@ unique_ptr<FunctionData> KreppIndexCreateTableFunction::Bind(ClientContext &cont
 	}
 
 	return_types = data->types;
-	names = data->names;
+	names = StringsToIdentifiers(data->names);
 	return std::move(data);
 }
 

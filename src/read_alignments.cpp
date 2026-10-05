@@ -79,7 +79,8 @@ unique_ptr<FunctionData> ReadAlignmentsTableFunction::Bind(ClientContext &contex
 		RejectCTERelationName(input, reference_lengths_table.value());
 
 		// Validate table or view exists (use TABLE_ENTRY lookup which returns either)
-		EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, reference_lengths_table.value(), QueryErrorContext());
+		EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY,
+		                            QualifiedName(Identifier(reference_lengths_table.value())), QueryErrorContext());
 		auto entry =
 		    Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
 		if (!entry) {

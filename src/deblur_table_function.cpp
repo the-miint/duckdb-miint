@@ -97,7 +97,7 @@ static unique_ptr<FunctionData> DeblurBind(ClientContext &context, TableFunction
 	RejectCTERelationName(input, data->input_table);
 
 	auto get_col_override = [&](const std::string &param_name, std::string &out) {
-		auto it = input.named_parameters.find(param_name);
+		auto it = input.named_parameters.find(Identifier(param_name));
 		if (it != input.named_parameters.end()) {
 			auto val = it->second.GetValue<std::string>();
 			if (val.empty()) {
@@ -178,7 +178,7 @@ static unique_ptr<FunctionData> DeblurBind(ClientContext &context, TableFunction
 		DiscoverSamples(conn, data->input_table, data->sample_info.sample_id_col, {"read_id", "sequence", "abundance"},
 		                "deblur", data->sample_info);
 
-		names.push_back(data->sample_info.sample_id_col);
+		names.emplace_back(data->sample_info.sample_id_col);
 		return_types.push_back(data->sample_info.sample_id_type);
 	}
 

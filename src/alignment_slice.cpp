@@ -169,7 +169,7 @@ unique_ptr<FunctionData> AlignmentSliceTableFunction::Bind(ClientContext &contex
 		}
 	}
 
-	names = data->output_names;
+	names = StringsToIdentifiers(data->output_names);
 	return_types = data->output_types;
 
 	return data;

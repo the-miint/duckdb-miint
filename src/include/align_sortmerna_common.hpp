@@ -21,7 +21,7 @@ namespace duckdb {
 
 // Parse a LIST(VARCHAR) ref_paths named parameter into std::vector<std::string>.
 // `fn_name` is the caller's SQL-facing name, used to prefix error messages.
-inline std::vector<std::string> ParseSortMeRNARefPaths(const named_parameter_map_t &params, const char *fn_name) {
+inline std::vector<std::string> ParseSortMeRNARefPaths(const named_argument_map_t &params, const char *fn_name) {
 	auto it = params.find("ref_paths");
 	if (it == params.end() || it->second.IsNull()) {
 		throw BinderException("%s requires ref_paths (LIST of FASTA paths)", fn_name);
@@ -41,7 +41,7 @@ inline std::vector<std::string> ParseSortMeRNARefPaths(const named_parameter_map
 	return result;
 }
 
-inline void ParseSortMeRNAConfigParams(const named_parameter_map_t &params, miint::SortMeRNAConfig &cfg) {
+inline void ParseSortMeRNAConfigParams(const named_argument_map_t &params, miint::SortMeRNAConfig &cfg) {
 	auto set_i32 = [&](const char *name, int32_t &dst) {
 		auto it = params.find(name);
 		if (it != params.end() && !it->second.IsNull()) {

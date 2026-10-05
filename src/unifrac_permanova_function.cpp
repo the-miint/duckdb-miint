@@ -303,7 +303,7 @@ unique_ptr<FunctionData> UnifracPermanovaBind(ClientContext &context, TableFunct
 	int32_t seed = -1;
 	int32_t threads = 0; // 0 = follow DuckDB's TaskScheduler::NumberOfThreads()
 	for (const auto &kv : input.named_parameters) {
-		const auto key = StringUtil::Lower(kv.first);
+		const auto key = StringUtil::Lower(kv.first.GetIdentifierName());
 		if (key == "variant") {
 			variant = kv.second.GetValue<string>();
 		} else if (key == "n_permutations") {
@@ -481,7 +481,7 @@ unique_ptr<FunctionData> PermanovaFromDistancesBind(ClientContext &context, Tabl
 	int32_t seed = -1;
 	int32_t threads = 0; // 0 = follow DuckDB's TaskScheduler::NumberOfThreads()
 	for (const auto &kv : input.named_parameters) {
-		const auto key = StringUtil::Lower(kv.first);
+		const auto key = StringUtil::Lower(kv.first.GetIdentifierName());
 		if (key == "n_permutations") {
 			n_permutations = kv.second.GetValue<int32_t>();
 		} else if (key == "variables") {

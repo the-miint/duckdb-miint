@@ -99,15 +99,15 @@ static unique_ptr<FunctionData> NewickCopyBind(ClientContext &context, CopyFunct
 	// Find column indices
 	for (idx_t i = 0; i < names.size(); i++) {
 		const auto &name = names[i];
-		if (StringUtil::CIEquals(name, "node_index")) {
+		if (name == "node_index") {
 			result->node_index_idx = i;
-		} else if (StringUtil::CIEquals(name, "parent_index")) {
+		} else if (name == "parent_index") {
 			result->parent_index_idx = i;
-		} else if (StringUtil::CIEquals(name, "name")) {
+		} else if (name == "name") {
 			result->name_idx = i;
-		} else if (StringUtil::CIEquals(name, "branch_length")) {
+		} else if (name == "branch_length") {
 			result->branch_length_idx = i;
-		} else if (StringUtil::CIEquals(name, "edge_id")) {
+		} else if (name == "edge_id") {
 			result->edge_id_idx = i;
 		}
 		// Ignore unknown columns (like is_tip, filepath)
@@ -126,7 +126,7 @@ static unique_ptr<FunctionData> NewickCopyBind(ClientContext &context, CopyFunct
 	bool edge_ids_specified = false;
 	std::optional<std::string> placements_table;
 	for (auto &option : input.info.options) {
-		auto loption = StringUtil::Lower(option.first);
+		auto loption = StringUtil::Lower(option.first.GetIdentifierName());
 		if (loption == "edge_ids") {
 			if (option.second.size() != 1 || option.second[0].type().id() != LogicalTypeId::BOOLEAN) {
 				throw BinderException("EDGE_IDS option requires a boolean value");

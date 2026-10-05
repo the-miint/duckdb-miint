@@ -58,7 +58,7 @@ std::vector<std::string> ParseFilePathsParameter(const Value &input, const std::
 	return paths;
 }
 
-bool ParseIncludeFilepathParameter(const named_parameter_map_t &named_parameters) {
+bool ParseIncludeFilepathParameter(const named_argument_map_t &named_parameters) {
 	auto fp_param = named_parameters.find("include_filepath");
 	if (fp_param != named_parameters.end() && !fp_param->second.IsNull()) {
 		return fp_param->second.GetValue<bool>();

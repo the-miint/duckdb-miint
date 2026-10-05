@@ -451,7 +451,7 @@ std::string MaterializeQueryReads(Connection &conn, const std::string &query_tab
 	// user's session for the lifetime of the connection.
 	idx_t row_count = 0;
 	try {
-		Appender appender(conn, tmp_name);
+		Appender appender(conn, Identifier(tmp_name));
 		while (true) {
 			auto chunk = stream->Fetch();
 			if (!chunk || chunk->size() == 0) {

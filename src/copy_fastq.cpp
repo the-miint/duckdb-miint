@@ -55,7 +55,7 @@ static unique_ptr<FunctionData> FastqCopyBind(ClientContext &context, CopyFuncti
                                               const vector<Identifier> &names, const vector<LogicalType> &sql_types) {
 	auto result = make_uniq<FastqCopyBindData>();
 	result->file_path = input.info.file_path;
-	result->names = names;
+	result->names = IdentifiersToStrings(names);
 
 	// Detect and store column indices (computed once at bind time)
 	result->indices.FindIndices(names);
@@ -90,12 +90,10 @@ static unique_ptr<FunctionData> FastqCopyBind(ClientContext &context, CopyFuncti
 	Value qual_offset_param;
 
 	for (auto &option : input.info.options) {
-		if (StringUtil::CIEquals(option.first, "qual_offset")) {
+		if (option.first == "qual_offset") {
 			qual_offset_param = option.second[0];
-		} else if (!StringUtil::CIEquals(option.first, "interleave") &&
-		           !StringUtil::CIEquals(option.first, "id_as_sequence_index") &&
-		           !StringUtil::CIEquals(option.first, "include_comment") &&
-		           !StringUtil::CIEquals(option.first, "compression")) {
+		} else if (!(option.first == "interleave") && !(option.first == "id_as_sequence_index") &&
+		           !(option.first == "include_comment") && !(option.first == "compression")) {
 			throw BinderException("Unknown option for COPY FORMAT FASTQ: %s", option.first);
 		}
 	}

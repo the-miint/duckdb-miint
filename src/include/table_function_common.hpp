@@ -24,7 +24,7 @@ bool IsGzipped(const std::string &path);
 std::vector<std::string> ParseFilePathsParameter(const Value &input, const std::string &function_name);
 
 // Parse include_filepath named parameter (optional BOOLEAN, default false)
-bool ParseIncludeFilepathParameter(const named_parameter_map_t &named_parameters);
+bool ParseIncludeFilepathParameter(const named_argument_map_t &named_parameters);
 
 // Expand a glob pattern into a sorted list of file paths
 // - If pattern contains glob characters (*, ?, []), expands and sorts alphabetically

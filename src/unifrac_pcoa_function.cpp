@@ -273,7 +273,7 @@ unique_ptr<FunctionData> UnifracPcoaBind(ClientContext &context, TableFunctionBi
 	int32_t seed = -1;
 	int32_t threads = 0; // 0 = follow DuckDB's TaskScheduler::NumberOfThreads()
 	for (const auto &kv : input.named_parameters) {
-		const auto key = StringUtil::Lower(kv.first);
+		const auto key = StringUtil::Lower(kv.first.GetIdentifierName());
 		if (key == "variant") {
 			variant = kv.second.GetValue<string>();
 		} else if (key == "n_dims") {
@@ -525,7 +525,7 @@ unique_ptr<FunctionData> PcoaFromDistancesBind(ClientContext &context, TableFunc
 	int32_t seed = -1;
 	int32_t threads = 0; // 0 = follow DuckDB's TaskScheduler::NumberOfThreads()
 	for (const auto &kv : input.named_parameters) {
-		const auto key = StringUtil::Lower(kv.first);
+		const auto key = StringUtil::Lower(kv.first.GetIdentifierName());
 		if (key == "n_dims") {
 			n_dims = kv.second.GetValue<int32_t>();
 		} else if (key == "seed") {
@@ -956,7 +956,7 @@ private:
 			                            create->GetError());
 		}
 		{
-			Appender appender(conn, wave_batch_table_);
+			Appender appender(conn, Identifier(wave_batch_table_));
 			for (size_t k = 0; k < requests.size(); ++k) {
 				for (uint32_t p = 0; p < batch_len_[k]; ++p) {
 					appender.AppendRow(MapId(requests[k][p]), Value::INTEGER(static_cast<int32_t>(k)),
@@ -966,7 +966,7 @@ private:
 			appender.Close();
 		}
 		{
-			Appender appender(conn, wave_anchor_table_);
+			Appender appender(conn, Identifier(wave_anchor_table_));
 			for (uint32_t j = 0; j < anchors_.size(); ++j) {
 				appender.AppendRow(MapId(anchors_[j]), Value::INTEGER(static_cast<int32_t>(j)));
 			}
@@ -1195,7 +1195,7 @@ unique_ptr<FunctionData> ProgressivePcoaFromDistancesBind(ClientContext &context
 	bool global_rotation = true;     // see ProgressivePcoaData::global_rotation
 	vector<string> explicit_anchors; // if non-empty: override seeded random anchor selection
 	for (const auto &kv : input.named_parameters) {
-		const auto key = StringUtil::Lower(kv.first);
+		const auto key = StringUtil::Lower(kv.first.GetIdentifierName());
 		if (key == "n_dims") {
 			n_dims = kv.second.GetValue<int32_t>();
 		} else if (key == "n_anchors") {
@@ -1960,7 +1960,7 @@ unique_ptr<FunctionData> ProgressivePcoaFromUnifracBind(ClientContext &context, 
 	bool global_rotation = true;     // see ProgressivePcoaData::global_rotation
 	vector<string> explicit_anchors; // if non-empty: override seeded random anchor selection
 	for (const auto &kv : input.named_parameters) {
-		const auto key = StringUtil::Lower(kv.first);
+		const auto key = StringUtil::Lower(kv.first.GetIdentifierName());
 		if (key == "variant") {
 			variant = kv.second.GetValue<string>();
 		} else if (key == "n_dims") {
@@ -2181,7 +2181,7 @@ unique_ptr<FunctionData> ProgressivePcoaFromFeaturesBind(ClientContext &context,
 	bool global_rotation = true;     // see ProgressivePcoaData::global_rotation
 	vector<string> explicit_anchors; // if non-empty: override seeded random anchor selection
 	for (const auto &kv : input.named_parameters) {
-		const auto key = StringUtil::Lower(kv.first);
+		const auto key = StringUtil::Lower(kv.first.GetIdentifierName());
 		if (key == "n_dims") {
 			n_dims = kv.second.GetValue<int32_t>();
 		} else if (key == "n_anchors") {
@@ -2403,7 +2403,7 @@ unique_ptr<miint::progressive::ProgressivePcoaRun> MakeProgressiveRun(ClientCont
 	// Ctrl-C sets context.interrupted and, until now, nothing on this path ever read
 	// it. Polled from worker threads too, hence the atomic read.
 	const miint::progressive::InterruptCheck interrupt = [&context]() {
-		if (context.interrupted) {
+		if (context.IsInterrupted()) {
 			throw InterruptException();
 		}
 	};
@@ -2665,7 +2665,7 @@ void StageRotatedRun(ClientContext &context, const ProgressivePcoaData &data, Pr
 	append_chunk.Initialize(Allocator::Get(context), types);
 
 	while (AdvanceProgressiveRun(context, data, gstate)) {
-		if (context.interrupted) {
+		if (context.IsInterrupted()) {
 			throw InterruptException();
 		}
 		StageWave(data, gstate, append_chunk, axes);
@@ -2762,7 +2762,7 @@ void ProgressivePcoaExecute(ClientContext &context, TableFunctionInput &input, D
 		// Polled here as well as inside the run: a cancellation arriving while DuckDB
 		// drains the rows already produced is noticed on the next refill rather than
 		// after another wave's worth of work.
-		if (context.interrupted) {
+		if (context.IsInterrupted()) {
 			throw InterruptException();
 		}
 		// Same contract either way — "false" means there is nothing left to emit. Only

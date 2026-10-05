@@ -979,7 +979,7 @@ static void FilterReadExecute(DataChunk &args, ExpressionState &state, Vector &r
 // Register a trim_quality_* function with both the 2-arg (defaults) and 4-arg
 // (explicit window_size + mean_quality) overloads.
 static void RegisterTrimQualityFamily(ExtensionLoader &loader, const std::string &name, scalar_function_t fn) {
-	ScalarFunctionSet set(name);
+	ScalarFunctionSet set {Identifier(name)};
 
 	ScalarFunction two_arg(name, {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT)},
 	                       TrimResultStructType(), fn);

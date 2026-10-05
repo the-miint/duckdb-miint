@@ -146,7 +146,7 @@ const std::unordered_set<std::string> kCommonAlignParams = {
     "memory_mapped",
 };
 
-void AppendBowtie2AlignParams(ConfigJsonBuilder &cfg, const named_parameter_map_t &named_params, const char *caller) {
+void AppendBowtie2AlignParams(ConfigJsonBuilder &cfg, const named_argument_map_t &named_params, const char *caller) {
 	auto get = [&](const std::string &k) -> const Value * {
 		auto it = named_params.find(k);
 		return (it == named_params.end() || it->second.IsNull()) ? nullptr : &it->second;
@@ -991,7 +991,7 @@ std::string BuildBowtie2BuildConfigJson(const std::string &index_basename, int64
 	return cfg.build();
 }
 
-int64_t ResolveNthreadsFromParams(const named_parameter_map_t &named_params, int64_t db_threads, const char *caller) {
+int64_t ResolveNthreadsFromParams(const named_argument_map_t &named_params, int64_t db_threads, const char *caller) {
 	auto it = named_params.find("threads");
 	const bool supplied = it != named_params.end() && !it->second.IsNull();
 	int64_t user_threads = 1;

@@ -67,7 +67,7 @@ std::unordered_set<std::string> MakeKnownAlignParams() {
 // instead) — an explicit value wins, else nthreads defaults to `db_threads`
 // (DuckDB's configured thread budget) so alignment uses the query's cores by
 // default rather than one.
-std::string BuildAlignConfigJson(const named_parameter_map_t &named_params, const std::string &index_basename,
+std::string BuildAlignConfigJson(const named_argument_map_t &named_params, const std::string &index_basename,
                                  int64_t db_threads) {
 	static const auto kKnown = MakeKnownAlignParams();
 	for (const auto &kv : named_params) {
@@ -118,7 +118,7 @@ struct AlignBowtie2BindData : public TableFunctionData {
 	std::string subject_table;
 	// Carry the user's named_params forward so InitGlobal can build the
 	// align config_json once it knows the index basename.
-	named_parameter_map_t named_params;
+	named_argument_map_t named_params;
 
 	// Detected at bind time, used by Execute when building the query Arrow
 	// batches. Auto-detection of paired-end is per-batch on the daemon

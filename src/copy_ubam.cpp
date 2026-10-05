@@ -179,15 +179,15 @@ static unique_ptr<FunctionData> UBAMCopyBind(ClientContext &context, CopyFunctio
                                              const vector<Identifier> &names, const vector<LogicalType> &sql_types) {
 	auto result = make_uniq<UBAMCopyBindData>();
 	result->file_path = input.info.file_path;
-	result->names = names;
+	result->names = IdentifiersToStrings(names);
 
 	// Locate required columns (case-insensitive, matching the SAM/BAM writer).
 	for (idx_t i = 0; i < names.size(); i++) {
-		if (StringUtil::CIEquals(names[i], "read_id")) {
+		if (names[i] == "read_id") {
 			result->read_id_idx = i;
-		} else if (StringUtil::CIEquals(names[i], "sequence1")) {
+		} else if (names[i] == "sequence1") {
 			result->sequence1_idx = i;
-		} else if (StringUtil::CIEquals(names[i], "qual1")) {
+		} else if (names[i] == "qual1") {
 			result->qual1_idx = i;
 		}
 	}
@@ -216,17 +216,17 @@ static unique_ptr<FunctionData> UBAMCopyBind(ClientContext &context, CopyFunctio
 
 	// Options.
 	for (auto &option : input.info.options) {
-		if (StringUtil::CIEquals(option.first, "read_group")) {
+		if (option.first == "read_group") {
 			ParseReadGroup(option.second[0], result->rg_line, result->rg_id);
 			result->has_read_group = true;
-		} else if (StringUtil::CIEquals(option.first, "tags")) {
+		} else if (option.first == "tags") {
 			ParseTags(option.second[0], names, result->tags, sql_types);
-		} else if (StringUtil::CIEquals(option.first, "compression_level")) {
+		} else if (option.first == "compression_level") {
 			result->compression_level = option.second[0].GetValue<int32_t>();
 			if (result->compression_level < 0 || result->compression_level > 9) {
 				throw BinderException("COMPRESSION_LEVEL must be between 0 and 9, got %d", result->compression_level);
 			}
-		} else if (StringUtil::CIEquals(option.first, "reference_lengths")) {
+		} else if (option.first == "reference_lengths") {
 			throw BinderException("COPY FORMAT UBAM does not accept REFERENCE_LENGTHS: a uBAM is headerless "
 			                      "(unaligned reads, no @SQ). Use FORMAT BAM for aligned records.");
 		} else {

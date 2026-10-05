@@ -103,7 +103,7 @@ static unique_ptr<FunctionData> AlignAbpoaBind(ClientContext &context, TableFunc
 		DiscoverSamples(conn, data->table_name, data->sample_info.sample_id_col,
 		                {"sequence_index", "read_id", "aligned_sequence", "original_length", "aligned_length"},
 		                "align_abpoa", data->sample_info);
-		names.push_back(data->sample_info.sample_id_col);
+		names.emplace_back(data->sample_info.sample_id_col);
 		return_types.push_back(data->sample_info.sample_id_type);
 	}
 

@@ -64,7 +64,7 @@ unique_ptr<FunctionData> CommunityDistBind(ClientContext &context, TableFunction
 
 	int32_t threads = 0; // 0 = follow DuckDB's TaskScheduler::NumberOfThreads()
 	for (const auto &kv : input.named_parameters) {
-		if (StringUtil::Lower(kv.first) == "threads") {
+		if (kv.first == "threads") {
 			threads = kv.second.GetValue<int32_t>();
 		}
 	}

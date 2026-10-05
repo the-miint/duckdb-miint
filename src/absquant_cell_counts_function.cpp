@@ -104,7 +104,7 @@ unique_ptr<FunctionData> AbsQuantCellCountsBind(ClientContext &context, TableFun
 	RejectCTERelationName(input, data->params_table);
 	data->options.min_coverage = input.inputs[6].GetValue<double>();
 	for (const auto &kv : input.named_parameters) {
-		if (StringUtil::Lower(kv.first) == "min_rsquared") {
+		if (kv.first == "min_rsquared") {
 			if (kv.second.IsNull()) {
 				throw BinderException("%s: min_rsquared must not be NULL", kCallerName);
 			}

@@ -144,7 +144,7 @@ std::string value_to_str(const std::string &param, const Value &v) {
 // Build the JSON config from named_parameters, applying every check that
 // gpl-boundary's `apply_json_to_config` performs. Failures throw before the
 // daemon spawns. Returns the serialized JSON object string ("{...}").
-std::string BuildConfigJson(const named_parameter_map_t &named_params) {
+std::string BuildConfigJson(const named_argument_map_t &named_params) {
 	ConfigJsonBuilder cfg;
 
 	// First pass: reject unknown params.

@@ -49,7 +49,7 @@ unique_ptr<FunctionData> ClusterKmeansBind(ClientContext &context, TableFunction
 
 	bool has_k = false;
 	for (auto &kv : input.named_parameters) {
-		const auto key = StringUtil::Lower(kv.first);
+		const auto key = StringUtil::Lower(kv.first.GetIdentifierName());
 		if (key == "k") {
 			data->k = kv.second.GetValue<int32_t>();
 			has_k = true;

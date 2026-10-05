@@ -124,7 +124,7 @@ unique_ptr<FunctionData> SylphProfileTableFunction::Bind(ClientContext &context,
 	// param was passed, std::nullopt otherwise — so we only touch FFI fields
 	// the caller explicitly asked to change.
 	auto get_double = [&](const std::string &param, double lo, double hi) -> std::optional<double> {
-		auto it = input.named_parameters.find(param);
+		auto it = input.named_parameters.find(Identifier(param));
 		if (it == input.named_parameters.end())
 			return std::nullopt;
 		double v = it->second.GetValue<double>();
@@ -134,7 +134,7 @@ unique_ptr<FunctionData> SylphProfileTableFunction::Bind(ClientContext &context,
 		return v;
 	};
 	auto get_uint = [&](const std::string &param) -> std::optional<uint32_t> {
-		auto it = input.named_parameters.find(param);
+		auto it = input.named_parameters.find(Identifier(param));
 		if (it == input.named_parameters.end())
 			return std::nullopt;
 		auto v = it->second.GetValue<int64_t>();
@@ -144,7 +144,7 @@ unique_ptr<FunctionData> SylphProfileTableFunction::Bind(ClientContext &context,
 		return static_cast<uint32_t>(v);
 	};
 	auto get_bool = [&](const std::string &param) -> std::optional<bool> {
-		auto it = input.named_parameters.find(param);
+		auto it = input.named_parameters.find(Identifier(param));
 		if (it == input.named_parameters.end())
 			return std::nullopt;
 		return it->second.GetValue<bool>();
@@ -204,7 +204,7 @@ unique_ptr<FunctionData> SylphProfileTableFunction::Bind(ClientContext &context,
 		data->output_types = std::move(out_types);
 	}
 
-	names = data->output_names;
+	names = StringsToIdentifiers(data->output_names);
 	return_types = data->output_types;
 	return std::move(data);
 }

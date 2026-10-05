@@ -62,7 +62,7 @@ unique_ptr<FunctionData> PickAnchorsBind(ClientContext &context, TableFunctionBi
 
 	bool has_n = false;
 	for (const auto &kv : input.named_parameters) {
-		const auto key = StringUtil::Lower(kv.first);
+		const auto key = StringUtil::Lower(kv.first.GetIdentifierName());
 		if (key == "n_anchors") {
 			data->n_anchors = kv.second.GetValue<int32_t>();
 			has_n = true;

@@ -158,7 +158,7 @@ static unique_ptr<FunctionData> WoltkaOguBind(ClientContext &context, TableFunct
 	LogicalType reference_type;
 	bool reference_found = false;
 	for (idx_t i = 0; i < probe->names.size(); i++) {
-		if (StringUtil::CIEquals(probe->names[i], "reference")) {
+		if (probe->names[i] == "reference") {
 			reference_type = probe->types[i];
 			reference_found = true;
 			break;
@@ -177,7 +177,7 @@ static unique_ptr<FunctionData> WoltkaOguBind(ClientContext &context, TableFunct
 		DiscoverSamples(conn, data->source, data->sample_info.sample_id_col, {"feature_id", "value"}, "woltka_ogu",
 		                data->sample_info);
 
-		names.push_back(data->sample_info.sample_id_col);
+		names.emplace_back(data->sample_info.sample_id_col);
 		return_types.push_back(data->sample_info.sample_id_type);
 	} else {
 		// Non-sample path: pre-run the aggregation once here. Ownership of the result

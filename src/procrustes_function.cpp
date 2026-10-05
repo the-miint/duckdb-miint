@@ -349,7 +349,7 @@ unique_ptr<FunctionData> ProcrustesBind(ClientContext &context, TableFunctionBin
 	int32_t permutations = 999;
 	int32_t seed_param = -1; // <0 = nondeterministic (mirrors pcoa's seed convention)
 	for (const auto &kv : input.named_parameters) {
-		const auto key = StringUtil::Lower(kv.first);
+		const auto key = StringUtil::Lower(kv.first.GetIdentifierName());
 		if (key == "pairing") {
 			pairing_name = kv.second.GetValue<string>();
 			RejectCTERelationName(input, pairing_name);

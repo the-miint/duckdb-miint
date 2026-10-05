@@ -138,7 +138,7 @@ inline void ParseOccFilterSpec(const std::string &spec, miint::Minimap2Config &c
 
 // Parse minimap2 config parameters from named_parameters map
 // Set warn_prebuilt_index=true to warn when k/w are specified but will be ignored
-inline void ParseMinimap2ConfigParams(const named_parameter_map_t &params, miint::Minimap2Config &config,
+inline void ParseMinimap2ConfigParams(const named_argument_map_t &params, miint::Minimap2Config &config,
                                       bool warn_prebuilt_index = false) {
 	auto preset_param = params.find("preset");
 	if (preset_param != params.end() && !preset_param->second.IsNull()) {
@@ -384,7 +384,7 @@ inline void FilterMappedOnly(miint::SAMRecordBatch &batch) {
 //     implicit casts.
 inline void ValidateReadToShardSchema(ClientContext &context, const std::string &table_name,
                                       const LogicalType &expected_read_id_type = LogicalType(LogicalTypeId::INVALID)) {
-	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, table_name, QueryErrorContext());
+	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, QualifiedName(Identifier(table_name)), QueryErrorContext());
 	auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
 
 	if (!entry) {
@@ -399,14 +399,14 @@ inline void ValidateReadToShardSchema(ClientContext &context, const std::string 
 		auto &columns = table.GetColumns();
 		for (idx_t i = 0; i < columns.LogicalColumnCount(); i++) {
 			auto &col = columns.GetColumn(LogicalIndex(i));
-			col_names.push_back(col.Name());
+			col_names.push_back(col.Name().GetIdentifierName());
 			col_types.push_back(col.Type());
 		}
 	} else if (entry->type == CatalogType::VIEW_ENTRY) {
 		auto &view = entry->Cast<ViewCatalogEntry>();
 		view.BindView(context);
 		auto col_info = view.GetColumnInfo();
-		col_names = col_info->names;
+		col_names = IdentifiersToStrings(col_info->names);
 		col_types = col_info->types;
 	} else {
 		throw BinderException("'%s' is not a table or view", table_name);

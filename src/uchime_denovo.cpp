@@ -26,7 +26,7 @@ namespace duckdb {
 static LogicalType ValidateDenovoTableSchema(ClientContext &context, const std::string &table_name,
                                              const std::string &id_col, const std::string &sequence_col,
                                              const std::string &count_col) {
-	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, table_name, QueryErrorContext());
+	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, QualifiedName(Identifier(table_name)), QueryErrorContext());
 	auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
 	if (!entry) {
 		throw BinderException("Table or view '%s' does not exist", table_name);
@@ -39,14 +39,14 @@ static LogicalType ValidateDenovoTableSchema(ClientContext &context, const std::
 		auto &columns = table.GetColumns();
 		for (idx_t i = 0; i < columns.LogicalColumnCount(); i++) {
 			auto &c = columns.GetColumn(LogicalIndex(i));
-			col_names.push_back(c.Name());
+			col_names.push_back(c.Name().GetIdentifierName());
 			col_types.push_back(c.Type());
 		}
 	} else if (entry->type == CatalogType::VIEW_ENTRY) {
 		auto &view = entry->Cast<ViewCatalogEntry>();
 		view.BindView(context);
 		auto col_info = view.GetColumnInfo();
-		col_names = col_info->names;
+		col_names = IdentifiersToStrings(col_info->names);
 		col_types = col_info->types;
 	} else {
 		throw BinderException("'%s' is not a table or view", table_name);
@@ -172,7 +172,7 @@ unique_ptr<FunctionData> UchimeDenovoTableFunction::Bind(ClientContext &context,
 	RejectCTERelationName(input, data->input_table);
 
 	auto get_col_override = [&](const std::string &param_name, std::string &out) {
-		auto it = input.named_parameters.find(param_name);
+		auto it = input.named_parameters.find(Identifier(param_name));
 		if (it != input.named_parameters.end()) {
 			auto val = it->second.GetValue<std::string>();
 			if (val.empty()) {
@@ -189,7 +189,7 @@ unique_ptr<FunctionData> UchimeDenovoTableFunction::Bind(ClientContext &context,
 	    ValidateDenovoTableSchema(context, data->input_table, data->id_col, data->sequence_col, data->count_col);
 
 	auto get_double = [&](const std::string &name, double &out, double min_val, const char *constraint) {
-		auto it = input.named_parameters.find(name);
+		auto it = input.named_parameters.find(Identifier(name));
 		if (it != input.named_parameters.end()) {
 			out = it->second.GetValue<double>();
 			if (out < min_val) {
@@ -199,7 +199,7 @@ unique_ptr<FunctionData> UchimeDenovoTableFunction::Bind(ClientContext &context,
 		}
 	};
 	auto get_int = [&](const std::string &name, int &out, int min_val, const char *constraint) {
-		auto it = input.named_parameters.find(name);
+		auto it = input.named_parameters.find(Identifier(name));
 		if (it != input.named_parameters.end()) {
 			out = it->second.GetValue<int>();
 			if (out < min_val) {
@@ -233,12 +233,12 @@ unique_ptr<FunctionData> UchimeDenovoTableFunction::Bind(ClientContext &context,
 		DiscoverSamples(conn, data->input_table, data->sample_info.sample_id_col, data->names,
 		                "detect_chimera_uchime_denovo", data->sample_info);
 
-		names.push_back(data->sample_info.sample_id_col);
+		names.emplace_back(data->sample_info.sample_id_col);
 		return_types.push_back(data->sample_info.sample_id_type);
 	}
 
 	for (auto &n : data->names) {
-		names.push_back(n);
+		names.emplace_back(n);
 	}
 	for (auto &t : data->types) {
 		return_types.push_back(t);

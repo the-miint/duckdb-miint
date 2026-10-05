@@ -195,7 +195,7 @@ struct AlignBowtie2ShardedBindData : public TableFunctionData {
 	std::string query_table;
 	std::string shard_directory;
 	std::string read_to_shard_table;
-	named_parameter_map_t named_params;
+	named_argument_map_t named_params;
 
 	// Detected at bind time; affects the per-batch Arrow IPC encoding.
 	bool query_has_sequence2 = false;
@@ -469,7 +469,7 @@ void DetectQueryColumns(ClientContext &context, AlignBowtie2ShardedBindData &bd)
 // Submits from different miint worker threads fan out to independent
 // per-fingerprint workers in the daemon — that's how cross-shard
 // parallelism falls out for free.
-std::string BuildAlignConfigJson(const named_parameter_map_t &named_params, const std::string &index_prefix,
+std::string BuildAlignConfigJson(const named_argument_map_t &named_params, const std::string &index_prefix,
                                  idx_t max_threads_per_shard) {
 	bt2_daemon::ConfigJsonBuilder cfg;
 	cfg.append_str("index_path", index_prefix);

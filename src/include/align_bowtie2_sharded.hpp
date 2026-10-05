@@ -46,8 +46,8 @@ inline idx_t EffectiveShardThreads(idx_t base_threads_per_shard, idx_t db_thread
 //
 // Templated over the map type and a bool→value factory so the logic is unit-
 // testable in the standalone Catch2 binary, which links no libduckdb (hence no
-// `Value` / `named_parameter_map_t` symbols). Production instantiates it with
-// `named_parameter_map_t` + `Value::BOOLEAN`; the test uses a plain
+// `Value` / `named_argument_map_t` symbols). Production instantiates it with
+// `named_argument_map_t` + `Value::BOOLEAN`; the test uses a plain
 // `std::map<std::string,bool>`. Same rationale as keeping EffectiveShardThreads /
 // ShardIndexFiles inline and duckdb-free below.
 template <class Map, class MakeBool>

@@ -92,7 +92,7 @@ unique_ptr<FunctionData> MmvecFitBind(ClientContext &context, TableFunctionBindI
 	std::string optimizer = "lbfgs";
 	int64_t seed = 0;
 	for (const auto &kv : input.named_parameters) {
-		const auto key = StringUtil::Lower(kv.first);
+		const auto key = StringUtil::Lower(kv.first.GetIdentifierName());
 		if (kv.second.IsNull()) {
 			throw BinderException("mmvec_fit: parameter '%s' cannot be NULL", key);
 		}

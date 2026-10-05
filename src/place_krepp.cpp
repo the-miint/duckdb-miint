@@ -21,7 +21,7 @@ namespace {
 
 // Reads an optional named parameter, leaving `target` alone when absent.
 template <typename T>
-void ReadOptional(const named_parameter_map_t &params, const char *key, T &target,
+void ReadOptional(const named_argument_map_t &params, const char *key, T &target,
                   const std::function<T(const Value &)> &convert) {
 	auto it = params.find(key);
 	if (it != params.end() && !it->second.IsNull()) {
@@ -110,7 +110,7 @@ unique_ptr<FunctionData> PlaceKreppTableFunction::Bind(ClientContext &context, T
 	data->types[0] = data->schema.id_type;
 
 	return_types = data->types;
-	names = data->names;
+	names = StringsToIdentifiers(data->names);
 	return std::move(data);
 }
 

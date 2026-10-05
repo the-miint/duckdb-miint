@@ -73,7 +73,7 @@ unique_ptr<FunctionData> AbsQuantFitBind(ClientContext &context, TableFunctionBi
 	RejectCTERelationName(input, data->params_table);
 	data->options.syndna_contributing_fraction = input.inputs[3].GetValue<double>();
 	for (const auto &kv : input.named_parameters) {
-		if (StringUtil::Lower(kv.first) == "min_syndna_counts") {
+		if (kv.first == "min_syndna_counts") {
 			if (kv.second.IsNull()) {
 				throw BinderException("%s: min_syndna_counts must not be NULL", kCallerName);
 			}

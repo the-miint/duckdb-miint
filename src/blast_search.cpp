@@ -39,25 +39,25 @@ unique_ptr<FunctionData> BlastSearchTableFunction::Bind(ClientContext &context, 
 	}
 
 	auto get_string = [&](const std::string &name, std::string &out) {
-		auto it = input.named_parameters.find(name);
+		auto it = input.named_parameters.find(Identifier(name));
 		if (it != input.named_parameters.end() && !it->second.IsNull()) {
 			out = it->second.ToString();
 		}
 	};
 	auto get_double = [&](const std::string &name, double &out) {
-		auto it = input.named_parameters.find(name);
+		auto it = input.named_parameters.find(Identifier(name));
 		if (it != input.named_parameters.end() && !it->second.IsNull()) {
 			out = it->second.GetValue<double>();
 		}
 	};
 	auto get_int = [&](const std::string &name, int &out) {
-		auto it = input.named_parameters.find(name);
+		auto it = input.named_parameters.find(Identifier(name));
 		if (it != input.named_parameters.end() && !it->second.IsNull()) {
 			out = it->second.GetValue<int>();
 		}
 	};
 	auto get_bool = [&](const std::string &name, bool &out) {
-		auto it = input.named_parameters.find(name);
+		auto it = input.named_parameters.find(Identifier(name));
 		if (it != input.named_parameters.end() && !it->second.IsNull()) {
 			out = it->second.GetValue<bool>();
 		}

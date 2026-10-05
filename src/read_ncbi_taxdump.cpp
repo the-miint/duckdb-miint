@@ -95,7 +95,7 @@ std::string ReadArchiveBytes(ClientContext &context, FileSystem &fs, const std::
 	return ReadWholeFile(fs, source);
 }
 
-bool ParseRefreshParam(const named_parameter_map_t &params) {
+bool ParseRefreshParam(const named_argument_map_t &params) {
 	auto it = params.find("refresh");
 	if (it != params.end() && !it->second.IsNull()) {
 		return it->second.GetValue<bool>();

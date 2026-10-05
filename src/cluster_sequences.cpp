@@ -121,7 +121,7 @@ unique_ptr<FunctionData> ClusterSequencesTableFunction::Bind(ClientContext &cont
 	}
 
 	auto get_int = [&](const std::string &name, int &out, int min_val, int max_val, const char *constraint) {
-		auto it = input.named_parameters.find(name);
+		auto it = input.named_parameters.find(Identifier(name));
 		if (it != input.named_parameters.end()) {
 			out = it->second.GetValue<int>();
 			if (out < min_val || out > max_val) {
@@ -140,7 +140,7 @@ unique_ptr<FunctionData> ClusterSequencesTableFunction::Bind(ClientContext &cont
 	data->names = GetClusterOutputNames();
 	data->types = GetClusterOutputTypes(data->id_type);
 	for (auto &n : data->names) {
-		names.push_back(n);
+		names.emplace_back(n);
 	}
 	for (auto &t : data->types) {
 		return_types.push_back(t);

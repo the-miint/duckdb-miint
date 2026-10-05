@@ -25,7 +25,7 @@ public:
 		// Carried from Bind so InitGlobal can resolve nthreads against the LIVE
 		// DuckDB thread budget (matching align_bowtie2), rather than caching a
 		// count at bind time that a re-executed prepared statement would stale.
-		named_parameter_map_t named_params;
+		named_argument_map_t named_params;
 
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;

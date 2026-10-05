@@ -321,7 +321,7 @@ unique_ptr<FunctionData> NotImplementedBind(ClientContext &, TableFunctionBindIn
                                             vector<LogicalType> &return_types, vector<Identifier> &names) {
 	throw NotImplementedException("Reading from ena.%s is not supported in this build "
 	                              "(SELECT support is planned for a future phase).",
-	                              input.table_function.name);
+	                              input.table_function.GetName().GetIdentifierName());
 }
 
 void NotImplementedScanFn(ClientContext &, TableFunctionInput &, DataChunk &) {
@@ -462,7 +462,7 @@ optional_ptr<CatalogEntry> ENASchemaEntry::LookupEntry(CatalogTransaction, const
 	}
 	const auto &name = lookup_info.GetEntryName();
 	for (auto &t : tables) {
-		if (StringUtil::CIEquals(t->name, name)) {
+		if (t->name == name) {
 			return t.get();
 		}
 	}

@@ -55,7 +55,7 @@ unique_ptr<FunctionData> UchimeRefTableFunction::Bind(ClientContext &context, Ta
 	data->ref_schema = ValidateSequenceTableSchema(context, data->ref_table, /*allow_bigint=*/true);
 
 	auto get_double = [&](const std::string &name, double &out, double min_val, const char *constraint) {
-		auto it = input.named_parameters.find(name);
+		auto it = input.named_parameters.find(Identifier(name));
 		if (it != input.named_parameters.end()) {
 			out = it->second.GetValue<double>();
 			if (out < min_val) {
@@ -64,7 +64,7 @@ unique_ptr<FunctionData> UchimeRefTableFunction::Bind(ClientContext &context, Ta
 		}
 	};
 	auto get_int = [&](const std::string &name, int &out, int min_val, int max_val, const char *constraint) {
-		auto it = input.named_parameters.find(name);
+		auto it = input.named_parameters.find(Identifier(name));
 		if (it != input.named_parameters.end()) {
 			out = it->second.GetValue<int>();
 			if (out < min_val || out > max_val) {
@@ -100,12 +100,12 @@ unique_ptr<FunctionData> UchimeRefTableFunction::Bind(ClientContext &context, Ta
 		DiscoverSamples(conn, data->query_table, data->sample_info.sample_id_col, data->names, "detect_chimera_uchime",
 		                data->sample_info);
 
-		names.push_back(data->sample_info.sample_id_col);
+		names.emplace_back(data->sample_info.sample_id_col);
 		return_types.push_back(data->sample_info.sample_id_type);
 	}
 
 	for (auto &n : data->names) {
-		names.push_back(n);
+		names.emplace_back(n);
 	}
 	for (auto &t : data->types) {
 		return_types.push_back(t);

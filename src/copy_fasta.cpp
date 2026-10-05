@@ -50,7 +50,7 @@ static unique_ptr<FunctionData> FastaCopyBind(ClientContext &context, CopyFuncti
                                               const vector<Identifier> &names, const vector<LogicalType> &sql_types) {
 	auto result = make_uniq<FastaCopyBindData>();
 	result->file_path = input.info.file_path;
-	result->names = names;
+	result->names = IdentifiersToStrings(names);
 
 	// Detect and store column indices (computed once at bind time)
 	result->indices.FindIndices(names);
@@ -78,10 +78,8 @@ static unique_ptr<FunctionData> FastaCopyBind(ClientContext &context, CopyFuncti
 	CommonCopyParameters common_params;
 
 	for (auto &option : input.info.options) {
-		if (!StringUtil::CIEquals(option.first, "interleave") &&
-		    !StringUtil::CIEquals(option.first, "id_as_sequence_index") &&
-		    !StringUtil::CIEquals(option.first, "include_comment") &&
-		    !StringUtil::CIEquals(option.first, "compression")) {
+		if (!(option.first == "interleave") && !(option.first == "id_as_sequence_index") &&
+		    !(option.first == "include_comment") && !(option.first == "compression")) {
 			throw BinderException("Unknown option for COPY FORMAT FASTA: %s", option.first);
 		}
 	}
