@@ -74,6 +74,56 @@ WHERE flags & 4 = 0;
 ----
 200	200
 
+# The other half of an unstable routing relation: shard discovery runs at bind
+# time against the user's relation, the membership snapshot at execution time,
+# so the two can disagree about which shards even exist. A shard that only the
+# second pass sees has no index loaded for it, and before the routing snapshot
+# was encoded to integer ids its reads were simply never aligned — zero rows,
+# no error. Encoding via a LEFT JOIN against the discovered shard list turns
+# that into a NULL id, which is reported.
+#
+# The sequence makes the disagreement deterministic: bind's GROUP BY consumes
+# nextval 1-2 and sees only 'ro_a', the snapshot consumes 3-4 and sees only
+# 'ro_b'.
+
+query I
+SELECT success FROM save_minimap2_index('ro_ref', '__TEST_DIR__/ro_a.mmi', preset := 'map-hifi');
+----
+true
+
+query I
+SELECT success FROM save_minimap2_index('ro_ref', '__TEST_DIR__/ro_b.mmi', preset := 'map-hifi');
+----
+true
+
+statement ok
+CREATE TABLE ro_pair AS SELECT read_id, sequence1 FROM ro_reads LIMIT 2;
+
+statement ok
+CREATE SEQUENCE ro_seq;
+
+statement ok
+CREATE VIEW ro_shifting AS
+SELECT read_id, CASE WHEN nextval('ro_seq') <= 2 THEN 'ro_a' ELSE 'ro_b' END AS shard_name
+FROM ro_pair;
+
+statement error
+SELECT count(*) FROM align_minimap2_sharded('ro_pair',
+    shard_directory := '__TEST_DIR__',
+    read_to_shard := 'ro_shifting',
+    preset := 'map-hifi');
+----
+name a shard that was not present when the shard list was read
+
+statement ok
+DROP VIEW ro_shifting;
+
+statement ok
+DROP SEQUENCE ro_seq;
+
+statement ok
+DROP TABLE ro_pair;
+
 statement ok
 DROP VIEW ro_routing;
 

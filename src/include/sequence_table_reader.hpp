@@ -55,8 +55,12 @@ std::vector<miint::AlignmentSubject> ReadSubjectTable(ClientContext &context, co
 // below for a single streaming pass instead.
 
 // SELECT yielding BuildQueryReadsSelect's columns for every row of
-// `snapshot_table` that `routing_snapshot` assigns to `shard_name`, meant to be
+// `snapshot_table` that `routing_snapshot` assigns to `shard_id`, meant to be
 // streamed (QuerySequenceStream's SelectSql form), once per shard and index part.
+//
+// `shard_id` is the shard's index in the list passed to MaterializeReadToShard,
+// which is also ActiveShard::shard_idx. Selecting on the integer rather than the
+// name is what lets zonemap statistics prune this read — see MaterializeReadToShard.
 //
 // BOTH relations are snapshots, and for the same #229 reason: this SELECT is
 // re-run once per shard and part, so naming the user's relations here would read
@@ -83,7 +87,7 @@ std::vector<miint::AlignmentSubject> ReadSubjectTable(ClientContext &context, co
 // shards rows — and would then hash the whole corpus, sequences included, once
 // per shard.
 std::string BuildShardReadsSelect(const std::string &snapshot_table, const std::string &routing_snapshot,
-                                  const SequenceTableSchema &schema, const std::string &shard_name);
+                                  const SequenceTableSchema &schema, idx_t shard_id);
 
 // The projection every read of a sequence relation uses: exactly the columns
 // `schema` says alignment consumes, in a fixed order. Shared by the snapshot
@@ -117,7 +121,13 @@ std::string MaterializeQueryReads(Connection &conn, const std::string &query_tab
                                   idx_t &out_row_count);
 
 // The same one-pass TEMP snapshot, for align_minimap2_sharded's routing relation
-// (`read_to_shard`). Holds (read_id, shard_name) only.
+// (`read_to_shard`). Holds (read_id, shard_id), where shard_id is the index of
+// the row's shard in `shard_names` — see MaterializeReadToShard for why routing
+// is encoded to an integer rather than carrying the name.
+//
+// Throws if a routing row names a shard absent from `shard_names`: that means
+// the relation changed between shard discovery and here, and aligning what is
+// left would silently drop those reads.
 //
 // Routing is read as many times as the reads are — once per shard and index part
 // — so it needs the #229 guarantee just as much: a routing view built on
@@ -130,7 +140,8 @@ std::string MaterializeQueryReads(Connection &conn, const std::string &query_tab
 //
 // Returns the unquoted TEMP table name; the caller MUST drop it via
 // DropHelperTempRelation.
-std::string MaterializeReadToShard(Connection &conn, const std::string &read_to_shard_table, idx_t &out_row_count);
+std::string MaterializeReadToShard(Connection &conn, const std::string &read_to_shard_table,
+                                   const std::vector<std::string> &shard_names, idx_t &out_row_count);
 
 // Labels and single-end sequences loaded from a table for vsearch operations.
 struct LoadedSingleEndSequences {

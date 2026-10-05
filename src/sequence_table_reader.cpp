@@ -325,19 +325,19 @@ static std::string BuildSequenceColumnList(const SequenceTableSchema &schema) {
 }
 
 std::string BuildShardReadsSelect(const std::string &snapshot_table, const std::string &routing_snapshot,
-                                  const SequenceTableSchema &schema, const std::string &shard_name) {
+                                  const SequenceTableSchema &schema, idx_t shard_id) {
 	// See the header for why membership is a projected IN (MARK join) and not a
 	// JOIN. No ORDER BY: alignment does not depend on read order.
 	//
 	// The IN compares native types: ValidateReadToShardSchema enforces that both
 	// read_id columns share a type, so VARCHAR/BIGINT/UUID all compare directly.
-	// shard_name is a user-supplied row value from read_to_shard, so it must be
-	// quoted rather than concatenated — same reasoning as ReadShardNameCounts.
+	// The shard is selected by its integer id (MaterializeReadToShard), so no
+	// user-supplied value is concatenated into this SQL at all.
 	const std::string columns = BuildSequenceColumnList(schema);
 	return "SELECT " + columns + " FROM (SELECT " + columns + ", read_id IN (SELECT read_id FROM " +
-	       KeywordHelper::WriteOptionallyQuoted(routing_snapshot) +
-	       " WHERE shard_name = " + KeywordHelper::WriteQuoted(shard_name, '\'') + ") AS _miint_in_shard FROM " +
-	       KeywordHelper::WriteOptionallyQuoted(snapshot_table) + ") WHERE _miint_in_shard";
+	       KeywordHelper::WriteOptionallyQuoted(routing_snapshot) + " WHERE shard_id = " + std::to_string(shard_id) +
+	       ") AS _miint_in_shard FROM " + KeywordHelper::WriteOptionallyQuoted(snapshot_table) +
+	       ") WHERE _miint_in_shard";
 }
 
 std::string BuildQueryReadsSelect(const std::string &query_table, const SequenceTableSchema &schema) {
@@ -394,6 +394,18 @@ static std::string MaterializeSelectIntoTemp(Connection &conn, const std::string
 			create_sql += ", ";
 		}
 		create_sql += KeywordHelper::WriteOptionallyQuoted(stream->names[i]) + " " + stream->types[i].ToString();
+		// LogicalType::ToString() renders a collated VARCHAR as plain "VARCHAR",
+		// so without this the snapshot silently loses the collation and every
+		// later comparison against it turns case-sensitive. That is a silent
+		// wrong-answer bug, not an error: with `read_id VARCHAR COLLATE NOCASE`,
+		// rows whose ids differ only in case stop matching and are never
+		// aligned, and nothing reports it.
+		if (stream->types[i].id() == LogicalTypeId::VARCHAR) {
+			const auto collation = StringType::GetCollation(stream->types[i]);
+			if (!collation.empty()) {
+				create_sql += " COLLATE " + KeywordHelper::WriteOptionallyQuoted(collation);
+			}
+		}
 	}
 	create_sql += ")";
 	auto create_result = conn.Query(create_sql);
@@ -441,28 +453,95 @@ std::string MaterializeQueryReads(Connection &conn, const std::string &query_tab
 	                                 "Failed to materialize query table '" + query_table + "'", out_row_count);
 }
 
-std::string MaterializeReadToShard(Connection &conn, const std::string &read_to_shard_table, idx_t &out_row_count) {
-	// Columns and types were already checked by ValidateReadToShardSchema; this
-	// projects exactly the two BuildShardReadsSelect reads back out, so a routing
-	// relation carrying extra columns does not drag them into the snapshot.
+std::string MaterializeReadToShard(Connection &conn, const std::string &read_to_shard_table,
+                                   const std::vector<std::string> &shard_names, idx_t &out_row_count) {
+	// Routing is encoded to an integer shard id rather than carrying the shard
+	// name, following DuckDB's dimension-table pattern
+	// (https://duckdb.org/2026/10/02/dimension-tables): work on the narrow key,
+	// resolve the string once at the edge. `shard_id` is the index into the
+	// caller's shard list, which ActiveShard already carries as shard_idx, so
+	// nothing has to be resolved back.
 	//
-	// ORDER BY shard_name is what makes the per-shard filter cheap. Every shard
-	// re-reads this snapshot, once per index part, with `WHERE shard_name = x`,
-	// and zonemap pruning is decided entirely by physical row order (see
-	// docs/internals/duckdb-engine-notes.md § Indexes). Appended in source order
-	// the shard names interleave, every row group's min/max spans them all,
-	// nothing prunes, and each of those reads scans the whole relation —
-	// #shards x #parts x |routing| rows, which for the all-shards case this
-	// function exists to survive (1M reads x 1000 shards) is 10^12 row scans per
-	// part. Clustered, each read touches roughly its own shard's row groups, and
-	// the repeated shard_name values compress besides. The sort is of two id
-	// columns with no sequences attached, and unlike the Appender path it is
-	// memory-managed and spillable.
-	const std::string select_sql = "SELECT read_id, shard_name FROM " +
-	                               KeywordHelper::WriteOptionallyQuoted(read_to_shard_table) + " ORDER BY shard_name";
-	return MaterializeSelectIntoTemp(conn, select_sql, "_miint_read_to_shard_",
-	                                 "Failed to materialize read_to_shard table '" + read_to_shard_table + "'",
-	                                 out_row_count);
+	// Three things this buys, in order of importance:
+	//
+	// 1. Zonemap pruning that actually prunes. Every shard re-reads this
+	//    snapshot once per index part with an equality filter, and pruning is
+	//    decided by physical row order (docs/internals/duckdb-engine-notes.md
+	//    § Indexes) — but DuckDB keeps only the first 8 bytes of a string in
+	//    min/max statistics (StringStatsData::MAX_STRING_MINMAX_SIZE). Shard
+	//    names that agree in their first 8 bytes — "mem_shard_0..59", or
+	//    accessions like "GCF_000001405.40" — give every row group an identical
+	//    min and max, so sorting by the name prunes NOTHING. Measured on 6M
+	//    routing rows over 60 shards: filtering the name-sorted snapshot scanned
+	//    all 6,000,000 rows, the id-sorted one 182,272. Integer statistics are
+	//    exact.
+	// 2. The user's collation decides membership. The join below compares
+	//    shard names under the routing relation's own collation, before anything
+	//    is copied; afterwards only integers are compared. Encoding is therefore
+	//    collation-correct even where the snapshot's own DDL is not.
+	// 3. A shard name the caller's list does not contain becomes a NULL id
+	//    instead of a row that quietly matches no shard. Checked below.
+	//
+	// The snapshot is also narrower — 4 bytes per routing row instead of a
+	// string — which shrinks the sort, its spill, and the temp_directory budget.
+	const std::string dim_name = UniqueTempRelationName("_miint_shards_");
+	const std::string dim_quoted = KeywordHelper::WriteOptionallyQuoted(dim_name);
+	const std::string error_context = "Failed to materialize read_to_shard table '" + read_to_shard_table + "'";
+
+	auto dim_result = conn.Query("CREATE TEMP TABLE " + dim_quoted + " (shard_name VARCHAR, shard_id UINTEGER)");
+	if (dim_result->HasError()) {
+		throw InvalidInputException("%s: %s", error_context, dim_result->GetError());
+	}
+
+	std::string snapshot;
+	try {
+		Appender dim_appender(conn, dim_name);
+		for (idx_t i = 0; i < shard_names.size(); i++) {
+			dim_appender.BeginRow();
+			dim_appender.Append(Value(shard_names[i]));
+			dim_appender.Append(Value::UINTEGER(NumericCast<uint32_t>(i)));
+			dim_appender.EndRow();
+		}
+		dim_appender.Close();
+
+		// LEFT JOIN, not INNER: an unmatched routing row must survive as a NULL
+		// so the check below can see it. An INNER JOIN would drop exactly the
+		// rows we want to complain about.
+		const std::string select_sql = "SELECT r.read_id, s.shard_id FROM " +
+		                               KeywordHelper::WriteOptionallyQuoted(read_to_shard_table) + " r LEFT JOIN " +
+		                               dim_quoted + " s ON r.shard_name = s.shard_name ORDER BY s.shard_id";
+		snapshot = MaterializeSelectIntoTemp(conn, select_sql, "_miint_read_to_shard_", error_context, out_row_count);
+	} catch (...) {
+		DropHelperTempRelation(conn, dim_quoted);
+		throw;
+	}
+	// The dimension table has done its job once the ids are encoded; only the
+	// snapshot is read from here on.
+	DropHelperTempRelation(conn, dim_quoted);
+
+	// A NULL id means the routing relation named a shard that shard discovery
+	// did not see. Discovery runs at bind time against the user's relation and
+	// this snapshot is taken at execution time, so an unstable relation can
+	// disagree between them. We cannot make the two agree here, but we can
+	// refuse to align a partial result silently.
+	//
+	// ORDER BY above puts the NULLs last and integer statistics are exact, so
+	// this scan prunes to the tail row groups rather than reading the snapshot.
+	const std::string snapshot_quoted = KeywordHelper::WriteOptionallyQuoted(snapshot);
+	auto orphan_result = conn.Query("SELECT count(*) FROM " + snapshot_quoted + " WHERE shard_id IS NULL");
+	if (orphan_result->HasError()) {
+		DropHelperTempRelation(conn, snapshot_quoted);
+		throw InvalidInputException("%s: %s", error_context, orphan_result->GetError());
+	}
+	const auto orphans = orphan_result->GetValue(0, 0).GetValue<idx_t>();
+	if (orphans > 0) {
+		DropHelperTempRelation(conn, snapshot_quoted);
+		throw InvalidInputException(
+		    "read_to_shard table '%s' changed while align_minimap2_sharded was starting: %llu routing row(s) name a "
+		    "shard that was not present when the shard list was read. Materialize '%s' into a table before aligning.",
+		    read_to_shard_table, static_cast<unsigned long long>(orphans), read_to_shard_table);
+	}
+	return snapshot;
 }
 
 QuerySequenceStream::QuerySequenceStream(ClientContext &context, const std::string &select_sql,

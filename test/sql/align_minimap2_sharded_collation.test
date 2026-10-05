@@ -1,0 +1,99 @@
+# name: test/sql/align_minimap2_sharded_collation.test
+# description: align_minimap2_sharded honours the input relations' collation
+# group: [sql]
+
+require miint
+
+# A TEMP snapshot is built from the stream's own output schema, and
+# LogicalType::ToString() renders a collated VARCHAR as plain "VARCHAR". Without
+# carrying the collation across, every comparison against the snapshot turns
+# case-sensitive while the user's own relation stays case-insensitive — and the
+# rows that stop matching are not reported, they are just never aligned.
+
+statement ok
+CREATE TABLE coll_subj AS SELECT 'ref1' AS read_id,
+       'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT' AS sequence1;
+
+query I
+SELECT success FROM save_minimap2_index('coll_subj', '__TEST_DIR__/Shard_A.mmi', k := 5);
+----
+true
+
+statement ok
+CREATE TABLE coll_reads AS SELECT * FROM (VALUES
+    ('q1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    ('q2', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT')
+) AS t(read_id, sequence1);
+
+# shard_name side: bind-time shard discovery GROUPs BY under NOCASE and folds
+# 'Shard_A' and 'shard_a' into the single shard 'Shard_A' (2 reads). If the
+# per-shard filter is case-sensitive, only q1 is aligned and q2 vanishes.
+statement ok
+CREATE TABLE coll_rts (read_id VARCHAR, shard_name VARCHAR COLLATE NOCASE);
+
+statement ok
+INSERT INTO coll_rts VALUES ('q1', 'Shard_A'), ('q2', 'shard_a');
+
+# Mirrors ReadShardNameCounts' GROUP BY, which is what discovers the shard list.
+# (count(DISTINCT ...) does NOT fold under the collation here, so it would not
+# show what shard discovery actually sees.)
+query II
+SELECT shard_name, count(*) FROM coll_rts GROUP BY shard_name;
+----
+Shard_A	2
+
+query II
+SELECT read_id, reference
+FROM align_minimap2_sharded('coll_reads',
+    shard_directory := '__TEST_DIR__',
+    read_to_shard := 'coll_rts',
+    max_secondary := 0)
+WHERE flags & 4 = 0
+ORDER BY read_id;
+----
+q1	ref1
+q2	ref1
+
+# read_id side: the per-shard filter matches reads by `read_id IN (...)` across
+# two snapshots. Both must keep the collation or the ids stop matching each
+# other, with the same silent result.
+statement ok
+CREATE TABLE coll_reads_ci (read_id VARCHAR COLLATE NOCASE, sequence1 VARCHAR);
+
+statement ok
+INSERT INTO coll_reads_ci VALUES
+    ('Q1', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    ('Q2', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT');
+
+statement ok
+CREATE TABLE coll_rts_ci (read_id VARCHAR COLLATE NOCASE, shard_name VARCHAR);
+
+statement ok
+INSERT INTO coll_rts_ci VALUES ('q1', 'Shard_A'), ('q2', 'Shard_A');
+
+query II
+SELECT read_id, reference
+FROM align_minimap2_sharded('coll_reads_ci',
+    shard_directory := '__TEST_DIR__',
+    read_to_shard := 'coll_rts_ci',
+    max_secondary := 0)
+WHERE flags & 4 = 0
+ORDER BY read_id;
+----
+Q1	ref1
+Q2	ref1
+
+statement ok
+DROP TABLE coll_rts_ci;
+
+statement ok
+DROP TABLE coll_reads_ci;
+
+statement ok
+DROP TABLE coll_rts;
+
+statement ok
+DROP TABLE coll_reads;
+
+statement ok
+DROP TABLE coll_subj;

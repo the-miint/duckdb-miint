@@ -142,7 +142,11 @@ Three remedies are in use. Pick by what the consumer actually needs:
    snapshot once per part. `align_minimap2_sharded` streams it once per shard and
    part, filtered by `BuildShardReadsSelect` — and snapshots its **routing**
    relation (`read_to_shard`) the same way, because that filter re-reads routing
-   on exactly the same schedule as the reads. Snapshot the relation itself,
+   on exactly the same schedule as the reads. Note that a snapshot is only as
+   faithful as its DDL: `MaterializeSelectIntoTemp` has to re-emit `COLLATE`
+   explicitly, because `LogicalType::ToString()` renders a collated VARCHAR as
+   plain `VARCHAR` and the lost collation turns every later comparison
+   case-sensitive without an error. Snapshot the relation itself,
    **never** a join that fans it out: an earlier `align_minimap2_sharded`
    snapshotted `query JOIN read_to_shard`, one copy of each read per shard. With
    all-shards routing (1M HiFi reads × 1000 shards) that was about a thousand

@@ -196,8 +196,15 @@ unique_ptr<GlobalTableFunctionState> AlignMinimap2ShardedTableFunction::InitGlob
 		// of a reads x shards relation that nothing ever reads.
 		gstate->next_shard_idx = gstate->shard_count;
 	} else {
+		// shard_id in the snapshot is the index into data.shards, which is also
+		// ActiveShard::shard_idx — so the per-shard filter needs no lookup back.
+		std::vector<std::string> shard_names;
+		shard_names.reserve(data.shards.size());
+		for (const auto &shard : data.shards) {
+			shard_names.push_back(shard.name);
+		}
 		gstate->snapshots->read_to_shard =
-		    MaterializeReadToShard(*gstate->snapshots->conn, data.read_to_shard_table, routing_row_count);
+		    MaterializeReadToShard(*gstate->snapshots->conn, data.read_to_shard_table, shard_names, routing_row_count);
 	}
 	// This runs on the query's calling thread, never a TaskScheduler worker, so
 	// nothing will return the allocation it just freed to the OS on its own —
@@ -232,15 +239,15 @@ static constexpr idx_t SHARD_READ_BATCH_SIZE = 2048;
 // through here, so all of them read exactly the same rows.
 static std::shared_ptr<QuerySequenceStream>
 OpenShardStream(ClientContext &context, const AlignMinimap2ShardedTableFunction::GlobalState &gstate,
-                const AlignMinimap2ShardedTableFunction::Data &bind_data, const std::string &shard_name) {
+                const AlignMinimap2ShardedTableFunction::Data &bind_data, idx_t shard_idx) {
 	// The stream holds the snapshots it reads from, so they cannot be dropped
 	// while it is open however the scan ends — see QuerySnapshots.
 	return std::make_shared<QuerySequenceStream>(
 	    context,
 	    QuerySequenceStream::SelectSql {BuildShardReadsSelect(gstate.snapshots->query_reads,
 	                                                          gstate.snapshots->read_to_shard, bind_data.query_schema,
-	                                                          shard_name),
-	                                    "reads for shard '" + shard_name + "'"},
+	                                                          shard_idx),
+	                                    "reads for shard '" + bind_data.shards[shard_idx].name + "'"},
 	    bind_data.query_schema, SHARD_READ_BATCH_SIZE, gstate.snapshots);
 }
 
@@ -328,7 +335,7 @@ std::shared_ptr<ActiveShard> AlignMinimap2ShardedTableFunction::ClaimWork(Client
 		SHARD_DBG_MEM(gstate, "ClaimWork: LOADED index shard %zu '%s' (%s) in %ldms", static_cast<size_t>(shard_idx),
 		              shard_info.name.c_str(), active->parts->IsMultiPart() ? "multi-part, first part" : "single-part",
 		              static_cast<long>(load_ms));
-		active->stream = OpenShardStream(context, gstate, bind_data, shard_info.name);
+		active->stream = OpenShardStream(context, gstate, bind_data, shard_idx);
 	} catch (...) {
 		SHARD_DBG(gstate, "ClaimWork: SETUP FAILED shard %zu", static_cast<size_t>(shard_idx));
 		active->exhausted.store(true, std::memory_order_release);
@@ -506,9 +513,7 @@ void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFun
 				advanced = active->parts->Advance(
 				    local_state.part, *local_state.aligner,
 				    /*prepare=*/
-				    [&]() {
-					    next_stream = OpenShardStream(context, global_state, bind_data, local_state.current_shard_name);
-				    },
+				    [&]() { next_stream = OpenShardStream(context, global_state, bind_data, active->shard_idx); },
 				    /*publish=*/
 				    [&]() {
 					    active->stream = std::move(next_stream);
