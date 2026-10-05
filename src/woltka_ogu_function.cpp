@@ -228,7 +228,7 @@ static void WoltkaOguExecute(ClientContext &context, TableFunctionInput &input, 
 			output.Reference(*lstate.current_chunk);
 			return;
 		}
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
@@ -244,7 +244,7 @@ static void WoltkaOguExecute(ClientContext &context, TableFunctionInput &input, 
 		}
 		idx_t sample_idx;
 		if (!ClaimNextSample(gstate, data.sample_info.sample_values.size(), sample_idx)) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		lstate.result =

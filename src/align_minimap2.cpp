@@ -277,7 +277,7 @@ static void ExecutePerSubject(ClientContext &context, const AlignMinimap2TableFu
 	std::lock_guard<std::mutex> lock(ps.lock);
 
 	if (ps.done) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
@@ -323,7 +323,7 @@ static void ExecutePerSubject(ClientContext &context, const AlignMinimap2TableFu
 
 		if (ps.current_subject_idx >= bind_data.subjects.size()) {
 			ps.done = true;
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 
@@ -396,7 +396,7 @@ static void ExecuteStandard(const AlignMinimap2TableFunction::Data &bind_data,
 		// 4. Stream exhausted. Without a cursor that is the end of the scan.
 		if (!st.parts) {
 			SHARD_DBG(gstate, "ExecuteStandard: DONE (stream exhausted)");
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 
@@ -414,7 +414,7 @@ static void ExecuteStandard(const AlignMinimap2TableFunction::Data &bind_data,
 		    });
 		if (!advanced) {
 			SHARD_DBG(gstate, "ExecuteStandard: DONE (all parts exhausted)");
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		// A part newer than the one this thread was on now exists (whether this

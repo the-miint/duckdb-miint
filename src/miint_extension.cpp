@@ -250,7 +250,7 @@ static unique_ptr<FunctionData> MiintVersionsBind(ClientContext &context, TableF
 static void MiintVersionsExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &data = data_p.bind_data->CastNoConst<MiintVersionsData>();
 	if (data.done) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 	idx_t count = data.versions.size();
@@ -260,7 +260,7 @@ static void MiintVersionsExecute(ClientContext &context, TableFunctionInput &dat
 		FlatVector::GetDataMutable<string_t>(output.data[1])[i] =
 		    StringVector::AddString(output.data[1], data.versions[i].second);
 	}
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 	data.done = true;
 }
 

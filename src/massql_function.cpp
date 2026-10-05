@@ -260,7 +260,7 @@ static void MassQLExecute(ClientContext &context, TableFunctionInput &input, Dat
 			output.Reference(*lstate.current_chunk);
 			return;
 		}
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
@@ -282,7 +282,7 @@ static void MassQLExecute(ClientContext &context, TableFunctionInput &input, Dat
 		}
 		idx_t sample_idx;
 		if (!ClaimNextSample(gstate, data.sample_info.sample_values.size(), sample_idx)) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		lstate.result = RunSamplePipeline(*lstate.conn, data.parsed, data.effective_source,

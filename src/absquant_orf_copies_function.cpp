@@ -213,7 +213,7 @@ void AbsQuantOrfCopiesExecute(ClientContext &, TableFunctionInput &data_p, DataC
 		value[r] = cell.value;
 	}
 	g.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 } // namespace

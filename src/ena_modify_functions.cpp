@@ -141,7 +141,7 @@ unique_ptr<GlobalTableFunctionState> InitModifyProjectGlobal(ClientContext &, Ta
 void ExecuteModifyProject(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
 	auto &gs = data.global_state->Cast<ModifyProjectGlobalState>();
 	if (gs.emitted) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 	auto &bd = data.bind_data->Cast<ModifyProjectBindData>();
@@ -244,7 +244,7 @@ void ExecuteModifyProject(ClientContext &context, TableFunctionInput &data, Data
 		throw InvalidInputException("ena_modify_project: %s", detail);
 	}
 
-	output.SetCardinality(1);
+	output.SetChildCardinality(1);
 	output.data[0].SetValue(0, Value(string(miint::ActionName(miint::ENAAction::MODIFY))));
 	output.data[1].SetValue(0, Value(bd.accession));
 	output.data[2].SetValue(0, Value::BOOLEAN(success));
@@ -396,7 +396,7 @@ unique_ptr<GlobalTableFunctionState> InitModifySampleGlobal(ClientContext &, Tab
 void ExecuteModifySample(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
 	auto &gs = data.global_state->Cast<ModifySampleGlobalState>();
 	if (gs.emitted) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 	auto &bd = data.bind_data->Cast<ModifySampleBindData>();
@@ -491,7 +491,7 @@ void ExecuteModifySample(ClientContext &context, TableFunctionInput &data, DataC
 		throw InvalidInputException("ena_modify_sample: %s", detail);
 	}
 
-	output.SetCardinality(1);
+	output.SetChildCardinality(1);
 	output.data[0].SetValue(0, Value(string(miint::ActionName(miint::ENAAction::MODIFY))));
 	output.data[1].SetValue(0, Value(bd.accession));
 	output.data[2].SetValue(0, Value::BOOLEAN(success));
@@ -682,7 +682,7 @@ unique_ptr<GlobalTableFunctionState> InitModifyExperimentGlobal(ClientContext &,
 void ExecuteModifyExperiment(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
 	auto &gs = data.global_state->Cast<ModifyExperimentGlobalState>();
 	if (gs.emitted) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 	auto &bd = data.bind_data->Cast<ModifyExperimentBindData>();
@@ -792,7 +792,7 @@ void ExecuteModifyExperiment(ClientContext &context, TableFunctionInput &data, D
 		throw InvalidInputException("ena_modify_experiment: %s", detail);
 	}
 
-	output.SetCardinality(1);
+	output.SetChildCardinality(1);
 	output.data[0].SetValue(0, Value(string(miint::ActionName(miint::ENAAction::MODIFY))));
 	output.data[1].SetValue(0, Value(bd.accession));
 	output.data[2].SetValue(0, Value::BOOLEAN(success));
@@ -930,7 +930,7 @@ unique_ptr<GlobalTableFunctionState> InitModifyRunGlobal(ClientContext &, TableF
 void ExecuteModifyRun(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
 	auto &gs = data.global_state->Cast<ModifyRunGlobalState>();
 	if (gs.emitted) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 	auto &bd = data.bind_data->Cast<ModifyRunBindData>();
@@ -1027,7 +1027,7 @@ void ExecuteModifyRun(ClientContext &context, TableFunctionInput &data, DataChun
 		throw InvalidInputException("ena_modify_run: %s", detail);
 	}
 
-	output.SetCardinality(1);
+	output.SetChildCardinality(1);
 	output.data[0].SetValue(0, Value(string(miint::ActionName(miint::ENAAction::MODIFY))));
 	output.data[1].SetValue(0, Value(bd.accession));
 	output.data[2].SetValue(0, Value::BOOLEAN(success));

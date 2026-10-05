@@ -219,7 +219,7 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 
 				// Check if all files exhausted
 				if (global_state.next_file_idx >= global_state.sequence1_filepaths.size()) {
-					output.SetCardinality(0);
+					output.SetChildCardinality(0);
 					return;
 				}
 
@@ -307,7 +307,7 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 		SetResultVectorFilepath(output.data[field_idx++], current_filepath);
 	}
 
-	output.SetCardinality(batch.size());
+	output.SetChildCardinality(batch.size());
 }
 
 // Cardinality estimate so the query optimizer knows roughly how big the scan is. Without

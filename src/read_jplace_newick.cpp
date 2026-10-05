@@ -218,7 +218,7 @@ void ReadJplaceNewickTableFunction::Execute(ClientContext &context, TableFunctio
 		}
 	}
 
-	output.SetCardinality(output_idx);
+	output.SetChildCardinality(output_idx);
 }
 
 TableFunction ReadJplaceNewickTableFunction::GetFunction() {

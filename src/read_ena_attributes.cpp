@@ -411,7 +411,7 @@ void ReadENAAttributesTableFunction::Execute(ClientContext &context, TableFuncti
 		bool ok =
 		    use_structured ? global_state.FetchNextStructuredBatch(bind_data.pushdown) : global_state.FetchNextBatch();
 		if (!ok) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 	}
@@ -446,7 +446,7 @@ void ReadENAAttributesTableFunction::Execute(ClientContext &context, TableFuncti
 	}
 
 	global_state.current_batch_offset += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 // ---- Pushdown complex filter ----

@@ -124,7 +124,7 @@ void ClusterUpgmaExecute(ClientContext &, TableFunctionInput &data_p, DataChunk 
 		is_tip[r] = row.is_tip;
 	}
 	g.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 } // namespace

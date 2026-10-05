@@ -379,7 +379,7 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 						miint::EmitWarning(context, msg);
 					}
 				}
-				output.SetCardinality(0);
+				output.SetChildCardinality(0);
 				return;
 			}
 
@@ -582,7 +582,7 @@ void ReadENASequencesTableFunction::FillOutputFromBatch(DataChunk &output, const
 		SetResultVectorFilepath(output.data[field_idx++], filepath);
 	}
 
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 // ---- ExecuteInOut ----
@@ -644,14 +644,14 @@ OperatorResultType ReadENASequencesTableFunction::ExecuteInOut(ExecutionContext 
 	// Phase 1: need a fresh outer row → pull and resolve.
 	if (local.row_consumed && local.pending_runs.empty()) {
 		if (input.size() == 0) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return OperatorResultType::NEED_MORE_INPUT;
 		}
 		auto acc_val = input.data[0].GetValue(0);
 		if (acc_val.IsNull()) {
 			// NULL accession → no rows for this outer row. Not a failure
 			// (outer emitted NULL intentionally); skip quietly.
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return OperatorResultType::NEED_MORE_INPUT;
 		}
 		local.current_accession = acc_val.ToString();
@@ -672,7 +672,7 @@ OperatorResultType ReadENASequencesTableFunction::ExecuteInOut(ExecutionContext 
 				record_skip(local.current_accession, "",
 				            "ENA returned no runs for this accession (may not exist, may have no sequence data)");
 				local.row_consumed = true;
-				output.SetCardinality(0);
+				output.SetChildCardinality(0);
 				return OperatorResultType::NEED_MORE_INPUT;
 			}
 			for (const auto &run : it->second) {
@@ -681,7 +681,7 @@ OperatorResultType ReadENASequencesTableFunction::ExecuteInOut(ExecutionContext 
 		} catch (const std::exception &e) {
 			record_skip(local.current_accession, "", std::string("metadata resolution failed: ") + e.what());
 			local.row_consumed = true;
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return OperatorResultType::NEED_MORE_INPUT;
 		}
 		local.row_consumed = false;
@@ -692,7 +692,7 @@ OperatorResultType ReadENASequencesTableFunction::ExecuteInOut(ExecutionContext 
 	if (!local.current_reader) {
 		if (local.pending_runs.empty()) {
 			local.row_consumed = true;
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return OperatorResultType::NEED_MORE_INPUT;
 		}
 		auto run = local.pending_runs.front();
@@ -716,7 +716,7 @@ OperatorResultType ReadENASequencesTableFunction::ExecuteInOut(ExecutionContext 
 				// will call us back to handle the next pending run or yield
 				// NEED_MORE_INPUT. This is why HAVE_MORE_OUTPUT + cardinality=0
 				// is safe here — forward progress is guaranteed.
-				output.SetCardinality(0);
+				output.SetChildCardinality(0);
 				return OperatorResultType::HAVE_MORE_OUTPUT;
 			}
 		}
@@ -746,7 +746,7 @@ OperatorResultType ReadENASequencesTableFunction::ExecuteInOut(ExecutionContext 
 		            "failed mid-stream after emitting " + std::to_string(emitted) +
 		                " read(s); downstream sees partial data for this run (error: " + e.what() + ")");
 		local.current_reader.reset();
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return OperatorResultType::HAVE_MORE_OUTPUT;
 	}
 
@@ -764,11 +764,11 @@ OperatorResultType ReadENASequencesTableFunction::ExecuteInOut(ExecutionContext 
 		}
 		local.current_reader.reset();
 		if (!local.pending_runs.empty()) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return OperatorResultType::HAVE_MORE_OUTPUT;
 		}
 		local.row_consumed = true;
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return OperatorResultType::NEED_MORE_INPUT;
 	}
 

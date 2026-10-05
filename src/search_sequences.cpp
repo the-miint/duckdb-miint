@@ -41,7 +41,7 @@ static idx_t OutputSearchResults(DataChunk &output, const std::vector<miint::Sea
                                  idx_t count, const LogicalType &query_id_type, const LogicalType &target_id_type) {
 	idx_t actual = std::min(count, static_cast<idx_t>(results.size()) - offset);
 	if (actual == 0) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return 0;
 	}
 
@@ -98,7 +98,7 @@ static idx_t OutputSearchResults(DataChunk &output, const std::vector<miint::Sea
 	}
 
 	D_ASSERT(col == output.ColumnCount());
-	output.SetCardinality(actual);
+	output.SetChildCardinality(actual);
 	return actual;
 }
 
@@ -202,7 +202,7 @@ void SearchSequencesTableFunction::Execute(ClientContext &context, TableFunction
 
 		auto query_batch = gstate.query_stream->FetchSubBatch();
 		if (query_batch.empty()) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 

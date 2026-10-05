@@ -141,14 +141,14 @@ void SaveBowtie2IndexTableFunction::Execute(ClientContext &context, TableFunctio
 	auto &gstate = data_p.global_state->Cast<GlobalState>();
 
 	if (gstate.done) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
 	output.data[0].SetValue(0, Value::BOOLEAN(true));               // success
 	output.data[1].SetValue(0, Value(bind_data.output_path));       // index_path
 	output.data[2].SetValue(0, Value::BIGINT(gstate.num_subjects)); // num_subjects
-	output.SetCardinality(1);
+	output.SetChildCardinality(1);
 	gstate.done = true;
 }
 

@@ -431,7 +431,7 @@ void UnifracPermanovaExecute(ClientContext &, TableFunctionInput &input, DataChu
 	auto &gstate = input.global_state->Cast<UnifracPermanovaGlobalState>();
 	const idx_t total = gstate.rows.size();
 	if (gstate.cursor >= total) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 	const idx_t remaining = total - gstate.cursor;
@@ -455,7 +455,7 @@ void UnifracPermanovaExecute(ClientContext &, TableFunctionInput &input, DataChu
 		n_perm_data[i] = r.n_permutations;
 	}
 	gstate.cursor += n;
-	output.SetCardinality(n);
+	output.SetChildCardinality(n);
 }
 
 // ── permanova(distances, metadata, ...) — metric-agnostic PERMANOVA ───────────

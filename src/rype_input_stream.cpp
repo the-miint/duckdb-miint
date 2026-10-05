@@ -370,7 +370,7 @@ idx_t RypeInputStream::AppendSlice(ArrowAppender &appender, DataChunk &chunk, id
 	if (options.include_pair_column) {
 		transformed.data[COL_PAIR_SEQUENCE].Reference(chunk.data[COL_PAIR_SEQUENCE]);
 	}
-	transformed.SetCardinality(chunk_size);
+	transformed.SetChildCardinality(chunk_size);
 
 	appender.Append(transformed, from, to, chunk_size);
 	return to;

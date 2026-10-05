@@ -325,7 +325,7 @@ void ReadNewickTableFunction::Execute(ClientContext &context, TableFunctionInput
 		local_state.has_file = false; // Ready to claim next file when done
 	}
 
-	output.SetCardinality(output_idx);
+	output.SetChildCardinality(output_idx);
 }
 
 TableFunction ReadNewickTableFunction::GetFunction() {

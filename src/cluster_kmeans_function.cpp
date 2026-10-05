@@ -134,7 +134,7 @@ void ClusterKmeansExecute(ClientContext &, TableFunctionInput &data_p, DataChunk
 		cluster[r] = g.assignments[k];
 	}
 	g.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 } // namespace

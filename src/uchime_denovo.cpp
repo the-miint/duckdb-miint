@@ -334,7 +334,7 @@ void UchimeDenovoTableFunction::Execute(ClientContext & /*context*/, TableFuncti
 		}
 
 		if (gstate.results.empty()) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 
@@ -359,7 +359,7 @@ void UchimeDenovoTableFunction::Execute(ClientContext & /*context*/, TableFuncti
 
 		idx_t sample_idx;
 		if (!ClaimNextSample(gstate, data.sample_info.sample_values.size(), sample_idx)) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		lstate.sample_value = data.sample_info.sample_values[sample_idx];

@@ -746,7 +746,7 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 	(void)context;
 
 	if (gstate.batch_index >= gstate.batches.size()) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
@@ -765,7 +765,7 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 	const idx_t total = static_cast<idx_t>(batch.length);
 	const idx_t remaining = total - gstate.row_in_batch;
 	const idx_t to_emit = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
-	output.SetCardinality(to_emit);
+	output.SetChildCardinality(to_emit);
 
 	// gpl-boundary `19306f6` `output_schema` (verified at
 	// `ext/GPL-boundary/src/tools/fasttree.rs:145-152`):

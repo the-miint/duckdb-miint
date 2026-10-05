@@ -315,7 +315,7 @@ void MmvecRanksExecute(ClientContext &, TableFunctionInput &data_p, DataChunk &o
 		prob[r] = g.probs[k];
 	}
 	g.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 // ---------------------------------------------------------------------------
@@ -415,7 +415,7 @@ void MmvecPredictExecute(ClientContext &, TableFunctionInput &data_p, DataChunk 
 		proportion[r] = g.proportions[k];
 	}
 	g.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 // ---------------------------------------------------------------------------
@@ -481,12 +481,12 @@ unique_ptr<GlobalTableFunctionState> MmvecScoreInitGlobal(ClientContext &context
 void MmvecScoreExecute(ClientContext &, TableFunctionInput &data_p, DataChunk &output) {
 	auto &g = data_p.global_state->Cast<MmvecScoreGlobalState>();
 	if (g.emitted) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 	FlatVector::GetDataMutable<double>(output.data[0])[0] = g.q_squared;
 	g.emitted = true;
-	output.SetCardinality(1);
+	output.SetChildCardinality(1);
 }
 
 } // namespace

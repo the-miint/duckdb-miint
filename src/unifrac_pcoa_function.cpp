@@ -492,13 +492,13 @@ void EmitPcoaChunk(const std::vector<PcoaRow> &rows, size_t &cursor, const Logic
 	}
 
 	cursor += n;
-	output.SetCardinality(n);
+	output.SetChildCardinality(n);
 }
 
 void UnifracPcoaExecute(ClientContext &, TableFunctionInput &input, DataChunk &output) {
 	auto &gstate = input.global_state->Cast<UnifracPcoaGlobalState>();
 	if (gstate.cursor >= gstate.rows.size()) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 	EmitPcoaChunk(gstate.rows, gstate.cursor, gstate.sample_id_type, /*with_batch_diagnostics=*/false, output);
@@ -2639,7 +2639,7 @@ void StageWave(const ProgressivePcoaData &data, ProgressivePcoaGlobalState &gsta
 			coords[a] = pr.coordinate;
 			append_chunk.SetValue(3 + a, row, Value::DOUBLE(pr.coordinate));
 		}
-		append_chunk.SetCardinality(row + 1);
+		append_chunk.SetChildCardinality(row + 1);
 		axes.Add(coords.data(), 1);
 	}
 }
@@ -2765,7 +2765,7 @@ void ProgressivePcoaExecute(ClientContext &context, TableFunctionInput &input, D
 		const bool refilled =
 		    data.global_rotation ? RefillFromStaged(data, gstate) : AdvanceProgressiveRun(context, data, gstate);
 		if (!refilled) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 	}

@@ -150,7 +150,7 @@ void ReadNCBIAnnotationTableFunction::Execute(ClientContext &context, TableFunct
 	while (global_state.current_batch.empty() || global_state.batch_offset >= global_state.current_batch.size()) {
 		if (!global_state.FetchNextAccession()) {
 			// No more accessions
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 	}
@@ -254,7 +254,7 @@ void ReadNCBIAnnotationTableFunction::Execute(ClientContext &context, TableFunct
 	}
 
 	global_state.batch_offset += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 TableFunction ReadNCBIAnnotationTableFunction::GetFunction() {

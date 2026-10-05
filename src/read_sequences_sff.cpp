@@ -106,7 +106,7 @@ void ReadSequencesSFFTableFunction::Execute(ClientContext &context, TableFunctio
 			lock_guard<mutex> read_lock(global_state.lock);
 
 			if (global_state.next_file_idx >= global_state.filepaths.size()) {
-				output.SetCardinality(0);
+				output.SetChildCardinality(0);
 				return;
 			}
 
@@ -167,7 +167,7 @@ void ReadSequencesSFFTableFunction::Execute(ClientContext &context, TableFunctio
 		SetResultVectorFilepath(output.data[field_idx++], current_filepath);
 	}
 
-	output.SetCardinality(batch.size());
+	output.SetChildCardinality(batch.size());
 }
 
 TableFunction ReadSequencesSFFTableFunction::GetFunction() {

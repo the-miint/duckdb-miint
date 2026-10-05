@@ -253,7 +253,7 @@ void RypeClassifyTableFunction::Execute(ClientContext &context, TableFunctionInp
 	// No mutex needed - MaxThreads() returns 1, enforcing single-threaded execution
 
 	if (gstate.done) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
@@ -274,7 +274,7 @@ void RypeClassifyTableFunction::Execute(ClientContext &context, TableFunctionInp
 		// Check if stream is exhausted
 		if (!wrapper->arrow_array.release) {
 			gstate.done = true;
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 
@@ -286,7 +286,7 @@ void RypeClassifyTableFunction::Execute(ClientContext &context, TableFunctionInp
 	idx_t remaining = static_cast<idx_t>(batch.length) - gstate.batch_offset;
 	idx_t to_output = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
 
-	output.SetCardinality(to_output);
+	output.SetChildCardinality(to_output);
 
 	// RYpe output schema: query_id (Int64), bucket_id (UInt32), score (Float64)
 	// Our output schema: read_id (mirrors the id_column's type -- VARCHAR, BIGINT or UUID;

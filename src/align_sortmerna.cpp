@@ -89,7 +89,7 @@ void AlignSortMeRNATableFunction::Execute(ClientContext &, TableFunctionInput &d
 
 		auto query_batch = gstate.query_stream->FetchSubBatch();
 		if (query_batch.empty()) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 

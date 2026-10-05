@@ -87,7 +87,7 @@ void ReadMzMLTableFunction::Execute(ClientContext &context, TableFunctionInput &
 			lock_guard<mutex> read_lock(global_state.lock);
 
 			if (global_state.next_file_idx >= global_state.filepaths.size()) {
-				output.SetCardinality(0);
+				output.SetChildCardinality(0);
 				return;
 			}
 

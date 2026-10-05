@@ -165,7 +165,7 @@ void UchimeRefTableFunction::Execute(ClientContext & /*context*/, TableFunctionI
 
 			auto query_batch = gstate.query_stream->FetchSubBatch();
 			if (query_batch.empty()) {
-				output.SetCardinality(0);
+				output.SetChildCardinality(0);
 				return;
 			}
 			gstate.wrapper.detect_batch(query_batch.read_ids, query_batch.sequences1, gstate.result_buffer);
@@ -193,7 +193,7 @@ void UchimeRefTableFunction::Execute(ClientContext & /*context*/, TableFunctionI
 		// Current sample exhausted; claim the next.
 		idx_t sample_idx;
 		if (!ClaimNextSample(gstate, data.sample_info.sample_values.size(), sample_idx)) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		lstate.sample_value = data.sample_info.sample_values[sample_idx];

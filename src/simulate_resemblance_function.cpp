@@ -164,7 +164,7 @@ void SimGradientExecute(ClientContext &context, TableFunctionInput &data_p, Data
 		position[i] = coo.ground_truth[j];
 	}
 	gstate.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 unique_ptr<LocalTableFunctionState> SimInitLocal(ExecutionContext &, TableFunctionInitInput &,
@@ -289,7 +289,7 @@ void SimClusterExecute(ClientContext &context, TableFunctionInput &data_p, DataC
 		cluster_id[i] = static_cast<int32_t>(coo.ground_truth[j]);
 	}
 	gstate.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 } // namespace

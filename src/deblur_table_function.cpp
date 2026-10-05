@@ -333,7 +333,7 @@ static void EmitRows(const DeblurData &data, DeblurLocalState &lstate, const std
 		abundance_data[i] = r.abundance;
 	}
 	lstate.current_row += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 static void DeblurExecute(ClientContext & /*context*/, TableFunctionInput &data_p, DataChunk &output) {
@@ -344,7 +344,7 @@ static void DeblurExecute(ClientContext & /*context*/, TableFunctionInput &data_
 	if (!data.has_sample_id) {
 		// Single thread (MaxThreads()=1) drains gstate.shared_results via lstate's cursor.
 		if (lstate.current_row >= gstate.shared_results.size()) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		EmitRows(data, lstate, gstate.shared_results, output);
@@ -360,7 +360,7 @@ static void DeblurExecute(ClientContext & /*context*/, TableFunctionInput &data_
 		// fall through to claim again.
 		idx_t sample_idx;
 		if (!ClaimNextSample(gstate, data.sample_info.sample_values.size(), sample_idx)) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		lstate.sample_value = data.sample_info.sample_values[sample_idx];

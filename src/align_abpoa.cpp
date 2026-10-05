@@ -181,7 +181,7 @@ static void EmitRows(const AlignAbpoaData &data, AlignAbpoaLocalState &lstate, c
 	}
 
 	lstate.current_row += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 static void AlignAbpoaExecute(ClientContext & /*context*/, TableFunctionInput &data_p, DataChunk &output) {
@@ -191,7 +191,7 @@ static void AlignAbpoaExecute(ClientContext & /*context*/, TableFunctionInput &d
 
 	if (!data.has_sample_id) {
 		if (lstate.current_row >= gstate.names.size()) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		EmitRows(data, lstate, gstate.names, gstate.sequences, gstate.original_lengths, gstate.aligned_length, output);
@@ -206,7 +206,7 @@ static void AlignAbpoaExecute(ClientContext & /*context*/, TableFunctionInput &d
 		}
 		idx_t sample_idx;
 		if (!ClaimNextSample(gstate, data.sample_info.sample_values.size(), sample_idx)) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		lstate.sample_value = data.sample_info.sample_values[sample_idx];

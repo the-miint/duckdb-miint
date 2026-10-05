@@ -273,7 +273,7 @@ void ReadENATableFunction::Execute(ClientContext &context, TableFunctionInput &d
 
 	while (global_state.row_offset >= global_state.rows.size()) {
 		if (!global_state.FetchNextAccession()) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 	}
@@ -377,7 +377,7 @@ void ReadENATableFunction::Execute(ClientContext &context, TableFunctionInput &d
 	}
 
 	global_state.row_offset += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 // ---- Registration ----

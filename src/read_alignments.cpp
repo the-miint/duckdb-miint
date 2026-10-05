@@ -199,7 +199,7 @@ void ReadAlignmentsTableFunction::Execute(ClientContext &context, TableFunctionI
 
 				// Check if all files exhausted
 				if (global_state.next_file_idx >= global_state.filepaths.size()) {
-					output.SetCardinality(0);
+					output.SetChildCardinality(0);
 					return;
 				}
 
@@ -263,7 +263,7 @@ void ReadAlignmentsTableFunction::Execute(ClientContext &context, TableFunctionI
 		SetResultVectorFilepath(output.data[field_idx++], current_filepath);
 	}
 
-	output.SetCardinality(batch.size());
+	output.SetChildCardinality(batch.size());
 }
 
 TableFunction ReadAlignmentsTableFunction::GetFunction() {

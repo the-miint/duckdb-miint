@@ -442,7 +442,7 @@ void SylphProfileTableFunction::Execute(ClientContext &context, TableFunctionInp
 			gstate.profile_done = true;
 		}
 		idx_t emitted = EmitFromArrow(gstate.arrow, output, /*start_col=*/0, context);
-		output.SetCardinality(emitted);
+		output.SetChildCardinality(emitted);
 		return;
 	}
 
@@ -459,13 +459,13 @@ void SylphProfileTableFunction::Execute(ClientContext &context, TableFunctionInp
 		idx_t emitted = EmitFromArrow(lstate.arrow, output, /*start_col=*/1, context);
 		if (emitted > 0) {
 			output.data[0].Reference(lstate.sample_value, count_t(emitted));
-			output.SetCardinality(emitted);
+			output.SetChildCardinality(emitted);
 			return;
 		}
 
 		idx_t sample_idx = 0;
 		if (!ClaimNextSample(gstate, num_samples, sample_idx)) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		lstate.sample_value = data.sample_info.sample_values[sample_idx];

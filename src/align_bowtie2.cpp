@@ -541,7 +541,7 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 			continue;
 		}
 		const idx_t to_emit = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
-		output.SetCardinality(to_emit);
+		output.SetChildCardinality(to_emit);
 		bt2_daemon::EmitChunkRows(output, to_emit, gs.row_in_batch, batch, bd.query_id_type, bd.subject_id_type);
 		gs.row_in_batch += to_emit;
 		return;
@@ -554,7 +554,7 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 	bt2_daemon::QueryBatch qb;
 	while (true) {
 		if (!FetchNextQueryBatch(gs, bd, qb)) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		if (qb.read_ids.empty()) {
@@ -574,7 +574,7 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 	}
 	const idx_t total = static_cast<idx_t>(batch.length);
 	const idx_t to_emit = MinValue<idx_t>(total, STANDARD_VECTOR_SIZE);
-	output.SetCardinality(to_emit);
+	output.SetChildCardinality(to_emit);
 	bt2_daemon::EmitChunkRows(output, to_emit, 0, batch, bd.query_id_type, bd.subject_id_type);
 	gs.row_in_batch = to_emit;
 }

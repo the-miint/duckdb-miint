@@ -167,7 +167,7 @@ void ENAExperimentsInsert::AppendReturningRows(ColumnDataCollection &return_coll
 		chunk.data[COL_INSTRUMENT_MODEL].SetValue(idx, Value(spec.instrument_model));
 		chunk.data[COL_ERX_ACCESSION].SetValue(idx, row.erx_accession.empty() ? Value(LogicalType::VARCHAR)
 		                                                                      : Value(row.erx_accession));
-		chunk.SetCardinality(idx + 1);
+		chunk.SetChildCardinality(idx + 1);
 		if (chunk.size() == STANDARD_VECTOR_SIZE) {
 			return_collection.Append(chunk);
 			chunk.Reset();

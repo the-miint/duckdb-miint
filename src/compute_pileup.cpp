@@ -259,7 +259,7 @@ static void EmitPileupRows(DataChunk &output, const std::vector<miint::PileupRow
 		}
 	}
 
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
@@ -279,7 +279,7 @@ static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChun
 		gstate.buffer_offset = 0;
 
 		if (gstate.stream_exhausted) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 
@@ -290,12 +290,12 @@ static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChun
 				                            gstate.alignment_stream->GetError());
 			}
 			gstate.stream_exhausted = true;
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		if (chunk->size() == 0) {
 			gstate.stream_exhausted = true;
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 

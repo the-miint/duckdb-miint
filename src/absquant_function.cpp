@@ -220,7 +220,7 @@ void AbsQuantFitExecute(ClientContext &, TableFunctionInput &data_p, DataChunk &
 		intercept_stderr[r] = model.fit.intercept_stderr;
 	}
 	g.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 } // namespace

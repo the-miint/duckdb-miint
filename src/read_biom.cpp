@@ -151,7 +151,7 @@ void ReadBIOMTableFunction::Execute(ClientContext &context, TableFunctionInput &
 		bool got_file = local_state.GetNextFile(global_state);
 		if (!got_file) {
 			// No more files to process
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		// GetNextFile resets current_row to 0 and loads new table
@@ -172,7 +172,7 @@ void ReadBIOMTableFunction::Execute(ClientContext &context, TableFunctionInput &
 		SetResultVectorFilepath(result_vector, local_state.path, n_rows);
 	}
 
-	output.SetCardinality(n_rows);
+	output.SetChildCardinality(n_rows);
 	local_state.current_row += n_rows;
 }
 

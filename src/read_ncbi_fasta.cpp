@@ -278,7 +278,7 @@ void ReadNCBIFastaTableFunction::Execute(ClientContext &context, TableFunctionIn
 	// If current batch is exhausted, fetch next work unit.
 	while (global_state.current_batch.empty() || global_state.batch_offset >= global_state.current_batch.size()) {
 		if (!global_state.FetchNextBatch(context)) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 	}
@@ -342,7 +342,7 @@ void ReadNCBIFastaTableFunction::Execute(ClientContext &context, TableFunctionIn
 	}
 
 	global_state.batch_offset += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 TableFunction ReadNCBIFastaTableFunction::GetFunction() {

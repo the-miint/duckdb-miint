@@ -173,7 +173,7 @@ unique_ptr<GlobalTableFunctionState> InitLifecycleGlobal(ClientContext &, TableF
 void ExecuteLifecycle(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
 	auto &gs = data.global_state->Cast<LifecycleGlobalState>();
 	if (gs.emitted) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 	auto &bd = data.bind_data->Cast<LifecycleBindData>();
@@ -313,7 +313,7 @@ void ExecuteLifecycle(ClientContext &context, TableFunctionInput &data, DataChun
 		throw InvalidInputException("%s: %s", bd.fn_name, detail);
 	}
 
-	output.SetCardinality(1);
+	output.SetChildCardinality(1);
 
 	const auto &o = gs.outcome;
 	output.data[0].SetValue(0, Value(string(ActionName(o.action))));

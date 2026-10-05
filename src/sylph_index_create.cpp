@@ -378,7 +378,7 @@ void SylphIndexCreateTableFunction::Execute(ClientContext &, TableFunctionInput 
 	auto &gstate = data_p.global_state->Cast<GlobalState>();
 
 	if (gstate.done) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
@@ -392,7 +392,7 @@ void SylphIndexCreateTableFunction::Execute(ClientContext &, TableFunctionInput 
 	output.data[3].SetValue(0, Value::UBIGINT(gstate.num_genomes));
 	output.data[4].SetValue(0, Value("ok"));
 
-	output.SetCardinality(1);
+	output.SetChildCardinality(1);
 	gstate.done = true;
 }
 

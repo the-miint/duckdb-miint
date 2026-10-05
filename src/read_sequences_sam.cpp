@@ -118,7 +118,7 @@ void ReadSequencesSamTableFunction::Execute(ClientContext &context, TableFunctio
 			lock_guard<mutex> read_lock(global_state.lock);
 
 			if (global_state.next_file_idx >= global_state.readers.size()) {
-				output.SetCardinality(0);
+				output.SetChildCardinality(0);
 				return;
 			}
 
@@ -219,7 +219,7 @@ void ReadSequencesSamTableFunction::Execute(ClientContext &context, TableFunctio
 		SetResultVectorFilepath(output.data[7], current_filepath);
 	}
 
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 TableFunction ReadSequencesSamTableFunction::GetFunction() {

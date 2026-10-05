@@ -752,7 +752,7 @@ void KreppIndexCreateTableFunction::Execute(ClientContext &context, TableFunctio
 	auto &gstate = data_p.global_state->Cast<GlobalState>();
 
 	if (gstate.done) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
@@ -762,7 +762,7 @@ void KreppIndexCreateTableFunction::Execute(ClientContext &context, TableFunctio
 	output.data[3].SetValue(0, Value::INTEGER(gstate.h));
 	output.data[4].SetValue(0, Value::BIGINT(gstate.num_references));
 	output.data[5].SetValue(0, Value("ok"));
-	output.SetCardinality(1);
+	output.SetChildCardinality(1);
 	gstate.done = true;
 }
 

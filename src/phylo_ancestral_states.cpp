@@ -98,7 +98,7 @@ void PhyloAncestralStatesTableFunction::Execute(ClientContext &context, TableFun
 	auto &gstate = data_p.global_state->Cast<GlobalState>();
 
 	if (gstate.current_row_idx >= gstate.rows.size()) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
@@ -122,7 +122,7 @@ void PhyloAncestralStatesTableFunction::Execute(ClientContext &context, TableFun
 	}
 
 	gstate.current_row_idx += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 TableFunction PhyloAncestralStatesTableFunction::GetFunction() {

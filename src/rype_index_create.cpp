@@ -397,7 +397,7 @@ void RypeIndexCreateTableFunction::Execute(ClientContext &context, TableFunction
 	auto &gstate = data_p.global_state->Cast<GlobalState>();
 
 	if (gstate.done) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
@@ -406,7 +406,7 @@ void RypeIndexCreateTableFunction::Execute(ClientContext &context, TableFunction
 	output.data[2].SetValue(0, Value::INTEGER(bind_data.w));
 	output.data[3].SetValue(0, Value("ok"));
 
-	output.SetCardinality(1);
+	output.SetChildCardinality(1);
 	gstate.done = true;
 }
 

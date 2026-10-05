@@ -180,7 +180,7 @@ void PlaceKreppTableFunction::Execute(ClientContext &context, TableFunctionInput
 	while (lstate.emitted >= lstate.pending.size()) {
 		auto batch = gstate.stream->FetchSubBatch();
 		if (batch.size() == 0) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		std::vector<miint::KreppQuery> queries;
@@ -237,7 +237,7 @@ void PlaceKreppTableFunction::Execute(ClientContext &context, TableFunctionInput
 		distance_out[row] = placement.distance;
 	}
 	lstate.emitted += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 void PlaceKreppTableFunction::Register(ExtensionLoader &loader) {

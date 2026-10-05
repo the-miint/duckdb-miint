@@ -547,7 +547,7 @@ void ProcrustesExecute(ClientContext &, TableFunctionInput &data_p, DataChunk &o
 		}
 	}
 	gstate.cursor += n;
-	output.SetCardinality(n);
+	output.SetChildCardinality(n);
 }
 
 } // namespace

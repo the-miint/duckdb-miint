@@ -133,7 +133,7 @@ void ReadENASearchableFieldsTableFunction::Execute(ClientContext &context, Table
 	idx_t remaining = global.rows.size() - global.offset;
 	idx_t count = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
 	if (count == 0) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
@@ -154,7 +154,7 @@ void ReadENASearchableFieldsTableFunction::Execute(ClientContext &context, Table
 	}
 
 	global.offset += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 // ---- Registration ----

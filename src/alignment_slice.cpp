@@ -334,7 +334,7 @@ void AlignmentSliceTableFunction::Execute(ClientContext &context, TableFunctionI
 		out_row++;
 	}
 
-	output.SetCardinality(out_row);
+	output.SetChildCardinality(out_row);
 }
 
 void AlignmentSliceTableFunction::Register(ExtensionLoader &loader) {

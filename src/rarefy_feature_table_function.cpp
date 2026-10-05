@@ -178,7 +178,7 @@ void RarefyExecute(ClientContext &, TableFunctionInput &input, DataChunk &output
 	auto &gstate = input.global_state->Cast<RarefyGlobalState>();
 	const idx_t total = gstate.rows.size();
 	if (gstate.cursor >= total) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 	const idx_t n = std::min<idx_t>(STANDARD_VECTOR_SIZE, total - gstate.cursor);
@@ -196,7 +196,7 @@ void RarefyExecute(ClientContext &, TableFunctionInput &input, DataChunk &output
 		value_data[i] = r.count;
 	}
 	gstate.cursor += n;
-	output.SetCardinality(n);
+	output.SetChildCardinality(n);
 }
 
 } // namespace

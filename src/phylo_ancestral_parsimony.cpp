@@ -264,7 +264,7 @@ void PhyloAncestralParsimonyTableFunction::Execute(ClientContext &context, Table
 	auto &gstate = data_p.global_state->Cast<GlobalState>();
 
 	if (gstate.current_row_idx >= gstate.rows.size()) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
@@ -286,7 +286,7 @@ void PhyloAncestralParsimonyTableFunction::Execute(ClientContext &context, Table
 	}
 
 	gstate.current_row_idx += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 void PhyloAncestralParsimonyTableFunction::Register(ExtensionLoader &loader) {

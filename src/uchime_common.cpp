@@ -25,7 +25,7 @@ idx_t OutputUchimeResults(DataChunk &output, const std::vector<miint::UchimeResu
                           const LogicalType &read_id_type, const LogicalType &parent_type, idx_t start_col) {
 	idx_t actual = std::min(count, static_cast<idx_t>(results.size()) - offset);
 	if (actual == 0) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return 0;
 	}
 
@@ -143,7 +143,7 @@ idx_t OutputUchimeResults(DataChunk &output, const std::vector<miint::UchimeResu
 	// so the two forms are equivalent — but this form stays honest about what
 	// this function owns regardless of the caller's extra columns.)
 	D_ASSERT(col == start_col + 18);
-	output.SetCardinality(actual);
+	output.SetChildCardinality(actual);
 	return actual;
 }
 

@@ -170,7 +170,7 @@ static void PeakPairExecute(ClientContext &context, TableFunctionInput &input, D
 		output.Reference(*lstate.current_chunk);
 		return;
 	}
-	output.SetCardinality(0);
+	output.SetChildCardinality(0);
 }
 
 void MzmlPeakPairFunction::Register(ExtensionLoader &loader) {

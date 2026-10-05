@@ -152,7 +152,7 @@ void PickAnchorsExecute(ClientContext &, TableFunctionInput &input, DataChunk &o
 	auto &gstate = input.global_state->Cast<PickAnchorsGlobalState>();
 	const idx_t total = gstate.anchors.size();
 	if (gstate.cursor >= total) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 	const idx_t n = MinValue<idx_t>(STANDARD_VECTOR_SIZE, total - gstate.cursor);
@@ -164,7 +164,7 @@ void PickAnchorsExecute(ClientContext &, TableFunctionInput &input, DataChunk &o
 		EmitIdCell(sample_id_vec, i, gstate.anchors[gstate.cursor + i], gstate.sample_id_type);
 	}
 	gstate.cursor += n;
-	output.SetCardinality(n);
+	output.SetChildCardinality(n);
 }
 
 } // namespace

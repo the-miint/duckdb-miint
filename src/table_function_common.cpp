@@ -338,7 +338,7 @@ void PopulateSpectrumBatchOutput(DataChunk &output, const miint::MzMLSpectrumBat
 	if (include_filepath) {
 		SetResultVectorFilepath(output.data[col++], filepath);
 	}
-	output.SetCardinality(batch.size());
+	output.SetChildCardinality(batch.size());
 }
 
 void GetListUInt8Slice(Vector &list_vec, UnifiedVectorFormat &list_data, idx_t row_idx, const uint8_t *&out_data,

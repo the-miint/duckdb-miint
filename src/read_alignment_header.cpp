@@ -105,7 +105,7 @@ void ReadAlignmentHeaderTableFunction::Execute(ClientContext &, TableFunctionInp
 	}
 
 	gstate.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 TableFunction ReadAlignmentHeaderTableFunction::GetFunction() {

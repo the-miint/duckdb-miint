@@ -471,7 +471,7 @@ void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFun
 			auto active = ClaimWork(context, global_state, bind_data, local_state);
 			if (!active) {
 				// No more shards to process
-				output.SetCardinality(0);
+				output.SetChildCardinality(0);
 				return;
 			}
 			local_state.current_active_shard = active;

@@ -300,7 +300,7 @@ void ReadNCBITaxdumpTableFunction::Execute(ClientContext &, TableFunctionInput &
 	}
 
 	gstate.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 void ReadNCBITaxdumpTableFunction::Register(ExtensionLoader &loader) {
@@ -361,7 +361,7 @@ void ReadNCBITaxdumpMergedTableFunction::Execute(ClientContext &, TableFunctionI
 	}
 
 	gstate.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 void ReadNCBITaxdumpMergedTableFunction::Register(ExtensionLoader &loader) {
@@ -425,7 +425,7 @@ void ReadNCBITaxdumpNamesTableFunction::Execute(ClientContext &, TableFunctionIn
 	}
 
 	gstate.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 void ReadNCBITaxdumpNamesTableFunction::Register(ExtensionLoader &loader) {
@@ -483,7 +483,7 @@ void ReadNCBITaxdumpDeletedTableFunction::Execute(ClientContext &, TableFunction
 	}
 
 	gstate.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 void ReadNCBITaxdumpDeletedTableFunction::Register(ExtensionLoader &loader) {

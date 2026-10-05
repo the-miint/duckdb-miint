@@ -35,7 +35,7 @@ static idx_t OutputClusterResults(DataChunk &output, const std::vector<miint::Cl
                                   idx_t count, const LogicalType &id_type) {
 	idx_t actual = std::min(count, static_cast<idx_t>(results.size()) - offset);
 	if (actual == 0) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return 0;
 	}
 
@@ -78,7 +78,7 @@ static idx_t OutputClusterResults(DataChunk &output, const std::vector<miint::Cl
 	}
 
 	D_ASSERT(col == output.ColumnCount());
-	output.SetCardinality(actual);
+	output.SetChildCardinality(actual);
 	return actual;
 }
 
@@ -172,7 +172,7 @@ void ClusterSequencesTableFunction::Execute(ClientContext &context, TableFunctio
 	auto &gstate = data_p.global_state->Cast<GlobalState>();
 
 	if (gstate.result_offset >= gstate.results.size()) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 

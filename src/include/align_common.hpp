@@ -267,7 +267,7 @@ inline idx_t OutputSAMRecordBatch(DataChunk &output, const miint::SAMRecordBatch
 		}
 	}
 
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 	return count;
 }
 

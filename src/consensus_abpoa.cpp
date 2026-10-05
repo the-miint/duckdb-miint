@@ -160,7 +160,7 @@ static void EmitConsensusRows(const ConsensusAbpoaData &data, ConsensusAbpoaLoca
 	}
 
 	lstate.current_row += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 static void ConsensusAbpoaExecute(ClientContext & /*context*/, TableFunctionInput &data_p, DataChunk &output) {
@@ -170,7 +170,7 @@ static void ConsensusAbpoaExecute(ClientContext & /*context*/, TableFunctionInpu
 
 	if (!data.has_sample_id) {
 		if (lstate.current_row >= gstate.entries.size()) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		EmitConsensusRows(data, lstate, gstate.entries, output);
@@ -184,7 +184,7 @@ static void ConsensusAbpoaExecute(ClientContext & /*context*/, TableFunctionInpu
 		}
 		idx_t sample_idx;
 		if (!ClaimNextSample(gstate, data.sample_info.sample_values.size(), sample_idx)) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		lstate.sample_value = data.sample_info.sample_values[sample_idx];

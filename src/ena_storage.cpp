@@ -218,10 +218,10 @@ void ENASubmissionLogScan(ClientContext &, TableFunctionInput &data, DataChunk &
 	const idx_t available = state.snapshot.size() - state.cursor;
 	const idx_t produce = MinValue<idx_t>(STANDARD_VECTOR_SIZE, available);
 	if (produce == 0) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
-	output.SetCardinality(produce);
+	output.SetChildCardinality(produce);
 
 	auto submission_id = FlatVector::GetDataMutable<string_t>(output.data[0]);
 	auto submitted_at = FlatVector::GetDataMutable<timestamp_tz_t>(output.data[1]);

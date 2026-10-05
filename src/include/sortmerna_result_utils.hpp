@@ -52,7 +52,7 @@ inline void OutputSortMeRNARRNABatch(DataChunk &output, const miint::SortMeRNARe
 	SetAlignResultDouble(output.data[col++], batch.coverages, offset, count);
 	SetAlignResultInt32(output.data[col++], batch.edit_distances, offset, count);
 	SetAlignResultInt32(output.data[col++], batch.segment_indices, offset, count);
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 // Project a SortMeRNAResultBatch slice onto the shared SAM output schema
@@ -244,7 +244,7 @@ inline void OutputSortMeRNASamBatch(DataChunk &output, const miint::SortMeRNARes
 	EmitIdColumnFromStrings(reference_vec, emit_references, 0, count, subject_id_type);
 	EmitIdColumnFromStrings(mate_reference_vec, emit_mate_references, 0, count, subject_id_type);
 
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 } // namespace duckdb

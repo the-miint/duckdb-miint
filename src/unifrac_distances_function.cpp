@@ -250,7 +250,7 @@ void UnifracDistancesExecute(ClientContext &, TableFunctionInput &input, DataChu
 	auto &gstate = input.global_state->Cast<UnifracDistancesGlobalState>();
 
 	if (gstate.finished) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
@@ -300,7 +300,7 @@ void UnifracDistancesExecute(ClientContext &, TableFunctionInput &input, DataChu
 		}
 	}
 
-	output.SetCardinality(out_n);
+	output.SetChildCardinality(out_n);
 }
 
 } // namespace

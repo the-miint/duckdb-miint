@@ -166,7 +166,7 @@ BuildExtractionInputStream(ClientContext &context, const RypeExtractData &bind_d
 static void ExecuteExtraction(RypeExtractGlobalState &gstate, RypeExtractLocalState &lstate, DataChunk &output,
                               idx_t num_list_cols) {
 	if (gstate.done) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
@@ -185,7 +185,7 @@ static void ExecuteExtraction(RypeExtractGlobalState &gstate, RypeExtractLocalSt
 
 		if (!wrapper->arrow_array.release) {
 			gstate.done = true;
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 
@@ -196,7 +196,7 @@ static void ExecuteExtraction(RypeExtractGlobalState &gstate, RypeExtractLocalSt
 	auto &batch = gstate.current_chunk->arrow_array;
 	idx_t remaining = static_cast<idx_t>(batch.length) - gstate.batch_offset;
 	idx_t to_output = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
-	output.SetCardinality(to_output);
+	output.SetChildCardinality(to_output);
 
 	// Column 0: id (Int64) → read_id (mirrors id_column type) — manual transformation.
 	// Offset calculation follows rype_classify pattern: parent batch offset + child array offset.

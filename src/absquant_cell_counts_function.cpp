@@ -314,7 +314,7 @@ void AbsQuantCellCountsExecute(ClientContext &, TableFunctionInput &data_p, Data
 		value[r] = cell.value;
 	}
 	g.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 } // namespace

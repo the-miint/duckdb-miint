@@ -237,7 +237,7 @@ protected:
 	                                 OperatorSourceInput &input) const override {
 		auto &gs = input.global_state.Cast<GlobalState>();
 		if (gs.emitted) {
-			chunk.SetCardinality(0);
+			chunk.SetChildCardinality(0);
 			return SourceResultType::FINISHED;
 		}
 
@@ -372,7 +372,7 @@ protected:
 		// successful CANCEL as a single row deleted — matches the user's
 		// mental model of `DELETE … WHERE accession='X'` even though our
 		// catalog is virtual.
-		chunk.SetCardinality(1);
+		chunk.SetChildCardinality(1);
 		chunk.data[0].SetValue(0, Value::BIGINT(1));
 		return SourceResultType::FINISHED;
 	}

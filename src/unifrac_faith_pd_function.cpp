@@ -256,7 +256,7 @@ void UnifracFaithPdExecute(ClientContext &, TableFunctionInput &input, DataChunk
 	auto &gstate = input.global_state->Cast<UnifracFaithPdGlobalState>();
 	const idx_t total = gstate.rows.size();
 	if (gstate.cursor >= total) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 	const idx_t remaining = total - gstate.cursor;
@@ -275,7 +275,7 @@ void UnifracFaithPdExecute(ClientContext &, TableFunctionInput &input, DataChunk
 		faith_pd_data[i] = r.faith_pd;
 	}
 	gstate.cursor += n;
-	output.SetCardinality(n);
+	output.SetChildCardinality(n);
 }
 
 } // namespace

@@ -293,7 +293,7 @@ static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChun
 	auto &gstate = data_p.global_state->Cast<MatchGlobalState>();
 
 	if (gstate.hit_offset >= gstate.hits.size()) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
@@ -313,7 +313,7 @@ static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChun
 		nm_data[i] = hit.nm;
 	}
 
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 	gstate.hit_offset += count;
 }
 

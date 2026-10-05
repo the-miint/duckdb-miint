@@ -185,7 +185,7 @@ void CommunityDistExecute(ClientContext &, TableFunctionInput &data_p, DataChunk
 		dd[r] = g.dist[k];
 	}
 	g.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 } // namespace

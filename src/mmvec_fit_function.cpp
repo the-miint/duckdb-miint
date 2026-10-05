@@ -370,7 +370,7 @@ void MmvecFitExecute(ClientContext &, TableFunctionInput &data_p, DataChunk &out
 	}
 
 	g.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 } // namespace

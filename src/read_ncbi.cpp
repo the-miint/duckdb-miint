@@ -217,7 +217,7 @@ void ReadNCBITableFunction::Execute(ClientContext &context, TableFunctionInput &
 		global_state.metadata_results.clear();
 		global_state.result_offset = 0;
 		if (!global_state.FetchNextBatch(context)) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 	}
@@ -258,7 +258,7 @@ void ReadNCBITableFunction::Execute(ClientContext &context, TableFunctionInput &
 	}
 
 	global_state.result_offset += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 TableFunction ReadNCBITableFunction::GetFunction() {

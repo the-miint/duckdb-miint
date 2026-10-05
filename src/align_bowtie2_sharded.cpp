@@ -1051,7 +1051,7 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 				continue;
 			}
 			const idx_t to_emit = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
-			output.SetCardinality(to_emit);
+			output.SetChildCardinality(to_emit);
 			bt2_daemon::EmitChunkRows(output, to_emit, local.row_in_batch, batch, bd.query_id_type, bd.subject_id_type);
 			if (bd.include_shard_name) {
 				FillShardNameColumn(output, to_emit, local.current_shard_name);
@@ -1163,7 +1163,7 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 		//    without re-checking that invariant.
 		const idx_t shard_idx = gs.next_shard_idx.fetch_add(1, std::memory_order_relaxed);
 		if (shard_idx >= bd.shards.size()) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		local.current_shard_idx = shard_idx;

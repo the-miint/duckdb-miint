@@ -859,7 +859,7 @@ void Execute(ClientContext &, TableFunctionInput &data_p, DataChunk &output) {
 	auto &gs = data_p.global_state->Cast<ENAUploadReadsGlobalState>();
 	const idx_t remaining = gs.emitted.size() - gs.emit_cursor;
 	if (remaining == 0) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 	const idx_t to_emit = std::min<idx_t>(remaining, STANDARD_VECTOR_SIZE);
@@ -881,7 +881,7 @@ void Execute(ClientContext &, TableFunctionInput &data_p, DataChunk &output) {
 		layout_v[i] = StringVector::AddString(output.data[5], row.layout_name);
 	}
 	gs.emit_cursor += to_emit;
-	output.SetCardinality(to_emit);
+	output.SetChildCardinality(to_emit);
 }
 
 } // namespace

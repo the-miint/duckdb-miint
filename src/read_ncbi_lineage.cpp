@@ -208,7 +208,7 @@ void ReadNCBILineageTableFunction::Execute(ClientContext &context, TableFunction
 		global_state.results.clear();
 		global_state.result_offset = 0;
 		if (!global_state.FetchNextBatch(context)) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 	}
@@ -235,7 +235,7 @@ void ReadNCBILineageTableFunction::Execute(ClientContext &context, TableFunction
 	}
 
 	global_state.result_offset += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 TableFunction ReadNCBILineageTableFunction::GetFunction() {

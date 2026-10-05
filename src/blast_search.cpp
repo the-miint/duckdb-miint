@@ -171,7 +171,7 @@ static void OutputBlastHits(DataChunk &output, const std::vector<miint::BlastHit
 		FlatVector::GetDataMutable<double>(output.data[10])[i] = hit.evalue;
 		FlatVector::GetDataMutable<double>(output.data[11])[i] = hit.bit_score;
 	}
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 void BlastSearchTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
@@ -185,7 +185,7 @@ void BlastSearchTableFunction::Execute(ClientContext &context, TableFunctionInpu
 		gstate.result_buffer.clear();
 		gstate.result_offset = 0;
 		if (!gstate.FetchNextBatch(context)) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 	}

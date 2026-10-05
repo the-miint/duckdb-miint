@@ -240,7 +240,7 @@ void RypeLogRatioTableFunction::Execute(ClientContext &context, TableFunctionInp
 	auto &lstate = data_p.local_state->Cast<LocalState>();
 
 	if (gstate.done) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
@@ -261,7 +261,7 @@ void RypeLogRatioTableFunction::Execute(ClientContext &context, TableFunctionInp
 		// Check if stream is exhausted
 		if (!wrapper->arrow_array.release) {
 			gstate.done = true;
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 
@@ -273,7 +273,7 @@ void RypeLogRatioTableFunction::Execute(ClientContext &context, TableFunctionInp
 	idx_t remaining = static_cast<idx_t>(batch.length) - gstate.batch_offset;
 	idx_t to_output = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
 
-	output.SetCardinality(to_output);
+	output.SetChildCardinality(to_output);
 
 	// RYpe output schema: query_id (Int64), log_ratio (Float64), fast_path (Int32)
 	// Our output schema: read_id (VARCHAR), log_ratio (DOUBLE), fast_path (INTEGER)
