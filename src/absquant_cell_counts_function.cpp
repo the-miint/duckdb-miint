@@ -304,7 +304,7 @@ void AbsQuantCellCountsExecute(ClientContext &, TableFunctionInput &data_p, Data
 
 	auto &sample_id = output.data[0];
 	auto &feature_id = output.data[1];
-	auto value = FlatVector::GetData<double>(output.data[2]);
+	auto value = FlatVector::GetDataMutable<double>(output.data[2]);
 
 	for (idx_t r = 0; r < count; ++r) {
 		const auto &cell = g.values[g.cursor + r];

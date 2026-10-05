@@ -175,7 +175,7 @@ void CommunityDistExecute(ClientContext &, TableFunctionInput &data_p, DataChunk
 
 	auto &va = output.data[0];
 	auto &vb = output.data[1];
-	auto dd = FlatVector::GetData<double>(output.data[2]);
+	auto dd = FlatVector::GetDataMutable<double>(output.data[2]);
 
 	for (idx_t r = 0; r < count; ++r) {
 		const idx_t k = g.cursor + r;

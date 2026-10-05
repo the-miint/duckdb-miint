@@ -126,7 +126,7 @@ void ClusterKmeansExecute(ClientContext &, TableFunctionInput &data_p, DataChunk
 	const idx_t count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, total - g.cursor);
 
 	auto &sid_vec = output.data[0];
-	auto cluster = FlatVector::GetData<int32_t>(output.data[1]);
+	auto cluster = FlatVector::GetDataMutable<int32_t>(output.data[1]);
 	for (idx_t r = 0; r < count; ++r) {
 		const idx_t k = g.cursor + r;
 		EmitIdCell(sid_vec, r, g.sample_ids[k], g.sample_id_type);

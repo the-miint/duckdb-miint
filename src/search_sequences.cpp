@@ -56,42 +56,42 @@ static idx_t OutputSearchResults(DataChunk &output, const std::vector<miint::Sea
 		EmitIdCell(target_vec, i, results[offset + i].target_id, target_id_type);
 	}
 
-	auto identity_data = FlatVector::GetData<double>(output.data[col++]);
+	auto identity_data = FlatVector::GetDataMutable<double>(output.data[col++]);
 	for (idx_t i = 0; i < actual; i++) {
 		identity_data[i] = results[offset + i].identity;
 	}
 
-	auto matches_data = FlatVector::GetData<int32_t>(output.data[col++]);
+	auto matches_data = FlatVector::GetDataMutable<int32_t>(output.data[col++]);
 	for (idx_t i = 0; i < actual; i++) {
 		matches_data[i] = results[offset + i].matches;
 	}
 
-	auto mismatches_data = FlatVector::GetData<int32_t>(output.data[col++]);
+	auto mismatches_data = FlatVector::GetDataMutable<int32_t>(output.data[col++]);
 	for (idx_t i = 0; i < actual; i++) {
 		mismatches_data[i] = results[offset + i].mismatches;
 	}
 
-	auto gaps_data = FlatVector::GetData<int32_t>(output.data[col++]);
+	auto gaps_data = FlatVector::GetDataMutable<int32_t>(output.data[col++]);
 	for (idx_t i = 0; i < actual; i++) {
 		gaps_data[i] = results[offset + i].gaps;
 	}
 
-	auto alnlen_data = FlatVector::GetData<int32_t>(output.data[col++]);
+	auto alnlen_data = FlatVector::GetDataMutable<int32_t>(output.data[col++]);
 	for (idx_t i = 0; i < actual; i++) {
 		alnlen_data[i] = results[offset + i].alignment_length;
 	}
 
-	auto qlen_data = FlatVector::GetData<int32_t>(output.data[col++]);
+	auto qlen_data = FlatVector::GetDataMutable<int32_t>(output.data[col++]);
 	for (idx_t i = 0; i < actual; i++) {
 		qlen_data[i] = results[offset + i].query_length;
 	}
 
-	auto tlen_data = FlatVector::GetData<int32_t>(output.data[col++]);
+	auto tlen_data = FlatVector::GetDataMutable<int32_t>(output.data[col++]);
 	for (idx_t i = 0; i < actual; i++) {
 		tlen_data[i] = results[offset + i].target_length;
 	}
 
-	auto accepted_data = FlatVector::GetData<bool>(output.data[col++]);
+	auto accepted_data = FlatVector::GetDataMutable<bool>(output.data[col++]);
 	for (idx_t i = 0; i < actual; i++) {
 		accepted_data[i] = results[offset + i].accepted;
 	}

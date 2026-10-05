@@ -137,7 +137,7 @@ void ReadSequencesSFFTableFunction::Execute(ClientContext &context, TableFunctio
 
 	// Set sequence_index column
 	auto &sequence_index_vector = output.data[0];
-	auto sequence_index_data = FlatVector::GetData<int64_t>(sequence_index_vector);
+	auto sequence_index_data = FlatVector::GetDataMutable<int64_t>(sequence_index_vector);
 	for (idx_t j = 0; j < batch.size(); j++) {
 		sequence_index_data[j] = static_cast<int64_t>(start_sequence_index + j);
 	}

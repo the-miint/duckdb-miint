@@ -253,10 +253,10 @@ void UnifracDistancesExecute(ClientContext &, TableFunctionInput &input, DataChu
 		return;
 	}
 
-	auto iter_data = FlatVector::GetData<int32_t>(output.data[0]);
+	auto iter_data = FlatVector::GetDataMutable<int32_t>(output.data[0]);
 	auto &sample_a_vec = output.data[1];
 	auto &sample_b_vec = output.data[2];
-	auto dist_data = FlatVector::GetData<double>(output.data[3]);
+	auto dist_data = FlatVector::GetDataMutable<double>(output.data[3]);
 	const LogicalType &id_type = data.sample_id_out_type;
 
 	idx_t out_n = 0;

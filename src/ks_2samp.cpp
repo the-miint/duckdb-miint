@@ -91,8 +91,8 @@ void KsTwoSampleScalarFunction(DataChunk &args, ExpressionState &state, Vector &
 	}
 
 	auto &entries = StructVector::GetEntries(result);
-	auto statistic_data = FlatVector::GetData<double>(*entries[0]);
-	auto pvalue_data = FlatVector::GetData<double>(*entries[1]);
+	auto statistic_data = FlatVector::GetDataMutable<double>(entries[0]);
+	auto pvalue_data = FlatVector::GetDataMutable<double>(entries[1]);
 
 	// Hoisted: the payload pointer does not change per row.
 	auto method_values = has_method ? UnifiedVectorFormat::GetData<string_t>(method_fmt) : nullptr;

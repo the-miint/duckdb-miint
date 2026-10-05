@@ -229,13 +229,17 @@ void ReadNCBITableFunction::Execute(ClientContext &context, TableFunctionInput &
 	for (idx_t i = 0; i < count; i++) {
 		const auto &meta = global_state.metadata_results[offset + i];
 
-		FlatVector::GetData<string_t>(output.data[0])[i] = StringVector::AddString(output.data[0], meta.accession);
-		FlatVector::GetData<int32_t>(output.data[1])[i] = meta.version;
-		FlatVector::GetData<string_t>(output.data[2])[i] = StringVector::AddString(output.data[2], meta.description);
-		FlatVector::GetData<string_t>(output.data[3])[i] = StringVector::AddString(output.data[3], meta.organism);
-		FlatVector::GetData<int64_t>(output.data[4])[i] = meta.taxonomy_id;
-		FlatVector::GetData<int64_t>(output.data[5])[i] = meta.length;
-		FlatVector::GetData<string_t>(output.data[6])[i] = StringVector::AddString(output.data[6], meta.molecule_type);
+		FlatVector::GetDataMutable<string_t>(output.data[0])[i] =
+		    StringVector::AddString(output.data[0], meta.accession);
+		FlatVector::GetDataMutable<int32_t>(output.data[1])[i] = meta.version;
+		FlatVector::GetDataMutable<string_t>(output.data[2])[i] =
+		    StringVector::AddString(output.data[2], meta.description);
+		FlatVector::GetDataMutable<string_t>(output.data[3])[i] =
+		    StringVector::AddString(output.data[3], meta.organism);
+		FlatVector::GetDataMutable<int64_t>(output.data[4])[i] = meta.taxonomy_id;
+		FlatVector::GetDataMutable<int64_t>(output.data[5])[i] = meta.length;
+		FlatVector::GetDataMutable<string_t>(output.data[6])[i] =
+		    StringVector::AddString(output.data[6], meta.molecule_type);
 
 		if (!meta.update_date.empty()) {
 			date_t date;
@@ -243,12 +247,12 @@ void ReadNCBITableFunction::Execute(ClientContext &context, TableFunctionInput &
 			bool special;
 			auto result = Date::TryConvertDate(meta.update_date.c_str(), meta.update_date.size(), pos, date, special);
 			if (result == DateCastResult::SUCCESS) {
-				FlatVector::GetData<date_t>(output.data[7])[i] = date;
+				FlatVector::GetDataMutable<date_t>(output.data[7])[i] = date;
 			} else {
-				FlatVector::Validity(output.data[7]).SetInvalid(i);
+				FlatVector::ValidityMutable(output.data[7]).SetInvalid(i);
 			}
 		} else {
-			FlatVector::Validity(output.data[7]).SetInvalid(i);
+			FlatVector::ValidityMutable(output.data[7]).SetInvalid(i);
 		}
 	}
 

@@ -520,7 +520,7 @@ void ReadENASequencesTableFunction::FillOutputFromBatch(DataChunk &output, const
 	idx_t field_idx = 0;
 
 	// sequence_index (column 0)
-	auto seq_idx_data = FlatVector::GetData<int64_t>(output.data[field_idx++]);
+	auto seq_idx_data = FlatVector::GetDataMutable<int64_t>(output.data[field_idx++]);
 	for (idx_t i = 0; i < count; i++) {
 		seq_idx_data[i] = static_cast<int64_t>(seq_counter++);
 	}

@@ -184,7 +184,7 @@ void RarefyExecute(ClientContext &, TableFunctionInput &input, DataChunk &output
 
 	auto &sample_id_vec = output.data[0];
 	auto &feature_id_vec = output.data[1];
-	auto value_data = FlatVector::GetData<double>(output.data[2]);
+	auto value_data = FlatVector::GetDataMutable<double>(output.data[2]);
 
 	for (idx_t i = 0; i < n; ++i) {
 		const auto &r = gstate.rows[gstate.cursor + i];

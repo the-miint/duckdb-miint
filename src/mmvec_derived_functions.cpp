@@ -287,8 +287,8 @@ void MmvecRanksExecute(ClientContext &, TableFunctionInput &data_p, DataChunk &o
 
 	auto &v_x = output.data[0];
 	auto &v_y = output.data[1];
-	auto rank = FlatVector::GetData<double>(output.data[2]);
-	auto prob = FlatVector::GetData<double>(output.data[3]);
+	auto rank = FlatVector::GetDataMutable<double>(output.data[2]);
+	auto prob = FlatVector::GetDataMutable<double>(output.data[3]);
 
 	// The output is row-major over (X feature, Y feature), so within a chunk the X id
 	// repeats for up to d2 consecutive rows while the Y id never repeats. Emitting the
@@ -404,7 +404,7 @@ void MmvecPredictExecute(ClientContext &, TableFunctionInput &data_p, DataChunk 
 
 	auto &v_sample = output.data[0];
 	auto &v_y = output.data[1];
-	auto proportion = FlatVector::GetData<double>(output.data[2]);
+	auto proportion = FlatVector::GetDataMutable<double>(output.data[2]);
 
 	for (idx_t r = 0; r < count; ++r) {
 		const idx_t k = g.cursor + r;
@@ -484,7 +484,7 @@ void MmvecScoreExecute(ClientContext &, TableFunctionInput &data_p, DataChunk &o
 		output.SetCardinality(0);
 		return;
 	}
-	FlatVector::GetData<double>(output.data[0])[0] = g.q_squared;
+	FlatVector::GetDataMutable<double>(output.data[0])[0] = g.q_squared;
 	g.emitted = true;
 	output.SetCardinality(1);
 }

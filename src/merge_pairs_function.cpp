@@ -213,18 +213,18 @@ static void MergePairsExecute(DataChunk &args, ExpressionState &state, Vector &r
 
 	// Output struct entries
 	auto &entries = StructVector::GetEntries(result);
-	auto merged_data = FlatVector::GetData<bool>(*entries[0]);
-	auto &seq_vec = *entries[1];
-	auto &qual_list_vec = *entries[2]; // LIST(UTINYINT)
-	auto ee_merged_data = FlatVector::GetData<double>(*entries[3]);
-	auto ee_fwd_data = FlatVector::GetData<double>(*entries[4]);
-	auto ee_rev_data = FlatVector::GetData<double>(*entries[5]);
-	auto fwd_errors_data = FlatVector::GetData<int32_t>(*entries[6]);
-	auto rev_errors_data = FlatVector::GetData<int32_t>(*entries[7]);
-	auto overlap_data = FlatVector::GetData<int32_t>(*entries[8]);
+	auto merged_data = FlatVector::GetDataMutable<bool>(entries[0]);
+	auto &seq_vec = entries[1];
+	auto &qual_list_vec = entries[2]; // LIST(UTINYINT)
+	auto ee_merged_data = FlatVector::GetDataMutable<double>(entries[3]);
+	auto ee_fwd_data = FlatVector::GetDataMutable<double>(entries[4]);
+	auto ee_rev_data = FlatVector::GetDataMutable<double>(entries[5]);
+	auto fwd_errors_data = FlatVector::GetDataMutable<int32_t>(entries[6]);
+	auto rev_errors_data = FlatVector::GetDataMutable<int32_t>(entries[7]);
+	auto overlap_data = FlatVector::GetDataMutable<int32_t>(entries[8]);
 
 	// Quality output: LIST(UTINYINT) managed via ListVector
-	auto qual_list_entries = FlatVector::GetData<list_entry_t>(qual_list_vec);
+	auto qual_list_entries = FlatVector::GetDataMutable<list_entry_t>(qual_list_vec);
 	idx_t qual_child_offset = ListVector::GetListSize(qual_list_vec);
 
 	// Reusable buffers
@@ -275,13 +275,13 @@ static void MergePairsExecute(DataChunk &args, ExpressionState &state, Vector &r
 
 		merged_data[i] = mr.merged;
 		if (mr.merged) {
-			FlatVector::GetData<string_t>(seq_vec)[i] =
+			FlatVector::GetDataMutable<string_t>(seq_vec)[i] =
 			    StringVector::AddString(seq_vec, mr.merged_sequence, mr.merged_length);
 
 			// Write merged quality as LIST(UTINYINT) using QualScore::write_decoded
 			ListVector::Reserve(qual_list_vec, qual_child_offset + mr.merged_length);
 			auto &qual_child = ListVector::GetEntry(qual_list_vec);
-			auto qual_child_data = FlatVector::GetData<uint8_t>(qual_child);
+			auto qual_child_data = FlatVector::GetDataMutable<uint8_t>(qual_child);
 			qual_list_entries[i].offset = qual_child_offset;
 			qual_list_entries[i].length = mr.merged_length;
 			miint::QualScore merged_qual(std::string(mr.merged_quality, mr.merged_length));
@@ -296,7 +296,7 @@ static void MergePairsExecute(DataChunk &args, ExpressionState &state, Vector &r
 			rev_errors_data[i] = mr.rev_errors;
 			overlap_data[i] = mr.overlap_length;
 		} else {
-			FlatVector::GetData<string_t>(seq_vec)[i] = StringVector::AddString(seq_vec, "", 0);
+			FlatVector::GetDataMutable<string_t>(seq_vec)[i] = StringVector::AddString(seq_vec, "", 0);
 			qual_list_entries[i].offset = qual_child_offset;
 			qual_list_entries[i].length = 0;
 			ee_merged_data[i] = 0.0;

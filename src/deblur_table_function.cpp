@@ -322,9 +322,9 @@ static void EmitRows(const DeblurData &data, DeblurLocalState &lstate, const std
 	auto &read_id_vec = output.data[col++];
 	auto &seq_vec = output.data[col++];
 	auto &abundance_vec = output.data[col++];
-	auto read_id_data = FlatVector::GetData<string_t>(read_id_vec);
-	auto seq_data = FlatVector::GetData<string_t>(seq_vec);
-	auto abundance_data = FlatVector::GetData<int64_t>(abundance_vec);
+	auto read_id_data = FlatVector::GetDataMutable<string_t>(read_id_vec);
+	auto seq_data = FlatVector::GetDataMutable<string_t>(seq_vec);
+	auto abundance_data = FlatVector::GetDataMutable<int64_t>(abundance_vec);
 	for (idx_t i = 0; i < count; i++) {
 		auto &r = source[lstate.current_row + i];
 		read_id_data[i] = StringVector::AddString(read_id_vec, r.label);

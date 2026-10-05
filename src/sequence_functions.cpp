@@ -250,8 +250,8 @@ static void SequenceSplitFunction(DataChunk &args, ExpressionState &state, Vecto
 	const auto seq_data = UnifiedVectorFormat::GetData<string_t>(seq_fmt);
 	const auto cs_data = UnifiedVectorFormat::GetData<int32_t>(cs_fmt);
 
-	auto list_entries = FlatVector::GetData<list_entry_t>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto list_entries = FlatVector::GetDataMutable<list_entry_t>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 
 	// Pass 1: validate, NULL-propagate, and lay out per-row [offset, length) into the child.
 	idx_t total_chunks = 0;
@@ -288,9 +288,9 @@ static void SequenceSplitFunction(DataChunk &args, ExpressionState &state, Vecto
 	ListVector::SetListSize(result, total_chunks);
 	auto &struct_vec = ListVector::GetEntry(result);
 	auto &struct_children = StructVector::GetEntries(struct_vec);
-	auto idx_data = FlatVector::GetData<int32_t>(*struct_children[0]); // chunk_index
-	auto &data_vec = *struct_children[1];                              // chunk_data VARCHAR
-	auto chunk_str = FlatVector::GetData<string_t>(data_vec);
+	auto idx_data = FlatVector::GetDataMutable<int32_t>(struct_children[0]); // chunk_index
+	auto &data_vec = struct_children[1];                                     // chunk_data VARCHAR
+	auto chunk_str = FlatVector::GetDataMutable<string_t>(data_vec);
 
 	// Pass 2: slice. chunk_data is a copy into the result heap (must outlive the input).
 	for (idx_t row = 0; row < count; row++) {

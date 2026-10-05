@@ -160,9 +160,9 @@ struct ConsensusOperation {
 		auto states = UnifiedVectorFormat::GetData<ConsensusState *>(state_data);
 
 		auto &entries = StructVector::GetEntries(result);
-		auto &seq_vec = *entries[0];
-		auto &qual_list_vec = *entries[1];
-		auto qual_list_entries = FlatVector::GetData<list_entry_t>(qual_list_vec);
+		auto &seq_vec = entries[0];
+		auto &qual_list_vec = entries[1];
+		auto qual_list_entries = FlatVector::GetDataMutable<list_entry_t>(qual_list_vec);
 
 		for (idx_t i = 0; i < count; ++i) {
 			const auto si = state_data.sel->get_index(i);
@@ -185,13 +185,13 @@ struct ConsensusOperation {
 			const auto &seq = consensus.first;
 			const auto &qual = consensus.second;
 
-			FlatVector::GetData<string_t>(seq_vec)[i + offset] =
+			FlatVector::GetDataMutable<string_t>(seq_vec)[i + offset] =
 			    StringVector::AddString(seq_vec, seq.data(), seq.size());
 
 			const idx_t list_offset = ListVector::GetListSize(qual_list_vec);
 			ListVector::Reserve(qual_list_vec, list_offset + qual.size());
 			auto &qual_child = ListVector::GetEntry(qual_list_vec);
-			auto qual_child_data = FlatVector::GetData<std::uint8_t>(qual_child);
+			auto qual_child_data = FlatVector::GetDataMutable<std::uint8_t>(qual_child);
 			for (std::size_t k = 0; k < qual.size(); ++k) {
 				qual_child_data[list_offset + k] = qual[k];
 			}

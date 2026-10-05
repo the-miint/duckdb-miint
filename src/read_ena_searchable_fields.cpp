@@ -137,10 +137,10 @@ void ReadENASearchableFieldsTableFunction::Execute(ClientContext &context, Table
 		return;
 	}
 
-	auto name_data = FlatVector::GetData<string_t>(output.data[0]);
-	auto type_data = FlatVector::GetData<string_t>(output.data[1]);
-	auto desc_data = FlatVector::GetData<string_t>(output.data[2]);
-	auto &desc_validity = FlatVector::Validity(output.data[2]);
+	auto name_data = FlatVector::GetDataMutable<string_t>(output.data[0]);
+	auto type_data = FlatVector::GetDataMutable<string_t>(output.data[1]);
+	auto desc_data = FlatVector::GetDataMutable<string_t>(output.data[2]);
+	auto &desc_validity = FlatVector::ValidityMutable(output.data[2]);
 
 	for (idx_t i = 0; i < count; i++) {
 		const auto &row = global.rows[global.offset + i];

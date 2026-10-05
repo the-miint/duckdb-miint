@@ -278,12 +278,12 @@ void ReadNCBITaxdumpTableFunction::Execute(ClientContext &, TableFunctionInput &
 
 	idx_t count = std::min<idx_t>(STANDARD_VECTOR_SIZE, gstate.nodes.size() - gstate.cursor);
 
-	auto node_index = FlatVector::GetData<int64_t>(output.data[0]);
+	auto node_index = FlatVector::GetDataMutable<int64_t>(output.data[0]);
 	auto &parent_vec = output.data[1];
-	auto parent_index = FlatVector::GetData<int64_t>(parent_vec);
+	auto parent_index = FlatVector::GetDataMutable<int64_t>(parent_vec);
 	auto &name_vec = output.data[2];
 	auto &rank_vec = output.data[3];
-	auto is_tip = FlatVector::GetData<bool>(output.data[4]);
+	auto is_tip = FlatVector::GetDataMutable<bool>(output.data[4]);
 
 	for (idx_t i = 0; i < count; ++i) {
 		const auto &node = gstate.nodes[gstate.cursor + i];
@@ -291,10 +291,10 @@ void ReadNCBITaxdumpTableFunction::Execute(ClientContext &, TableFunctionInput &
 		if (node.parent_taxid.has_value()) {
 			parent_index[i] = node.parent_taxid.value();
 		} else {
-			FlatVector::Validity(parent_vec).SetInvalid(i);
+			FlatVector::ValidityMutable(parent_vec).SetInvalid(i);
 		}
-		FlatVector::GetData<string_t>(name_vec)[i] = StringVector::AddString(name_vec, node.name);
-		FlatVector::GetData<string_t>(rank_vec)[i] = StringVector::AddString(rank_vec, node.rank);
+		FlatVector::GetDataMutable<string_t>(name_vec)[i] = StringVector::AddString(name_vec, node.name);
+		FlatVector::GetDataMutable<string_t>(rank_vec)[i] = StringVector::AddString(rank_vec, node.rank);
 		is_tip[i] = node.is_tip;
 	}
 
@@ -351,8 +351,8 @@ void ReadNCBITaxdumpMergedTableFunction::Execute(ClientContext &, TableFunctionI
 
 	idx_t count = std::min<idx_t>(STANDARD_VECTOR_SIZE, gstate.merged.size() - gstate.cursor);
 
-	auto old_taxid = FlatVector::GetData<int64_t>(output.data[0]);
-	auto new_taxid = FlatVector::GetData<int64_t>(output.data[1]);
+	auto old_taxid = FlatVector::GetDataMutable<int64_t>(output.data[0]);
+	auto new_taxid = FlatVector::GetDataMutable<int64_t>(output.data[1]);
 	for (idx_t i = 0; i < count; ++i) {
 		const auto &m = gstate.merged[gstate.cursor + i];
 		old_taxid[i] = m.old_taxid;
@@ -410,16 +410,17 @@ void ReadNCBITaxdumpNamesTableFunction::Execute(ClientContext &, TableFunctionIn
 
 	idx_t count = std::min<idx_t>(STANDARD_VECTOR_SIZE, gstate.names.size() - gstate.cursor);
 
-	auto taxid = FlatVector::GetData<int64_t>(output.data[0]);
+	auto taxid = FlatVector::GetDataMutable<int64_t>(output.data[0]);
 	auto &name_vec = output.data[1];
 	auto &unique_name_vec = output.data[2];
 	auto &name_class_vec = output.data[3];
 	for (idx_t i = 0; i < count; ++i) {
 		const auto &n = gstate.names[gstate.cursor + i];
 		taxid[i] = n.taxid;
-		FlatVector::GetData<string_t>(name_vec)[i] = StringVector::AddString(name_vec, n.name);
-		FlatVector::GetData<string_t>(unique_name_vec)[i] = StringVector::AddString(unique_name_vec, n.unique_name);
-		FlatVector::GetData<string_t>(name_class_vec)[i] = StringVector::AddString(name_class_vec, n.name_class);
+		FlatVector::GetDataMutable<string_t>(name_vec)[i] = StringVector::AddString(name_vec, n.name);
+		FlatVector::GetDataMutable<string_t>(unique_name_vec)[i] =
+		    StringVector::AddString(unique_name_vec, n.unique_name);
+		FlatVector::GetDataMutable<string_t>(name_class_vec)[i] = StringVector::AddString(name_class_vec, n.name_class);
 	}
 
 	gstate.cursor += count;
@@ -475,7 +476,7 @@ void ReadNCBITaxdumpDeletedTableFunction::Execute(ClientContext &, TableFunction
 
 	idx_t count = std::min<idx_t>(STANDARD_VECTOR_SIZE, gstate.deleted.size() - gstate.cursor);
 
-	auto taxid = FlatVector::GetData<int64_t>(output.data[0]);
+	auto taxid = FlatVector::GetDataMutable<int64_t>(output.data[0]);
 	for (idx_t i = 0; i < count; ++i) {
 		taxid[i] = gstate.deleted[gstate.cursor + i];
 	}

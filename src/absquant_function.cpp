@@ -201,12 +201,12 @@ void AbsQuantFitExecute(ClientContext &, TableFunctionInput &data_p, DataChunk &
 	const idx_t count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, total - g.cursor);
 
 	auto &sample_id = output.data[0];
-	auto slope = FlatVector::GetData<double>(output.data[1]);
-	auto intercept = FlatVector::GetData<double>(output.data[2]);
-	auto rvalue = FlatVector::GetData<double>(output.data[3]);
-	auto pvalue = FlatVector::GetData<double>(output.data[4]);
-	auto stderr_ = FlatVector::GetData<double>(output.data[5]);
-	auto intercept_stderr = FlatVector::GetData<double>(output.data[6]);
+	auto slope = FlatVector::GetDataMutable<double>(output.data[1]);
+	auto intercept = FlatVector::GetDataMutable<double>(output.data[2]);
+	auto rvalue = FlatVector::GetDataMutable<double>(output.data[3]);
+	auto pvalue = FlatVector::GetDataMutable<double>(output.data[4]);
+	auto stderr_ = FlatVector::GetDataMutable<double>(output.data[5]);
+	auto intercept_stderr = FlatVector::GetDataMutable<double>(output.data[6]);
 
 	for (idx_t r = 0; r < count; ++r) {
 		const auto &model = g.models[g.cursor + r];

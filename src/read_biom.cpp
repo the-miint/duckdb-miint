@@ -110,7 +110,7 @@ void ReadBIOMTableFunction::SetResultVector(Vector &result_vector, const miint::
 
 void ReadBIOMTableFunction::SetResultVectorString(Vector &result_vector, const miint::BIOMTableField &field,
                                                   const miint::BIOMTable &record, size_t current_row, size_t n_rows) {
-	auto result_data = FlatVector::GetData<string_t>(result_vector);
+	auto result_data = FlatVector::GetDataMutable<string_t>(result_vector);
 
 	const auto &indices =
 	    (field == miint::BIOMTableField::SAMPLE_ID) ? record.COOSampleIndices() : record.COOFeatureIndices();
@@ -124,7 +124,7 @@ void ReadBIOMTableFunction::SetResultVectorString(Vector &result_vector, const m
 
 void ReadBIOMTableFunction::SetResultVectorDouble(Vector &result_vector, const miint::BIOMTableField &field,
                                                   const miint::BIOMTable &record, size_t current_row, size_t n_rows) {
-	auto result_data = FlatVector::GetData<double>(result_vector);
+	auto result_data = FlatVector::GetDataMutable<double>(result_vector);
 	auto &data = record.COOValues();
 
 	for (size_t i = 0; i < n_rows; i++) {

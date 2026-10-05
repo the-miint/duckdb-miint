@@ -99,14 +99,14 @@ void ClusterUpgmaExecute(ClientContext &, TableFunctionInput &data_p, DataChunk 
 	const idx_t total = g.rows.size();
 	const idx_t count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, total - g.cursor);
 
-	auto node_index = FlatVector::GetData<int64_t>(output.data[0]);
+	auto node_index = FlatVector::GetDataMutable<int64_t>(output.data[0]);
 	auto &name_vec = output.data[1];
-	auto name_data = FlatVector::GetData<string_t>(name_vec);
-	auto branch_length = FlatVector::GetData<double>(output.data[2]);
-	auto edge_id = FlatVector::GetData<int64_t>(output.data[3]);
-	auto parent_index = FlatVector::GetData<int64_t>(output.data[4]);
-	auto &parent_validity = FlatVector::Validity(output.data[4]);
-	auto is_tip = FlatVector::GetData<bool>(output.data[5]);
+	auto name_data = FlatVector::GetDataMutable<string_t>(name_vec);
+	auto branch_length = FlatVector::GetDataMutable<double>(output.data[2]);
+	auto edge_id = FlatVector::GetDataMutable<int64_t>(output.data[3]);
+	auto parent_index = FlatVector::GetDataMutable<int64_t>(output.data[4]);
+	auto &parent_validity = FlatVector::ValidityMutable(output.data[4]);
+	auto is_tip = FlatVector::GetDataMutable<bool>(output.data[5]);
 
 	for (idx_t r = 0; r < count; ++r) {
 		const auto &row = g.rows[g.cursor + r];

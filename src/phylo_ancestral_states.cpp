@@ -104,12 +104,12 @@ void PhyloAncestralStatesTableFunction::Execute(ClientContext &context, TableFun
 
 	size_t count = std::min<size_t>(STANDARD_VECTOR_SIZE, gstate.rows.size() - gstate.current_row_idx);
 
-	auto node_index_data = FlatVector::GetData<int64_t>(output.data[0]);
-	auto trait_data = FlatVector::GetData<string_t>(output.data[1]);
-	auto estimate_data = FlatVector::GetData<double>(output.data[2]);
-	auto variance_data = FlatVector::GetData<double>(output.data[3]);
-	auto ci_low_data = FlatVector::GetData<double>(output.data[4]);
-	auto ci_high_data = FlatVector::GetData<double>(output.data[5]);
+	auto node_index_data = FlatVector::GetDataMutable<int64_t>(output.data[0]);
+	auto trait_data = FlatVector::GetDataMutable<string_t>(output.data[1]);
+	auto estimate_data = FlatVector::GetDataMutable<double>(output.data[2]);
+	auto variance_data = FlatVector::GetDataMutable<double>(output.data[3]);
+	auto ci_low_data = FlatVector::GetDataMutable<double>(output.data[4]);
+	auto ci_high_data = FlatVector::GetDataMutable<double>(output.data[5]);
 
 	for (size_t k = 0; k < count; k++) {
 		const auto &row = gstate.rows[gstate.current_row_idx + k];

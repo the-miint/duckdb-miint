@@ -157,17 +157,18 @@ static void OutputBlastHits(DataChunk &output, const std::vector<miint::BlastHit
 		const auto &hit = hits[offset + i];
 		// query_id mirrors the query table's id type; subject_id is always VARCHAR.
 		EmitIdCell(output.data[0], i, hit.query_id, query_id_type);
-		FlatVector::GetData<string_t>(output.data[1])[i] = StringVector::AddString(output.data[1], hit.subject_id);
-		FlatVector::GetData<double>(output.data[2])[i] = hit.pct_identity;
-		FlatVector::GetData<int32_t>(output.data[3])[i] = hit.alignment_length;
-		FlatVector::GetData<int32_t>(output.data[4])[i] = hit.mismatches;
-		FlatVector::GetData<int32_t>(output.data[5])[i] = hit.gap_opens;
-		FlatVector::GetData<int64_t>(output.data[6])[i] = hit.query_start;
-		FlatVector::GetData<int64_t>(output.data[7])[i] = hit.query_end;
-		FlatVector::GetData<int64_t>(output.data[8])[i] = hit.subject_start;
-		FlatVector::GetData<int64_t>(output.data[9])[i] = hit.subject_end;
-		FlatVector::GetData<double>(output.data[10])[i] = hit.evalue;
-		FlatVector::GetData<double>(output.data[11])[i] = hit.bit_score;
+		FlatVector::GetDataMutable<string_t>(output.data[1])[i] =
+		    StringVector::AddString(output.data[1], hit.subject_id);
+		FlatVector::GetDataMutable<double>(output.data[2])[i] = hit.pct_identity;
+		FlatVector::GetDataMutable<int32_t>(output.data[3])[i] = hit.alignment_length;
+		FlatVector::GetDataMutable<int32_t>(output.data[4])[i] = hit.mismatches;
+		FlatVector::GetDataMutable<int32_t>(output.data[5])[i] = hit.gap_opens;
+		FlatVector::GetDataMutable<int64_t>(output.data[6])[i] = hit.query_start;
+		FlatVector::GetDataMutable<int64_t>(output.data[7])[i] = hit.query_end;
+		FlatVector::GetDataMutable<int64_t>(output.data[8])[i] = hit.subject_start;
+		FlatVector::GetDataMutable<int64_t>(output.data[9])[i] = hit.subject_end;
+		FlatVector::GetDataMutable<double>(output.data[10])[i] = hit.evalue;
+		FlatVector::GetDataMutable<double>(output.data[11])[i] = hit.bit_score;
 	}
 	output.SetCardinality(count);
 }

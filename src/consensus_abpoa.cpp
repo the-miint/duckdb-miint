@@ -146,10 +146,10 @@ static void EmitConsensusRows(const ConsensusAbpoaData &data, ConsensusAbpoaLoca
 	auto &cons_seq_vec = output.data[col++];
 	auto &cons_len_vec = output.data[col++];
 	auto &num_reads_vec = output.data[col++];
-	auto cons_id_data = FlatVector::GetData<int32_t>(cons_id_vec);
-	auto cons_seq_data = FlatVector::GetData<string_t>(cons_seq_vec);
-	auto cons_len_data = FlatVector::GetData<int32_t>(cons_len_vec);
-	auto num_reads_data = FlatVector::GetData<int32_t>(num_reads_vec);
+	auto cons_id_data = FlatVector::GetDataMutable<int32_t>(cons_id_vec);
+	auto cons_seq_data = FlatVector::GetDataMutable<string_t>(cons_seq_vec);
+	auto cons_len_data = FlatVector::GetDataMutable<int32_t>(cons_len_vec);
+	auto num_reads_data = FlatVector::GetDataMutable<int32_t>(num_reads_vec);
 	for (idx_t i = 0; i < count; i++) {
 		idx_t row = lstate.current_row + i;
 		cons_id_data[i] = static_cast<int32_t>(entries[row].consensus_id);

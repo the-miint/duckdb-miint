@@ -235,11 +235,11 @@ static void EmitRows(const AlignMafftData &data, AlignMafftLocalState &lstate, c
 	auto &aligned_seq_vec = output.data[col++];
 	auto &original_length_vec = output.data[col++];
 	auto &aligned_length_vec = output.data[col++];
-	auto sequence_index_data = FlatVector::GetData<int64_t>(sequence_index_vec);
-	auto read_id_data = FlatVector::GetData<string_t>(read_id_vec);
-	auto aligned_seq_data = FlatVector::GetData<string_t>(aligned_seq_vec);
-	auto original_length_data = FlatVector::GetData<int32_t>(original_length_vec);
-	auto aligned_length_data = FlatVector::GetData<int32_t>(aligned_length_vec);
+	auto sequence_index_data = FlatVector::GetDataMutable<int64_t>(sequence_index_vec);
+	auto read_id_data = FlatVector::GetDataMutable<string_t>(read_id_vec);
+	auto aligned_seq_data = FlatVector::GetDataMutable<string_t>(aligned_seq_vec);
+	auto original_length_data = FlatVector::GetDataMutable<int32_t>(original_length_vec);
+	auto aligned_length_data = FlatVector::GetDataMutable<int32_t>(aligned_length_vec);
 	for (idx_t i = 0; i < count; i++) {
 		idx_t row = lstate.current_row + i;
 		sequence_index_data[i] = static_cast<int64_t>(row);

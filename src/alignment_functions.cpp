@@ -29,8 +29,8 @@ static void AlignmentSeqIdentityScalarFunction(DataChunk &args, ExpressionState 
 	auto md_ptr = UnifiedVectorFormat::GetData<string_t>(md_data);
 	auto type_ptr = UnifiedVectorFormat::GetData<string_t>(type_data);
 
-	auto result_data = FlatVector::GetData<double>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<double>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 
 	for (idx_t i = 0; i < args.size(); i++) {
 		auto cigar_idx = cigar_data.sel->get_index(i);
@@ -209,8 +209,8 @@ static void CigarSequenceIdentityScalarFunction(DataChunk &args, ExpressionState
 	auto cigar_ptr = UnifiedVectorFormat::GetData<string_t>(cigar_data);
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto result_data = FlatVector::GetData<double>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<double>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 
 	for (idx_t i = 0; i < args.size(); i++) {
 		auto cigar_idx = cigar_data.sel->get_index(i);
@@ -440,8 +440,8 @@ static void CigarQueryIntervalsScalarFunction(DataChunk &args, ExpressionState &
 	const auto type_data = has_type ? UnifiedVectorFormat::GetData<string_t>(type_fmt) : nullptr;
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto list_entries = FlatVector::GetData<list_entry_t>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto list_entries = FlatVector::GetDataMutable<list_entry_t>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 
 	// The interval count is only known by computing the intervals, so there is no cheap
 	// sizing pass as in sequence_split. Rather than buffer the whole chunk and copy it in
@@ -481,8 +481,8 @@ static void CigarQueryIntervalsScalarFunction(DataChunk &args, ExpressionState &
 			// Reserve may reallocate the child, so re-fetch its data pointers each time.
 			ListVector::Reserve(result, total + intervals.size());
 			auto &struct_children = StructVector::GetEntries(ListVector::GetEntry(result));
-			auto start_data = FlatVector::GetData<int64_t>(*struct_children[0]);
-			auto stop_data = FlatVector::GetData<int64_t>(*struct_children[1]);
+			auto start_data = FlatVector::GetDataMutable<int64_t>(struct_children[0]);
+			auto stop_data = FlatVector::GetDataMutable<int64_t>(struct_children[1]);
 			for (idx_t i = 0; i < intervals.size(); i++) {
 				start_data[total + i] = intervals[i].start;
 				stop_data[total + i] = intervals[i].stop;

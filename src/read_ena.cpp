@@ -286,10 +286,10 @@ void ReadENATableFunction::Execute(ClientContext &context, TableFunctionInput &d
 
 	for (idx_t col = 0; col < num_cols; col++) {
 		const auto &col_type = bind_data.types[col];
-		auto &validity = FlatVector::Validity(output.data[col]);
+		auto &validity = FlatVector::ValidityMutable(output.data[col]);
 
 		if (col_type.id() == LogicalTypeId::BIGINT) {
-			auto col_data = FlatVector::GetData<int64_t>(output.data[col]);
+			auto col_data = FlatVector::GetDataMutable<int64_t>(output.data[col]);
 			for (idx_t i = 0; i < count; i++) {
 				auto &row = rows[offset + i];
 				if (col < row.size()) {
@@ -333,7 +333,7 @@ void ReadENATableFunction::Execute(ClientContext &context, TableFunctionInput &d
 					list_entries[i] = list_entry_t(child_offset, parts.size());
 
 					if (child_type.id() == LogicalTypeId::BIGINT) {
-						auto child_data = FlatVector::GetData<int64_t>(child_vec);
+						auto child_data = FlatVector::GetDataMutable<int64_t>(child_vec);
 						for (size_t j = 0; j < parts.size(); j++) {
 							try {
 								child_data[child_offset + j] = std::stoll(parts[j]);
@@ -343,7 +343,7 @@ void ReadENATableFunction::Execute(ClientContext &context, TableFunctionInput &d
 							}
 						}
 					} else {
-						auto child_data = FlatVector::GetData<string_t>(child_vec);
+						auto child_data = FlatVector::GetDataMutable<string_t>(child_vec);
 						for (size_t j = 0; j < parts.size(); j++) {
 							child_data[child_offset + j] = StringVector::AddString(child_vec, parts[j]);
 						}
@@ -358,7 +358,7 @@ void ReadENATableFunction::Execute(ClientContext &context, TableFunctionInput &d
 			ListVector::SetListSize(output.data[col], child_offset);
 		} else {
 			// Default: VARCHAR
-			auto col_data = FlatVector::GetData<string_t>(output.data[col]);
+			auto col_data = FlatVector::GetDataMutable<string_t>(output.data[col]);
 			for (idx_t i = 0; i < count; i++) {
 				auto &row = rows[offset + i];
 				if (col < row.size()) {

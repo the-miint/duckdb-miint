@@ -95,12 +95,12 @@ void ReadAlignmentHeaderTableFunction::Execute(ClientContext &, TableFunctionInp
 
 	idx_t count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, gstate.entries.size() - gstate.cursor);
 
-	auto tids = FlatVector::GetData<int32_t>(output.data[0]);
-	auto lengths = FlatVector::GetData<int64_t>(output.data[2]);
+	auto tids = FlatVector::GetDataMutable<int32_t>(output.data[0]);
+	auto lengths = FlatVector::GetDataMutable<int64_t>(output.data[2]);
 	for (idx_t i = 0; i < count; i++) {
 		const auto &e = gstate.entries[gstate.cursor + i];
 		tids[i] = e.tid;
-		FlatVector::GetData<string_t>(output.data[1])[i] = StringVector::AddString(output.data[1], e.reference);
+		FlatVector::GetDataMutable<string_t>(output.data[1])[i] = StringVector::AddString(output.data[1], e.reference);
 		lengths[i] = e.length;
 	}
 

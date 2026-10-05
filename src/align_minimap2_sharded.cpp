@@ -455,7 +455,7 @@ void AlignMinimap2ShardedTableFunction::Execute(ClientContext &context, TableFun
 				auto shard_col_idx = output.ColumnCount() - 1;
 				auto &shard_vec = output.data[shard_col_idx];
 				for (idx_t i = 0; i < output_count; i++) {
-					FlatVector::GetData<string_t>(shard_vec)[i] =
+					FlatVector::GetDataMutable<string_t>(shard_vec)[i] =
 					    StringVector::AddString(shard_vec, local_state.current_shard_name);
 				}
 			}

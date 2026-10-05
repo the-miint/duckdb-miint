@@ -130,14 +130,14 @@ inline void ExtractIdColumnAsStrings(DataChunk &chunk, idx_t col_idx, const Logi
 // Validity is always set explicitly (valid or invalid) so reusing the vector is
 // safe. Precondition: `out` is a FlatVector sized for at least `row + 1` rows.
 inline void EmitIdCell(Vector &out, idx_t row, const std::string &s, const LogicalType &id_type) {
-	auto &validity = FlatVector::Validity(out);
+	auto &validity = FlatVector::ValidityMutable(out);
 	if (id_type.id() == LogicalTypeId::VARCHAR) {
-		FlatVector::GetData<string_t>(out)[row] = StringVector::AddString(out, s);
+		FlatVector::GetDataMutable<string_t>(out)[row] = StringVector::AddString(out, s);
 		validity.SetValid(row);
 		return;
 	}
 	if (id_type.id() == LogicalTypeId::BIGINT) {
-		auto out_data = FlatVector::GetData<int64_t>(out);
+		auto out_data = FlatVector::GetDataMutable<int64_t>(out);
 		try {
 			auto parsed = ::miint::ParseIdAsInt64(s);
 			if (parsed.has_value()) {
@@ -153,7 +153,7 @@ inline void EmitIdCell(Vector &out, idx_t row, const std::string &s, const Logic
 		return;
 	}
 	if (id_type.id() == LogicalTypeId::UUID) {
-		auto out_data = FlatVector::GetData<hugeint_t>(out);
+		auto out_data = FlatVector::GetDataMutable<hugeint_t>(out);
 		if (s.empty() || s == "*") {
 			out_data[row] = 0;
 			validity.SetInvalid(row);
@@ -183,20 +183,20 @@ inline void EmitIdCell(Vector &out, idx_t row, const std::string &s, const Logic
 // Precondition: `from_row` was written by EmitIdCell on this same Vector, in this same
 // chunk, with this same `id_type`; both rows are within the flat vector's capacity.
 inline void RepeatIdCell(Vector &out, idx_t row, idx_t from_row, const LogicalType &id_type) {
-	auto &validity = FlatVector::Validity(out);
+	auto &validity = FlatVector::ValidityMutable(out);
 	validity.Set(row, validity.RowIsValid(from_row));
 	if (id_type.id() == LogicalTypeId::VARCHAR) {
-		auto data = FlatVector::GetData<string_t>(out);
+		auto data = FlatVector::GetDataMutable<string_t>(out);
 		data[row] = data[from_row];
 		return;
 	}
 	if (id_type.id() == LogicalTypeId::BIGINT) {
-		auto data = FlatVector::GetData<int64_t>(out);
+		auto data = FlatVector::GetDataMutable<int64_t>(out);
 		data[row] = data[from_row];
 		return;
 	}
 	if (id_type.id() == LogicalTypeId::UUID) {
-		auto data = FlatVector::GetData<hugeint_t>(out);
+		auto data = FlatVector::GetDataMutable<hugeint_t>(out);
 		data[row] = data[from_row];
 		return;
 	}

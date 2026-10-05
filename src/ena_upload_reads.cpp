@@ -862,12 +862,12 @@ void Execute(ClientContext &, TableFunctionInput &data_p, DataChunk &output) {
 	}
 	const idx_t to_emit = std::min<idx_t>(remaining, STANDARD_VECTOR_SIZE);
 
-	auto sample_ref = FlatVector::GetData<string_t>(output.data[0]);
-	auto filename = FlatVector::GetData<string_t>(output.data[1]);
-	auto filetype = FlatVector::GetData<string_t>(output.data[2]);
-	auto md5_v = FlatVector::GetData<string_t>(output.data[3]);
-	auto bytes_v = FlatVector::GetData<uint64_t>(output.data[4]);
-	auto layout_v = FlatVector::GetData<string_t>(output.data[5]);
+	auto sample_ref = FlatVector::GetDataMutable<string_t>(output.data[0]);
+	auto filename = FlatVector::GetDataMutable<string_t>(output.data[1]);
+	auto filetype = FlatVector::GetDataMutable<string_t>(output.data[2]);
+	auto md5_v = FlatVector::GetDataMutable<string_t>(output.data[3]);
+	auto bytes_v = FlatVector::GetDataMutable<uint64_t>(output.data[4]);
+	auto layout_v = FlatVector::GetDataMutable<string_t>(output.data[5]);
 
 	for (idx_t i = 0; i < to_emit; i++) {
 		const auto &row = gs.emitted[gs.emit_cursor + i];

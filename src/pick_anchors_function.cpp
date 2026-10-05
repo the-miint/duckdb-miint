@@ -156,7 +156,7 @@ void PickAnchorsExecute(ClientContext &, TableFunctionInput &input, DataChunk &o
 	}
 	const idx_t n = MinValue<idx_t>(STANDARD_VECTOR_SIZE, total - gstate.cursor);
 
-	auto rank_data = FlatVector::GetData<int32_t>(output.data[0]);
+	auto rank_data = FlatVector::GetDataMutable<int32_t>(output.data[0]);
 	auto &sample_id_vec = output.data[1];
 	for (idx_t i = 0; i < n; ++i) {
 		rank_data[i] = static_cast<int32_t>(gstate.cursor + i);

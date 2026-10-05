@@ -32,7 +32,7 @@ idx_t OutputUchimeResults(DataChunk &output, const std::vector<miint::UchimeResu
 	idx_t col = start_col;
 
 	// score — always populated
-	auto score_data = FlatVector::GetData<double>(output.data[col++]);
+	auto score_data = FlatVector::GetDataMutable<double>(output.data[col++]);
 	for (idx_t i = 0; i < actual; i++) {
 		score_data[i] = results[offset + i].score;
 	}
@@ -53,9 +53,9 @@ idx_t OutputUchimeResults(DataChunk &output, const std::vector<miint::UchimeResu
 	auto &parent_a_vec = output.data[col++];
 	auto &parent_b_vec = output.data[col++];
 	auto &closest_parent_vec = output.data[col++];
-	auto &pa_validity = FlatVector::Validity(parent_a_vec);
-	auto &pb_validity = FlatVector::Validity(parent_b_vec);
-	auto &cp_validity = FlatVector::Validity(closest_parent_vec);
+	auto &pa_validity = FlatVector::ValidityMutable(parent_a_vec);
+	auto &pb_validity = FlatVector::ValidityMutable(parent_b_vec);
+	auto &cp_validity = FlatVector::ValidityMutable(closest_parent_vec);
 	for (idx_t i = 0; i < actual; i++) {
 		auto &r = results[offset + i];
 		if (r.parent_a_label.empty()) {
@@ -75,16 +75,16 @@ idx_t OutputUchimeResults(DataChunk &output, const std::vector<miint::UchimeResu
 	idx_t id_qb_col = col++;
 	idx_t id_ab_col = col++;
 	idx_t id_qt_col = col++;
-	auto id_qm = FlatVector::GetData<double>(output.data[id_qm_col]);
-	auto id_qa = FlatVector::GetData<double>(output.data[id_qa_col]);
-	auto id_qb = FlatVector::GetData<double>(output.data[id_qb_col]);
-	auto id_ab = FlatVector::GetData<double>(output.data[id_ab_col]);
-	auto id_qt = FlatVector::GetData<double>(output.data[id_qt_col]);
-	auto &id_qm_v = FlatVector::Validity(output.data[id_qm_col]);
-	auto &id_qa_v = FlatVector::Validity(output.data[id_qa_col]);
-	auto &id_qb_v = FlatVector::Validity(output.data[id_qb_col]);
-	auto &id_ab_v = FlatVector::Validity(output.data[id_ab_col]);
-	auto &id_qt_v = FlatVector::Validity(output.data[id_qt_col]);
+	auto id_qm = FlatVector::GetDataMutable<double>(output.data[id_qm_col]);
+	auto id_qa = FlatVector::GetDataMutable<double>(output.data[id_qa_col]);
+	auto id_qb = FlatVector::GetDataMutable<double>(output.data[id_qb_col]);
+	auto id_ab = FlatVector::GetDataMutable<double>(output.data[id_ab_col]);
+	auto id_qt = FlatVector::GetDataMutable<double>(output.data[id_qt_col]);
+	auto &id_qm_v = FlatVector::ValidityMutable(output.data[id_qm_col]);
+	auto &id_qa_v = FlatVector::ValidityMutable(output.data[id_qa_col]);
+	auto &id_qb_v = FlatVector::ValidityMutable(output.data[id_qb_col]);
+	auto &id_ab_v = FlatVector::ValidityMutable(output.data[id_ab_col]);
+	auto &id_qt_v = FlatVector::ValidityMutable(output.data[id_qt_col]);
 	for (idx_t i = 0; i < actual; i++) {
 		auto &r = results[offset + i];
 		if (r.flag == "N") {
@@ -103,12 +103,12 @@ idx_t OutputUchimeResults(DataChunk &output, const std::vector<miint::UchimeResu
 	}
 
 	// left_yes, left_no, left_abstain, right_yes, right_no, right_abstain
-	auto ly = FlatVector::GetData<int32_t>(output.data[col++]);
-	auto ln = FlatVector::GetData<int32_t>(output.data[col++]);
-	auto la = FlatVector::GetData<int32_t>(output.data[col++]);
-	auto ry = FlatVector::GetData<int32_t>(output.data[col++]);
-	auto rn = FlatVector::GetData<int32_t>(output.data[col++]);
-	auto ra = FlatVector::GetData<int32_t>(output.data[col++]);
+	auto ly = FlatVector::GetDataMutable<int32_t>(output.data[col++]);
+	auto ln = FlatVector::GetDataMutable<int32_t>(output.data[col++]);
+	auto la = FlatVector::GetDataMutable<int32_t>(output.data[col++]);
+	auto ry = FlatVector::GetDataMutable<int32_t>(output.data[col++]);
+	auto rn = FlatVector::GetDataMutable<int32_t>(output.data[col++]);
+	auto ra = FlatVector::GetDataMutable<int32_t>(output.data[col++]);
 	for (idx_t i = 0; i < actual; i++) {
 		auto &r = results[offset + i];
 		ly[i] = r.left_yes;
@@ -121,8 +121,8 @@ idx_t OutputUchimeResults(DataChunk &output, const std::vector<miint::UchimeResu
 
 	// divergence — NULL when non-chimeric
 	idx_t div_col = col++;
-	auto div_data = FlatVector::GetData<double>(output.data[div_col]);
-	auto &div_v = FlatVector::Validity(output.data[div_col]);
+	auto div_data = FlatVector::GetDataMutable<double>(output.data[div_col]);
+	auto &div_v = FlatVector::ValidityMutable(output.data[div_col]);
 	for (idx_t i = 0; i < actual; i++) {
 		auto &r = results[offset + i];
 		if (r.flag == "N") {
@@ -135,7 +135,7 @@ idx_t OutputUchimeResults(DataChunk &output, const std::vector<miint::UchimeResu
 	// flag — always populated
 	auto &flag_vec = output.data[col++];
 	for (idx_t i = 0; i < actual; i++) {
-		FlatVector::GetData<string_t>(flag_vec)[i] = StringVector::AddString(flag_vec, results[offset + i].flag);
+		FlatVector::GetDataMutable<string_t>(flag_vec)[i] = StringVector::AddString(flag_vec, results[offset + i].flag);
 	}
 
 	// Exactly 18 uchimeout columns should have been written, starting at start_col.

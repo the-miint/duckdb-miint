@@ -136,7 +136,7 @@ void SetResultVectorNull(Vector &result_vector) {
 }
 
 void SetResultVectorString(Vector &result_vector, const std::vector<std::string> &values) {
-	auto result_data = FlatVector::GetData<string_t>(result_vector);
+	auto result_data = FlatVector::GetDataMutable<string_t>(result_vector);
 	for (idx_t j = 0; j < values.size(); j++) {
 		result_data[j] = StringVector::AddString(result_vector, values[j]);
 	}
@@ -146,8 +146,8 @@ void SetResultVectorString(Vector &result_vector, const std::vector<std::string>
 // spectrum_type, polarity, and activation_method where an empty string indicates
 // the value was absent in the source data.
 void SetResultVectorStringNullable(Vector &result_vector, const std::vector<std::string> &values) {
-	auto result_data = FlatVector::GetData<string_t>(result_vector);
-	auto &validity = FlatVector::Validity(result_vector);
+	auto result_data = FlatVector::GetDataMutable<string_t>(result_vector);
+	auto &validity = FlatVector::ValidityMutable(result_vector);
 	validity.SetAllInvalid(values.size());
 
 	for (idx_t j = 0; j < values.size(); j++) {
@@ -165,21 +165,21 @@ void SetResultVectorFilepath(Vector &result_vector, const std::string &filepath)
 }
 
 void SetResultVectorUInt8(Vector &result_vector, const std::vector<uint8_t> &values) {
-	auto result_data = FlatVector::GetData<uint8_t>(result_vector);
+	auto result_data = FlatVector::GetDataMutable<uint8_t>(result_vector);
 	for (idx_t j = 0; j < values.size(); j++) {
 		result_data[j] = values[j];
 	}
 }
 
 void SetResultVectorUInt16(Vector &result_vector, const std::vector<uint16_t> &values) {
-	auto result_data = FlatVector::GetData<uint16_t>(result_vector);
+	auto result_data = FlatVector::GetDataMutable<uint16_t>(result_vector);
 	for (idx_t j = 0; j < values.size(); j++) {
 		result_data[j] = values[j];
 	}
 }
 
 void SetResultVectorInt64(Vector &result_vector, const std::vector<int64_t> &values) {
-	auto result_data = FlatVector::GetData<int64_t>(result_vector);
+	auto result_data = FlatVector::GetDataMutable<int64_t>(result_vector);
 	for (idx_t j = 0; j < values.size(); j++) {
 		result_data[j] = values[j];
 	}
@@ -187,8 +187,8 @@ void SetResultVectorInt64(Vector &result_vector, const std::vector<int64_t> &val
 
 void SetResultVectorInt64Nullable(Vector &result_vector, const std::vector<int64_t> &values,
                                   const std::vector<bool> &valid) {
-	auto result_data = FlatVector::GetData<int64_t>(result_vector);
-	auto &validity = FlatVector::Validity(result_vector);
+	auto result_data = FlatVector::GetDataMutable<int64_t>(result_vector);
+	auto &validity = FlatVector::ValidityMutable(result_vector);
 	validity.SetAllInvalid(values.size());
 
 	for (idx_t j = 0; j < values.size(); j++) {
@@ -209,8 +209,8 @@ void SetResultVectorListUInt8(Vector &result_vector, const std::vector<miint::Qu
 	ListVector::SetListSize(result_vector, total_child_elements);
 
 	auto &child_vector = ListVector::GetEntry(result_vector);
-	auto child_data = FlatVector::GetData<uint8_t>(child_vector);
-	auto list_entries = FlatVector::GetData<list_entry_t>(result_vector);
+	auto child_data = FlatVector::GetDataMutable<uint8_t>(child_vector);
+	auto list_entries = FlatVector::GetDataMutable<list_entry_t>(result_vector);
 
 	const auto output_count = values.size();
 	idx_t value_offset = 0;
@@ -223,15 +223,15 @@ void SetResultVectorListUInt8(Vector &result_vector, const std::vector<miint::Qu
 		value_offset += len;
 	}
 
-	auto &validity = FlatVector::Validity(result_vector);
+	auto &validity = FlatVector::ValidityMutable(result_vector);
 	validity.SetAllValid(output_count);
 
-	auto &child_validity = FlatVector::Validity(child_vector);
+	auto &child_validity = FlatVector::ValidityMutable(child_vector);
 	child_validity.SetAllValid(total_child_elements);
 }
 
 void SetResultVectorInt32(Vector &result_vector, const std::vector<int32_t> &values) {
-	auto result_data = FlatVector::GetData<int32_t>(result_vector);
+	auto result_data = FlatVector::GetDataMutable<int32_t>(result_vector);
 	for (idx_t j = 0; j < values.size(); j++) {
 		result_data[j] = values[j];
 	}
@@ -239,8 +239,8 @@ void SetResultVectorInt32(Vector &result_vector, const std::vector<int32_t> &val
 
 void SetResultVectorInt32Nullable(Vector &result_vector, const std::vector<int32_t> &values,
                                   const std::vector<bool> &valid) {
-	auto result_data = FlatVector::GetData<int32_t>(result_vector);
-	auto &validity = FlatVector::Validity(result_vector);
+	auto result_data = FlatVector::GetDataMutable<int32_t>(result_vector);
+	auto &validity = FlatVector::ValidityMutable(result_vector);
 	validity.SetAllInvalid(values.size());
 
 	for (idx_t j = 0; j < values.size(); j++) {
@@ -252,7 +252,7 @@ void SetResultVectorInt32Nullable(Vector &result_vector, const std::vector<int32
 }
 
 void SetResultVectorDouble(Vector &result_vector, const std::vector<double> &values) {
-	auto result_data = FlatVector::GetData<double>(result_vector);
+	auto result_data = FlatVector::GetDataMutable<double>(result_vector);
 	for (idx_t j = 0; j < values.size(); j++) {
 		result_data[j] = values[j];
 	}
@@ -260,8 +260,8 @@ void SetResultVectorDouble(Vector &result_vector, const std::vector<double> &val
 
 void SetResultVectorDoubleNullable(Vector &result_vector, const std::vector<double> &values,
                                    const std::vector<bool> &valid) {
-	auto result_data = FlatVector::GetData<double>(result_vector);
-	auto &validity = FlatVector::Validity(result_vector);
+	auto result_data = FlatVector::GetDataMutable<double>(result_vector);
+	auto &validity = FlatVector::ValidityMutable(result_vector);
 	validity.SetAllInvalid(values.size());
 
 	for (idx_t j = 0; j < values.size(); j++) {
@@ -282,8 +282,8 @@ void SetResultVectorListDouble(Vector &result_vector, const std::vector<std::vec
 	ListVector::SetListSize(result_vector, total_child_elements);
 
 	auto &child_vector = ListVector::GetEntry(result_vector);
-	auto child_data = FlatVector::GetData<double>(child_vector);
-	auto list_entries = FlatVector::GetData<list_entry_t>(result_vector);
+	auto child_data = FlatVector::GetDataMutable<double>(child_vector);
+	auto list_entries = FlatVector::GetDataMutable<list_entry_t>(result_vector);
 
 	idx_t value_offset = 0;
 	for (idx_t row_offset = 0; row_offset < values.size(); row_offset++) {
@@ -297,10 +297,10 @@ void SetResultVectorListDouble(Vector &result_vector, const std::vector<std::vec
 		value_offset += len;
 	}
 
-	auto &validity = FlatVector::Validity(result_vector);
+	auto &validity = FlatVector::ValidityMutable(result_vector);
 	validity.SetAllValid(values.size());
 
-	auto &child_validity = FlatVector::Validity(child_vector);
+	auto &child_validity = FlatVector::ValidityMutable(child_vector);
 	child_validity.SetAllValid(total_child_elements);
 }
 

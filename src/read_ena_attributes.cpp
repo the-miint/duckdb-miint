@@ -419,20 +419,20 @@ void ReadENAAttributesTableFunction::Execute(ClientContext &context, TableFuncti
 	idx_t count = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
 
 	// sample_accession (column 0)
-	auto acc_data = FlatVector::GetData<string_t>(output.data[0]);
+	auto acc_data = FlatVector::GetDataMutable<string_t>(output.data[0]);
 	for (idx_t i = 0; i < count; i++) {
 		acc_data[i] = StringVector::AddString(output.data[0], attrs[offset + i].sample_accession);
 	}
 
 	// tag (column 1)
-	auto tag_data = FlatVector::GetData<string_t>(output.data[1]);
+	auto tag_data = FlatVector::GetDataMutable<string_t>(output.data[1]);
 	for (idx_t i = 0; i < count; i++) {
 		tag_data[i] = StringVector::AddString(output.data[1], attrs[offset + i].tag);
 	}
 
 	// value (column 2)
-	auto val_data = FlatVector::GetData<string_t>(output.data[2]);
-	auto &val_validity = FlatVector::Validity(output.data[2]);
+	auto val_data = FlatVector::GetDataMutable<string_t>(output.data[2]);
+	auto &val_validity = FlatVector::ValidityMutable(output.data[2]);
 	for (idx_t i = 0; i < count; i++) {
 		const auto &val = attrs[offset + i].value;
 		if (val.empty()) {

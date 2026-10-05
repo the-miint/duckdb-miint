@@ -320,16 +320,16 @@ void MmvecFitExecute(ClientContext &, TableFunctionInput &data_p, DataChunk &out
 	auto &v_modality = output.data[0];
 	auto &v_x = output.data[1];
 	auto &v_y = output.data[2];
-	auto axis = FlatVector::GetData<int32_t>(output.data[3]);
-	auto value = FlatVector::GetData<double>(output.data[4]);
-	auto converged = FlatVector::GetData<bool>(output.data[5]);
-	auto n_iter = FlatVector::GetData<int64_t>(output.data[6]);
-	auto final_loss = FlatVector::GetData<double>(output.data[7]);
-	auto max_abs_grad = FlatVector::GetData<double>(output.data[8]);
+	auto axis = FlatVector::GetDataMutable<int32_t>(output.data[3]);
+	auto value = FlatVector::GetDataMutable<double>(output.data[4]);
+	auto converged = FlatVector::GetDataMutable<bool>(output.data[5]);
+	auto n_iter = FlatVector::GetDataMutable<int64_t>(output.data[6]);
+	auto final_loss = FlatVector::GetDataMutable<double>(output.data[7]);
+	auto max_abs_grad = FlatVector::GetDataMutable<double>(output.data[8]);
 	auto &v_message = output.data[9];
 
-	auto modality_data = FlatVector::GetData<string_t>(v_modality);
-	auto message_data = FlatVector::GetData<string_t>(v_message);
+	auto modality_data = FlatVector::GetDataMutable<string_t>(v_modality);
+	auto message_data = FlatVector::GetDataMutable<string_t>(v_message);
 
 	for (idx_t r = 0; r < count; ++r) {
 		const auto &row = g.rows[g.cursor + r];
@@ -343,19 +343,19 @@ void MmvecFitExecute(ClientContext &, TableFunctionInput &data_p, DataChunk &out
 			modality_data[r] =
 			    StringVector::AddString(v_modality, miint::mmvec::ModalityName(miint::mmvec::ModelRow::Kind::X));
 			EmitIdCell(v_x, r, g.x_feature_ids[id], g.x_type);
-			FlatVector::Validity(v_y).SetInvalid(r);
+			FlatVector::ValidityMutable(v_y).SetInvalid(r);
 			break;
 		case miint::mmvec::ModelRow::Kind::Y:
 			modality_data[r] =
 			    StringVector::AddString(v_modality, miint::mmvec::ModalityName(miint::mmvec::ModelRow::Kind::Y));
-			FlatVector::Validity(v_x).SetInvalid(r);
+			FlatVector::ValidityMutable(v_x).SetInvalid(r);
 			EmitIdCell(v_y, r, g.y_feature_ids[id], g.y_type);
 			break;
 		case miint::mmvec::ModelRow::Kind::Loss:
 			modality_data[r] =
 			    StringVector::AddString(v_modality, miint::mmvec::ModalityName(miint::mmvec::ModelRow::Kind::Loss));
-			FlatVector::Validity(v_x).SetInvalid(r);
-			FlatVector::Validity(v_y).SetInvalid(r);
+			FlatVector::ValidityMutable(v_x).SetInvalid(r);
+			FlatVector::ValidityMutable(v_y).SetInvalid(r);
 			break;
 		}
 

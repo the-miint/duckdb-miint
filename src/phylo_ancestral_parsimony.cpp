@@ -270,11 +270,11 @@ void PhyloAncestralParsimonyTableFunction::Execute(ClientContext &context, Table
 
 	size_t count = std::min<size_t>(STANDARD_VECTOR_SIZE, gstate.rows.size() - gstate.current_row_idx);
 
-	auto node_index_data = FlatVector::GetData<int64_t>(output.data[0]);
-	auto trait_data = FlatVector::GetData<string_t>(output.data[1]);
-	auto state_data = FlatVector::GetData<string_t>(output.data[2]);
-	auto in_mpr_data = FlatVector::GetData<bool>(output.data[3]);
-	auto min_cost_data = FlatVector::GetData<double>(output.data[4]);
+	auto node_index_data = FlatVector::GetDataMutable<int64_t>(output.data[0]);
+	auto trait_data = FlatVector::GetDataMutable<string_t>(output.data[1]);
+	auto state_data = FlatVector::GetDataMutable<string_t>(output.data[2]);
+	auto in_mpr_data = FlatVector::GetDataMutable<bool>(output.data[3]);
+	auto min_cost_data = FlatVector::GetDataMutable<double>(output.data[4]);
 
 	for (size_t k = 0; k < count; k++) {
 		const auto &row = gstate.rows[gstate.current_row_idx + k];

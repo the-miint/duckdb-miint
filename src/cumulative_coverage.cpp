@@ -131,8 +131,8 @@ struct CumulativeCoverageOperation {
 		state_vector.ToUnifiedFormat(count, state_data);
 		auto states = UnifiedVectorFormat::GetData<CumulativeCoverageState *>(state_data);
 
-		auto &result_validity = FlatVector::Validity(result);
-		auto result_data = FlatVector::GetData<list_entry_t>(result);
+		auto &result_validity = FlatVector::ValidityMutable(result);
+		auto result_data = FlatVector::GetDataMutable<list_entry_t>(result);
 
 		for (idx_t i = 0; i < count; i++) {
 			auto state_idx = state_data.sel->get_index(i);
@@ -158,8 +158,8 @@ struct CumulativeCoverageOperation {
 			ListVector::Reserve(result, list_offset + curve.size());
 
 			auto &struct_children = StructVector::GetEntries(list_entry);
-			auto rank_ptr = FlatVector::GetData<int32_t>(*struct_children[0]);
-			auto covered_ptr = FlatVector::GetData<int64_t>(*struct_children[1]);
+			auto rank_ptr = FlatVector::GetDataMutable<int32_t>(struct_children[0]);
+			auto covered_ptr = FlatVector::GetDataMutable<int64_t>(struct_children[1]);
 
 			for (idx_t j = 0; j < curve.size(); j++) {
 				rank_ptr[list_offset + j] = curve[j].rank;

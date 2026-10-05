@@ -158,8 +158,8 @@ struct CoverageDepthOperation {
 		state_vector.ToUnifiedFormat(count, state_data);
 		auto states = UnifiedVectorFormat::GetData<CoverageDepthState *>(state_data);
 
-		auto &result_validity = FlatVector::Validity(result);
-		auto result_data = FlatVector::GetData<list_entry_t>(result);
+		auto &result_validity = FlatVector::ValidityMutable(result);
+		auto result_data = FlatVector::GetDataMutable<list_entry_t>(result);
 
 		for (idx_t i = 0; i < count; i++) {
 			auto state_idx = state_data.sel->get_index(i);
@@ -177,7 +177,7 @@ struct CoverageDepthOperation {
 			auto list_offset = ListVector::GetListSize(result);
 			ListVector::Reserve(result, list_offset + list_size);
 
-			auto child_ptr = FlatVector::GetData<uint32_t>(list_entry);
+			auto child_ptr = FlatVector::GetDataMutable<uint32_t>(list_entry);
 
 			for (idx_t j = 0; j < list_size; j++) {
 				child_ptr[list_offset + j] = depths[j];

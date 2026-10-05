@@ -223,19 +223,19 @@ void ENASubmissionLogScan(ClientContext &, TableFunctionInput &data, DataChunk &
 	}
 	output.SetCardinality(produce);
 
-	auto submission_id = FlatVector::GetData<string_t>(output.data[0]);
-	auto submitted_at = FlatVector::GetData<timestamp_tz_t>(output.data[1]);
-	auto endpoint = FlatVector::GetData<string_t>(output.data[2]);
-	auto secret_name = FlatVector::GetData<string_t>(output.data[3]);
-	auto action = FlatVector::GetData<string_t>(output.data[4]);
-	auto object_type = FlatVector::GetData<string_t>(output.data[5]);
-	auto n_objects = FlatVector::GetData<int32_t>(output.data[6]);
-	auto success = FlatVector::GetData<bool>(output.data[7]);
-	auto era_accession = FlatVector::GetData<string_t>(output.data[8]);
-	auto request_payload = FlatVector::GetData<string_t>(output.data[9]);
-	auto receipt = FlatVector::GetData<string_t>(output.data[10]);
-	auto duration_ms = FlatVector::GetData<int64_t>(output.data[12]);
-	auto target = FlatVector::GetData<string_t>(output.data[13]);
+	auto submission_id = FlatVector::GetDataMutable<string_t>(output.data[0]);
+	auto submitted_at = FlatVector::GetDataMutable<timestamp_tz_t>(output.data[1]);
+	auto endpoint = FlatVector::GetDataMutable<string_t>(output.data[2]);
+	auto secret_name = FlatVector::GetDataMutable<string_t>(output.data[3]);
+	auto action = FlatVector::GetDataMutable<string_t>(output.data[4]);
+	auto object_type = FlatVector::GetDataMutable<string_t>(output.data[5]);
+	auto n_objects = FlatVector::GetDataMutable<int32_t>(output.data[6]);
+	auto success = FlatVector::GetDataMutable<bool>(output.data[7]);
+	auto era_accession = FlatVector::GetDataMutable<string_t>(output.data[8]);
+	auto request_payload = FlatVector::GetDataMutable<string_t>(output.data[9]);
+	auto receipt = FlatVector::GetDataMutable<string_t>(output.data[10]);
+	auto duration_ms = FlatVector::GetDataMutable<int64_t>(output.data[12]);
+	auto target = FlatVector::GetDataMutable<string_t>(output.data[13]);
 
 	auto &error_messages = output.data[11];
 	ListVector::SetListSize(error_messages, 0);
@@ -267,7 +267,7 @@ void ENASubmissionLogScan(ClientContext &, TableFunctionInput &data, DataChunk &
 		const auto count = static_cast<idx_t>(row.error_messages.size());
 		ListVector::Reserve(error_messages, child_offset + count);
 		auto &child_vec = ListVector::GetEntry(error_messages);
-		auto child_data = FlatVector::GetData<string_t>(child_vec);
+		auto child_data = FlatVector::GetDataMutable<string_t>(child_vec);
 		for (idx_t j = 0; j < count; j++) {
 			child_data[child_offset + j] = StringVector::AddString(child_vec, row.error_messages[j]);
 		}
@@ -296,7 +296,7 @@ void ENASubmissionLogScan(ClientContext &, TableFunctionInput &data, DataChunk &
 			const auto count = static_cast<idx_t>(src.size());
 			ListVector::Reserve(list_vec, offset + count);
 			auto &child_vec = ListVector::GetEntry(list_vec);
-			auto child_data = FlatVector::GetData<string_t>(child_vec);
+			auto child_data = FlatVector::GetDataMutable<string_t>(child_vec);
 			for (idx_t j = 0; j < count; j++) {
 				child_data[offset + j] = StringVector::AddString(child_vec, src[j]);
 			}

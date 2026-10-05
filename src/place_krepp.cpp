@@ -219,12 +219,12 @@ void PlaceKreppTableFunction::Execute(ClientContext &context, TableFunctionInput
 	// boxes every cell into a Value first. EmitIdCell is the shared id codec, so
 	// a BIGINT or UUID fragment is written the same way align_minimap2 writes it.
 	auto &fragment_out = output.data[0];
-	auto edge_num_out = FlatVector::GetData<int64_t>(output.data[1]);
-	auto likelihood_out = FlatVector::GetData<double>(output.data[2]);
-	auto lwr_out = FlatVector::GetData<double>(output.data[3]);
-	auto distal_out = FlatVector::GetData<double>(output.data[4]);
-	auto pendant_out = FlatVector::GetData<double>(output.data[5]);
-	auto distance_out = FlatVector::GetData<double>(output.data[6]);
+	auto edge_num_out = FlatVector::GetDataMutable<int64_t>(output.data[1]);
+	auto likelihood_out = FlatVector::GetDataMutable<double>(output.data[2]);
+	auto lwr_out = FlatVector::GetDataMutable<double>(output.data[3]);
+	auto distal_out = FlatVector::GetDataMutable<double>(output.data[4]);
+	auto pendant_out = FlatVector::GetDataMutable<double>(output.data[5]);
+	auto distance_out = FlatVector::GetDataMutable<double>(output.data[6]);
 	for (idx_t row = 0; row < count; ++row) {
 		const auto &placement = lstate.pending[lstate.emitted + row];
 		EmitIdCell(fragment_out, row, placement.fragment, bind_data.schema.id_type);

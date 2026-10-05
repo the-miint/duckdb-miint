@@ -291,20 +291,20 @@ void ReadNCBIFastaTableFunction::Execute(ClientContext &context, TableFunctionIn
 	size_t offset = global_state.batch_offset;
 
 	// sequence_index (column 0)
-	auto seq_idx_data = FlatVector::GetData<int64_t>(output.data[0]);
+	auto seq_idx_data = FlatVector::GetDataMutable<int64_t>(output.data[0]);
 	for (idx_t i = 0; i < count; i++) {
 		seq_idx_data[i] = global_state.sequence_index++;
 	}
 
 	// read_id (column 1)
-	auto read_id_data = FlatVector::GetData<string_t>(output.data[1]);
+	auto read_id_data = FlatVector::GetDataMutable<string_t>(output.data[1]);
 	for (idx_t i = 0; i < count; i++) {
 		read_id_data[i] = StringVector::AddString(output.data[1], batch.read_ids[offset + i]);
 	}
 
 	// comment (column 2) - nullable
-	auto comment_data = FlatVector::GetData<string_t>(output.data[2]);
-	auto &comment_validity = FlatVector::Validity(output.data[2]);
+	auto comment_data = FlatVector::GetDataMutable<string_t>(output.data[2]);
+	auto &comment_validity = FlatVector::ValidityMutable(output.data[2]);
 	for (idx_t i = 0; i < count; i++) {
 		const auto &comment = batch.comments[offset + i];
 		comment_data[i] = StringVector::AddString(output.data[2], comment);
@@ -314,7 +314,7 @@ void ReadNCBIFastaTableFunction::Execute(ClientContext &context, TableFunctionIn
 	}
 
 	// sequence1 (column 3)
-	auto seq1_data = FlatVector::GetData<string_t>(output.data[3]);
+	auto seq1_data = FlatVector::GetDataMutable<string_t>(output.data[3]);
 	for (idx_t i = 0; i < count; i++) {
 		seq1_data[i] = StringVector::AddString(output.data[3], batch.sequences1[offset + i]);
 	}

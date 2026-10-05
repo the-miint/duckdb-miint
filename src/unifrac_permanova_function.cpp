@@ -435,13 +435,13 @@ void UnifracPermanovaExecute(ClientContext &, TableFunctionInput &input, DataChu
 	const idx_t remaining = total - gstate.cursor;
 	const idx_t n = std::min<idx_t>(STANDARD_VECTOR_SIZE, remaining);
 
-	auto iter_data = FlatVector::GetData<int32_t>(output.data[0]);
+	auto iter_data = FlatVector::GetDataMutable<int32_t>(output.data[0]);
 	auto &variable_vec = output.data[1];
-	auto variable_data = FlatVector::GetData<string_t>(variable_vec);
-	auto n_groups_data = FlatVector::GetData<int32_t>(output.data[2]);
-	auto f_stat_data = FlatVector::GetData<double>(output.data[3]);
-	auto p_value_data = FlatVector::GetData<double>(output.data[4]);
-	auto n_perm_data = FlatVector::GetData<int32_t>(output.data[5]);
+	auto variable_data = FlatVector::GetDataMutable<string_t>(variable_vec);
+	auto n_groups_data = FlatVector::GetDataMutable<int32_t>(output.data[2]);
+	auto f_stat_data = FlatVector::GetDataMutable<double>(output.data[3]);
+	auto p_value_data = FlatVector::GetDataMutable<double>(output.data[4]);
+	auto n_perm_data = FlatVector::GetDataMutable<int32_t>(output.data[5]);
 
 	for (idx_t i = 0; i < n; ++i) {
 		const auto &r = gstate.rows[gstate.cursor + i];

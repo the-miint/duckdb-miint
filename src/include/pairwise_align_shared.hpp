@@ -105,8 +105,8 @@ template <typename LocalState, auto Method>
 inline void RunPairwiseAlignScoreExecute(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &lstate = ExecuteFunctionState::GetFunctionState(state)->template Cast<LocalState>();
 	auto inputs = PrepareAlignInputs(args);
-	auto result_data = FlatVector::GetData<int32_t>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<int32_t>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 
 	for (idx_t i = 0; i < args.size(); i++) {
 		if (!GetAlignInput(inputs, i, lstate.query_buf, lstate.subject_buf)) {
@@ -128,9 +128,9 @@ inline void RunPairwiseAlignCigarExecute(DataChunk &args, ExpressionState &state
 	auto inputs = PrepareAlignInputs(args);
 
 	auto &entries = StructVector::GetEntries(result);
-	auto score_data = FlatVector::GetData<int32_t>(*entries[0]);
-	auto &cigar_vec = *entries[1];
-	auto cigar_data = FlatVector::GetData<string_t>(cigar_vec);
+	auto score_data = FlatVector::GetDataMutable<int32_t>(entries[0]);
+	auto &cigar_vec = entries[1];
+	auto cigar_data = FlatVector::GetDataMutable<string_t>(cigar_vec);
 
 	// FlatVector::SetNull, not Validity().SetInvalid: this returns a STRUCT, and
 	// struct_extract hands back a bare reference to a child WITHOUT applying the parent's
@@ -162,13 +162,13 @@ inline void RunPairwiseAlignFullExecute(DataChunk &args, ExpressionState &state,
 	auto inputs = PrepareAlignInputs(args);
 
 	auto &entries = StructVector::GetEntries(result);
-	auto score_data = FlatVector::GetData<int32_t>(*entries[0]);
-	auto &cigar_vec = *entries[1];
-	auto &query_aligned_vec = *entries[2];
-	auto &subject_aligned_vec = *entries[3];
-	auto cigar_data = FlatVector::GetData<string_t>(cigar_vec);
-	auto query_aligned_data = FlatVector::GetData<string_t>(query_aligned_vec);
-	auto subject_aligned_data = FlatVector::GetData<string_t>(subject_aligned_vec);
+	auto score_data = FlatVector::GetDataMutable<int32_t>(entries[0]);
+	auto &cigar_vec = entries[1];
+	auto &query_aligned_vec = entries[2];
+	auto &subject_aligned_vec = entries[3];
+	auto cigar_data = FlatVector::GetDataMutable<string_t>(cigar_vec);
+	auto query_aligned_data = FlatVector::GetDataMutable<string_t>(query_aligned_vec);
+	auto subject_aligned_data = FlatVector::GetDataMutable<string_t>(subject_aligned_vec);
 
 	// STRUCT result: see the note in RunPairwiseAlignCigarExecute above for why this is
 	// FlatVector::SetNull and not Validity().SetInvalid.

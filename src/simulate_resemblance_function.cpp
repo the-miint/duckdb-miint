@@ -150,10 +150,10 @@ void SimGradientExecute(ClientContext &context, TableFunctionInput &data_p, Data
 	const idx_t total = coo.size();
 	const idx_t count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, total - gstate.cursor);
 
-	auto sample_id = FlatVector::GetData<int32_t>(output.data[0]);
-	auto otu_id = FlatVector::GetData<int32_t>(output.data[1]);
-	auto counts = FlatVector::GetData<int64_t>(output.data[2]);
-	auto position = FlatVector::GetData<double>(output.data[3]);
+	auto sample_id = FlatVector::GetDataMutable<int32_t>(output.data[0]);
+	auto otu_id = FlatVector::GetDataMutable<int32_t>(output.data[1]);
+	auto counts = FlatVector::GetDataMutable<int64_t>(output.data[2]);
+	auto position = FlatVector::GetDataMutable<double>(output.data[3]);
 
 	for (idx_t i = 0; i < count; i++) {
 		const idx_t j = gstate.cursor + i;
@@ -275,10 +275,10 @@ void SimClusterExecute(ClientContext &context, TableFunctionInput &data_p, DataC
 	const idx_t total = coo.size();
 	const idx_t count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, total - gstate.cursor);
 
-	auto sample_id = FlatVector::GetData<int32_t>(output.data[0]);
-	auto otu_id = FlatVector::GetData<int32_t>(output.data[1]);
-	auto counts = FlatVector::GetData<int64_t>(output.data[2]);
-	auto cluster_id = FlatVector::GetData<int32_t>(output.data[3]);
+	auto sample_id = FlatVector::GetDataMutable<int32_t>(output.data[0]);
+	auto otu_id = FlatVector::GetDataMutable<int32_t>(output.data[1]);
+	auto counts = FlatVector::GetDataMutable<int64_t>(output.data[2]);
+	auto cluster_id = FlatVector::GetDataMutable<int32_t>(output.data[3]);
 
 	for (idx_t i = 0; i < count; i++) {
 		const idx_t j = gstate.cursor + i;

@@ -261,9 +261,9 @@ void UnifracFaithPdExecute(ClientContext &, TableFunctionInput &input, DataChunk
 	const idx_t remaining = total - gstate.cursor;
 	const idx_t n = std::min<idx_t>(STANDARD_VECTOR_SIZE, remaining);
 
-	auto iter_data = FlatVector::GetData<int32_t>(output.data[0]);
+	auto iter_data = FlatVector::GetDataMutable<int32_t>(output.data[0]);
 	auto &sample_id_vec = output.data[1];
-	auto faith_pd_data = FlatVector::GetData<double>(output.data[2]);
+	auto faith_pd_data = FlatVector::GetDataMutable<double>(output.data[2]);
 
 	for (idx_t i = 0; i < n; ++i) {
 		const auto &r = gstate.rows[gstate.cursor + i];

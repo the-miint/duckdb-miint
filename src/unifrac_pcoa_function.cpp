@@ -453,17 +453,17 @@ void EmitPcoaChunk(const std::vector<PcoaRow> &rows, size_t &cursor, const Logic
 	const idx_t remaining = rows.size() - cursor;
 	const idx_t n = std::min<idx_t>(STANDARD_VECTOR_SIZE, remaining);
 
-	auto iter_data = FlatVector::GetData<int32_t>(output.data[0]);
+	auto iter_data = FlatVector::GetDataMutable<int32_t>(output.data[0]);
 	auto &sample_id_vec = output.data[1];
-	auto axis_data = FlatVector::GetData<int32_t>(output.data[2]);
-	auto coord_data = FlatVector::GetData<double>(output.data[3]);
-	auto eig_data = FlatVector::GetData<double>(output.data[4]);
-	auto pe_data = FlatVector::GetData<double>(output.data[5]);
+	auto axis_data = FlatVector::GetDataMutable<int32_t>(output.data[2]);
+	auto coord_data = FlatVector::GetDataMutable<double>(output.data[3]);
+	auto eig_data = FlatVector::GetDataMutable<double>(output.data[4]);
+	auto pe_data = FlatVector::GetDataMutable<double>(output.data[5]);
 	int32_t *batch_data = nullptr;
 	double *m2_data = nullptr;
 	if (with_batch_diagnostics) {
-		batch_data = FlatVector::GetData<int32_t>(output.data[6]);
-		m2_data = FlatVector::GetData<double>(output.data[7]);
+		batch_data = FlatVector::GetDataMutable<int32_t>(output.data[6]);
+		m2_data = FlatVector::GetDataMutable<double>(output.data[7]);
 	}
 
 	for (idx_t i = 0; i < n; ++i) {

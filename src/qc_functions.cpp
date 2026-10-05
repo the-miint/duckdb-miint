@@ -79,11 +79,11 @@ static void WriteTrimRow(idx_t i, const string_t &seq, const uint8_t *qptr, idx_
                          Vector &seq_out_vec, Vector &qual_out_vec, list_entry_t *qual_out_entries,
                          idx_t &qual_child_offset, uint32_t *trimmed_5p_data, uint32_t *trimmed_3p_data) {
 	const idx_t kept_len = tr.end - tr.start;
-	FlatVector::GetData<string_t>(seq_out_vec)[i] =
+	FlatVector::GetDataMutable<string_t>(seq_out_vec)[i] =
 	    StringVector::AddString(seq_out_vec, seq.GetData() + tr.start, kept_len);
 
 	auto &qual_child = ListVector::GetEntry(qual_out_vec);
-	auto qual_child_data = FlatVector::GetData<uint8_t>(qual_child);
+	auto qual_child_data = FlatVector::GetDataMutable<uint8_t>(qual_child);
 	std::memcpy(qual_child_data + qual_child_offset, qptr + tr.start, kept_len);
 	qual_out_entries[i].offset = qual_child_offset;
 	qual_out_entries[i].length = kept_len;
@@ -126,12 +126,12 @@ static void TrimExecuteImpl(DataChunk &args, Vector &result, idx_t n_optional, c
 	auto seq_ptr = UnifiedVectorFormat::GetData<string_t>(seq_data);
 
 	auto &entries = StructVector::GetEntries(result);
-	auto &seq_out_vec = *entries[0];
-	auto &qual_out_vec = *entries[1];
-	auto trimmed_5p_data = FlatVector::GetData<uint32_t>(*entries[2]);
-	auto trimmed_3p_data = FlatVector::GetData<uint32_t>(*entries[3]);
+	auto &seq_out_vec = entries[0];
+	auto &qual_out_vec = entries[1];
+	auto trimmed_5p_data = FlatVector::GetDataMutable<uint32_t>(entries[2]);
+	auto trimmed_3p_data = FlatVector::GetDataMutable<uint32_t>(entries[3]);
 
-	auto qual_out_entries = FlatVector::GetData<list_entry_t>(qual_out_vec);
+	auto qual_out_entries = FlatVector::GetDataMutable<list_entry_t>(qual_out_vec);
 	idx_t qual_child_offset = ListVector::GetListSize(qual_out_vec);
 	ReserveTrimOutputChildBuffer(args, qual_out_vec, qual_child_offset);
 
@@ -398,12 +398,12 @@ static void TrimAdaptersExecuteImpl(DataChunk &args, Vector &result, bool adapte
 	auto prestart_ptr = has_explicit_params ? UnifiedVectorFormat::GetData<bool>(prestart_data) : nullptr;
 
 	auto &entries = StructVector::GetEntries(result);
-	auto &seq_out_vec = *entries[0];
-	auto &qual_out_vec = *entries[1];
-	auto trimmed_5p_data = FlatVector::GetData<uint32_t>(*entries[2]);
-	auto trimmed_3p_data = FlatVector::GetData<uint32_t>(*entries[3]);
+	auto &seq_out_vec = entries[0];
+	auto &qual_out_vec = entries[1];
+	auto trimmed_5p_data = FlatVector::GetDataMutable<uint32_t>(entries[2]);
+	auto trimmed_3p_data = FlatVector::GetDataMutable<uint32_t>(entries[3]);
 
-	auto qual_out_entries = FlatVector::GetData<list_entry_t>(qual_out_vec);
+	auto qual_out_entries = FlatVector::GetDataMutable<list_entry_t>(qual_out_vec);
 	idx_t qual_child_offset = ListVector::GetListSize(qual_out_vec);
 	ReserveTrimOutputChildBuffer(args, qual_out_vec, qual_child_offset);
 
@@ -607,7 +607,8 @@ static LogicalType TrimAdaptersPeResultStructType() {
 static void WritePeMate(idx_t i, const string_t &seq, const uint8_t *qptr, idx_t keep_len, Vector &seq_out_vec,
                         Vector &qual_out_vec, list_entry_t *qual_entries, uint8_t *qual_child,
                         idx_t &qual_child_offset) {
-	FlatVector::GetData<string_t>(seq_out_vec)[i] = StringVector::AddString(seq_out_vec, seq.GetData(), keep_len);
+	FlatVector::GetDataMutable<string_t>(seq_out_vec)[i] =
+	    StringVector::AddString(seq_out_vec, seq.GetData(), keep_len);
 	std::memcpy(qual_child + qual_child_offset, qptr, keep_len);
 	qual_entries[i].offset = qual_child_offset;
 	qual_entries[i].length = keep_len;
@@ -723,17 +724,17 @@ static void TrimAdaptersPeExecute(DataChunk &args, ExpressionState &state, Vecto
 	auto seq2_ptr = UnifiedVectorFormat::GetData<string_t>(seq2_data);
 
 	auto &entries = StructVector::GetEntries(result);
-	auto &seq1_out = *entries[0];
-	auto &qual1_out = *entries[1];
-	auto &seq2_out = *entries[2];
-	auto &qual2_out = *entries[3];
-	auto overlap_len_data = FlatVector::GetData<int32_t>(*entries[4]);
-	auto adapter_trimmed_data = FlatVector::GetData<bool>(*entries[5]);
-	auto trimmed1_data = FlatVector::GetData<uint32_t>(*entries[6]);
-	auto trimmed2_data = FlatVector::GetData<uint32_t>(*entries[7]);
+	auto &seq1_out = entries[0];
+	auto &qual1_out = entries[1];
+	auto &seq2_out = entries[2];
+	auto &qual2_out = entries[3];
+	auto overlap_len_data = FlatVector::GetDataMutable<int32_t>(entries[4]);
+	auto adapter_trimmed_data = FlatVector::GetDataMutable<bool>(entries[5]);
+	auto trimmed1_data = FlatVector::GetDataMutable<uint32_t>(entries[6]);
+	auto trimmed2_data = FlatVector::GetDataMutable<uint32_t>(entries[7]);
 
-	auto qual1_entries = FlatVector::GetData<list_entry_t>(qual1_out);
-	auto qual2_entries = FlatVector::GetData<list_entry_t>(qual2_out);
+	auto qual1_entries = FlatVector::GetDataMutable<list_entry_t>(qual1_out);
+	auto qual2_entries = FlatVector::GetDataMutable<list_entry_t>(qual2_out);
 	idx_t qual1_off = ListVector::GetListSize(qual1_out);
 	idx_t qual2_off = ListVector::GetListSize(qual2_out);
 	// Trimmed output is at most as long as the input quality, so one reserve per
@@ -743,8 +744,8 @@ static void TrimAdaptersPeExecute(DataChunk &args, ExpressionState &state, Vecto
 	// Both Reserves happen before either child pointer is taken, and no Reserve
 	// runs inside the row loop (WritePeMate only SetListSize, which never
 	// reallocates), so these cached child pointers stay valid for the whole chunk.
-	auto qual1_child = FlatVector::GetData<uint8_t>(ListVector::GetEntry(qual1_out));
-	auto qual2_child = FlatVector::GetData<uint8_t>(ListVector::GetEntry(qual2_out));
+	auto qual1_child = FlatVector::GetDataMutable<uint8_t>(ListVector::GetEntry(qual1_out));
+	auto qual2_child = FlatVector::GetDataMutable<uint8_t>(ListVector::GetEntry(qual2_out));
 
 	for (idx_t i = 0; i < row_count; i++) {
 		auto s1i = seq1_data.sel->get_index(i);
@@ -872,13 +873,13 @@ static void FilterReadExecute(DataChunk &args, ExpressionState &state, Vector &r
 	auto p6_ptr = has_explicit_params ? UnifiedVectorFormat::GetData<int32_t>(p6_data) : nullptr;
 
 	auto &entries = StructVector::GetEntries(result);
-	auto passed_data = FlatVector::GetData<bool>(*entries[0]);
-	auto &fail_reason_vec = *entries[1];
-	auto length_data = FlatVector::GetData<uint32_t>(*entries[2]);
-	auto n_bases_data = FlatVector::GetData<uint32_t>(*entries[3]);
-	auto low_qual_data = FlatVector::GetData<uint32_t>(*entries[4]);
-	auto mean_q_data = FlatVector::GetData<float>(*entries[5]);
-	auto &fail_reason_validity = FlatVector::Validity(fail_reason_vec);
+	auto passed_data = FlatVector::GetDataMutable<bool>(entries[0]);
+	auto &fail_reason_vec = entries[1];
+	auto length_data = FlatVector::GetDataMutable<uint32_t>(entries[2]);
+	auto n_bases_data = FlatVector::GetDataMutable<uint32_t>(entries[3]);
+	auto low_qual_data = FlatVector::GetDataMutable<uint32_t>(entries[4]);
+	auto mean_q_data = FlatVector::GetDataMutable<float>(entries[5]);
+	auto &fail_reason_validity = FlatVector::ValidityMutable(fail_reason_vec);
 
 	for (idx_t i = 0; i < row_count; i++) {
 		auto si = seq_data.sel->get_index(i);
@@ -934,7 +935,7 @@ static void FilterReadExecute(DataChunk &args, ExpressionState &state, Vector &r
 		// reached only when qlen is also 0.)
 		if (seq.GetSize() == 0) {
 			passed_data[i] = false;
-			FlatVector::GetData<string_t>(fail_reason_vec)[i] =
+			FlatVector::GetDataMutable<string_t>(fail_reason_vec)[i] =
 			    StringVector::AddString(fail_reason_vec, FAIL_REASON_LENGTH);
 			length_data[i] = 0;
 			n_bases_data[i] = 0;
@@ -967,7 +968,8 @@ static void FilterReadExecute(DataChunk &args, ExpressionState &state, Vector &r
 
 		passed_data[i] = (fail_reason == nullptr);
 		if (fail_reason != nullptr) {
-			FlatVector::GetData<string_t>(fail_reason_vec)[i] = StringVector::AddString(fail_reason_vec, fail_reason);
+			FlatVector::GetDataMutable<string_t>(fail_reason_vec)[i] =
+			    StringVector::AddString(fail_reason_vec, fail_reason);
 		} else {
 			fail_reason_validity.SetInvalid(i);
 		}

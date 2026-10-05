@@ -522,13 +522,13 @@ void ProcrustesExecute(ClientContext &, TableFunctionInput &data_p, DataChunk &o
 	const size_t total = gstate.rows.size();
 	const idx_t n = MinValue<idx_t>(STANDARD_VECTOR_SIZE, total - gstate.cursor);
 
-	auto matrix_data = FlatVector::GetData<string_t>(output.data[0]);
+	auto matrix_data = FlatVector::GetDataMutable<string_t>(output.data[0]);
 	auto &sample_id_vec = output.data[1];
-	auto axis_data = FlatVector::GetData<int32_t>(output.data[2]);
-	auto coord_data = FlatVector::GetData<double>(output.data[3]);
-	auto m2_data = FlatVector::GetData<double>(output.data[4]);
-	auto pvalue_data = FlatVector::GetData<double>(output.data[5]);
-	auto &pvalue_validity = FlatVector::Validity(output.data[5]);
+	auto axis_data = FlatVector::GetDataMutable<int32_t>(output.data[2]);
+	auto coord_data = FlatVector::GetDataMutable<double>(output.data[3]);
+	auto m2_data = FlatVector::GetDataMutable<double>(output.data[4]);
+	auto pvalue_data = FlatVector::GetDataMutable<double>(output.data[5]);
+	auto &pvalue_validity = FlatVector::ValidityMutable(output.data[5]);
 	const bool pvalue_is_null = std::isnan(gstate.pvalue);
 
 	for (idx_t i = 0; i < n; ++i) {

@@ -45,12 +45,12 @@ static idx_t OutputClusterResults(DataChunk &output, const std::vector<miint::Cl
 		EmitIdCell(read_id_vec, i, results[offset + i].read_id, id_type);
 	}
 
-	auto is_centroid_data = FlatVector::GetData<bool>(output.data[col++]);
+	auto is_centroid_data = FlatVector::GetDataMutable<bool>(output.data[col++]);
 	for (idx_t i = 0; i < actual; i++) {
 		is_centroid_data[i] = results[offset + i].is_centroid;
 	}
 
-	auto cluster_id_data = FlatVector::GetData<int32_t>(output.data[col++]);
+	auto cluster_id_data = FlatVector::GetDataMutable<int32_t>(output.data[col++]);
 	for (idx_t i = 0; i < actual; i++) {
 		cluster_id_data[i] = results[offset + i].cluster_id;
 	}
@@ -60,17 +60,18 @@ static idx_t OutputClusterResults(DataChunk &output, const std::vector<miint::Cl
 		EmitIdCell(centroid_id_vec, i, results[offset + i].centroid_id, id_type);
 	}
 
-	auto identity_data = FlatVector::GetData<double>(output.data[col++]);
+	auto identity_data = FlatVector::GetDataMutable<double>(output.data[col++]);
 	for (idx_t i = 0; i < actual; i++) {
 		identity_data[i] = results[offset + i].identity;
 	}
 
 	auto &cigar_vec = output.data[col++];
 	for (idx_t i = 0; i < actual; i++) {
-		FlatVector::GetData<string_t>(cigar_vec)[i] = StringVector::AddString(cigar_vec, results[offset + i].cigar);
+		FlatVector::GetDataMutable<string_t>(cigar_vec)[i] =
+		    StringVector::AddString(cigar_vec, results[offset + i].cigar);
 	}
 
-	auto cigar_trunc_data = FlatVector::GetData<bool>(output.data[col++]);
+	auto cigar_trunc_data = FlatVector::GetDataMutable<bool>(output.data[col++]);
 	for (idx_t i = 0; i < actual; i++) {
 		cigar_trunc_data[i] = results[offset + i].cigar_truncated;
 	}

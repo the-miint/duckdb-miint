@@ -266,12 +266,12 @@ static void Execute(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto a3_ptr = UnifiedVectorFormat::GetData<string_t>(a3_data);
 
 	auto &entries = StructVector::GetEntries(result);
-	auto &seq_out_vec = *entries[0];
-	auto &qual_out_vec = *entries[1];
-	auto start_data = FlatVector::GetData<int32_t>(*entries[2]);
-	auto stop_data = FlatVector::GetData<int32_t>(*entries[3]);
+	auto &seq_out_vec = entries[0];
+	auto &qual_out_vec = entries[1];
+	auto start_data = FlatVector::GetDataMutable<int32_t>(entries[2]);
+	auto stop_data = FlatVector::GetDataMutable<int32_t>(entries[3]);
 
-	auto qual_out_entries = FlatVector::GetData<list_entry_t>(qual_out_vec);
+	auto qual_out_entries = FlatVector::GetDataMutable<list_entry_t>(qual_out_vec);
 	idx_t qual_child_offset = ListVector::GetListSize(qual_out_vec);
 	// Worst case: every output row keeps the full input qual list.
 	ListVector::Reserve(qual_out_vec, qual_child_offset + ListVector::GetListSize(args.data[1]));
@@ -406,12 +406,12 @@ static void Execute(DataChunk &args, ExpressionState &state, Vector &result) {
 		}
 
 		// Write extracted sequence
-		FlatVector::GetData<string_t>(seq_out_vec)[i] =
+		FlatVector::GetDataMutable<string_t>(seq_out_vec)[i] =
 		    StringVector::AddString(seq_out_vec, seq.GetData() + global_start, extracted_len);
 
 		// Write extracted qual list
 		auto &qual_child = ListVector::GetEntry(qual_out_vec);
-		auto qual_child_data = FlatVector::GetData<uint8_t>(qual_child);
+		auto qual_child_data = FlatVector::GetDataMutable<uint8_t>(qual_child);
 		if (extracted_len > 0) {
 			std::memcpy(qual_child_data + qual_child_offset, qptr + global_start, extracted_len);
 		}
