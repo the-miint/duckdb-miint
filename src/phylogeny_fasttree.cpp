@@ -149,7 +149,7 @@ std::string BuildConfigJson(const named_argument_map_t &named_params) {
 
 	// First pass: reject unknown params.
 	for (const auto &kv : named_params) {
-		if (kKnownParams.find(kv.first) == kKnownParams.end()) {
+		if (kKnownParams.find(kv.first.GetIdentifierName()) == kKnownParams.end()) {
 			throw InvalidInputException("phylogeny_fasttree: unknown named parameter '%s'. "
 			                            "See `docs/phylogeny.md` for the supported list.",
 			                            kv.first);
@@ -157,7 +157,7 @@ std::string BuildConfigJson(const named_argument_map_t &named_params) {
 	}
 
 	auto get = [&](const std::string &k) -> const Value * {
-		auto it = named_params.find(k);
+		auto it = named_params.find(Identifier(k));
 		return it == named_params.end() ? nullptr : &it->second;
 	};
 

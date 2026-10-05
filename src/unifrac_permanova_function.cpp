@@ -94,7 +94,7 @@ WideMetadata ReadWideMetadata(ClientContext &context, const std::string &table_n
 	std::vector<std::string> non_sample_cols;
 	std::vector<idx_t> non_sample_indices;
 	for (idx_t i = 0; i < all_names.size(); ++i) {
-		if (StringUtil::Lower(all_names[i]) == "sample_id") {
+		if (all_names[i] == "sample_id") {
 			if (sample_id_col != DConstants::INVALID_INDEX) {
 				throw BinderException("%s: metadata '%s' has multiple 'sample_id' columns", caller_name, table_name);
 			}

@@ -148,7 +148,7 @@ const std::unordered_set<std::string> kCommonAlignParams = {
 
 void AppendBowtie2AlignParams(ConfigJsonBuilder &cfg, const named_argument_map_t &named_params, const char *caller) {
 	auto get = [&](const std::string &k) -> const Value * {
-		auto it = named_params.find(k);
+		auto it = named_params.find(Identifier(k));
 		return (it == named_params.end() || it->second.IsNull()) ? nullptr : &it->second;
 	};
 

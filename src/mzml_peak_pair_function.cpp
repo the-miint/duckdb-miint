@@ -42,7 +42,7 @@ struct MzmlPeakPairLocalState : public LocalTableFunctionState {
 
 static void ExtractSchema(QueryResult &result, vector<LogicalType> &return_types, vector<string> &names) {
 	for (idx_t i = 0; i < result.ColumnCount(); i++) {
-		names.push_back(result.ColumnName(i));
+		names.push_back(result.ColumnName(i).GetIdentifierName());
 		return_types.push_back(result.GetTypes()[i]);
 	}
 }

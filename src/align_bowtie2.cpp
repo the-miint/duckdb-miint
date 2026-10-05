@@ -72,7 +72,7 @@ std::string BuildAlignConfigJson(const named_argument_map_t &named_params, const
                                  int64_t db_threads) {
 	static const auto kKnown = MakeKnownAlignParams();
 	for (const auto &kv : named_params) {
-		if (kKnown.find(kv.first) == kKnown.end()) {
+		if (kKnown.find(kv.first.GetIdentifierName()) == kKnown.end()) {
 			throw InvalidInputException("align_bowtie2: unknown named parameter '%s'.", kv.first);
 		}
 	}
@@ -271,7 +271,7 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 	// at SQL-compile rather than at execution).
 	static const auto kKnown = MakeKnownAlignParams();
 	for (const auto &kv : bd->named_params) {
-		if (kKnown.find(kv.first) == kKnown.end()) {
+		if (kKnown.find(kv.first.GetIdentifierName()) == kKnown.end()) {
 			throw InvalidInputException("align_bowtie2: unknown named parameter '%s'.", kv.first);
 		}
 	}

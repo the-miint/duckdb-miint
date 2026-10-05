@@ -540,7 +540,7 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 	// Reject unknown params at bind time.
 	for (const auto &kv : input.named_parameters) {
 		static const auto kKnown = MakeKnownShardedParams();
-		if (kKnown.find(kv.first) == kKnown.end()) {
+		if (kKnown.find(kv.first.GetIdentifierName()) == kKnown.end()) {
 			throw InvalidInputException("align_bowtie2_sharded: unknown named parameter '%s'", kv.first);
 		}
 	}

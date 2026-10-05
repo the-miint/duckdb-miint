@@ -226,7 +226,7 @@ struct LowercasedColumns {
 //! diagnostics.
 inline LowercasedColumns GetTableColumnsLower(ClientContext &context, const std::string &table_name,
                                               const std::string &role = "Table or view") {
-	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, table_name, QueryErrorContext());
+	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, QualifiedName(Identifier(table_name)), QueryErrorContext());
 	auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
 
 	if (!entry) {
@@ -239,7 +239,7 @@ inline LowercasedColumns GetTableColumnsLower(ClientContext &context, const std:
 		auto &columns = table.GetColumns();
 		for (idx_t i = 0; i < columns.LogicalColumnCount(); i++) {
 			auto &col = columns.GetColumn(LogicalIndex(i));
-			cols.names.push_back(StringUtil::Lower(col.Name()));
+			cols.names.push_back(StringUtil::Lower(col.Name().GetIdentifierName()));
 			cols.types.push_back(col.Type());
 		}
 	} else if (entry->type == CatalogType::VIEW_ENTRY) {
@@ -247,7 +247,7 @@ inline LowercasedColumns GetTableColumnsLower(ClientContext &context, const std:
 		view.BindView(context);
 		auto col_info = view.GetColumnInfo();
 		for (idx_t i = 0; i < col_info->names.size(); i++) {
-			cols.names.push_back(StringUtil::Lower(col_info->names[i]));
+			cols.names.push_back(StringUtil::Lower(col_info->names[i].GetIdentifierName()));
 			cols.types.push_back(col_info->types[i]);
 		}
 	} else {

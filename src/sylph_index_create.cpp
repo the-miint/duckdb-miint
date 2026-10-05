@@ -48,7 +48,7 @@ namespace {
 // struct's zero, so callers never pass 0 explicitly here).
 template <typename T>
 void ApplyBoundedInt(TableFunctionBindInput &input, const std::string &param, int64_t hi, T &out) {
-	auto it = input.named_parameters.find(param);
+	auto it = input.named_parameters.find(Identifier(param));
 	if (it == input.named_parameters.end() || it->second.IsNull()) {
 		return;
 	}
@@ -184,7 +184,7 @@ unique_ptr<FunctionData> SylphIndexCreateTableFunction::Bind(ClientContext &cont
 		data->has_comment = !comment_probe->HasError();
 	}
 
-	names = data->names;
+	names = StringsToIdentifiers(data->names);
 	return_types = data->types;
 	return std::move(data);
 }
