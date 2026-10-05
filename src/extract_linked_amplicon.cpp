@@ -429,16 +429,14 @@ static void Execute(DataChunk &args, ExpressionState &state, Vector &result) {
 // Bind: 4-arg (all defaults), 7-arg (min_len/max_len/error_rate), 8-arg
 // (also min_overlap). All explicit params must be foldable constants.
 // ---------------------------------------------------------------------------
-static unique_ptr<FunctionData> Bind4Arg(ClientContext &ctx, ScalarFunction &fn, vector<unique_ptr<Expression>> &args) {
-	(void)ctx;
-	(void)fn;
-	(void)args;
+static unique_ptr<FunctionData> Bind4Arg(BindScalarFunctionInput &input) {
 	LinkedAmpliconBindData::Validate(DEFAULT_MIN_LEN, DEFAULT_MAX_LEN, DEFAULT_ERROR_RATE, DEFAULT_MIN_OVERLAP);
 	return make_uniq<LinkedAmpliconBindData>(DEFAULT_MIN_LEN, DEFAULT_MAX_LEN, DEFAULT_ERROR_RATE, DEFAULT_MIN_OVERLAP);
 }
 
-static unique_ptr<FunctionData> Bind7Arg(ClientContext &ctx, ScalarFunction &fn, vector<unique_ptr<Expression>> &args) {
-	(void)fn;
+static unique_ptr<FunctionData> Bind7Arg(BindScalarFunctionInput &input) {
+	auto &ctx = input.GetClientContext();
+	auto &args = input.GetArguments();
 	for (idx_t i = 4; i < 7; ++i) {
 		if (!args[i]->IsFoldable()) {
 			throw InvalidInputException(
@@ -452,8 +450,9 @@ static unique_ptr<FunctionData> Bind7Arg(ClientContext &ctx, ScalarFunction &fn,
 	return make_uniq<LinkedAmpliconBindData>(min_len, max_len, error_rate, DEFAULT_MIN_OVERLAP);
 }
 
-static unique_ptr<FunctionData> Bind8Arg(ClientContext &ctx, ScalarFunction &fn, vector<unique_ptr<Expression>> &args) {
-	(void)fn;
+static unique_ptr<FunctionData> Bind8Arg(BindScalarFunctionInput &input) {
+	auto &ctx = input.GetClientContext();
+	auto &args = input.GetArguments();
 	for (idx_t i = 4; i < 8; ++i) {
 		if (!args[i]->IsFoldable()) {
 			throw InvalidInputException("extract_linked_amplicon: min_len, max_len, error_rate, min_overlap must be "
@@ -480,24 +479,24 @@ void ExtractLinkedAmpliconFunction::Register(ExtensionLoader &loader) {
 	// 4-arg: seq, qual, anchor5, anchor3
 	ScalarFunction four({LogicalType::VARCHAR, qual_t, LogicalType::VARCHAR, LogicalType::VARCHAR}, ret_t, Execute,
 	                    Bind4Arg);
-	four.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	four.init_local_state = InitLocalState;
+	four.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	four.SetInitStateCallback(InitLocalState);
 	set.AddFunction(four);
 
 	// 7-arg: seq, qual, anchor5, anchor3, min_len, max_len, error_rate
 	ScalarFunction seven({LogicalType::VARCHAR, qual_t, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BIGINT,
 	                      LogicalType::BIGINT, LogicalType::DOUBLE},
 	                     ret_t, Execute, Bind7Arg);
-	seven.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	seven.init_local_state = InitLocalState;
+	seven.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	seven.SetInitStateCallback(InitLocalState);
 	set.AddFunction(seven);
 
 	// 8-arg: seq, qual, anchor5, anchor3, min_len, max_len, error_rate, min_overlap
 	ScalarFunction eight({LogicalType::VARCHAR, qual_t, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BIGINT,
 	                      LogicalType::BIGINT, LogicalType::DOUBLE, LogicalType::BIGINT},
 	                     ret_t, Execute, Bind8Arg);
-	eight.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	eight.init_local_state = InitLocalState;
+	eight.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	eight.SetInitStateCallback(InitLocalState);
 	set.AddFunction(eight);
 
 	loader.RegisterFunction(set);

@@ -317,23 +317,27 @@ void MergePairsFunction::Register(ExtensionLoader &loader) {
 
 	// 4-arg: merge_pairs(fwd_seq, fwd_qual, rev_seq, rev_qual)
 	ScalarFunction merge_4arg("merge_pairs_vsearch", FourArgTypes(), MergePairsReturnType(), MergePairsExecute);
-	merge_4arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	merge_4arg.bind = [](ClientContext &ctx, ScalarFunction &fn, vector<unique_ptr<Expression>> &args) {
-		fn.return_type = MergePairsReturnType();
+	merge_4arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	merge_4arg.SetBindCallback([](BindScalarFunctionInput &input) {
+		auto &fn = input.GetBoundFunction();
+		fn.SetReturnType(MergePairsReturnType());
 		return unique_ptr<FunctionData>(MergePairsBindData::Defaults().release());
-	};
-	merge_4arg.init_local_state = MergePairsInitLocalState;
+	});
+	merge_4arg.SetInitStateCallback(MergePairsInitLocalState);
 	function_set.AddFunction(merge_4arg);
 
 	// 10-arg: merge_pairs(fwd_seq, fwd_qual, rev_seq, rev_qual,
 	//                      minovlen, maxdiffs, maxdiffpct, maxee, minlen, maxlen)
 	ScalarFunction merge_10arg("merge_pairs_vsearch", TenArgTypes(), MergePairsReturnType(), MergePairsExecute);
-	merge_10arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	merge_10arg.bind = [](ClientContext &ctx, ScalarFunction &fn, vector<unique_ptr<Expression>> &args) {
-		fn.return_type = MergePairsReturnType();
+	merge_10arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	merge_10arg.SetBindCallback([](BindScalarFunctionInput &input) {
+		auto &ctx = input.GetClientContext();
+		auto &fn = input.GetBoundFunction();
+		auto &args = input.GetArguments();
+		fn.SetReturnType(MergePairsReturnType());
 		return unique_ptr<FunctionData>(MergePairsBindData::FromArgs10(ctx, args).release());
-	};
-	merge_10arg.init_local_state = MergePairsInitLocalState;
+	});
+	merge_10arg.SetInitStateCallback(MergePairsInitLocalState);
 	function_set.AddFunction(merge_10arg);
 
 	loader.RegisterFunction(function_set);

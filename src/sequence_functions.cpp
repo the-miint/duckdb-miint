@@ -334,7 +334,7 @@ void SequenceFunctions::Register(ExtensionLoader &loader) {
 
 	ScalarFunction sequence_split("sequence_split", {LogicalType::VARCHAR, LogicalType::INTEGER},
 	                              SequenceSplitReturnType(), SequenceSplitFunction);
-	sequence_split.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	sequence_split.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	loader.RegisterFunction(sequence_split);
 }
 

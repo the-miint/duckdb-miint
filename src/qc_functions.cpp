@@ -617,11 +617,7 @@ static void WritePeMate(idx_t i, const string_t &seq, const uint8_t *qptr, idx_t
 }
 
 // 4-arg form: overlap-only with fastp defaults; no adapter-by-sequence fallback.
-static unique_ptr<FunctionData> TrimAdaptersPeBind4(ClientContext &ctx, ScalarFunction &fn,
-                                                    vector<unique_ptr<Expression>> &arguments) {
-	(void)ctx;
-	(void)fn;
-	(void)arguments;
+static unique_ptr<FunctionData> TrimAdaptersPeBind4(BindScalarFunctionInput &input) {
 	return make_uniq<TrimAdaptersPeBindData>(); // all defaults; candidates empty
 }
 
@@ -630,9 +626,9 @@ static unique_ptr<FunctionData> TrimAdaptersPeBind4(ClientContext &ctx, ScalarFu
 // allow_pre_start). The adapter list + tuning params must be constant; they are
 // evaluated once here and the fallback candidate set (RC-expanded, deduped) is
 // built with min_match fixed from the pre-dedup count.
-static unique_ptr<FunctionData> TrimAdaptersPeBind11(ClientContext &ctx, ScalarFunction &fn,
-                                                     vector<unique_ptr<Expression>> &arguments) {
-	(void)fn;
+static unique_ptr<FunctionData> TrimAdaptersPeBind11(BindScalarFunctionInput &input) {
+	auto &ctx = input.GetClientContext();
+	auto &arguments = input.GetArguments();
 	for (idx_t k = 4; k < 11; k++) {
 		if (!arguments[k]->IsFoldable()) {
 			throw InvalidInputException("trim_adapters_pe: the adapter list and tuning parameters must be constant "
@@ -987,14 +983,14 @@ static void RegisterTrimQualityFamily(ExtensionLoader &loader, const std::string
 
 	ScalarFunction two_arg(name, {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT)},
 	                       TrimResultStructType(), fn);
-	two_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	two_arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	set.AddFunction(two_arg);
 
 	ScalarFunction four_arg(
 	    name,
 	    {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT), LogicalType::INTEGER, LogicalType::INTEGER},
 	    TrimResultStructType(), fn);
-	four_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	four_arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	set.AddFunction(four_arg);
 
 	loader.RegisterFunction(set);
@@ -1016,14 +1012,14 @@ void QcFunctions::Register(ExtensionLoader &loader) {
 		ScalarFunctionSet set("trim_polyg");
 		ScalarFunction two_arg("trim_polyg", {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT)},
 		                       TrimResultStructType(), TrimPolygExecute);
-		two_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		two_arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 		set.AddFunction(two_arg);
 
 		ScalarFunction five_arg("trim_polyg",
 		                        {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT), LogicalType::INTEGER,
 		                         LogicalType::INTEGER, LogicalType::INTEGER},
 		                        TrimResultStructType(), TrimPolygExecute);
-		five_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		five_arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 		set.AddFunction(five_arg);
 		loader.RegisterFunction(set);
 	}
@@ -1033,14 +1029,14 @@ void QcFunctions::Register(ExtensionLoader &loader) {
 		ScalarFunctionSet set("trim_polyx");
 		ScalarFunction two_arg("trim_polyx", {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT)},
 		                       TrimResultStructType(), TrimPolyxExecute);
-		two_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		two_arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 		set.AddFunction(two_arg);
 
 		ScalarFunction four_arg("trim_polyx",
 		                        {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT), LogicalType::INTEGER,
 		                         LogicalType::INTEGER},
 		                        TrimResultStructType(), TrimPolyxExecute);
-		four_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		four_arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 		set.AddFunction(four_arg);
 		loader.RegisterFunction(set);
 	}
@@ -1054,12 +1050,12 @@ void QcFunctions::Register(ExtensionLoader &loader) {
 
 		ScalarFunction two_arg("filter_read", {LogicalType::VARCHAR, qual_t}, FilterResultStructType(),
 		                       FilterReadExecute);
-		two_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		two_arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 		set.AddFunction(two_arg);
 
 		ScalarFunction eight_arg("filter_read", {LogicalType::VARCHAR, qual_t, i, i, i, i, i, i},
 		                         FilterResultStructType(), FilterReadExecute);
-		eight_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		eight_arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 		set.AddFunction(eight_arg);
 
 		loader.RegisterFunction(set);
@@ -1074,26 +1070,26 @@ void QcFunctions::Register(ExtensionLoader &loader) {
 
 		ScalarFunction varchar_3arg("trim_adapters", {LogicalType::VARCHAR, qual_t, LogicalType::VARCHAR},
 		                            TrimResultStructType(), TrimAdaptersVarcharExecute);
-		varchar_3arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		varchar_3arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 		set.AddFunction(varchar_3arg);
 
 		ScalarFunction list_3arg("trim_adapters", {LogicalType::VARCHAR, qual_t, adapter_list_t},
 		                         TrimResultStructType(), TrimAdaptersListExecute);
-		list_3arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		list_3arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 		set.AddFunction(list_3arg);
 
 		ScalarFunction varchar_6arg("trim_adapters",
 		                            {LogicalType::VARCHAR, qual_t, LogicalType::VARCHAR, LogicalType::BOOLEAN,
 		                             LogicalType::INTEGER, LogicalType::BOOLEAN},
 		                            TrimResultStructType(), TrimAdaptersVarcharExecute);
-		varchar_6arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		varchar_6arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 		set.AddFunction(varchar_6arg);
 
 		ScalarFunction list_6arg("trim_adapters",
 		                         {LogicalType::VARCHAR, qual_t, adapter_list_t, LogicalType::BOOLEAN,
 		                          LogicalType::INTEGER, LogicalType::BOOLEAN},
 		                         TrimResultStructType(), TrimAdaptersListExecute);
-		list_6arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		list_6arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 		set.AddFunction(list_6arg);
 
 		loader.RegisterFunction(set);
@@ -1111,16 +1107,16 @@ void QcFunctions::Register(ExtensionLoader &loader) {
 
 		ScalarFunction four_arg("trim_adapters_pe", {LogicalType::VARCHAR, qual_t, LogicalType::VARCHAR, qual_t},
 		                        TrimAdaptersPeResultStructType(), TrimAdaptersPeExecute, TrimAdaptersPeBind4);
-		four_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-		four_arg.init_local_state = TrimAdaptersPeInitLocalState;
+		four_arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+		four_arg.SetInitStateCallback(TrimAdaptersPeInitLocalState);
 		set.AddFunction(four_arg);
 
 		ScalarFunction eleven_arg(
 		    "trim_adapters_pe",
 		    {LogicalType::VARCHAR, qual_t, LogicalType::VARCHAR, qual_t, adapter_list_t, i, i, i, b, i, b},
 		    TrimAdaptersPeResultStructType(), TrimAdaptersPeExecute, TrimAdaptersPeBind11);
-		eleven_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-		eleven_arg.init_local_state = TrimAdaptersPeInitLocalState;
+		eleven_arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+		eleven_arg.SetInitStateCallback(TrimAdaptersPeInitLocalState);
 		set.AddFunction(eleven_arg);
 
 		loader.RegisterFunction(set);

@@ -184,7 +184,7 @@ ScalarFunction AlignmentSeqIdentityFunction::GetFunction() {
 	                    LogicalType::DOUBLE, AlignmentSeqIdentityScalarFunction);
 
 	// Allow NULL values for optional parameters (nm and md)
-	func.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	func.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 
 	// Set default value for type parameter
 	func.arguments[3] = LogicalType::VARCHAR;
@@ -245,7 +245,7 @@ static void CigarSequenceIdentityScalarFunction(DataChunk &args, ExpressionState
 ScalarFunction CigarSequenceIdentityFunction::GetFunction() {
 	ScalarFunction func("cigar_sequence_identity", {LogicalType::VARCHAR}, LogicalType::DOUBLE,
 	                    CigarSequenceIdentityScalarFunction);
-	func.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	func.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	return func;
 }
 
@@ -283,7 +283,7 @@ ScalarFunction CigarQueryLengthFunction::GetFunction() {
 	                    CigarQueryLengthScalarFunction);
 
 	// Allow NULL CIGAR (returns NULL)
-	func.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	func.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 
 	// Set default value for include_hard_clips parameter (defaults to true)
 	func.arguments[1] = LogicalType::BOOLEAN;
@@ -319,7 +319,7 @@ void CigarQueryLengthFunction::Register(ExtensionLoader &loader) {
 			    }
 		    });
 	    });
-	func_one_param.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	func_one_param.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 
 	// Register both overloads as a function set
 	ScalarFunctionSet function_set("cigar_query_length");
@@ -362,7 +362,7 @@ ScalarFunction CigarQueryCoverageFunction::GetFunction() {
 	                    CigarQueryCoverageScalarFunction);
 
 	// Allow NULL values (returns NULL for NULL CIGAR, error for invalid type)
-	func.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	func.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 
 	// Set default value for type parameter (defaults to 'aligned')
 	func.arguments[1] = LogicalType::VARCHAR;
@@ -398,7 +398,7 @@ void CigarQueryCoverageFunction::Register(ExtensionLoader &loader) {
 			    }
 		    });
 	    });
-	func_one_param.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	func_one_param.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 
 	// Register both overloads as a function set
 	ScalarFunctionSet function_set("cigar_query_coverage");
@@ -500,7 +500,7 @@ static void CigarQueryIntervalsScalarFunction(DataChunk &args, ExpressionState &
 ScalarFunction CigarQueryIntervalsFunction::GetFunction() {
 	ScalarFunction func("cigar_query_intervals", {LogicalType::VARCHAR, LogicalType::USMALLINT, LogicalType::VARCHAR},
 	                    CigarQueryIntervalsReturnType(), CigarQueryIntervalsScalarFunction);
-	func.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	func.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	return func;
 }
 
@@ -508,7 +508,7 @@ void CigarQueryIntervalsFunction::Register(ExtensionLoader &loader) {
 	// Two-argument overload; type defaults to 'aligned' inside the shared body.
 	ScalarFunction func_two_args("cigar_query_intervals", {LogicalType::VARCHAR, LogicalType::USMALLINT},
 	                             CigarQueryIntervalsReturnType(), CigarQueryIntervalsScalarFunction);
-	func_two_args.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	func_two_args.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 
 	ScalarFunctionSet function_set("cigar_query_intervals");
 	function_set.AddFunction(func_two_args);

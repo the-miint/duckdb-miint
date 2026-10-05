@@ -95,20 +95,22 @@ void AlignPairwiseWfa2ScoreFunction::Register(ExtensionLoader &loader) {
 
 	ScalarFunction score_2arg("align_pairwise_wfa2_score", {LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                          LogicalType::INTEGER, AlignPairwiseWfa2ScoreExecute);
-	score_2arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	score_2arg.bind = [](ClientContext &ctx, ScalarFunction &fn, vector<unique_ptr<Expression>> &args) {
+	score_2arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	score_2arg.SetBindCallback([](BindScalarFunctionInput &input) {
 		return unique_ptr<FunctionData>(AlignPairwiseWfa2BindData::Defaults().release());
-	};
-	score_2arg.init_local_state = AlignPairwiseWfa2InitLocalState;
+	});
+	score_2arg.SetInitStateCallback(AlignPairwiseWfa2InitLocalState);
 	function_set.AddFunction(score_2arg);
 
 	ScalarFunction score_5arg("align_pairwise_wfa2_score", FiveArgTypes(), LogicalType::INTEGER,
 	                          AlignPairwiseWfa2ScoreExecute);
-	score_5arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	score_5arg.bind = [](ClientContext &ctx, ScalarFunction &fn, vector<unique_ptr<Expression>> &args) {
+	score_5arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	score_5arg.SetBindCallback([](BindScalarFunctionInput &input) {
+		auto &ctx = input.GetClientContext();
+		auto &args = input.GetArguments();
 		return unique_ptr<FunctionData>(AlignPairwiseWfa2BindData::FromArgs5(ctx, args).release());
-	};
-	score_5arg.init_local_state = AlignPairwiseWfa2InitLocalState;
+	});
+	score_5arg.SetInitStateCallback(AlignPairwiseWfa2InitLocalState);
 	function_set.AddFunction(score_5arg);
 
 	loader.RegisterFunction(function_set);
@@ -125,22 +127,26 @@ void AlignPairwiseWfa2CigarFunction::Register(ExtensionLoader &loader) {
 
 	ScalarFunction cigar_2arg("align_pairwise_wfa2_cigar", {LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                          PairwiseCigarReturnType(), AlignPairwiseWfa2CigarExecute);
-	cigar_2arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	cigar_2arg.bind = [](ClientContext &ctx, ScalarFunction &fn, vector<unique_ptr<Expression>> &args) {
-		fn.return_type = PairwiseCigarReturnType();
+	cigar_2arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	cigar_2arg.SetBindCallback([](BindScalarFunctionInput &input) {
+		auto &fn = input.GetBoundFunction();
+		fn.SetReturnType(PairwiseCigarReturnType());
 		return unique_ptr<FunctionData>(AlignPairwiseWfa2BindData::Defaults().release());
-	};
-	cigar_2arg.init_local_state = AlignPairwiseWfa2InitLocalState;
+	});
+	cigar_2arg.SetInitStateCallback(AlignPairwiseWfa2InitLocalState);
 	function_set.AddFunction(cigar_2arg);
 
 	ScalarFunction cigar_5arg("align_pairwise_wfa2_cigar", FiveArgTypes(), PairwiseCigarReturnType(),
 	                          AlignPairwiseWfa2CigarExecute);
-	cigar_5arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	cigar_5arg.bind = [](ClientContext &ctx, ScalarFunction &fn, vector<unique_ptr<Expression>> &args) {
-		fn.return_type = PairwiseCigarReturnType();
+	cigar_5arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	cigar_5arg.SetBindCallback([](BindScalarFunctionInput &input) {
+		auto &ctx = input.GetClientContext();
+		auto &fn = input.GetBoundFunction();
+		auto &args = input.GetArguments();
+		fn.SetReturnType(PairwiseCigarReturnType());
 		return unique_ptr<FunctionData>(AlignPairwiseWfa2BindData::FromArgs5(ctx, args).release());
-	};
-	cigar_5arg.init_local_state = AlignPairwiseWfa2InitLocalState;
+	});
+	cigar_5arg.SetInitStateCallback(AlignPairwiseWfa2InitLocalState);
 	function_set.AddFunction(cigar_5arg);
 
 	loader.RegisterFunction(function_set);
@@ -158,22 +164,26 @@ void AlignPairwiseWfa2FullFunction::Register(ExtensionLoader &loader) {
 
 	ScalarFunction full_2arg("align_pairwise_wfa2_full", {LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                         PairwiseFullReturnType(), AlignPairwiseWfa2FullExecute);
-	full_2arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	full_2arg.bind = [](ClientContext &ctx, ScalarFunction &fn, vector<unique_ptr<Expression>> &args) {
-		fn.return_type = PairwiseFullReturnType();
+	full_2arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	full_2arg.SetBindCallback([](BindScalarFunctionInput &input) {
+		auto &fn = input.GetBoundFunction();
+		fn.SetReturnType(PairwiseFullReturnType());
 		return unique_ptr<FunctionData>(AlignPairwiseWfa2BindData::Defaults().release());
-	};
-	full_2arg.init_local_state = AlignPairwiseWfa2InitLocalState;
+	});
+	full_2arg.SetInitStateCallback(AlignPairwiseWfa2InitLocalState);
 	function_set.AddFunction(full_2arg);
 
 	ScalarFunction full_5arg("align_pairwise_wfa2_full", FiveArgTypes(), PairwiseFullReturnType(),
 	                         AlignPairwiseWfa2FullExecute);
-	full_5arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	full_5arg.bind = [](ClientContext &ctx, ScalarFunction &fn, vector<unique_ptr<Expression>> &args) {
-		fn.return_type = PairwiseFullReturnType();
+	full_5arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	full_5arg.SetBindCallback([](BindScalarFunctionInput &input) {
+		auto &ctx = input.GetClientContext();
+		auto &fn = input.GetBoundFunction();
+		auto &args = input.GetArguments();
+		fn.SetReturnType(PairwiseFullReturnType());
 		return unique_ptr<FunctionData>(AlignPairwiseWfa2BindData::FromArgs5(ctx, args).release());
-	};
-	full_5arg.init_local_state = AlignPairwiseWfa2InitLocalState;
+	});
+	full_5arg.SetInitStateCallback(AlignPairwiseWfa2InitLocalState);
 	function_set.AddFunction(full_5arg);
 
 	loader.RegisterFunction(function_set);
