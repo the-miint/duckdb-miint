@@ -106,7 +106,7 @@ void DecodeListQualToPhred33(const Value &v, const char *col_name, const std::st
 
 // Drain `to_emit` rows starting at `row_start` from a decoded daemon Arrow
 // batch into a DuckDB DataChunk. Assumes `output` has 21 columns matching
-// PopulateOutputSchema's types. Caller is responsible for SetCardinality
+// PopulateOutputSchema's types. Caller is responsible for SetChildCardinality
 // before calling (we just write into the vectors).
 //
 // Tag widening (Int32 → BIGINT) and nullable-Utf8 decoding match the

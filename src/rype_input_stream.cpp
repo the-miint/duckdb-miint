@@ -82,9 +82,9 @@ unique_ptr<RypeInputStream> BuildRypeInputStream(Connection &conn, RypeIdMap &id
 		select_cols += options.has_sequence2 ? ", sequence2::BLOB AS pair_sequence" : ", NULL::BLOB AS pair_sequence";
 	}
 
-	// SendQuery, not Query: the result must stream so memory stays O(batch)
-	// instead of materializing the whole corpus. A prepared statement would
-	// force-materialize even with allow_stream_result.
+	// SubmitStream, not Query: the result must stream so memory stays O(batch)
+	// instead of materializing the whole corpus. (On DuckDB 1.5 a prepared statement
+	// would force-materialize even with allow_stream_result.)
 	auto query_result = SubmitStream(conn, "SELECT " + select_cols + " FROM " + options.relation_quoted);
 	if (query_result->HasError()) {
 		throw InvalidInputException("Failed to read sequences from '%s': %s", options.source_name,
@@ -263,7 +263,7 @@ void RypeInputStream::FetchBatch(ArrowArray *out) {
 	idx_t appended = 0;
 	idx_t batch_bytes = 0;
 
-	// Control flow mirrors ArrowUtil::TryFetchChunk: resume the partially
+	// Control flow mirrors DuckDB 1.5's ArrowUtil::TryFetchChunk: resume the partially
 	// consumed chunk first, then pull further chunks until the batch is full or
 	// the scan is drained. "Full" is a row count and, when configured, a byte
 	// ceiling — a source chunk can be left partly consumed by either.

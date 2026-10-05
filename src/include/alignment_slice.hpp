@@ -62,7 +62,7 @@ public:
 	};
 
 	struct GlobalState : public GlobalTableFunctionState {
-		// Connection must outlive the StreamQueryResult (it streams lazily)
+		// Connection must outlive the streaming query (it streams lazily)
 		unique_ptr<Connection> conn;
 		unique_ptr<StreamingQuery> query_result;
 		unique_ptr<DataChunk> current_chunk;

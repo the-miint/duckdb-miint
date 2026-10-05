@@ -142,7 +142,7 @@ SequenceDataMap ReadSequenceDataTable(ClientContext &context, const std::string 
 	}
 
 	// Temp vectors for two-pass extraction (strings first, then lists).
-	// ListVector::GetEntry() can corrupt string pointers, so all strings
+	// ListVector::GetChildMutable() can corrupt string pointers, so all strings
 	// must be copied to std::string before any list extraction.
 	std::vector<std::string> temp_read_ids;
 	std::vector<std::string> temp_seq1;

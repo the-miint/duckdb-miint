@@ -131,7 +131,7 @@ public:
 			// member destruction, so without this explicit reset the DROP below
 			// would run while `standard->query_stream` (an early-terminated query,
 			// e.g. LIMIT, never reads it to exhaustion) still has an open
-			// StreamQueryResult over that same table.
+			// streaming query over that same table.
 			standard.reset();
 			if (snapshot_conn) {
 				DropHelperTempRelation(*snapshot_conn, SQLIdentifier::ToString(query_snapshot));

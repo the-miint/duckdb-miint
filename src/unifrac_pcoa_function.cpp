@@ -980,7 +980,7 @@ private:
 	// class. A streaming result advances only when the fetching thread executes a
 	// task (duckdb executor.cpp: `Executor::ExecuteTask` runs it inline) and may
 	// only run ~`streaming_buffer_size` (1 MB by default) ahead of the consumer — so
-	// scanning 316 M rows through `SendQuery` ran the joins essentially
+	// on DuckDB 1.5, where this was measured, scanning 316 M rows through `SendQuery` ran the joins essentially
 	// single-threaded: 28 s wall for 2.7 s of work. Materializing lets DuckDB
 	// execute the whole pipeline across all cores first (25 batches: 28.1 s → 6.0 s;
 	// 121 batches: 15.2 s → 4.7 s). The per-batch provider always did this — via
@@ -2394,7 +2394,7 @@ unique_ptr<miint::progressive::ProgressivePcoaRun> MakeProgressiveRun(ClientCont
                                                                       const ProgressivePcoaData &data) {
 	// Cooperative cancellation. The core polls this before every batch, which is the
 	// only thing standing between a user and an uninterruptible multi-hour query:
-	// Ctrl-C sets context.interrupted and, until now, nothing on this path ever read
+	// Ctrl-C sets the context's interrupt flag and, until now, nothing on this path ever read
 	// it. Polled from worker threads too, hence the atomic read.
 	const miint::progressive::InterruptCheck interrupt = [&context]() {
 		if (context.IsInterrupted()) {

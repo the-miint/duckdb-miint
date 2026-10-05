@@ -11,10 +11,10 @@ Version-specific claims below are as of DuckDB v1.4/v1.5 — re-verify when we b
 
 ## Storage
 
-**New database files default to storage version 64 (= v1.0.0), even on v1.5.**
-This is the single most surprising item here. Newer compression algorithms are gated
-behind newer storage versions, so a database written with defaults silently forgoes
-them. Opt in explicitly:
+**On DuckDB 1.x, new database files default to storage version 64 (= v1.0.0), even on
+v1.5.** (2.0 changed this; see below.) This is the single most surprising item here.
+Newer compression algorithms are gated behind newer storage versions, so a database
+written with defaults silently forgoes them. Opt in explicitly:
 
 ```sql
 ATTACH 'file.db' (STORAGE_VERSION 'latest');   -- or 'v1.4.0', etc.
@@ -25,10 +25,28 @@ duckdb -storage-version latest my.db
 ```
 
 Check what a file actually is: `SELECT database_name, tags FROM duckdb_databases();`
-Version map: 68 = v1.5.x, 67 = v1.4.x, 66 = v1.3.x, 65 = v1.2.x, 64 = v0.9.x–v1.1.x.
+Version map: 69 = v2.0.x, 68 = v1.5.x, 67 = v1.4.x, 66 = v1.3.x, 65 = v1.2.x, 64 = v0.9.x–v1.1.x.
 
 The first 20 bytes of a `.db` file are `uint64` checksum + `DUCK` magic + `uint64`
 version — readable without DuckDB, which is handy for test fixtures and CI assertions.
+Since DuckDB 2.0 that field reads **999** (`StorageVersion::DEPRECATED`) on files
+written at the v2.0 storage version; the real version moved into the database header.
+
+**DuckDB 2.0 flips the default to the latest storage version (v2.0.0), and DuckDB 1.x
+cannot open those files** ("Trying to read a database file with version number 999").
+Opening and writing an *existing* older file keeps its version, so 1.x can still read
+it. To create a file 1.x can read, pin the version:
+
+```sql
+ATTACH 'file.db' (STORAGE_VERSION 'v1.5.0');
+```
+```bash
+duckdb -storage-version v1.5.0 my.db
+```
+
+`ATTACH 'old.db' (STORAGE_VERSION 'latest')` upgrades an existing file in place, and
+1.x can no longer open it afterwards. All verified on DuckDB 2.0 (`96df096fb00`)
+against 1.5.5.
 
 **Compression is off for in-memory databases.** It is applied to persistent databases
 only unless you `ATTACH` with `COMPRESS`. In-memory benchmarks therefore overstate the

@@ -28,12 +28,19 @@ auto wrapper = make_shared_ptr<ArrowArrayWrapper>();
 stream.get_next(&stream, &wrapper->arrow_array);
 current_chunk = std::move(wrapper);
 
-// In Execute, for each Arrow column that maps directly to a DuckDB column:
+// In Execute, set the output size first (see below), then convert each Arrow column
+// that maps directly to a DuckDB column:
+output.SetChildCardinality(size);
 auto &array_state = lstate.GetState(col_idx);
 array_state.owned_data = gstate.current_chunk;  // ref-count keeps batch alive
 ArrowToDuckDBConversion::SetValidityMask(output.data[col], array, batch_offset, size, batch.offset, -1);
 ArrowToDuckDBConversion::ColumnArrowToDuckDB(output.data[col], array, batch_offset, array_state, size, arrow_type);
 ```
+
+Use `SetChildCardinality`, never the deprecated `DataChunk::SetCardinality`. Since DuckDB
+2.0 every vector carries its own size, and `SetCardinality` sets only the chunk's count:
+the vectors stay at size 0, which shows up as wrong results, crashes, or absurd
+allocation requests rather than a compile error.
 
 ## When Manual Access is Needed
 

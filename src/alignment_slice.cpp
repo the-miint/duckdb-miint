@@ -185,7 +185,7 @@ unique_ptr<GlobalTableFunctionState> AlignmentSliceTableFunction::InitGlobal(Cli
 	gstate->slicer = make_uniq<miint::AlignmentSlicer>(data.region_start, data.region_stop, data.include_deletions);
 
 	// Separate connection avoids deadlocking the current context.
-	// SendQuery streams chunks lazily — only one chunk in memory at a time.
+	// SubmitStream streams chunks lazily — only one chunk in memory at a time.
 	auto &db = DatabaseInstance::GetDatabase(context);
 	gstate->conn = make_uniq<Connection>(db);
 	InheritTempObjects(context, *gstate->conn);

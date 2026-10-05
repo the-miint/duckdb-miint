@@ -61,9 +61,9 @@ public:
 
 		// Sub-connection feeding both Arrow streams. The (small) bucket mapping is
 		// materialized — RYpe reads it eagerly into memory anyway — while the (large)
-		// sequence/chunk data is streamed via a SendQuery cursor and fetched lazily.
+		// sequence/chunk data is streamed via a SubmitStream cursor and fetched lazily.
 		// A materialized result does not occupy the connection's single
-		// StreamQueryResult slot, so one connection serves both. It is held here so
+		// streaming-result slot, so one connection serves both. It is held here so
 		// it outlives RYpe's lazy consumption of the chunk cursor during the build.
 		unique_ptr<Connection> input_connection;
 

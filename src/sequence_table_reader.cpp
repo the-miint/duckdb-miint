@@ -249,7 +249,7 @@ static void ProcessSingleChunk(DataChunk &chunk, const SequenceTableSchema &sche
 	}
 
 	// IMPORTANT: Extract ALL string data FIRST before calling ExtractQualScore.
-	// ExtractQualScore calls ListVector::GetEntry() which may corrupt string pointers.
+	// ExtractQualScore calls ListVector::GetChildMutable() which may corrupt string pointers.
 	// clear() preserves heap capacity — no re-allocation after first chunk.
 	temp_read_ids.clear();
 	temp_seq1.clear();
@@ -408,7 +408,7 @@ std::string MaterializeQueryReads(Connection &conn, const std::string &query_tab
 	// Stream query_table and append each chunk into the snapshot as it arrives,
 	// rather than one CREATE TABLE AS SELECT that pulls the whole query relation
 	// through the pipeline before this call returns. A single-pass streaming
-	// query (SendQuery, not Query) still reads query_table exactly once — the
+	// query (SubmitStream, not Query) still reads query_table exactly once — the
 	// #229 guarantee above is about pass count, not chunk size — but bounds this
 	// materialization's own working set to O(one chunk) + O(the Appender's
 	// internal flush buffer) instead of O(corpus size). See the multi-part
@@ -419,7 +419,7 @@ std::string MaterializeQueryReads(Connection &conn, const std::string &query_tab
 	// A dedicated connection drives the read: a Connection supports only one
 	// active pending query at a time, and the Appender below issues its own
 	// statements against `conn` as it flushes, which would otherwise collide
-	// with `conn`'s still-open SendQuery stream mid-loop.
+	// with `conn`'s still-open SubmitStream stream mid-loop.
 	Connection stream_conn = MakeReadOnlyHelperConnection(*conn.context);
 	auto stream = SubmitStream(stream_conn, BuildQueryReadsSelect(query_table, schema));
 	if (stream->HasError()) {
@@ -427,7 +427,7 @@ std::string MaterializeQueryReads(Connection &conn, const std::string &query_tab
 	}
 
 	// The destination's column types come from the stream's own output schema
-	// (already resolved by SendQuery's bind, before any row is fetched) rather
+	// (already resolved by SubmitStream's bind, before any row is fetched) rather
 	// than a second "CREATE TABLE AS SELECT ... WHERE FALSE" probe query against
 	// query_table. query_table can be a view over something with bind-time work
 	// of its own (e.g. read_fastx opening/sniffing the underlying file) — one

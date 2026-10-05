@@ -175,10 +175,11 @@ for unless you write one:
    runs for a query the user never ran. Measured on a 4,000-sample ordination:
    `EXPLAIN` took 0.644 s against 0.638 s to actually run the query. After moving it,
    0.000 s.
-3. **The query cannot be cancelled.** Ctrl-C sets `context.interrupted`, which only
-   helps if something polls it. Nothing polls during `Bind`, so a multi-hour run is
-   uninterruptible. Execution-time work can poll between units and throw
-   `InterruptException` (see `ProgressivePcoaExecute`).
+3. **The query cannot be cancelled.** Ctrl-C sets the context's interrupt flag
+   (`context.IsInterrupted()`), which only helps if something polls it. Nothing
+   polls during `Bind`, so a multi-hour run is uninterruptible. Execution-time work
+   can poll between units and throw `InterruptException` (see
+   `ProgressivePcoaExecute`).
 4. **Nothing streams, and the result exists twice.** A `Bind` that computes everything
    must hand over a finished result, which the scan then re-materializes in its own
    row form. Driving the work from the scan instead lets rows go out as they are

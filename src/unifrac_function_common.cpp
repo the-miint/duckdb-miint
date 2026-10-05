@@ -334,7 +334,7 @@ DenseDistanceMatrix ReadDistanceTable(ClientContext &context, const std::string 
 	}
 
 	// ── Pass 2: stream the distances straight into the matrix ──
-	// SendQuery (not Query) so chunks arrive lazily instead of the whole relation
+	// SubmitStream (not Query) so chunks arrive lazily instead of the whole relation
 	// being materialized: nothing per-row is retained.
 	//
 	// NULL sample ids or NULL/NaN distances are dropped ("not provided"); an
@@ -403,7 +403,7 @@ DenseDistanceMatrix ReadDistanceTable(ClientContext &context, const std::string 
 	} catch (const std::invalid_argument &e) {
 		throw InvalidInputException("%s: %s", caller_name, e.what());
 	}
-	// A streaming result surfaces execution errors during Fetch, not at SendQuery.
+	// A streaming result surfaces execution errors during Fetch, not at SubmitStream.
 	if (result->HasError()) {
 		throw InvalidInputException("%s: failed to read distance-table '%s': %s", caller_name, table_name,
 		                            result->GetError());

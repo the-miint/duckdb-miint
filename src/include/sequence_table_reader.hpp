@@ -98,7 +98,7 @@ std::string BuildQueryReadsSelect(const std::string &query_table, const Sequence
 // the caller's TEMP catalog. The caller MUST drop it via DropHelperTempRelation.
 //
 // Streams query_table and appends each chunk into the snapshot as it arrives
-// (one pass, via SendQuery + Appender) rather than a single CREATE TABLE AS
+// (one pass, via SubmitStream + Appender) rather than a single CREATE TABLE AS
 // SELECT that pulls the whole query relation through the pipeline before this
 // call returns — bounds the materialization's own working set to O(one chunk)
 // instead of O(corpus size), which is what a full-corpus-sized query relation

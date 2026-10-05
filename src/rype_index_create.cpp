@@ -34,10 +34,10 @@ namespace {
 // ordering requirement — each feature contiguous, ascending, 0-based, gap-free —
 // holds: a feature lives wholly inside one window, windows ascend by feature_idx,
 // and the per-window ORDER BY groups each feature's chunks. The chunk_table may be
-// in ANY physical order. Only one window's StreamQueryResult is open at a time,
+// in ANY physical order. Only one window's streaming query is open at a time,
 // satisfying the one-active-stream-per-Connection rule.
 //
-// Ownership mirrors ResultArrowArrayStreamWrapper: rype_index_build_from_arrow
+// Ownership mirrors DuckDB 1.5's ResultArrowArrayStreamWrapper: rype_index_build_from_arrow
 // takes the stream and invokes release() synchronously during the build, which
 // deletes this object.
 struct WindowedChunkStream {

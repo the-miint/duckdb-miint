@@ -354,8 +354,8 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	//    config JSON.
 	gs->config_json_align = BuildAlignConfigJson(bd.named_params, index_basename, db_threads);
 
-	// 5. Open a streaming cursor on the query table. SendQuery returns a
-	//    StreamQueryResult that fetches chunks lazily.
+	// 5. Open a streaming cursor on the query table. SubmitStream returns a
+	//    streaming result that fetches chunks lazily.
 	gs->input_conn = std::make_unique<Connection>(DatabaseInstance::GetDatabase(context));
 	InheritTempObjects(context, *gs->input_conn);
 	std::string select = "SELECT read_id, sequence1";
