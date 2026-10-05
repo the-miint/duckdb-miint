@@ -55,7 +55,7 @@ static unique_ptr<FunctionData> PeakPairBind(ClientContext &context, TableFuncti
 	RejectCTERelationName(input, relation);
 	auto formula_str = input.inputs[1].GetValue<string>();
 
-	auto quoted_relation = KeywordHelper::WriteOptionallyQuoted(relation);
+	auto quoted_relation = SQLIdentifier::ToString(relation);
 
 	// Compute formula mass in C++ — avoids embedding user input into SQL.
 	double formula_mass;

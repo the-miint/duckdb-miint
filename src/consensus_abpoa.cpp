@@ -189,7 +189,7 @@ static void ConsensusAbpoaExecute(ClientContext & /*context*/, TableFunctionInpu
 		}
 		lstate.sample_value = data.sample_info.sample_values[sample_idx];
 		auto sample_literal = lstate.sample_value.ToSQLString();
-		auto q_col = KeywordHelper::WriteOptionallyQuoted(data.sample_info.sample_id_col);
+		auto q_col = SQLIdentifier::ToString(data.sample_info.sample_id_col);
 		auto where_sql = "CAST(" + q_col + " AS VARCHAR) = CAST(" + sample_literal + " AS VARCHAR)";
 		auto loaded =
 		    LoadSingleEndSequences(*lstate.conn, data.table_name, "consensus_abpoa", /*strict=*/true, where_sql);

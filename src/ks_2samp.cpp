@@ -77,17 +77,17 @@ void KsTwoSampleScalarFunction(DataChunk &args, ExpressionState &state, Vector &
 
 	UnifiedVectorFormat a_fmt;
 	UnifiedVectorFormat b_fmt;
-	args.data[0].ToUnifiedFormat(count, a_fmt);
-	args.data[1].ToUnifiedFormat(count, b_fmt);
+	args.data[0].ToUnifiedFormat(a_fmt);
+	args.data[1].ToUnifiedFormat(b_fmt);
 
 	UnifiedVectorFormat a_child_fmt;
 	UnifiedVectorFormat b_child_fmt;
-	ListVector::GetEntry(args.data[0]).ToUnifiedFormat(ListVector::GetListSize(args.data[0]), a_child_fmt);
-	ListVector::GetEntry(args.data[1]).ToUnifiedFormat(ListVector::GetListSize(args.data[1]), b_child_fmt);
+	ListVector::GetChildMutable(args.data[0]).ToUnifiedFormat(a_child_fmt);
+	ListVector::GetChildMutable(args.data[1]).ToUnifiedFormat(b_child_fmt);
 
 	UnifiedVectorFormat method_fmt;
 	if (has_method) {
-		args.data[2].ToUnifiedFormat(count, method_fmt);
+		args.data[2].ToUnifiedFormat(method_fmt);
 	}
 
 	auto &entries = StructVector::GetEntries(result);

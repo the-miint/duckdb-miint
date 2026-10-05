@@ -98,8 +98,8 @@ BuildExtractionInputStream(ClientContext &context, const RypeExtractData &bind_d
 	// Export BLOB with 64-bit offsets — see ConfigureRypeArrowExport in rype_common.hpp (#222).
 	ConfigureRypeArrowExport(conn);
 
-	std::string id_col_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.id_column);
-	std::string table_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.sequence_table);
+	std::string id_col_quoted = SQLIdentifier::ToString(bind_data.id_column);
+	std::string table_quoted = SQLIdentifier::ToString(bind_data.sequence_table);
 
 	// One streaming scan of the caller's relation, carrying the identifier and the
 	// sequence in the same row. Extraction is single-sequence, so no pair column.

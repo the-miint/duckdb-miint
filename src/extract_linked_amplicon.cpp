@@ -256,10 +256,10 @@ static void Execute(DataChunk &args, ExpressionState &state, Vector &result) {
 	const idx_t row_count = args.size();
 
 	UnifiedVectorFormat seq_data, qual_data, a5_data, a3_data;
-	args.data[0].ToUnifiedFormat(row_count, seq_data);
-	args.data[1].ToUnifiedFormat(row_count, qual_data);
-	args.data[2].ToUnifiedFormat(row_count, a5_data);
-	args.data[3].ToUnifiedFormat(row_count, a3_data);
+	args.data[0].ToUnifiedFormat(seq_data);
+	args.data[1].ToUnifiedFormat(qual_data);
+	args.data[2].ToUnifiedFormat(a5_data);
+	args.data[3].ToUnifiedFormat(a3_data);
 
 	auto seq_ptr = UnifiedVectorFormat::GetData<string_t>(seq_data);
 	auto a5_ptr = UnifiedVectorFormat::GetData<string_t>(a5_data);
@@ -410,7 +410,7 @@ static void Execute(DataChunk &args, ExpressionState &state, Vector &result) {
 		    StringVector::AddString(seq_out_vec, seq.GetData() + global_start, extracted_len);
 
 		// Write extracted qual list
-		auto &qual_child = ListVector::GetEntry(qual_out_vec);
+		auto &qual_child = ListVector::GetChildMutable(qual_out_vec);
 		auto qual_child_data = FlatVector::GetDataMutable<uint8_t>(qual_child);
 		if (extracted_len > 0) {
 			std::memcpy(qual_child_data + qual_child_offset, qptr + global_start, extracted_len);

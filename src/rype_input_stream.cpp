@@ -209,7 +209,7 @@ RypeInputStream::Sizing RypeInputStream::SampleSizing(size_t fallback_read_lengt
 	const idx_t from = chunk_offset;
 
 	UnifiedVectorFormat sequence_format;
-	chunk.data[COL_SEQUENCE].ToUnifiedFormat(chunk_size, sequence_format);
+	chunk.data[COL_SEQUENCE].ToUnifiedFormat(sequence_format);
 	auto sequence_data = UnifiedVectorFormat::GetData<string_t>(sequence_format);
 
 	idx_t total_bytes = 0;
@@ -234,7 +234,7 @@ RypeInputStream::Sizing RypeInputStream::SampleSizing(size_t fallback_read_lengt
 	// explicit.
 	if (options.include_pair_column && options.has_sequence2) {
 		UnifiedVectorFormat pair_format;
-		chunk.data[COL_PAIR_SEQUENCE].ToUnifiedFormat(chunk_size, pair_format);
+		chunk.data[COL_PAIR_SEQUENCE].ToUnifiedFormat(pair_format);
 		for (idx_t i = from; i < chunk_size; i++) {
 			if (pair_format.validity.RowIsValid(pair_format.sel->get_index(i))) {
 				sizing.is_paired = true;
@@ -297,12 +297,12 @@ idx_t RypeInputStream::AppendSlice(ArrowAppender &appender, DataChunk &chunk, id
 	const idx_t chunk_size = chunk.size();
 
 	UnifiedVectorFormat id_format;
-	chunk.data[COL_ID].ToUnifiedFormat(chunk_size, id_format);
+	chunk.data[COL_ID].ToUnifiedFormat(id_format);
 	UnifiedVectorFormat sequence_format;
-	chunk.data[COL_SEQUENCE].ToUnifiedFormat(chunk_size, sequence_format);
+	chunk.data[COL_SEQUENCE].ToUnifiedFormat(sequence_format);
 	UnifiedVectorFormat pair_format;
 	if (options.include_pair_column) {
-		chunk.data[COL_PAIR_SEQUENCE].ToUnifiedFormat(chunk_size, pair_format);
+		chunk.data[COL_PAIR_SEQUENCE].ToUnifiedFormat(pair_format);
 	}
 
 	// Decide how much of [from, row_limit) fits under the byte ceiling before

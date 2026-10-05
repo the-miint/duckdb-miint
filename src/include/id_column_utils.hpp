@@ -71,7 +71,7 @@ inline void ExtractIdColumnAsStrings(DataChunk &chunk, idx_t col_idx, const Logi
 	out_nulls.resize(n, false);
 
 	UnifiedVectorFormat fmt;
-	chunk.data[col_idx].ToUnifiedFormat(n, fmt);
+	chunk.data[col_idx].ToUnifiedFormat(fmt);
 
 	if (id_type.id() == LogicalTypeId::VARCHAR) {
 		auto data = UnifiedVectorFormat::GetData<string_t>(fmt);

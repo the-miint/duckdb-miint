@@ -286,12 +286,12 @@ void ENASubmissionLogScan(ClientContext &, TableFunctionInput &data, DataChunk &
 		const auto &row = state.snapshot[state.cursor + i];
 		const auto count = static_cast<idx_t>(row.error_messages.size());
 		ListVector::Reserve(error_messages, child_offset + count);
-		auto &child_vec = ListVector::GetEntry(error_messages);
+		auto &child_vec = ListVector::GetChildMutable(error_messages);
 		auto child_data = FlatVector::GetDataMutable<string_t>(child_vec);
 		for (idx_t j = 0; j < count; j++) {
 			child_data[child_offset + j] = StringVector::AddString(child_vec, row.error_messages[j]);
 		}
-		auto entries = ListVector::GetData(error_messages);
+		auto entries = FlatVector::GetDataMutable<list_entry_t>(error_messages);
 		entries[i].offset = child_offset;
 		entries[i].length = count;
 		child_offset += count;
@@ -315,12 +315,12 @@ void ENASubmissionLogScan(ClientContext &, TableFunctionInput &data, DataChunk &
 			const auto &src = row.*field;
 			const auto count = static_cast<idx_t>(src.size());
 			ListVector::Reserve(list_vec, offset + count);
-			auto &child_vec = ListVector::GetEntry(list_vec);
+			auto &child_vec = ListVector::GetChildMutable(list_vec);
 			auto child_data = FlatVector::GetDataMutable<string_t>(child_vec);
 			for (idx_t j = 0; j < count; j++) {
 				child_data[offset + j] = StringVector::AddString(child_vec, src[j]);
 			}
-			auto entries = ListVector::GetData(list_vec);
+			auto entries = FlatVector::GetDataMutable<list_entry_t>(list_vec);
 			entries[i].offset = offset;
 			entries[i].length = count;
 			offset += count;
@@ -621,7 +621,8 @@ PhysicalOperator &ENACatalog::PlanInsert(ClientContext &context, PhysicalPlanGen
 		return op_ref;
 	}
 	default:
-		throw BinderException("ENA catalog: INSERT INTO ena.%s is not implemented in this build", table_entry.name);
+		throw BinderException("ENA catalog: INSERT INTO ena.%s is not implemented in this build",
+		                      table_entry.name.GetIdentifierName());
 	}
 }
 

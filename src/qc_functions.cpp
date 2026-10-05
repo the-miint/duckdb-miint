@@ -82,7 +82,7 @@ static void WriteTrimRow(idx_t i, const string_t &seq, const uint8_t *qptr, idx_
 	FlatVector::GetDataMutable<string_t>(seq_out_vec)[i] =
 	    StringVector::AddString(seq_out_vec, seq.GetData() + tr.start, kept_len);
 
-	auto &qual_child = ListVector::GetEntry(qual_out_vec);
+	auto &qual_child = ListVector::GetChildMutable(qual_out_vec);
 	auto qual_child_data = FlatVector::GetDataMutable<uint8_t>(qual_child);
 	std::memcpy(qual_child_data + qual_child_offset, qptr + tr.start, kept_len);
 	qual_out_entries[i].offset = qual_child_offset;
@@ -111,14 +111,14 @@ static void TrimExecuteImpl(DataChunk &args, Vector &result, idx_t n_optional, c
 	D_ASSERT(n_optional <= 3);
 
 	UnifiedVectorFormat seq_data, qual_data;
-	args.data[0].ToUnifiedFormat(row_count, seq_data);
-	args.data[1].ToUnifiedFormat(row_count, qual_data);
+	args.data[0].ToUnifiedFormat(seq_data);
+	args.data[1].ToUnifiedFormat(qual_data);
 
 	UnifiedVectorFormat opt_data[3];
 	const int32_t *opt_ptr[3] = {nullptr, nullptr, nullptr};
 	if (has_explicit_params) {
 		for (idx_t k = 0; k < n_optional; k++) {
-			args.data[2 + k].ToUnifiedFormat(row_count, opt_data[k]);
+			args.data[2 + k].ToUnifiedFormat(opt_data[k]);
 			opt_ptr[k] = UnifiedVectorFormat::GetData<int32_t>(opt_data[k]);
 		}
 	}
@@ -375,21 +375,21 @@ static void TrimAdaptersExecuteImpl(DataChunk &args, Vector &result, bool adapte
 	const bool has_explicit_params = args.ColumnCount() == 6;
 
 	UnifiedVectorFormat seq_data, qual_data, adapter_data, revcomp_data, minmatch_data, prestart_data;
-	args.data[0].ToUnifiedFormat(row_count, seq_data);
-	args.data[1].ToUnifiedFormat(row_count, qual_data);
-	args.data[2].ToUnifiedFormat(row_count, adapter_data);
+	args.data[0].ToUnifiedFormat(seq_data);
+	args.data[1].ToUnifiedFormat(qual_data);
+	args.data[2].ToUnifiedFormat(adapter_data);
 	if (has_explicit_params) {
-		args.data[3].ToUnifiedFormat(row_count, revcomp_data);
-		args.data[4].ToUnifiedFormat(row_count, minmatch_data);
-		args.data[5].ToUnifiedFormat(row_count, prestart_data);
+		args.data[3].ToUnifiedFormat(revcomp_data);
+		args.data[4].ToUnifiedFormat(minmatch_data);
+		args.data[5].ToUnifiedFormat(prestart_data);
 	}
 
 	// The LIST(VARCHAR) child vector is independent of row — unify it once
 	// per chunk, not per row.
 	UnifiedVectorFormat list_child_data;
 	if (adapter_is_list) {
-		auto &child = ListVector::GetEntry(args.data[2]);
-		child.ToUnifiedFormat(ListVector::GetListSize(args.data[2]), list_child_data);
+		auto &child = ListVector::GetChildMutable(args.data[2]);
+		child.ToUnifiedFormat(list_child_data);
 	}
 
 	auto seq_ptr = UnifiedVectorFormat::GetData<string_t>(seq_data);
@@ -711,10 +711,10 @@ static void TrimAdaptersPeExecute(DataChunk &args, ExpressionState &state, Vecto
 	const idx_t row_count = args.size();
 
 	UnifiedVectorFormat seq1_data, qual1_data, seq2_data, qual2_data;
-	args.data[0].ToUnifiedFormat(row_count, seq1_data);
-	args.data[1].ToUnifiedFormat(row_count, qual1_data);
-	args.data[2].ToUnifiedFormat(row_count, seq2_data);
-	args.data[3].ToUnifiedFormat(row_count, qual2_data);
+	args.data[0].ToUnifiedFormat(seq1_data);
+	args.data[1].ToUnifiedFormat(qual1_data);
+	args.data[2].ToUnifiedFormat(seq2_data);
+	args.data[3].ToUnifiedFormat(qual2_data);
 
 	auto seq1_ptr = UnifiedVectorFormat::GetData<string_t>(seq1_data);
 	auto seq2_ptr = UnifiedVectorFormat::GetData<string_t>(seq2_data);
@@ -740,8 +740,8 @@ static void TrimAdaptersPeExecute(DataChunk &args, ExpressionState &state, Vecto
 	// Both Reserves happen before either child pointer is taken, and no Reserve
 	// runs inside the row loop (WritePeMate only SetListSize, which never
 	// reallocates), so these cached child pointers stay valid for the whole chunk.
-	auto qual1_child = FlatVector::GetDataMutable<uint8_t>(ListVector::GetEntry(qual1_out));
-	auto qual2_child = FlatVector::GetDataMutable<uint8_t>(ListVector::GetEntry(qual2_out));
+	auto qual1_child = FlatVector::GetDataMutable<uint8_t>(ListVector::GetChildMutable(qual1_out));
+	auto qual2_child = FlatVector::GetDataMutable<uint8_t>(ListVector::GetChildMutable(qual2_out));
 
 	for (idx_t i = 0; i < row_count; i++) {
 		auto s1i = seq1_data.sel->get_index(i);
@@ -849,15 +849,15 @@ static void FilterReadExecute(DataChunk &args, ExpressionState &state, Vector &r
 	const bool has_explicit_params = args.ColumnCount() == 8;
 
 	UnifiedVectorFormat seq_data, qual_data, p1_data, p2_data, p3_data, p4_data, p5_data, p6_data;
-	args.data[0].ToUnifiedFormat(row_count, seq_data);
-	args.data[1].ToUnifiedFormat(row_count, qual_data);
+	args.data[0].ToUnifiedFormat(seq_data);
+	args.data[1].ToUnifiedFormat(qual_data);
 	if (has_explicit_params) {
-		args.data[2].ToUnifiedFormat(row_count, p1_data);
-		args.data[3].ToUnifiedFormat(row_count, p2_data);
-		args.data[4].ToUnifiedFormat(row_count, p3_data);
-		args.data[5].ToUnifiedFormat(row_count, p4_data);
-		args.data[6].ToUnifiedFormat(row_count, p5_data);
-		args.data[7].ToUnifiedFormat(row_count, p6_data);
+		args.data[2].ToUnifiedFormat(p1_data);
+		args.data[3].ToUnifiedFormat(p2_data);
+		args.data[4].ToUnifiedFormat(p3_data);
+		args.data[5].ToUnifiedFormat(p4_data);
+		args.data[6].ToUnifiedFormat(p5_data);
+		args.data[7].ToUnifiedFormat(p6_data);
 	}
 
 	auto seq_ptr = UnifiedVectorFormat::GetData<string_t>(seq_data);

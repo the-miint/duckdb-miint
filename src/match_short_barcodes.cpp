@@ -125,7 +125,7 @@ static constexpr const char *FN_NAME = "match_short_barcodes";
 static size_t LoadAndPack(ClientContext &context, const std::string &table_name, const char *role,
                           std::vector<PackedBarcode> &out) {
 	auto conn = MakeReadOnlyHelperConnection(context);
-	std::string query = "SELECT id, sequence FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
+	std::string query = "SELECT id, sequence FROM " + SQLIdentifier::ToString(table_name);
 	auto result = conn.Query(query);
 	if (result->HasError()) {
 		throw InvalidInputException("%s: failed to read %s table '%s': %s", FN_NAME, role, table_name,
@@ -139,8 +139,8 @@ static size_t LoadAndPack(ClientContext &context, const std::string &table_name,
 		auto &id_vec = chunk->data[0];
 		auto &seq_vec = chunk->data[1];
 		UnifiedVectorFormat id_data, seq_data;
-		id_vec.ToUnifiedFormat(chunk->size(), id_data);
-		seq_vec.ToUnifiedFormat(chunk->size(), seq_data);
+		id_vec.ToUnifiedFormat(id_data);
+		seq_vec.ToUnifiedFormat(seq_data);
 		auto id_ptr = UnifiedVectorFormat::GetData<string_t>(id_data);
 		auto seq_ptr = UnifiedVectorFormat::GetData<string_t>(seq_data);
 
@@ -177,7 +177,7 @@ static size_t LoadAndPack(ClientContext &context, const std::string &table_name,
 // catalog TABLE_ENTRY lookup.
 static void ValidateTableExists(ClientContext &context, const std::string &table_name) {
 	auto conn = MakeReadOnlyHelperConnection(context);
-	std::string query = "SELECT id, sequence FROM " + KeywordHelper::WriteOptionallyQuoted(table_name) + " LIMIT 0";
+	std::string query = "SELECT id, sequence FROM " + SQLIdentifier::ToString(table_name) + " LIMIT 0";
 	auto result = conn.Query(query);
 	if (result->HasError()) {
 		throw BinderException("%s: '%s' does not exist or is missing 'id'/'sequence' columns (%s)", FN_NAME, table_name,

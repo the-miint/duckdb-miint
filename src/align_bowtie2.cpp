@@ -73,7 +73,7 @@ std::string BuildAlignConfigJson(const named_argument_map_t &named_params, const
 	static const auto kKnown = MakeKnownAlignParams();
 	for (const auto &kv : named_params) {
 		if (kKnown.find(kv.first.GetIdentifierName()) == kKnown.end()) {
-			throw InvalidInputException("align_bowtie2: unknown named parameter '%s'.", kv.first);
+			throw InvalidInputException("align_bowtie2: unknown named parameter '%s'.", kv.first.GetIdentifierName());
 		}
 	}
 
@@ -209,7 +209,7 @@ struct AlignBowtie2LocalState : public LocalTableFunctionState {};
 void DetectQueryColumns(ClientContext &context, AlignBowtie2BindData &bd) {
 	auto conn = MakeReadOnlyHelperConnection(context);
 	const std::string sql = "SELECT column_name, column_type FROM (DESCRIBE " +
-	                        KeywordHelper::WriteOptionallyQuoted(bd.query_table) +
+	                        SQLIdentifier::ToString(bd.query_table) +
 	                        ") WHERE column_name IN ('sequence2','qual1','qual2')";
 	auto result = conn.Query(sql);
 	if (result->HasError()) {
@@ -272,7 +272,7 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 	static const auto kKnown = MakeKnownAlignParams();
 	for (const auto &kv : bd->named_params) {
 		if (kKnown.find(kv.first.GetIdentifierName()) == kKnown.end()) {
-			throw InvalidInputException("align_bowtie2: unknown named parameter '%s'.", kv.first);
+			throw InvalidInputException("align_bowtie2: unknown named parameter '%s'.", kv.first.GetIdentifierName());
 		}
 	}
 
@@ -368,7 +368,7 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	if (bd.query_has_qual2) {
 		select += ", qual2";
 	}
-	select += " FROM " + KeywordHelper::WriteOptionallyQuoted(bd.query_table);
+	select += " FROM " + SQLIdentifier::ToString(bd.query_table);
 	gs->query_select_sql = select;
 	gs->input_stream = SubmitStream(*gs->input_conn, select);
 	if (gs->input_stream->HasError()) {

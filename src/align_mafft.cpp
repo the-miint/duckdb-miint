@@ -281,7 +281,7 @@ static void AlignMafftExecute(ClientContext & /*context*/, TableFunctionInput &d
 		}
 		lstate.sample_value = data.sample_info.sample_values[sample_idx];
 		auto sample_literal = lstate.sample_value.ToSQLString();
-		auto q_col = KeywordHelper::WriteOptionallyQuoted(data.sample_info.sample_id_col);
+		auto q_col = SQLIdentifier::ToString(data.sample_info.sample_id_col);
 		// Same CAST-as-VARCHAR equality as the other per-sample call sites; see the note
 		// in deblur_table_function.cpp for the DECIMAL caveat.
 		auto where_sql = "CAST(" + q_col + " AS VARCHAR) = CAST(" + sample_literal + " AS VARCHAR)";

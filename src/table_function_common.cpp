@@ -208,7 +208,7 @@ void SetResultVectorListUInt8(Vector &result_vector, const std::vector<miint::Qu
 	ListVector::Reserve(result_vector, total_child_elements);
 	ListVector::SetListSize(result_vector, total_child_elements);
 
-	auto &child_vector = ListVector::GetEntry(result_vector);
+	auto &child_vector = ListVector::GetChildMutable(result_vector);
 	auto child_data = FlatVector::GetDataMutable<uint8_t>(child_vector);
 	auto list_entries = FlatVector::GetDataMutable<list_entry_t>(result_vector);
 
@@ -281,7 +281,7 @@ void SetResultVectorListDouble(Vector &result_vector, const std::vector<std::vec
 	ListVector::Reserve(result_vector, total_child_elements);
 	ListVector::SetListSize(result_vector, total_child_elements);
 
-	auto &child_vector = ListVector::GetEntry(result_vector);
+	auto &child_vector = ListVector::GetChildMutable(result_vector);
 	auto child_data = FlatVector::GetDataMutable<double>(child_vector);
 	auto list_entries = FlatVector::GetDataMutable<list_entry_t>(result_vector);
 
@@ -347,7 +347,7 @@ void GetListUInt8Slice(Vector &list_vec, UnifiedVectorFormat &list_data, idx_t r
 	auto mapped_idx = list_data.sel->get_index(row_idx);
 	auto &entry = list_entries[mapped_idx];
 
-	auto &child = ListVector::GetEntry(list_vec);
+	auto &child = ListVector::GetChildMutable(list_vec);
 	auto child_data = FlatVector::GetData<uint8_t>(child);
 
 	out_data = child_data + entry.offset;

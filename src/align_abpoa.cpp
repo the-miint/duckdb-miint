@@ -211,7 +211,7 @@ static void AlignAbpoaExecute(ClientContext & /*context*/, TableFunctionInput &d
 		}
 		lstate.sample_value = data.sample_info.sample_values[sample_idx];
 		auto sample_literal = lstate.sample_value.ToSQLString();
-		auto q_col = KeywordHelper::WriteOptionallyQuoted(data.sample_info.sample_id_col);
+		auto q_col = SQLIdentifier::ToString(data.sample_info.sample_id_col);
 		auto where_sql = "CAST(" + q_col + " AS VARCHAR) = CAST(" + sample_literal + " AS VARCHAR)";
 		auto loaded = LoadSingleEndSequences(*lstate.conn, data.table_name, "align_abpoa", /*strict=*/true, where_sql);
 		ValidateAndAlignInto(sample_literal, loaded, lstate.names, lstate.sequences, lstate.original_lengths,

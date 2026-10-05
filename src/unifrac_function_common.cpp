@@ -45,7 +45,7 @@ void ProbeFeatureTableShape(Connection &conn, const std::string &qname, const st
 LogicalType ProbeFeatureTableIdType(ClientContext &context, const std::string &table_name,
                                     const std::string &caller_name) {
 	auto conn = MakeReadOnlyHelperConnection(context);
-	ProbeFeatureTableShape(conn, KeywordHelper::WriteOptionallyQuoted(table_name), table_name, caller_name);
+	ProbeFeatureTableShape(conn, SQLIdentifier::ToString(table_name), table_name, caller_name);
 	auto cols = GetTableOrViewColumns(context, table_name, "feature-table");
 	for (idx_t i = 0; i < cols.names.size(); ++i) {
 		if (StringUtil::Lower(cols.names[i]) == "sample_id") {
@@ -59,7 +59,7 @@ std::vector<miint::unifrac::CooRow> ReadFeatureTable(ClientContext &context, con
                                                      const std::string &caller_name, LogicalType *sample_id_type,
                                                      LogicalType *feature_id_type) {
 	auto conn = MakeReadOnlyHelperConnection(context);
-	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
+	const auto qname = SQLIdentifier::ToString(table_name);
 
 	ProbeFeatureTableShape(conn, qname, table_name, caller_name);
 
@@ -94,9 +94,9 @@ std::vector<miint::unifrac::CooRow> ReadFeatureTable(ClientContext &context, con
 			break;
 		}
 		UnifiedVectorFormat sid_u, fid_u, val_u;
-		chunk->data[0].ToUnifiedFormat(n, sid_u);
-		chunk->data[1].ToUnifiedFormat(n, fid_u);
-		chunk->data[2].ToUnifiedFormat(n, val_u);
+		chunk->data[0].ToUnifiedFormat(sid_u);
+		chunk->data[1].ToUnifiedFormat(fid_u);
+		chunk->data[2].ToUnifiedFormat(val_u);
 		auto sid_data = UnifiedVectorFormat::GetData<string_t>(sid_u);
 		auto fid_data = UnifiedVectorFormat::GetData<string_t>(fid_u);
 		auto val_data = UnifiedVectorFormat::GetData<double>(val_u);
@@ -181,7 +181,7 @@ std::string IdInPredicate(const std::string &column, const std::vector<std::stri
 LogicalType ProbeDistanceTableIdType(ClientContext &context, const std::string &table_name,
                                      const std::string &caller_name, LogicalType *predicate_type) {
 	auto conn = MakeReadOnlyHelperConnection(context);
-	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
+	const auto qname = SQLIdentifier::ToString(table_name);
 
 	// Schema probe via LIMIT 0 — surfaces missing columns or unsafe casts as a
 	// binder-time error before any scan (mirrors ReadFeatureTable).
@@ -235,7 +235,7 @@ DistanceRelationIds EnumerateDistanceIds(ClientContext &context, const std::stri
 	out.sample_id_type = ProbeDistanceTableIdType(context, table_name, caller_name, &out.sample_id_predicate_type);
 
 	auto conn = MakeReadOnlyHelperConnection(context);
-	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
+	const auto qname = SQLIdentifier::ToString(table_name);
 
 	// Ordered by the id columns' OWN order where that is native (see
 	// NativeIdPredicateType), because this list is what fixes the anchor set and the
@@ -265,7 +265,7 @@ DistanceRelationIds EnumerateDistanceIds(ClientContext &context, const std::stri
 			break;
 		}
 		UnifiedVectorFormat id_u;
-		chunk->data[0].ToUnifiedFormat(rn, id_u);
+		chunk->data[0].ToUnifiedFormat(id_u);
 		auto id_data = UnifiedVectorFormat::GetData<string_t>(id_u);
 		for (idx_t i = 0; i < rn; ++i) {
 			const auto ii = id_u.sel->get_index(i);
@@ -346,7 +346,7 @@ DenseDistanceMatrix ReadDistanceTable(ClientContext &context, const std::string 
 	// passes must, or a TEMP distance table binds and enumerates its ids here and
 	// then fails on the very next query.
 	auto conn = MakeReadOnlyHelperConnection(context);
-	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
+	const auto qname = SQLIdentifier::ToString(table_name);
 	auto result = SubmitStream(conn, "SELECT sample_a::VARCHAR, sample_b::VARCHAR, distance::DOUBLE FROM " + qname);
 	if (result->HasError()) {
 		throw InvalidInputException("%s: failed to read distance-table '%s': %s", caller_name, table_name,
@@ -362,9 +362,9 @@ DenseDistanceMatrix ReadDistanceTable(ClientContext &context, const std::string 
 				break;
 			}
 			UnifiedVectorFormat a_u, b_u, d_u;
-			chunk->data[0].ToUnifiedFormat(rn, a_u);
-			chunk->data[1].ToUnifiedFormat(rn, b_u);
-			chunk->data[2].ToUnifiedFormat(rn, d_u);
+			chunk->data[0].ToUnifiedFormat(a_u);
+			chunk->data[1].ToUnifiedFormat(b_u);
+			chunk->data[2].ToUnifiedFormat(d_u);
 			auto a_data = UnifiedVectorFormat::GetData<string_t>(a_u);
 			auto b_data = UnifiedVectorFormat::GetData<string_t>(b_u);
 			auto d_data = UnifiedVectorFormat::GetData<double>(d_u);
@@ -417,7 +417,7 @@ DenseDistanceMatrix ReadDistanceTable(ClientContext &context, const std::string 
 CoordinateTable ReadCoordinateTable(ClientContext &context, const std::string &table_name,
                                     const std::string &caller_name, int32_t n_dims) {
 	auto conn = MakeReadOnlyHelperConnection(context);
-	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
+	const auto qname = SQLIdentifier::ToString(table_name);
 
 	// Schema probe via LIMIT 0 — surfaces missing columns or unsafe casts before
 	// any scan (mirrors ReadFeatureTable / EnumerateDistanceIds).
@@ -458,9 +458,9 @@ CoordinateTable ReadCoordinateTable(ClientContext &context, const std::string &t
 			break;
 		}
 		UnifiedVectorFormat sid_u, axis_u, coord_u;
-		chunk->data[0].ToUnifiedFormat(n, sid_u);
-		chunk->data[1].ToUnifiedFormat(n, axis_u);
-		chunk->data[2].ToUnifiedFormat(n, coord_u);
+		chunk->data[0].ToUnifiedFormat(sid_u);
+		chunk->data[1].ToUnifiedFormat(axis_u);
+		chunk->data[2].ToUnifiedFormat(coord_u);
 		auto sid_data = UnifiedVectorFormat::GetData<string_t>(sid_u);
 		auto axis_data = UnifiedVectorFormat::GetData<int32_t>(axis_u);
 		auto coord_data = UnifiedVectorFormat::GetData<double>(coord_u);

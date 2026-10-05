@@ -72,7 +72,7 @@ OrdinationTable ReadOrdinationTable(ClientContext &context, const std::string &t
 		throw BinderException("%s: %s ordination-table name must not be empty", caller_name, role);
 	}
 	auto conn = MakeReadOnlyHelperConnection(context);
-	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
+	const auto qname = SQLIdentifier::ToString(table_name);
 	const std::string select = "SELECT sample_id::VARCHAR, axis::INTEGER, coordinate::DOUBLE FROM " + qname;
 
 	// LIMIT 0 probe — surface a missing column / bad cast as a bind-time error
@@ -116,9 +116,9 @@ OrdinationTable ReadOrdinationTable(ClientContext &context, const std::string &t
 			break;
 		}
 		UnifiedVectorFormat id_u, ax_u, co_u;
-		chunk->data[0].ToUnifiedFormat(rn, id_u);
-		chunk->data[1].ToUnifiedFormat(rn, ax_u);
-		chunk->data[2].ToUnifiedFormat(rn, co_u);
+		chunk->data[0].ToUnifiedFormat(id_u);
+		chunk->data[1].ToUnifiedFormat(ax_u);
+		chunk->data[2].ToUnifiedFormat(co_u);
 		auto id_data = UnifiedVectorFormat::GetData<string_t>(id_u);
 		auto ax_data = UnifiedVectorFormat::GetData<int32_t>(ax_u);
 		auto co_data = UnifiedVectorFormat::GetData<double>(co_u);
@@ -215,7 +215,7 @@ OrdinationTable ReadOrdinationTable(ClientContext &context, const std::string &t
 std::vector<std::pair<std::string, std::string>> ReadPairing(ClientContext &context, const std::string &table_name,
                                                              const std::string &caller_name) {
 	auto conn = MakeReadOnlyHelperConnection(context);
-	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
+	const auto qname = SQLIdentifier::ToString(table_name);
 	const std::string select = "SELECT reference_id::VARCHAR, other_id::VARCHAR FROM " + qname;
 
 	auto probe = conn.Query(select + " LIMIT 0");
@@ -237,8 +237,8 @@ std::vector<std::pair<std::string, std::string>> ReadPairing(ClientContext &cont
 			break;
 		}
 		UnifiedVectorFormat r_u, o_u;
-		chunk->data[0].ToUnifiedFormat(rn, r_u);
-		chunk->data[1].ToUnifiedFormat(rn, o_u);
+		chunk->data[0].ToUnifiedFormat(r_u);
+		chunk->data[1].ToUnifiedFormat(o_u);
 		auto r_data = UnifiedVectorFormat::GetData<string_t>(r_u);
 		auto o_data = UnifiedVectorFormat::GetData<string_t>(o_u);
 		for (idx_t i = 0; i < rn; ++i) {

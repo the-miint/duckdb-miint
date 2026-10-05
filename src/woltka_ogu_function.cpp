@@ -49,8 +49,8 @@ struct WoltkaOguLocalState : public LocalTableFunctionState {
 };
 
 static string BuildAggregationSql(const string &source, const string &seq_id_col) {
-	auto q_src = KeywordHelper::WriteOptionallyQuoted(source);
-	auto q_seq = KeywordHelper::WriteOptionallyQuoted(seq_id_col);
+	auto q_src = SQLIdentifier::ToString(source);
+	auto q_seq = SQLIdentifier::ToString(seq_id_col);
 	return "WITH base AS ("
 	       "  SELECT DISTINCT "
 	       "    " +
@@ -84,8 +84,8 @@ static unique_ptr<QueryResult> RunGlobalAggregation(Connection &conn, const stri
 static unique_ptr<QueryResult> RunSampleAggregation(Connection &conn, const string &source, const string &seq_id_col,
                                                     const string &sample_col, const Value &sample_value,
                                                     const LogicalType &sample_type) {
-	auto q_src = KeywordHelper::WriteOptionallyQuoted(source);
-	auto q_sample = KeywordHelper::WriteOptionallyQuoted(sample_col);
+	auto q_src = SQLIdentifier::ToString(source);
+	auto q_sample = SQLIdentifier::ToString(sample_col);
 	// ToSQLString handles all Value types (integers, timestamps, strings) safely.
 	auto sample_literal = sample_value.ToSQLString();
 	// Cast the inlined literal back to the sample column's declared type before
@@ -134,8 +134,8 @@ static unique_ptr<FunctionData> WoltkaOguBind(ClientContext &context, TableFunct
 
 	auto conn = MakeReadOnlyHelperConnection(context);
 
-	auto q_src = KeywordHelper::WriteOptionallyQuoted(data->source);
-	auto q_seq = KeywordHelper::WriteOptionallyQuoted(data->seq_id_col);
+	auto q_src = SQLIdentifier::ToString(data->source);
+	auto q_seq = SQLIdentifier::ToString(data->seq_id_col);
 
 	// Validate source resolves AND required columns exist AND flags casts to USMALLINT.
 	// reference is selected natively (not cast to VARCHAR) so its storage type can

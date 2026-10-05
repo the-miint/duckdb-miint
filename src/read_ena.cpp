@@ -312,8 +312,8 @@ void ReadENATableFunction::Execute(ClientContext &context, TableFunctionInput &d
 		} else if (col_type.id() == LogicalTypeId::LIST) {
 			// List columns: LIST(VARCHAR) or LIST(BIGINT)
 			auto &child_type = ListType::GetChildType(col_type);
-			auto list_entries = ListVector::GetData(output.data[col]);
-			auto &child_vec = ListVector::GetEntry(output.data[col]);
+			auto list_entries = FlatVector::GetDataMutable<list_entry_t>(output.data[col]);
+			auto &child_vec = ListVector::GetChildMutable(output.data[col]);
 
 			// Reserve capacity for the worst case (every row contributes at least one element)
 			idx_t worst_case = 0;

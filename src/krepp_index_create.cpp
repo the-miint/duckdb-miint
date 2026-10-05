@@ -597,7 +597,7 @@ unique_ptr<GlobalTableFunctionState> KreppIndexCreateTableFunction::InitGlobal(C
 		// ReadSubjectTable: the column may exist, its values may not.
 		const std::string sql = "SELECT read_id::VARCHAR AS read_id, sequence1" +
 		                        std::string(data.schema.has_sequence2 ? ", sequence2" : "") + " FROM " +
-		                        KeywordHelper::WriteOptionallyQuoted(data.sequence_table);
+		                        SQLIdentifier::ToString(data.sequence_table);
 		auto result = SubmitStream(conn, sql);
 		if (result->HasError()) {
 			throw InvalidInputException("%s: failed to read '%s': %s", kCallerName, data.sequence_table,

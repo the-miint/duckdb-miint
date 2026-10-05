@@ -245,8 +245,8 @@ static void SequenceSplitFunction(DataChunk &args, ExpressionState &state, Vecto
 	const idx_t count = args.size();
 
 	UnifiedVectorFormat seq_fmt, cs_fmt;
-	args.data[0].ToUnifiedFormat(count, seq_fmt);
-	args.data[1].ToUnifiedFormat(count, cs_fmt);
+	args.data[0].ToUnifiedFormat(seq_fmt);
+	args.data[1].ToUnifiedFormat(cs_fmt);
 	const auto seq_data = UnifiedVectorFormat::GetData<string_t>(seq_fmt);
 	const auto cs_data = UnifiedVectorFormat::GetData<int32_t>(cs_fmt);
 
@@ -286,7 +286,7 @@ static void SequenceSplitFunction(DataChunk &args, ExpressionState &state, Vecto
 	// Reserve the flat child once (no per-row realloc), then fill.
 	ListVector::Reserve(result, total_chunks);
 	ListVector::SetListSize(result, total_chunks);
-	auto &struct_vec = ListVector::GetEntry(result);
+	auto &struct_vec = ListVector::GetChildMutable(result);
 	auto &struct_children = StructVector::GetEntries(struct_vec);
 	auto idx_data = FlatVector::GetDataMutable<int32_t>(struct_children[0]); // chunk_index
 	auto &data_vec = struct_children[1];                                     // chunk_data VARCHAR

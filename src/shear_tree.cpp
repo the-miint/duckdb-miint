@@ -30,7 +30,7 @@ std::unordered_set<std::string> ReadTipNames(ClientContext &context, const std::
 
 	auto conn = MakeReadOnlyHelperConnection(context);
 
-	std::string query = "SELECT name::VARCHAR FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
+	std::string query = "SELECT name::VARCHAR FROM " + SQLIdentifier::ToString(table_name);
 	auto query_result = conn.Query(query);
 	if (query_result->HasError()) {
 		throw InvalidInputException("Failed to read from tips table '%s': %s", table_name, query_result->GetError());
@@ -43,7 +43,7 @@ std::unordered_set<std::string> ReadTipNames(ClientContext &context, const std::
 			break;
 		}
 		UnifiedVectorFormat name_data;
-		chunk->data[0].ToUnifiedFormat(chunk->size(), name_data);
+		chunk->data[0].ToUnifiedFormat(name_data);
 		auto name_strs = UnifiedVectorFormat::GetData<string_t>(name_data);
 		for (idx_t i = 0; i < chunk->size(); i++) {
 			auto idx = name_data.sel->get_index(i);

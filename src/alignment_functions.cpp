@@ -19,10 +19,10 @@ static void AlignmentSeqIdentityScalarFunction(DataChunk &args, ExpressionState 
 
 	// Manually handle 4 arguments since DuckDB doesn't have QuaternaryExecutor
 	UnifiedVectorFormat cigar_data, nm_data, md_data, type_data;
-	cigar_vector.ToUnifiedFormat(args.size(), cigar_data);
-	nm_vector.ToUnifiedFormat(args.size(), nm_data);
-	md_vector.ToUnifiedFormat(args.size(), md_data);
-	type_vector.ToUnifiedFormat(args.size(), type_data);
+	cigar_vector.ToUnifiedFormat(cigar_data);
+	nm_vector.ToUnifiedFormat(nm_data);
+	md_vector.ToUnifiedFormat(md_data);
+	type_vector.ToUnifiedFormat(type_data);
 
 	auto cigar_ptr = UnifiedVectorFormat::GetData<string_t>(cigar_data);
 	auto nm_ptr = UnifiedVectorFormat::GetData<int64_t>(nm_data);
@@ -203,7 +203,7 @@ static void CigarSequenceIdentityScalarFunction(DataChunk &args, ExpressionState
 	auto &cigar_vector = args.data[0];
 
 	UnifiedVectorFormat cigar_data;
-	cigar_vector.ToUnifiedFormat(args.size(), cigar_data);
+	cigar_vector.ToUnifiedFormat(cigar_data);
 	auto cigar_ptr = UnifiedVectorFormat::GetData<string_t>(cigar_data);
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
@@ -424,10 +424,10 @@ static void CigarQueryIntervalsScalarFunction(DataChunk &args, ExpressionState &
 	const bool has_type = args.ColumnCount() > 2;
 
 	UnifiedVectorFormat cigar_fmt, flags_fmt, type_fmt;
-	args.data[0].ToUnifiedFormat(count, cigar_fmt);
-	args.data[1].ToUnifiedFormat(count, flags_fmt);
+	args.data[0].ToUnifiedFormat(cigar_fmt);
+	args.data[1].ToUnifiedFormat(flags_fmt);
 	if (has_type) {
-		args.data[2].ToUnifiedFormat(count, type_fmt);
+		args.data[2].ToUnifiedFormat(type_fmt);
 	}
 	const auto cigar_data = UnifiedVectorFormat::GetData<string_t>(cigar_fmt);
 	const auto flags_data = UnifiedVectorFormat::GetData<uint16_t>(flags_fmt);
@@ -474,7 +474,7 @@ static void CigarQueryIntervalsScalarFunction(DataChunk &args, ExpressionState &
 			}
 			// Reserve may reallocate the child, so re-fetch its data pointers each time.
 			ListVector::Reserve(result, total + intervals.size());
-			auto &struct_children = StructVector::GetEntries(ListVector::GetEntry(result));
+			auto &struct_children = StructVector::GetEntries(ListVector::GetChildMutable(result));
 			auto start_data = FlatVector::GetDataMutable<int64_t>(struct_children[0]);
 			auto stop_data = FlatVector::GetDataMutable<int64_t>(struct_children[1]);
 			for (idx_t i = 0; i < intervals.size(); i++) {

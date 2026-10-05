@@ -152,7 +152,7 @@ std::string BuildConfigJson(const named_argument_map_t &named_params) {
 		if (kKnownParams.find(kv.first.GetIdentifierName()) == kKnownParams.end()) {
 			throw InvalidInputException("phylogeny_fasttree: unknown named parameter '%s'. "
 			                            "See `docs/phylogeny.md` for the supported list.",
-			                            kv.first);
+			                            kv.first.GetIdentifierName());
 		}
 	}
 
@@ -505,7 +505,7 @@ struct LoadedInput {
 
 LoadedInput LoadInputTable(ClientContext &context, const std::string &table_name) {
 	auto conn = MakeReadOnlyHelperConnection(context);
-	const std::string sql = "SELECT name, sequence FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
+	const std::string sql = "SELECT name, sequence FROM " + SQLIdentifier::ToString(table_name);
 	auto result = conn.Query(sql);
 	if (result->HasError()) {
 		throw InvalidInputException("phylogeny_fasttree: failed to read input table '%s' "

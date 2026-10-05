@@ -34,7 +34,7 @@ std::map<std::string, std::unordered_map<std::string, double>> ReadContinuousTra
 	auto conn = MakeReadOnlyHelperConnection(context);
 
 	std::string query =
-	    "SELECT name::VARCHAR, trait::VARCHAR, value::DOUBLE FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
+	    "SELECT name::VARCHAR, trait::VARCHAR, value::DOUBLE FROM " + SQLIdentifier::ToString(table_name);
 	auto query_result = conn.Query(query);
 	if (query_result->HasError()) {
 		throw InvalidInputException("Failed to read from traits table '%s': %s", table_name, query_result->GetError());
@@ -47,9 +47,9 @@ std::map<std::string, std::unordered_map<std::string, double>> ReadContinuousTra
 			break;
 		}
 		UnifiedVectorFormat name_data, trait_data, value_data;
-		chunk->data[0].ToUnifiedFormat(chunk->size(), name_data);
-		chunk->data[1].ToUnifiedFormat(chunk->size(), trait_data);
-		chunk->data[2].ToUnifiedFormat(chunk->size(), value_data);
+		chunk->data[0].ToUnifiedFormat(name_data);
+		chunk->data[1].ToUnifiedFormat(trait_data);
+		chunk->data[2].ToUnifiedFormat(value_data);
 		auto names = UnifiedVectorFormat::GetData<string_t>(name_data);
 		auto trait_names = UnifiedVectorFormat::GetData<string_t>(trait_data);
 		auto values = UnifiedVectorFormat::GetData<double>(value_data);
@@ -98,7 +98,7 @@ std::map<std::string, std::unordered_map<std::string, std::string>> ReadDiscrete
 	auto conn = MakeReadOnlyHelperConnection(context);
 
 	std::string query =
-	    "SELECT name::VARCHAR, trait::VARCHAR, value::VARCHAR FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
+	    "SELECT name::VARCHAR, trait::VARCHAR, value::VARCHAR FROM " + SQLIdentifier::ToString(table_name);
 	auto query_result = conn.Query(query);
 	if (query_result->HasError()) {
 		throw InvalidInputException("Failed to read from traits table '%s': %s", table_name, query_result->GetError());
@@ -111,9 +111,9 @@ std::map<std::string, std::unordered_map<std::string, std::string>> ReadDiscrete
 			break;
 		}
 		UnifiedVectorFormat name_data, trait_data, value_data;
-		chunk->data[0].ToUnifiedFormat(chunk->size(), name_data);
-		chunk->data[1].ToUnifiedFormat(chunk->size(), trait_data);
-		chunk->data[2].ToUnifiedFormat(chunk->size(), value_data);
+		chunk->data[0].ToUnifiedFormat(name_data);
+		chunk->data[1].ToUnifiedFormat(trait_data);
+		chunk->data[2].ToUnifiedFormat(value_data);
 		auto names = UnifiedVectorFormat::GetData<string_t>(name_data);
 		auto trait_names = UnifiedVectorFormat::GetData<string_t>(trait_data);
 		auto values = UnifiedVectorFormat::GetData<string_t>(value_data);

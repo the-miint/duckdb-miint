@@ -227,7 +227,7 @@ struct LowercasedColumns {
 inline LowercasedColumns GetTableColumnsLower(ClientContext &context, const std::string &table_name,
                                               const std::string &role = "Table or view") {
 	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, QualifiedName(Identifier(table_name)), QueryErrorContext());
-	auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
+	auto entry = Catalog::GetEntry(context, lookup_info, OnEntryNotFound::RETURN_NULL);
 
 	if (!entry) {
 		throw BinderException("%s '%s' does not exist", role, table_name);

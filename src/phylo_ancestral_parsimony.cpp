@@ -38,8 +38,8 @@ struct CostMatrix {
 // reading-tables-views.md).
 CostMatrix ReadCostMatrix(ClientContext &context, const std::string &table_name) {
 	auto conn = MakeReadOnlyHelperConnection(context);
-	std::string q = "SELECT from_state::VARCHAR, to_state::VARCHAR, cost::DOUBLE FROM " +
-	                KeywordHelper::WriteOptionallyQuoted(table_name);
+	std::string q =
+	    "SELECT from_state::VARCHAR, to_state::VARCHAR, cost::DOUBLE FROM " + SQLIdentifier::ToString(table_name);
 	auto res = conn.Query(q);
 	if (res->HasError()) {
 		throw InvalidInputException("Failed to read from cost matrix table '%s': %s", table_name, res->GetError());
@@ -54,9 +54,9 @@ CostMatrix ReadCostMatrix(ClientContext &context, const std::string &table_name)
 			break;
 		}
 		UnifiedVectorFormat fd, td, cd;
-		chunk->data[0].ToUnifiedFormat(chunk->size(), fd);
-		chunk->data[1].ToUnifiedFormat(chunk->size(), td);
-		chunk->data[2].ToUnifiedFormat(chunk->size(), cd);
+		chunk->data[0].ToUnifiedFormat(fd);
+		chunk->data[1].ToUnifiedFormat(td);
+		chunk->data[2].ToUnifiedFormat(cd);
 		auto fs = UnifiedVectorFormat::GetData<string_t>(fd);
 		auto ts = UnifiedVectorFormat::GetData<string_t>(td);
 		auto cs = UnifiedVectorFormat::GetData<double>(cd);

@@ -27,7 +27,7 @@ static LogicalType ValidateDenovoTableSchema(ClientContext &context, const std::
                                              const std::string &id_col, const std::string &sequence_col,
                                              const std::string &count_col) {
 	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, QualifiedName(Identifier(table_name)), QueryErrorContext());
-	auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
+	auto entry = Catalog::GetEntry(context, lookup_info, OnEntryNotFound::RETURN_NULL);
 	if (!entry) {
 		throw BinderException("Table or view '%s' does not exist", table_name);
 	}
@@ -98,11 +98,10 @@ static void LoadDenovoSequences(Connection &conn, const std::string &table_name,
                                 const std::string &sequence_col, const std::string &count_col,
                                 const std::string &where_sql, std::vector<std::string> &out_labels,
                                 std::vector<std::string> &out_sequences, std::vector<int64_t> &out_sizes) {
-	auto q_id = KeywordHelper::WriteOptionallyQuoted(id_col);
-	auto q_seq = KeywordHelper::WriteOptionallyQuoted(sequence_col);
-	auto q_count = KeywordHelper::WriteOptionallyQuoted(count_col);
-	auto sql =
-	    "SELECT " + q_id + ", " + q_seq + ", " + q_count + " FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
+	auto q_id = SQLIdentifier::ToString(id_col);
+	auto q_seq = SQLIdentifier::ToString(sequence_col);
+	auto q_count = SQLIdentifier::ToString(count_col);
+	auto sql = "SELECT " + q_id + ", " + q_seq + ", " + q_count + " FROM " + SQLIdentifier::ToString(table_name);
 	if (!where_sql.empty()) {
 		sql += " WHERE " + where_sql;
 	}
@@ -364,7 +363,7 @@ void UchimeDenovoTableFunction::Execute(ClientContext & /*context*/, TableFuncti
 		}
 		lstate.sample_value = data.sample_info.sample_values[sample_idx];
 		auto sample_literal = lstate.sample_value.ToSQLString();
-		auto q_col = KeywordHelper::WriteOptionallyQuoted(data.sample_info.sample_id_col);
+		auto q_col = SQLIdentifier::ToString(data.sample_info.sample_id_col);
 		// CAST-as-VARCHAR equality: see note in deblur_table_function.cpp re: DECIMAL.
 		auto where_sql = "CAST(" + q_col + " AS VARCHAR) = CAST(" + sample_literal + " AS VARCHAR)";
 

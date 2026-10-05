@@ -847,8 +847,7 @@ LoadedSubjects LoadSingleEndSubjects(ClientContext &context, const std::string &
 	// Probe for an optional sequence2 column first (paired subjects are
 	// rejected), then issue the actual SELECT. read_id may be VARCHAR or BIGINT;
 	// the implicit Value::GetValue<std::string>() cast below handles either.
-	const std::string columns_sql = "SELECT column_name FROM (DESCRIBE " +
-	                                KeywordHelper::WriteOptionallyQuoted(table_name) +
+	const std::string columns_sql = "SELECT column_name FROM (DESCRIBE " + SQLIdentifier::ToString(table_name) +
 	                                ") WHERE column_name IN ('sequence2')";
 	auto columns_res = conn.Query(columns_sql);
 	if (columns_res->HasError()) {
@@ -861,7 +860,7 @@ LoadedSubjects LoadSingleEndSubjects(ClientContext &context, const std::string &
 	if (has_sequence2) {
 		select_sql += ", sequence2";
 	}
-	select_sql += " FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
+	select_sql += " FROM " + SQLIdentifier::ToString(table_name);
 
 	auto result = conn.Query(select_sql);
 	if (result->HasError()) {

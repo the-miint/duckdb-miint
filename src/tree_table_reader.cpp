@@ -48,8 +48,7 @@ std::vector<miint::NodeInput> ReadTreeTable(ClientContext &context, const std::s
 	// order), so ordering by it makes order-sensitive consumers
 	// (tree_resolve_multifurcations) reproducible regardless of storage.
 	std::string query = "SELECT node_index::BIGINT, parent_index::BIGINT, " + name_proj + ", " + bl_proj + ", " +
-	                    edge_proj + " FROM " + KeywordHelper::WriteOptionallyQuoted(table_name) +
-	                    " ORDER BY node_index";
+	                    edge_proj + " FROM " + SQLIdentifier::ToString(table_name) + " ORDER BY node_index";
 
 	auto query_result = conn.Query(query);
 
@@ -72,11 +71,11 @@ std::vector<miint::NodeInput> ReadTreeTable(ClientContext &context, const std::s
 		auto &edge_id_vec = chunk->data[4];
 
 		UnifiedVectorFormat node_data, parent_data, name_data, bl_data, edge_data;
-		node_index_vec.ToUnifiedFormat(chunk->size(), node_data);
-		parent_index_vec.ToUnifiedFormat(chunk->size(), parent_data);
-		name_vec.ToUnifiedFormat(chunk->size(), name_data);
-		branch_length_vec.ToUnifiedFormat(chunk->size(), bl_data);
-		edge_id_vec.ToUnifiedFormat(chunk->size(), edge_data);
+		node_index_vec.ToUnifiedFormat(node_data);
+		parent_index_vec.ToUnifiedFormat(parent_data);
+		name_vec.ToUnifiedFormat(name_data);
+		branch_length_vec.ToUnifiedFormat(bl_data);
+		edge_id_vec.ToUnifiedFormat(edge_data);
 
 		auto node_indices = UnifiedVectorFormat::GetData<int64_t>(node_data);
 		auto parent_indices = UnifiedVectorFormat::GetData<int64_t>(parent_data);

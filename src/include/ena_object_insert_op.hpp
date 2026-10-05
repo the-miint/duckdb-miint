@@ -322,7 +322,7 @@ public:
 				return SourceResultType::FINISHED;
 			}
 			chunk.SetChildCardinality(1);
-			chunk.SetValue(0, 0, Value::BIGINT(NumericCast<int64_t>(gstate.insert_count)));
+			chunk.data[0].SetValue(0, Value::BIGINT(NumericCast<int64_t>(gstate.insert_count)));
 			source_state.finished = true;
 			return SourceResultType::FINISHED;
 		}

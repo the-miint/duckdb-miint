@@ -17,7 +17,7 @@ namespace duckdb {
 TableOrViewColumns GetTableOrViewColumns(ClientContext &context, const std::string &table_name,
                                          const std::string &entity_type) {
 	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, QualifiedName(Identifier(table_name)), QueryErrorContext());
-	auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
+	auto entry = Catalog::GetEntry(context, lookup_info, OnEntryNotFound::RETURN_NULL);
 
 	if (!entry) {
 		throw BinderException("%s or view '%s' does not exist", entity_type, table_name);
@@ -52,7 +52,7 @@ void RejectRelationNameAsLiteral(ClientContext &context, const std::string &func
 	// Unqualified lookup first. This honours the session search_path, so a bare name
 	// naming a table in a non-default schema is caught.
 	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, QualifiedName(Identifier(literal)), QueryErrorContext());
-	auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
+	auto entry = Catalog::GetEntry(context, lookup_info, OnEntryNotFound::RETURN_NULL);
 
 	if (!entry && literal.find('.') != std::string::npos) {
 		// A qualified name ("s.accs", "db.s.accs") is the same mistake and must not slip
@@ -103,7 +103,7 @@ void RejectCTERelationName(TableFunctionBindInput &input, const std::string &rel
 	// reads the same-named table, so reusing the name would make a view that
 	// references itself. TEMP is only the common case — massql and some sample_id
 	// paths still cannot read TEMP relations (#207).
-	auto suggested = KeywordHelper::WriteOptionallyQuoted(relation_name + "_view");
+	auto suggested = SQLIdentifier::ToString(relation_name + "_view");
 	throw BinderException("%s: '%s' is a common table expression (WITH clause). Relation names are resolved in the "
 	                      "catalog, where CTEs do not exist, so it cannot be read by name. Create a view or table "
 	                      "under a different name and pass that name instead, e.g. CREATE TEMP VIEW %s AS ...; "

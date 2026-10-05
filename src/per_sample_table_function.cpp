@@ -26,8 +26,8 @@ void DiscoverSamples(Connection &conn, const string &source_relation, const stri
 		}
 	}
 
-	auto q_src = KeywordHelper::WriteOptionallyQuoted(source_relation);
-	auto q_col = KeywordHelper::WriteOptionallyQuoted(sample_id_col);
+	auto q_src = SQLIdentifier::ToString(source_relation);
+	auto q_col = SQLIdentifier::ToString(sample_id_col);
 
 	auto probe = conn.Query("SELECT " + q_col + " FROM " + q_src + " LIMIT 0");
 	if (probe->HasError()) {

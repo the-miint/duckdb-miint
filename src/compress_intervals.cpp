@@ -70,14 +70,14 @@ struct CompressIntervalsOperation {
 
 		UnifiedVectorFormat start_data;
 		UnifiedVectorFormat stop_data;
-		start_vector.ToUnifiedFormat(count, start_data);
-		stop_vector.ToUnifiedFormat(count, stop_data);
+		start_vector.ToUnifiedFormat(start_data);
+		stop_vector.ToUnifiedFormat(stop_data);
 
 		auto start_ptr = UnifiedVectorFormat::GetData<int64_t>(start_data);
 		auto stop_ptr = UnifiedVectorFormat::GetData<int64_t>(stop_data);
 
 		UnifiedVectorFormat state_data;
-		states.ToUnifiedFormat(count, state_data);
+		states.ToUnifiedFormat(state_data);
 		auto state_ptr = UnifiedVectorFormat::GetData<IntervalState *>(state_data);
 
 		for (idx_t i = 0; i < count; i++) {
@@ -126,7 +126,7 @@ struct CompressIntervalsOperation {
 	static void Finalize(Vector &state_vector, AggregateFinalizeInputData &aggr_input_data, Vector &result, idx_t count,
 	                     idx_t offset) {
 		UnifiedVectorFormat state_data;
-		state_vector.ToUnifiedFormat(count, state_data);
+		state_vector.ToUnifiedFormat(state_data);
 		auto states = UnifiedVectorFormat::GetData<IntervalState *>(state_data);
 
 		auto &result_validity = FlatVector::ValidityMutable(result);
@@ -143,7 +143,7 @@ struct CompressIntervalsOperation {
 				continue;
 			}
 
-			auto &list_entry = ListVector::GetEntry(result);
+			auto &list_entry = ListVector::GetChildMutable(result);
 			auto list_offset = ListVector::GetListSize(result);
 			ListVector::Reserve(result, list_offset + state.Size());
 

@@ -188,7 +188,7 @@ void ReadSequencesSamTableFunction::Execute(ClientContext &context, TableFunctio
 	ListVector::Reserve(qual1_vector, qual_scratch.size());
 	ListVector::SetListSize(qual1_vector, qual_scratch.size());
 	if (!qual_scratch.empty()) {
-		auto &qual_child = ListVector::GetEntry(qual1_vector);
+		auto &qual_child = ListVector::GetChildMutable(qual1_vector);
 		auto qual_child_data = FlatVector::GetDataMutable<uint8_t>(qual_child);
 		std::memcpy(qual_child_data, qual_scratch.data(), qual_scratch.size());
 		FlatVector::ValidityMutable(qual_child).SetAllValid(qual_scratch.size());

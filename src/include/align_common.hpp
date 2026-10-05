@@ -385,7 +385,7 @@ inline void FilterMappedOnly(miint::SAMRecordBatch &batch) {
 inline void ValidateReadToShardSchema(ClientContext &context, const std::string &table_name,
                                       const LogicalType &expected_read_id_type = LogicalType(LogicalTypeId::INVALID)) {
 	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, QualifiedName(Identifier(table_name)), QueryErrorContext());
-	auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
+	auto entry = Catalog::GetEntry(context, lookup_info, OnEntryNotFound::RETURN_NULL);
 
 	if (!entry) {
 		throw BinderException("Table or view '%s' does not exist", table_name);
@@ -469,9 +469,9 @@ inline std::vector<ShardNameCount> ReadShardNameCounts(ClientContext &context, c
 	auto conn = MakeReadOnlyHelperConnection(context);
 
 	// Query shard counts ordered by count descending (largest first)
-	std::string from = KeywordHelper::WriteOptionallyQuoted(table_name) + " rts";
+	std::string from = SQLIdentifier::ToString(table_name) + " rts";
 	if (!join_query_table.empty()) {
-		from += " JOIN " + KeywordHelper::WriteOptionallyQuoted(join_query_table) + " q ON q.read_id = rts.read_id";
+		from += " JOIN " + SQLIdentifier::ToString(join_query_table) + " q ON q.read_id = rts.read_id";
 	}
 	std::string query = "SELECT rts.shard_name AS shard_name, COUNT(*) as cnt FROM " + from +
 	                    " GROUP BY rts.shard_name ORDER BY cnt DESC";
@@ -494,8 +494,8 @@ inline std::vector<ShardNameCount> ReadShardNameCounts(ClientContext &context, c
 		auto &count_vec = chunk->data[1];
 
 		UnifiedVectorFormat shard_data, count_data;
-		shard_name_vec.ToUnifiedFormat(chunk->size(), shard_data);
-		count_vec.ToUnifiedFormat(chunk->size(), count_data);
+		shard_name_vec.ToUnifiedFormat(shard_data);
+		count_vec.ToUnifiedFormat(count_data);
 
 		auto shard_names = UnifiedVectorFormat::GetData<string_t>(shard_data);
 		auto counts = UnifiedVectorFormat::GetData<int64_t>(count_data);

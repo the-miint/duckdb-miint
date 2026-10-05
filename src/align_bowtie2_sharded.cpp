@@ -432,7 +432,7 @@ struct AlignBowtie2ShardedLocalState : public LocalTableFunctionState {
 void DetectQueryColumns(ClientContext &context, AlignBowtie2ShardedBindData &bd) {
 	auto conn = MakeReadOnlyHelperConnection(context);
 	const std::string sql = "SELECT column_name, column_type FROM (DESCRIBE " +
-	                        KeywordHelper::WriteOptionallyQuoted(bd.query_table) +
+	                        SQLIdentifier::ToString(bd.query_table) +
 	                        ") WHERE column_name IN ('sequence2','qual1','qual2')";
 	auto result = conn.Query(sql);
 	if (result->HasError()) {
@@ -541,7 +541,8 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 	for (const auto &kv : input.named_parameters) {
 		static const auto kKnown = MakeKnownShardedParams();
 		if (kKnown.find(kv.first.GetIdentifierName()) == kKnown.end()) {
-			throw InvalidInputException("align_bowtie2_sharded: unknown named parameter '%s'", kv.first);
+			throw InvalidInputException("align_bowtie2_sharded: unknown named parameter '%s'",
+			                            kv.first.GetIdentifierName());
 		}
 	}
 	bd->named_params = input.named_parameters;
@@ -798,8 +799,8 @@ void OpenCurrentShardStream(AlignBowtie2ShardedLocalState &local, const AlignBow
 	if (bd.query_has_qual2) {
 		select += ", q.qual2";
 	}
-	select += " FROM " + KeywordHelper::WriteOptionallyQuoted(bd.query_table) + " q";
-	select += " JOIN " + KeywordHelper::WriteOptionallyQuoted(bd.read_to_shard_table) + " rts";
+	select += " FROM " + SQLIdentifier::ToString(bd.query_table) + " q";
+	select += " JOIN " + SQLIdentifier::ToString(bd.read_to_shard_table) + " rts";
 	select += " ON q.read_id = rts.read_id";
 	// shard.name is a user-supplied row value from `read_to_shard`. Direct
 	// concatenation into the WHERE clause would be a SQL-injection vector
@@ -807,7 +808,7 @@ void OpenCurrentShardStream(AlignBowtie2ShardedLocalState &local, const AlignBow
 	// and silently send reads to the wrong index). WriteQuoted wraps the
 	// value in single quotes and doubles any embedded single quote, matching
 	// the convention already used in sequence_table_reader.cpp:377.
-	select += " WHERE rts.shard_name = " + KeywordHelper::WriteQuoted(shard.name, '\'');
+	select += " WHERE rts.shard_name = " + SQLString::ToString(shard.name);
 
 	local.input_stream = SubmitStream(*local.input_conn, select);
 	local.stream_exhausted = false;

@@ -80,7 +80,7 @@ struct WideMetadata {
 WideMetadata ReadWideMetadata(ClientContext &context, const std::string &table_name,
                               const std::vector<std::string> &requested_variables, const std::string &caller_name) {
 	auto conn = MakeReadOnlyHelperConnection(context);
-	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
+	const auto qname = SQLIdentifier::ToString(table_name);
 
 	auto probe = conn.Query("SELECT * FROM " + qname + " LIMIT 0");
 	if (probe->HasError()) {
@@ -135,10 +135,9 @@ WideMetadata ReadWideMetadata(ClientContext &context, const std::string &table_n
 		}
 	}
 
-	std::string sql =
-	    "SELECT " + KeywordHelper::WriteOptionallyQuoted(all_names[sample_id_col].GetIdentifierName()) + "::VARCHAR";
+	std::string sql = "SELECT " + SQLIdentifier::ToString(all_names[sample_id_col].GetIdentifierName()) + "::VARCHAR";
 	for (auto col_idx : chosen_indices) {
-		sql += ", " + KeywordHelper::WriteOptionallyQuoted(all_names[col_idx].GetIdentifierName()) + "::VARCHAR";
+		sql += ", " + SQLIdentifier::ToString(all_names[col_idx].GetIdentifierName()) + "::VARCHAR";
 	}
 	sql += " FROM " + qname;
 
@@ -157,13 +156,13 @@ WideMetadata ReadWideMetadata(ClientContext &context, const std::string &table_n
 			break;
 		}
 		UnifiedVectorFormat sid_u;
-		chunk->data[0].ToUnifiedFormat(n, sid_u);
+		chunk->data[0].ToUnifiedFormat(sid_u);
 		auto sid_data = UnifiedVectorFormat::GetData<string_t>(sid_u);
 
 		std::vector<UnifiedVectorFormat> var_u(chosen_variables.size());
 		std::vector<const string_t *> var_data(chosen_variables.size());
 		for (size_t v = 0; v < chosen_variables.size(); ++v) {
-			chunk->data[v + 1].ToUnifiedFormat(n, var_u[v]);
+			chunk->data[v + 1].ToUnifiedFormat(var_u[v]);
 			var_data[v] = UnifiedVectorFormat::GetData<string_t>(var_u[v]);
 		}
 		for (idx_t i = 0; i < n; ++i) {

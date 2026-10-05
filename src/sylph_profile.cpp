@@ -474,8 +474,8 @@ void SylphProfileTableFunction::Execute(ClientContext &context, TableFunctionInp
 		// matches uchime_ref's per-sample path. The view name is fixed because
 		// each LocalState owns its own connection — TEMP VIEWs are scoped to the
 		// connection, so concurrent threads don't collide.
-		auto src = KeywordHelper::WriteOptionallyQuoted(data.source_table);
-		auto col = KeywordHelper::WriteOptionallyQuoted(data.sample_info.sample_id_col);
+		auto src = SQLIdentifier::ToString(data.source_table);
+		auto col = SQLIdentifier::ToString(data.sample_info.sample_id_col);
 		auto sample_lit = lstate.sample_value.ToSQLString();
 		auto view_sql = "CREATE OR REPLACE TEMP VIEW __sylph_per_sample AS SELECT * FROM " + src + " WHERE CAST(" +
 		                col + " AS VARCHAR) = CAST(" + sample_lit + " AS VARCHAR)";

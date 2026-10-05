@@ -792,8 +792,8 @@ public:
 	                        StringUtil::Replace(UUID::ToString(UUID::GenerateRandomUUID()), "-", "")),
 	      wave_anchor_table_("_miint_wave_anchor_" +
 	                         StringUtil::Replace(UUID::ToString(UUID::GenerateRandomUUID()), "-", "")),
-	      wave_batch_quoted_(KeywordHelper::WriteOptionallyQuoted(wave_batch_table_)),
-	      wave_anchor_quoted_(KeywordHelper::WriteOptionallyQuoted(wave_anchor_table_)) {
+	      wave_batch_quoted_(SQLIdentifier::ToString(wave_batch_table_)),
+	      wave_anchor_quoted_(SQLIdentifier::ToString(wave_anchor_table_)) {
 	}
 
 	// Fill the wave's blocks in one scan. `requests` are exactly the requests the
@@ -1016,10 +1016,10 @@ private:
 					break;
 				}
 				UnifiedVectorFormat blk_u, pa_u, pb_u, d_u;
-				chunk->data[0].ToUnifiedFormat(rn, blk_u);
-				chunk->data[1].ToUnifiedFormat(rn, pa_u);
-				chunk->data[2].ToUnifiedFormat(rn, pb_u);
-				chunk->data[3].ToUnifiedFormat(rn, d_u);
+				chunk->data[0].ToUnifiedFormat(blk_u);
+				chunk->data[1].ToUnifiedFormat(pa_u);
+				chunk->data[2].ToUnifiedFormat(pb_u);
+				chunk->data[3].ToUnifiedFormat(d_u);
 				auto blk_data = UnifiedVectorFormat::GetData<int32_t>(blk_u);
 				auto pa_data = UnifiedVectorFormat::GetData<int32_t>(pa_u);
 				auto pb_data = UnifiedVectorFormat::GetData<int32_t>(pb_u);
@@ -1062,9 +1062,9 @@ private:
 				break;
 			}
 			UnifiedVectorFormat oa_u, ob_u, d_u;
-			chunk->data[0].ToUnifiedFormat(rn, oa_u);
-			chunk->data[1].ToUnifiedFormat(rn, ob_u);
-			chunk->data[2].ToUnifiedFormat(rn, d_u);
+			chunk->data[0].ToUnifiedFormat(oa_u);
+			chunk->data[1].ToUnifiedFormat(ob_u);
+			chunk->data[2].ToUnifiedFormat(d_u);
 			auto oa_data = UnifiedVectorFormat::GetData<int32_t>(oa_u);
 			auto ob_data = UnifiedVectorFormat::GetData<int32_t>(ob_u);
 			auto d_data = UnifiedVectorFormat::GetData<double>(d_u);
@@ -1141,9 +1141,9 @@ miint::progressive::DistanceBlock QueryDistanceBlock(ClientContext &context, con
 			break;
 		}
 		UnifiedVectorFormat a_u, b_u, d_u;
-		chunk->data[0].ToUnifiedFormat(rn, a_u);
-		chunk->data[1].ToUnifiedFormat(rn, b_u);
-		chunk->data[2].ToUnifiedFormat(rn, d_u);
+		chunk->data[0].ToUnifiedFormat(a_u);
+		chunk->data[1].ToUnifiedFormat(b_u);
+		chunk->data[2].ToUnifiedFormat(d_u);
 		auto a_data = UnifiedVectorFormat::GetData<string_t>(a_u);
 		auto b_data = UnifiedVectorFormat::GetData<string_t>(b_u);
 		auto d_data = UnifiedVectorFormat::GetData<double>(d_u);
@@ -1266,7 +1266,7 @@ unique_ptr<FunctionData> ProgressivePcoaFromDistancesBind(ClientContext &context
 	data->source = ProgressivePcoaData::Source::DISTANCES;
 	data->sample_id_type = ids.sample_id_type;
 	data->sample_id_predicate_type = ids.sample_id_predicate_type;
-	data->qname = KeywordHelper::WriteOptionallyQuoted(table_name);
+	data->qname = SQLIdentifier::ToString(table_name);
 	data->part = std::move(part);
 	data->n_dims = static_cast<uint32_t>(n_dims);
 	data->batch_size = static_cast<uint32_t>(batch_size);
@@ -1317,7 +1317,7 @@ std::vector<std::string> CollectStringColumn(QueryResult &result) {
 			break;
 		}
 		UnifiedVectorFormat u;
-		chunk->data[0].ToUnifiedFormat(rn, u);
+		chunk->data[0].ToUnifiedFormat(u);
 		auto data = UnifiedVectorFormat::GetData<string_t>(u);
 		for (idx_t i = 0; i < rn; ++i) {
 			const auto ii = u.sel->get_index(i);
@@ -1332,7 +1332,7 @@ std::vector<std::string> CollectStringColumn(QueryResult &result) {
 FeatureTableIds EnumerateFeatureTableIds(ClientContext &context, const std::string &table_name,
                                          const std::string &caller) {
 	auto conn = MakeReadOnlyHelperConnection(context);
-	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
+	const auto qname = SQLIdentifier::ToString(table_name);
 	auto probe = conn.Query("SELECT sample_id::VARCHAR, feature_id::VARCHAR, value::DOUBLE FROM " + qname + " LIMIT 0");
 	if (probe->HasError()) {
 		throw InvalidInputException("%s: feature-table '%s' must expose (sample_id, feature_id, value DOUBLE): %s",
@@ -1497,9 +1497,9 @@ std::vector<miint::unifrac::CooRow> QueryFeatureRows(ClientContext &context, con
 			break;
 		}
 		UnifiedVectorFormat sid_u, fid_u, val_u;
-		chunk->data[0].ToUnifiedFormat(rn, sid_u);
-		chunk->data[1].ToUnifiedFormat(rn, fid_u);
-		chunk->data[2].ToUnifiedFormat(rn, val_u);
+		chunk->data[0].ToUnifiedFormat(sid_u);
+		chunk->data[1].ToUnifiedFormat(fid_u);
+		chunk->data[2].ToUnifiedFormat(val_u);
 		auto sid_data = UnifiedVectorFormat::GetData<string_t>(sid_u);
 		auto fid_data = UnifiedVectorFormat::GetData<string_t>(fid_u);
 		auto val_data = UnifiedVectorFormat::GetData<double>(val_u);
@@ -2091,7 +2091,7 @@ unique_ptr<FunctionData> ProgressivePcoaFromUnifracBind(ClientContext &context, 
 	    (part.remaining.size() + static_cast<size_t>(batch_size) - 1) / static_cast<size_t>(batch_size);
 	const auto concurrency = ResolveBlockConcurrency(n_threads, n_batches);
 
-	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
+	const auto qname = SQLIdentifier::ToString(table_name);
 	// Only worth probing — and only worth telling the user about — when there is more
 	// than one batch: a single batch reads the table once whatever its order, so
 	// sorting it would save nothing and the warning would be noise.
@@ -2251,7 +2251,7 @@ unique_ptr<FunctionData> ProgressivePcoaFromFeaturesBind(ClientContext &context,
 	    (part.remaining.size() + static_cast<size_t>(batch_size) - 1) / static_cast<size_t>(batch_size);
 	const auto concurrency = ResolveBlockConcurrency(n_threads, n_batches);
 
-	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
+	const auto qname = SQLIdentifier::ToString(table_name);
 	// Only worth warning about with more than one batch: a single batch reads the
 	// table once whatever its order.
 	if (n_batches > 1) {
@@ -2622,13 +2622,13 @@ void StageWave(const ProgressivePcoaData &data, ProgressivePcoaGlobalState &gsta
 		}
 		const idx_t row = append_chunk.size();
 		const auto &first = gstate.rows[r];
-		append_chunk.SetValue(0, row, Value(first.sample_id));
+		append_chunk.data[0].SetValue(row, Value(first.sample_id));
 		if (first.batch < 0) {
-			append_chunk.SetValue(1, row, Value(LogicalType::INTEGER));
-			append_chunk.SetValue(2, row, Value(LogicalType::DOUBLE));
+			append_chunk.data[1].SetValue(row, Value(LogicalType::INTEGER));
+			append_chunk.data[2].SetValue(row, Value(LogicalType::DOUBLE));
 		} else {
-			append_chunk.SetValue(1, row, Value::INTEGER(first.batch));
-			append_chunk.SetValue(2, row, Value::DOUBLE(first.batch_anchor_m2));
+			append_chunk.data[1].SetValue(row, Value::INTEGER(first.batch));
+			append_chunk.data[2].SetValue(row, Value::DOUBLE(first.batch_anchor_m2));
 		}
 		for (uint32_t a = 0; a < d; ++a) {
 			const auto &pr = gstate.rows[r + a];
@@ -2637,7 +2637,7 @@ void StageWave(const ProgressivePcoaData &data, ProgressivePcoaGlobalState &gsta
 				                        first.sample_id.c_str());
 			}
 			coords[a] = pr.coordinate;
-			append_chunk.SetValue(3 + a, row, Value::DOUBLE(pr.coordinate));
+			append_chunk.data[3 + a].SetValue(row, Value::DOUBLE(pr.coordinate));
 		}
 		append_chunk.SetChildCardinality(row + 1);
 		axes.Add(coords.data(), 1);

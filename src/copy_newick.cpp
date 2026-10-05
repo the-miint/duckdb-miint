@@ -146,7 +146,7 @@ static unique_ptr<FunctionData> NewickCopyBind(ClientContext &context, CopyFunct
 			// Validate placements table/view exists and has correct schema
 			ValidatePlacementTableSchema(context, placements_table.value());
 		} else {
-			throw BinderException("Unknown option for COPY FORMAT NEWICK: %s", option.first);
+			throw BinderException("Unknown option for COPY FORMAT NEWICK: %s", option.first.GetIdentifierName());
 		}
 	}
 
@@ -205,8 +205,8 @@ static void NewickCopySink(ExecutionContext &context, FunctionData &bind_data, G
 	UnifiedVectorFormat node_index_data, parent_index_data;
 	UnifiedVectorFormat name_data, branch_length_data, edge_id_data;
 
-	input.data[fdata.node_index_idx].ToUnifiedFormat(input.size(), node_index_data);
-	input.data[fdata.parent_index_idx].ToUnifiedFormat(input.size(), parent_index_data);
+	input.data[fdata.node_index_idx].ToUnifiedFormat(node_index_data);
+	input.data[fdata.parent_index_idx].ToUnifiedFormat(parent_index_data);
 
 	auto node_indices = UnifiedVectorFormat::GetData<int64_t>(node_index_data);
 	auto parent_indices = UnifiedVectorFormat::GetData<int64_t>(parent_index_data);
@@ -220,15 +220,15 @@ static void NewickCopySink(ExecutionContext &context, FunctionData &bind_data, G
 	const int64_t *edge_ids_ptr = nullptr;
 
 	if (has_name) {
-		input.data[fdata.name_idx].ToUnifiedFormat(input.size(), name_data);
+		input.data[fdata.name_idx].ToUnifiedFormat(name_data);
 		names_ptr = UnifiedVectorFormat::GetData<string_t>(name_data);
 	}
 	if (has_branch_length) {
-		input.data[fdata.branch_length_idx].ToUnifiedFormat(input.size(), branch_length_data);
+		input.data[fdata.branch_length_idx].ToUnifiedFormat(branch_length_data);
 		branch_lengths_ptr = UnifiedVectorFormat::GetData<double>(branch_length_data);
 	}
 	if (has_edge_id) {
-		input.data[fdata.edge_id_idx].ToUnifiedFormat(input.size(), edge_id_data);
+		input.data[fdata.edge_id_idx].ToUnifiedFormat(edge_id_data);
 		edge_ids_ptr = UnifiedVectorFormat::GetData<int64_t>(edge_id_data);
 	}
 

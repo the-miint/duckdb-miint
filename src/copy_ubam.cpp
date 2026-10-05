@@ -230,7 +230,7 @@ static unique_ptr<FunctionData> UBAMCopyBind(ClientContext &context, CopyFunctio
 			throw BinderException("COPY FORMAT UBAM does not accept REFERENCE_LENGTHS: a uBAM is headerless "
 			                      "(unaligned reads, no @SQ). Use FORMAT BAM for aligned records.");
 		} else {
-			throw BinderException("Unknown option for COPY FORMAT UBAM: %s", option.first);
+			throw BinderException("Unknown option for COPY FORMAT UBAM: %s", option.first.GetIdentifierName());
 		}
 	}
 
@@ -332,18 +332,18 @@ static void UBAMCopySink(ExecutionContext &context, FunctionData &bind_data, Glo
 	const idx_t n = input.size();
 
 	UnifiedVectorFormat read_id_data, seq1_data, qual1_data;
-	input.data[fdata.read_id_idx].ToUnifiedFormat(n, read_id_data);
-	input.data[fdata.sequence1_idx].ToUnifiedFormat(n, seq1_data);
-	input.data[fdata.qual1_idx].ToUnifiedFormat(n, qual1_data);
+	input.data[fdata.read_id_idx].ToUnifiedFormat(read_id_data);
+	input.data[fdata.sequence1_idx].ToUnifiedFormat(seq1_data);
+	input.data[fdata.qual1_idx].ToUnifiedFormat(qual1_data);
 
 	auto seq1_strings = UnifiedVectorFormat::GetData<string_t>(seq1_data);
 	auto qual1_entries = UnifiedVectorFormat::GetData<list_entry_t>(qual1_data);
-	auto qual1_child = FlatVector::GetData<uint8_t>(ListVector::GetEntry(input.data[fdata.qual1_idx]));
+	auto qual1_child = FlatVector::GetData<uint8_t>(ListVector::GetChildMutable(input.data[fdata.qual1_idx]));
 
 	// Tag columns: unify once per chunk.
 	vector<UnifiedVectorFormat> tag_formats(fdata.tags.size());
 	for (idx_t t = 0; t < fdata.tags.size(); t++) {
-		input.data[fdata.tags[t].col_idx].ToUnifiedFormat(n, tag_formats[t]);
+		input.data[fdata.tags[t].col_idx].ToUnifiedFormat(tag_formats[t]);
 	}
 
 	// Write the header once (first thread to arrive).

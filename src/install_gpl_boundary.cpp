@@ -333,7 +333,7 @@ bool ResolveForceArg(DataChunk &args) {
 		return false;
 	}
 	UnifiedVectorFormat fmt;
-	args.data[0].ToUnifiedFormat(args.size(), fmt);
+	args.data[0].ToUnifiedFormat(fmt);
 	const auto idx = fmt.sel->get_index(0);
 	if (!fmt.validity.RowIsValid(idx)) {
 		return false;

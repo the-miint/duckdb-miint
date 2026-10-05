@@ -206,11 +206,11 @@ static unique_ptr<GlobalTableFunctionState> DeblurInitGlobal(ClientContext &cont
 
 	// Non-sample path: load whole table once, deblur, hold for single-threaded drain.
 	auto conn = MakeReadOnlyHelperConnection(context);
-	auto q_id = KeywordHelper::WriteOptionallyQuoted(data.id_col);
-	auto q_seq = KeywordHelper::WriteOptionallyQuoted(data.sequence_col);
-	auto q_count = KeywordHelper::WriteOptionallyQuoted(data.count_col);
+	auto q_id = SQLIdentifier::ToString(data.id_col);
+	auto q_seq = SQLIdentifier::ToString(data.sequence_col);
+	auto q_count = SQLIdentifier::ToString(data.count_col);
 	auto result = conn.Query("SELECT " + q_id + ", " + q_seq + ", CAST(" + q_count + " AS BIGINT) FROM " +
-	                         KeywordHelper::WriteOptionallyQuoted(data.input_table) + " ORDER BY " + q_count + " DESC");
+	                         SQLIdentifier::ToString(data.input_table) + " ORDER BY " + q_count + " DESC");
 	if (result->HasError()) {
 		throw InvalidInputException("deblur: failed to read table '%s': %s", data.input_table, result->GetError());
 	}
@@ -265,11 +265,11 @@ static unique_ptr<LocalTableFunctionState> DeblurInitLocal(ExecutionContext &con
 // switch this (and the other per-sample call sites) to type-aware literals.
 static std::vector<miint::DeblurResult> RunDeblurForSample(Connection &conn, const DeblurData &data,
                                                            const Value &sample_value) {
-	auto q_src = KeywordHelper::WriteOptionallyQuoted(data.input_table);
-	auto q_col = KeywordHelper::WriteOptionallyQuoted(data.sample_info.sample_id_col);
-	auto q_id = KeywordHelper::WriteOptionallyQuoted(data.id_col);
-	auto q_seq = KeywordHelper::WriteOptionallyQuoted(data.sequence_col);
-	auto q_count = KeywordHelper::WriteOptionallyQuoted(data.count_col);
+	auto q_src = SQLIdentifier::ToString(data.input_table);
+	auto q_col = SQLIdentifier::ToString(data.sample_info.sample_id_col);
+	auto q_id = SQLIdentifier::ToString(data.id_col);
+	auto q_seq = SQLIdentifier::ToString(data.sequence_col);
+	auto q_count = SQLIdentifier::ToString(data.count_col);
 	auto sample_literal = sample_value.ToSQLString();
 
 	auto sql = "SELECT " + q_id + ", " + q_seq + ", CAST(" + q_count + " AS BIGINT) FROM " + q_src + " WHERE CAST(" +

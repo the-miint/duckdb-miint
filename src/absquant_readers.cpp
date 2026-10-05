@@ -29,7 +29,7 @@ KeyedColumns ReadKeyedColumns(ClientContext &context, const std::string &table_n
                               const std::vector<const char *> &value_columns, const char *entity,
                               const std::string &caller_name) {
 	auto conn = MakeReadOnlyHelperConnection(context);
-	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
+	const auto qname = SQLIdentifier::ToString(table_name);
 
 	std::string projection = std::string(key_column) + "::VARCHAR";
 	for (const auto *column : value_columns) {
@@ -70,13 +70,13 @@ KeyedColumns ReadKeyedColumns(ClientContext &context, const std::string &table_n
 			break;
 		}
 		UnifiedVectorFormat key_u;
-		chunk->data[0].ToUnifiedFormat(n, key_u);
+		chunk->data[0].ToUnifiedFormat(key_u);
 		auto key_data = UnifiedVectorFormat::GetData<string_t>(key_u);
 
 		std::vector<UnifiedVectorFormat> val_u(value_columns.size());
 		std::vector<const double *> val_data(value_columns.size());
 		for (size_t c = 0; c < value_columns.size(); ++c) {
-			chunk->data[c + 1].ToUnifiedFormat(n, val_u[c]);
+			chunk->data[c + 1].ToUnifiedFormat(val_u[c]);
 			val_data[c] = UnifiedVectorFormat::GetData<double>(val_u[c]);
 		}
 
@@ -100,7 +100,7 @@ std::vector<LongFormRow> ReadLongFormValues(ClientContext &context, const std::s
                                             const char *value_column, const char *entity,
                                             const std::string &caller_name) {
 	auto conn = MakeReadOnlyHelperConnection(context);
-	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
+	const auto qname = SQLIdentifier::ToString(table_name);
 	const std::string projection = "sample_id::VARCHAR, feature_id::VARCHAR, " + std::string(value_column) + "::DOUBLE";
 
 	auto probe = conn.Query("SELECT " + projection + " FROM " + qname + " LIMIT 0");
@@ -122,9 +122,9 @@ std::vector<LongFormRow> ReadLongFormValues(ClientContext &context, const std::s
 			break;
 		}
 		UnifiedVectorFormat sid_u, fid_u, val_u;
-		chunk->data[0].ToUnifiedFormat(n, sid_u);
-		chunk->data[1].ToUnifiedFormat(n, fid_u);
-		chunk->data[2].ToUnifiedFormat(n, val_u);
+		chunk->data[0].ToUnifiedFormat(sid_u);
+		chunk->data[1].ToUnifiedFormat(fid_u);
+		chunk->data[2].ToUnifiedFormat(val_u);
 		auto sid_data = UnifiedVectorFormat::GetData<string_t>(sid_u);
 		auto fid_data = UnifiedVectorFormat::GetData<string_t>(fid_u);
 		auto val_data = UnifiedVectorFormat::GetData<double>(val_u);

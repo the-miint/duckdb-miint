@@ -111,11 +111,11 @@ unique_ptr<FunctionData> AlignmentSliceTableFunction::Bind(ClientContext &contex
 	for (const auto &col : recognized) {
 		if (input_col_present[col.name] >= 0) {
 			select_col_idx[col.name] = static_cast<int>(select_cols.size());
-			select_cols.push_back(KeywordHelper::WriteOptionallyQuoted(col.name));
+			select_cols.push_back(SQLIdentifier::ToString(col.name));
 		}
 	}
-	data->select_query = "SELECT " + StringUtil::Join(select_cols, ", ") + " FROM " +
-	                     KeywordHelper::WriteOptionallyQuoted(data->table_name);
+	data->select_query =
+	    "SELECT " + StringUtil::Join(select_cols, ", ") + " FROM " + SQLIdentifier::ToString(data->table_name);
 
 	// Store slicer-relevant indices into the SELECT result
 	data->select_cigar_idx = select_col_idx.at("cigar");

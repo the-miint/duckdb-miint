@@ -111,15 +111,15 @@ struct ConsensusOperation {
 		auto &qual_vec = inputs[1];
 
 		UnifiedVectorFormat aligned_data, qual_data, state_data;
-		aligned_vec.ToUnifiedFormat(count, aligned_data);
-		qual_vec.ToUnifiedFormat(count, qual_data);
-		states.ToUnifiedFormat(count, state_data);
+		aligned_vec.ToUnifiedFormat(aligned_data);
+		qual_vec.ToUnifiedFormat(qual_data);
+		states.ToUnifiedFormat(state_data);
 
 		auto aligned_ptr = UnifiedVectorFormat::GetData<string_t>(aligned_data);
 		auto qual_entries = UnifiedVectorFormat::GetData<list_entry_t>(qual_data);
 		auto state_ptr = UnifiedVectorFormat::GetData<ConsensusState *>(state_data);
 
-		auto &qual_child_vec = ListVector::GetEntry(qual_vec);
+		auto &qual_child_vec = ListVector::GetChildMutable(qual_vec);
 		auto qual_child_data = FlatVector::GetData<std::uint8_t>(qual_child_vec);
 
 		for (idx_t i = 0; i < count; ++i) {
@@ -157,7 +157,7 @@ struct ConsensusOperation {
 	static void Finalize(Vector &state_vector, AggregateFinalizeInputData &, Vector &result, idx_t count,
 	                     idx_t offset) {
 		UnifiedVectorFormat state_data;
-		state_vector.ToUnifiedFormat(count, state_data);
+		state_vector.ToUnifiedFormat(state_data);
 		auto states = UnifiedVectorFormat::GetData<ConsensusState *>(state_data);
 
 		auto &entries = StructVector::GetEntries(result);
@@ -191,7 +191,7 @@ struct ConsensusOperation {
 
 			const idx_t list_offset = ListVector::GetListSize(qual_list_vec);
 			ListVector::Reserve(qual_list_vec, list_offset + qual.size());
-			auto &qual_child = ListVector::GetEntry(qual_list_vec);
+			auto &qual_child = ListVector::GetChildMutable(qual_list_vec);
 			auto qual_child_data = FlatVector::GetDataMutable<std::uint8_t>(qual_child);
 			for (std::size_t k = 0; k < qual.size(); ++k) {
 				qual_child_data[list_offset + k] = qual[k];

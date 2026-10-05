@@ -193,7 +193,7 @@ unique_ptr<GlobalTableFunctionState> AlignMinimap2ShardedTableFunction::InitGlob
 		InheritTempObjects(context, *gstate->snapshot_conn);
 		gstate->query_snapshot = MaterializeShardedQueryReads(*gstate->snapshot_conn, data.query_table,
 		                                                      data.read_to_shard_table, data.query_schema);
-		gstate->shard_read_source = KeywordHelper::WriteOptionallyQuoted(gstate->query_snapshot);
+		gstate->shard_read_source = SQLIdentifier::ToString(gstate->query_snapshot);
 		SHARD_DBG(*gstate, "InitGlobal: query snapshot '%s' materialized", gstate->query_snapshot.c_str());
 	} else {
 		gstate->shard_read_source =

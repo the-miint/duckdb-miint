@@ -101,8 +101,8 @@ static unique_ptr<QueryResult> RunPipeline(Connection &conn, const miint::MassQL
 static unique_ptr<QueryResult> RunSamplePipeline(Connection &conn, const miint::MassQLQuery &parsed,
                                                  const string &effective_source, const string &sample_id_col,
                                                  const Value &sample_value) {
-	auto quoted_col = KeywordHelper::WriteOptionallyQuoted(sample_id_col);
-	auto quoted_source = KeywordHelper::WriteOptionallyQuoted(effective_source);
+	auto quoted_col = SQLIdentifier::ToString(sample_id_col);
+	auto quoted_source = SQLIdentifier::ToString(effective_source);
 
 	// Use ToSQLString() for safe SQL literal construction — handles all Value types
 	// (integers, timestamps, intervals, etc.) without manual escaping.

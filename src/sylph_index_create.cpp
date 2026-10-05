@@ -162,9 +162,9 @@ unique_ptr<FunctionData> SylphIndexCreateTableFunction::Bind(ClientContext &cont
 	// for both tables and views and reports missing columns as a clean error.
 	{
 		auto conn = MakeReadOnlyHelperConnection(context);
-		auto src = KeywordHelper::WriteOptionallyQuoted(data->source_table);
-		auto gcol = KeywordHelper::WriteOptionallyQuoted(data->genome_id_col);
-		auto ocol = KeywordHelper::WriteOptionallyQuoted(data->order_by_col);
+		auto src = SQLIdentifier::ToString(data->source_table);
+		auto gcol = SQLIdentifier::ToString(data->genome_id_col);
+		auto ocol = SQLIdentifier::ToString(data->order_by_col);
 		auto probe = conn.Query("SELECT " + gcol + ", " + ocol + " FROM " + src + " LIMIT 0");
 		if (probe->HasError()) {
 			throw BinderException("sylph_index_create: genome_id/order_by column check failed: %s", probe->GetError());
@@ -197,9 +197,9 @@ unique_ptr<GlobalTableFunctionState> SylphIndexCreateTableFunction::InitGlobal(C
 	auto &data = input.bind_data->Cast<Data>();
 	auto gstate = make_uniq<GlobalState>();
 
-	auto src = KeywordHelper::WriteOptionallyQuoted(data.source_table);
-	auto gcol = KeywordHelper::WriteOptionallyQuoted(data.genome_id_col);
-	auto ocol = KeywordHelper::WriteOptionallyQuoted(data.order_by_col);
+	auto src = SQLIdentifier::ToString(data.source_table);
+	auto gcol = SQLIdentifier::ToString(data.genome_id_col);
+	auto ocol = SQLIdentifier::ToString(data.order_by_col);
 
 	// Contig name = the full FASTA header. sylph (via needletail) stores the whole
 	// header line as first_contig_name; read_fastx splits it into read_id (first

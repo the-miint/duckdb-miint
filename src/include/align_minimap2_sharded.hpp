@@ -124,7 +124,7 @@ public:
 
 		~GlobalState() override {
 			if (snapshot_conn) {
-				DropHelperTempRelation(*snapshot_conn, KeywordHelper::WriteOptionallyQuoted(query_snapshot));
+				DropHelperTempRelation(*snapshot_conn, SQLIdentifier::ToString(query_snapshot));
 			}
 		}
 	};

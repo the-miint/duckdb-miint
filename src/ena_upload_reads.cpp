@@ -143,7 +143,7 @@ void RequireListUtinyint(const string &col, const LogicalType &actual) {
 vector<uint8_t> ExtractQualList(Vector &list_vec, UnifiedVectorFormat &list_data, idx_t row) {
 	auto entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
 	auto sel_idx = list_data.sel->get_index(row);
-	auto &child = ListVector::GetEntry(list_vec);
+	auto &child = ListVector::GetChildMutable(list_vec);
 	auto child_data = FlatVector::GetData<uint8_t>(child);
 	const idx_t len = entries[sel_idx].length;
 	const idx_t offset = entries[sel_idx].offset;
@@ -156,7 +156,7 @@ vector<uint8_t> ExtractQualList(Vector &list_vec, UnifiedVectorFormat &list_data
 // probe, so we never materialise data just to check the schema. Returns whether
 // the optional R2 columns (sequence2 + qual2) are present.
 bool ValidateSchemaDetectR2(Connection &conn, const string &relation_name) {
-	const string query = "SELECT * FROM " + KeywordHelper::WriteOptionallyQuoted(relation_name) + " LIMIT 0";
+	const string query = "SELECT * FROM " + SQLIdentifier::ToString(relation_name) + " LIMIT 0";
 	auto result = conn.Query(query);
 	if (result->HasError()) {
 		throw InvalidInputException("ena_upload_reads: failed to read relation '%s': %s", relation_name,
@@ -233,7 +233,7 @@ void ValidateSampleRef(const string &sample_ref) {
 // stream. O(#samples) memory.
 void PlanSamples(Connection &conn, const string &relation_name, FastqLayoutMode requested, bool has_r2_columns,
                  vector<SamplePlan> &out) {
-	const string quoted = KeywordHelper::WriteOptionallyQuoted(relation_name);
+	const string quoted = SQLIdentifier::ToString(relation_name);
 	const string r2_expr = has_r2_columns ? "sequence2 IS NOT NULL" : "false";
 	const string query = "SELECT sample_ref, bool_and(" + r2_expr + ") AS all_paired, bool_or(" + r2_expr +
 	                     ") AS any_paired FROM " + quoted + " GROUP BY sample_ref";
@@ -440,9 +440,9 @@ void EncodeChunk(DataChunk &chunk, FastqLayoutMode layout, FastqEncoder &encoder
 	const idx_t n = chunk.size();
 
 	UnifiedVectorFormat read_id_data, sequence1_data, qual1_data;
-	chunk.data[0].ToUnifiedFormat(n, read_id_data);
-	chunk.data[1].ToUnifiedFormat(n, sequence1_data);
-	chunk.data[2].ToUnifiedFormat(n, qual1_data);
+	chunk.data[0].ToUnifiedFormat(read_id_data);
+	chunk.data[1].ToUnifiedFormat(sequence1_data);
+	chunk.data[2].ToUnifiedFormat(qual1_data);
 	auto read_id_strs = UnifiedVectorFormat::GetData<string_t>(read_id_data);
 	auto sequence1_strs = UnifiedVectorFormat::GetData<string_t>(sequence1_data);
 
@@ -450,8 +450,8 @@ void EncodeChunk(DataChunk &chunk, FastqLayoutMode layout, FastqEncoder &encoder
 	UnifiedVectorFormat sequence2_data, qual2_data;
 	const string_t *sequence2_strs = nullptr;
 	if (need_r2) {
-		chunk.data[3].ToUnifiedFormat(n, sequence2_data);
-		chunk.data[4].ToUnifiedFormat(n, qual2_data);
+		chunk.data[3].ToUnifiedFormat(sequence2_data);
+		chunk.data[4].ToUnifiedFormat(qual2_data);
 		sequence2_strs = UnifiedVectorFormat::GetData<string_t>(sequence2_data);
 	}
 
@@ -617,7 +617,7 @@ void UploadOneSample(ClientContext &context, const ENAUploadReadsBindData &bind,
 		// torn down (its dtor runs cleanup) and never reused, so the dangling
 		// active query never matters here.
 		FastqEncoder encoder(bind.qual_offset);
-		auto result = SubmitStream(conn, data_query_prefix + KeywordHelper::WriteQuoted(plan.sample_ref, '\''));
+		auto result = SubmitStream(conn, data_query_prefix + SQLString::ToString(plan.sample_ref));
 		if (result->HasError()) {
 			throw InvalidInputException("ena_upload_reads: failed to read sample '%s': %s", plan.sample_ref,
 			                            result->GetError());
@@ -717,7 +717,7 @@ void RunStreamingUpload(ClientContext &context, const ENAUploadReadsBindData &bi
 	// reject '/' and '..' but allow quotes).
 	const string data_query_prefix = "SELECT read_id, sequence1, qual1" +
 	                                 string(has_r2_columns ? ", sequence2, qual2" : "") + " FROM " +
-	                                 KeywordHelper::WriteOptionallyQuoted(bind.relation_name) + " WHERE sample_ref = ";
+	                                 SQLIdentifier::ToString(bind.relation_name) + " WHERE sample_ref = ";
 	for (auto &plan : gs.samples) {
 		UploadOneSample(context, bind, gs, conn, data_query_prefix, plan);
 	}

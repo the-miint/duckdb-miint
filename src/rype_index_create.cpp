@@ -292,7 +292,7 @@ unique_ptr<GlobalTableFunctionState> RypeIndexCreateTableFunction::InitGlobal(Cl
 	// rype build path accepts Utf8/LargeUtf8/Binary/LargeBinary/Utf8View/BinaryView.
 	ConfigureRypeArrowExport(conn);
 
-	std::string chunk_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.chunk_table);
+	std::string chunk_quoted = SQLIdentifier::ToString(bind_data.chunk_table);
 
 	// Mapping stream: feature_idx Int64, bucket_name Utf8. Materialized — it is
 	// small (one row per feature) and RYpe reads the whole mapping into memory
@@ -307,7 +307,7 @@ unique_ptr<GlobalTableFunctionState> RypeIndexCreateTableFunction::InitGlobal(Cl
 		              "'unnamed-bucket'::VARCHAR AS bucket_name FROM " +
 		              chunk_quoted;
 	} else {
-		std::string mapping_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.mapping_table);
+		std::string mapping_quoted = SQLIdentifier::ToString(bind_data.mapping_table);
 		mapping_sql =
 		    "SELECT feature_idx::BIGINT AS feature_idx, bucket_name::VARCHAR AS bucket_name FROM " + mapping_quoted;
 	}

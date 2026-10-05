@@ -116,7 +116,7 @@ static unique_ptr<FunctionData> BiomCopyBind(ClientContext &context, CopyFunctio
 		} else if (key == "generated_by") {
 			result->generated_by = values[0].ToString();
 		} else {
-			throw BinderException("Unknown option for COPY FORMAT BIOM: %s", key);
+			throw BinderException("Unknown option for COPY FORMAT BIOM: %s", key.GetIdentifierName());
 		}
 	}
 
@@ -172,9 +172,9 @@ static void BiomCopySink(ExecutionContext &context, FunctionData &bind_data, Glo
 	// Process each row
 	UnifiedVectorFormat feature_data, sample_data, value_data;
 
-	input.data[fdata.feature_id_idx].ToUnifiedFormat(input.size(), feature_data);
-	input.data[fdata.sample_id_idx].ToUnifiedFormat(input.size(), sample_data);
-	input.data[fdata.value_idx].ToUnifiedFormat(input.size(), value_data);
+	input.data[fdata.feature_id_idx].ToUnifiedFormat(feature_data);
+	input.data[fdata.sample_id_idx].ToUnifiedFormat(sample_data);
+	input.data[fdata.value_idx].ToUnifiedFormat(value_data);
 
 	auto feature_strings = UnifiedVectorFormat::GetData<string_t>(feature_data);
 	auto sample_strings = UnifiedVectorFormat::GetData<string_t>(sample_data);

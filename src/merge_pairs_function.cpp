@@ -203,10 +203,10 @@ static void MergePairsExecute(DataChunk &args, ExpressionState &state, Vector &r
 
 	// Input vectors (first 4 args only)
 	UnifiedVectorFormat fwd_seq_data, fwd_qual_data, rev_seq_data, rev_qual_data;
-	args.data[0].ToUnifiedFormat(args.size(), fwd_seq_data);
-	args.data[1].ToUnifiedFormat(args.size(), fwd_qual_data);
-	args.data[2].ToUnifiedFormat(args.size(), rev_seq_data);
-	args.data[3].ToUnifiedFormat(args.size(), rev_qual_data);
+	args.data[0].ToUnifiedFormat(fwd_seq_data);
+	args.data[1].ToUnifiedFormat(fwd_qual_data);
+	args.data[2].ToUnifiedFormat(rev_seq_data);
+	args.data[3].ToUnifiedFormat(rev_qual_data);
 
 	auto fwd_seq_ptr = UnifiedVectorFormat::GetData<string_t>(fwd_seq_data);
 	auto rev_seq_ptr = UnifiedVectorFormat::GetData<string_t>(rev_seq_data);
@@ -280,7 +280,7 @@ static void MergePairsExecute(DataChunk &args, ExpressionState &state, Vector &r
 
 			// Write merged quality as LIST(UTINYINT) using QualScore::write_decoded
 			ListVector::Reserve(qual_list_vec, qual_child_offset + mr.merged_length);
-			auto &qual_child = ListVector::GetEntry(qual_list_vec);
+			auto &qual_child = ListVector::GetChildMutable(qual_list_vec);
 			auto qual_child_data = FlatVector::GetDataMutable<uint8_t>(qual_child);
 			qual_list_entries[i].offset = qual_child_offset;
 			qual_list_entries[i].length = mr.merged_length;

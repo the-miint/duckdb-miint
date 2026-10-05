@@ -198,8 +198,8 @@ void UchimeRefTableFunction::Execute(ClientContext & /*context*/, TableFunctionI
 		}
 		lstate.sample_value = data.sample_info.sample_values[sample_idx];
 		auto sample_literal = lstate.sample_value.ToSQLString();
-		auto q_col = KeywordHelper::WriteOptionallyQuoted(data.sample_info.sample_id_col);
-		auto q_src = KeywordHelper::WriteOptionallyQuoted(data.query_table);
+		auto q_col = SQLIdentifier::ToString(data.sample_info.sample_id_col);
+		auto q_src = SQLIdentifier::ToString(data.query_table);
 		// Build a per-sample TEMP VIEW on the thread's connection, then hand that same
 		// connection to QuerySequenceStream so the stream can resolve the view. The
 		// CAST-as-VARCHAR equality matches the other per-sample call sites; DECIMAL caveat

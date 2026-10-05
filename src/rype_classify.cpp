@@ -168,8 +168,8 @@ unique_ptr<GlobalTableFunctionState> RypeClassifyTableFunction::InitGlobal(Clien
 	// for why this must not be BinaryView (#222).
 	ConfigureRypeArrowExport(conn);
 
-	std::string id_col_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.id_column);
-	std::string table_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.sequence_table);
+	std::string id_col_quoted = SQLIdentifier::ToString(bind_data.id_column);
+	std::string table_quoted = SQLIdentifier::ToString(bind_data.sequence_table);
 
 	// Build the Arrow input stream: one streaming scan of the caller's relation,
 	// carrying the identifier and the sequence in the same row. See

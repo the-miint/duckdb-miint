@@ -76,8 +76,8 @@ struct AlignInputVectors {
 // ensure args.data[0] and args.data[1] are VARCHAR.
 inline AlignInputVectors PrepareAlignInputs(DataChunk &args) {
 	AlignInputVectors v;
-	args.data[0].ToUnifiedFormat(args.size(), v.query_data);
-	args.data[1].ToUnifiedFormat(args.size(), v.subject_data);
+	args.data[0].ToUnifiedFormat(v.query_data);
+	args.data[1].ToUnifiedFormat(v.subject_data);
 	return v;
 }
 

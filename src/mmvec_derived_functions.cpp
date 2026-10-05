@@ -129,7 +129,7 @@ ModelIdTypes ResolveModelIdTypes(ClientContext &context, const std::string &tabl
 std::vector<miint::mmvec::ModelCell> ReadModelCells(ClientContext &context, const std::string &table_name,
                                                     const char *caller) {
 	auto conn = MakeReadOnlyHelperConnection(context);
-	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
+	const auto qname = SQLIdentifier::ToString(table_name);
 	const std::string projection = "SELECT modality::VARCHAR, x_feature_id::VARCHAR, y_feature_id::VARCHAR, "
 	                               "axis::INTEGER, value::DOUBLE FROM " +
 	                               qname;
@@ -154,11 +154,11 @@ std::vector<miint::mmvec::ModelCell> ReadModelCells(ClientContext &context, cons
 			break;
 		}
 		UnifiedVectorFormat mod_u, x_u, y_u, axis_u, val_u;
-		chunk->data[0].ToUnifiedFormat(n, mod_u);
-		chunk->data[1].ToUnifiedFormat(n, x_u);
-		chunk->data[2].ToUnifiedFormat(n, y_u);
-		chunk->data[3].ToUnifiedFormat(n, axis_u);
-		chunk->data[4].ToUnifiedFormat(n, val_u);
+		chunk->data[0].ToUnifiedFormat(mod_u);
+		chunk->data[1].ToUnifiedFormat(x_u);
+		chunk->data[2].ToUnifiedFormat(y_u);
+		chunk->data[3].ToUnifiedFormat(axis_u);
+		chunk->data[4].ToUnifiedFormat(val_u);
 		auto mod_data = UnifiedVectorFormat::GetData<string_t>(mod_u);
 		auto x_data = UnifiedVectorFormat::GetData<string_t>(x_u);
 		auto y_data = UnifiedVectorFormat::GetData<string_t>(y_u);
