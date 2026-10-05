@@ -198,7 +198,7 @@ void EmitSubmissionLogColumns(vector<LogicalType> &return_types, vector<string> 
 }
 
 unique_ptr<FunctionData> ENASubmissionLogBind(ClientContext &, TableFunctionBindInput &,
-                                              vector<LogicalType> &return_types, vector<string> &names) {
+                                              vector<LogicalType> &return_types, vector<Identifier> &names) {
 	EmitSubmissionLogColumns(return_types, names);
 	// Bind data must be supplied via GetScanFunction's bind_data out-parameter,
 	// not here; this bind callback exists only to satisfy DuckDB's table-scan
@@ -318,7 +318,7 @@ void ENASubmissionLogScan(ClientContext &, TableFunctionInput &data, DataChunk &
 // Bind throws before scan is ever called, so a paired scan-function is dead
 // code; route both pointers at the same throwing helper to keep them in sync.
 unique_ptr<FunctionData> NotImplementedBind(ClientContext &, TableFunctionBindInput &input,
-                                            vector<LogicalType> &return_types, vector<string> &names) {
+                                            vector<LogicalType> &return_types, vector<Identifier> &names) {
 	throw NotImplementedException("Reading from ena.%s is not supported in this build "
 	                              "(SELECT support is planned for a future phase).",
 	                              input.table_function.name);

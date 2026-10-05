@@ -10,12 +10,13 @@
 #include "duckdb/common/vector/flat_vector.hpp"
 #include <filesystem>
 #include <read_fastx.hpp>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
 unique_ptr<FunctionData> ReadFastxTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                       vector<duckdb::LogicalType> &return_types,
-                                                      vector<std::string> &names) {
+                                                      vector<Identifier> &names) {
 	FileSystem &fs = FileSystem::GetFileSystem(context);
 
 	std::vector<std::string> sequence1_paths;
@@ -375,10 +376,10 @@ static unique_ptr<NodeStatistics> ReadFastxCardinality(ClientContext &context, c
 
 TableFunction ReadFastxTableFunction::GetFunction() {
 	auto tf = TableFunction("read_fastx", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
-	tf.named_parameters["sequence2"] = LogicalType::ANY;
-	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
-	tf.named_parameters["qual_offset"] = LogicalType::BIGINT;
-	tf.named_parameters["max_batch_bytes"] = LogicalType::VARCHAR;
+	AddNamedParameter(tf, "sequence2", LogicalType::ANY);
+	AddNamedParameter(tf, "include_filepath", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "qual_offset", LogicalType::BIGINT);
+	AddNamedParameter(tf, "max_batch_bytes", LogicalType::VARCHAR);
 	tf.cardinality = ReadFastxCardinality;
 	return tf;
 }

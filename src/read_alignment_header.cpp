@@ -13,7 +13,7 @@ namespace duckdb {
 
 unique_ptr<FunctionData> ReadAlignmentHeaderTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                                 vector<LogicalType> &return_types,
-                                                                vector<std::string> &names) {
+                                                                vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 
 	if (input.inputs[0].IsNull()) {

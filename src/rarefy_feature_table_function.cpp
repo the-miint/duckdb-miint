@@ -22,6 +22,7 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 namespace {
@@ -71,7 +72,7 @@ std::vector<miint::unifrac::CooRow> FlattenToCoo(const miint::unifrac::UnifracSu
 }
 
 unique_ptr<FunctionData> RarefyBind(ClientContext &context, TableFunctionBindInput &input,
-                                    vector<LogicalType> &return_types, vector<string> &names) {
+                                    vector<LogicalType> &return_types, vector<Identifier> &names) {
 	const std::string table_name = input.inputs[0].GetValue<string>();
 	RejectCTERelationName(input, table_name);
 	if (table_name.empty()) {
@@ -202,10 +203,10 @@ void RarefyExecute(ClientContext &, TableFunctionInput &input, DataChunk &output
 
 void RegisterRarefyFeatureTable(ExtensionLoader &loader) {
 	TableFunction fn("rarefy_feature_table", {LogicalType::VARCHAR}, RarefyExecute, RarefyBind, RarefyInitGlobal);
-	fn.named_parameters["depth"] = LogicalType::INTEGER;
-	fn.named_parameters["with_replacement"] = LogicalType::BOOLEAN;
-	fn.named_parameters["seed"] = LogicalType::INTEGER;
-	fn.named_parameters["threads"] = LogicalType::INTEGER;
+	AddNamedParameter(fn, "depth", LogicalType::INTEGER);
+	AddNamedParameter(fn, "with_replacement", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "seed", LogicalType::INTEGER);
+	AddNamedParameter(fn, "threads", LogicalType::INTEGER);
 	loader.RegisterFunction(fn);
 }
 

@@ -5,6 +5,7 @@
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
 #include <sstream>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -116,7 +117,7 @@ bool ReadNCBITableFunction::GlobalState::FetchNextBatch(ClientContext &context) 
 }
 
 unique_ptr<FunctionData> ReadNCBITableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                     vector<LogicalType> &return_types, vector<std::string> &names) {
+                                                     vector<LogicalType> &return_types, vector<Identifier> &names) {
 	std::vector<std::string> accessions;
 
 	if (input.inputs[0].IsNull()) {
@@ -262,8 +263,8 @@ void ReadNCBITableFunction::Execute(ClientContext &context, TableFunctionInput &
 
 TableFunction ReadNCBITableFunction::GetFunction() {
 	auto tf = TableFunction("read_ncbi", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
-	tf.named_parameters["api_key"] = LogicalType::VARCHAR;
-	tf.named_parameters["batch_size"] = LogicalType::BIGINT;
+	AddNamedParameter(tf, "api_key", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "batch_size", LogicalType::BIGINT);
 	return tf;
 }
 

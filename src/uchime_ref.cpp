@@ -10,6 +10,7 @@
 #include "duckdb/parallel/task_scheduler.hpp"
 
 #include <algorithm>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -35,7 +36,7 @@ static bool EmitFromBuffer(const std::vector<miint::UchimeResult> &buffer, idx_t
 }
 
 unique_ptr<FunctionData> UchimeRefTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                      vector<LogicalType> &return_types, vector<std::string> &names) {
+                                                      vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 
 	data->query_table = input.inputs[0].GetValue<std::string>();
@@ -218,14 +219,14 @@ void UchimeRefTableFunction::Execute(ClientContext & /*context*/, TableFunctionI
 TableFunction UchimeRefTableFunction::GetFunction() {
 	auto tf = TableFunction("detect_chimera_uchime", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal, InitLocal);
 
-	tf.named_parameters["db"] = LogicalType::VARCHAR;
-	tf.named_parameters["minh"] = LogicalType::DOUBLE;
-	tf.named_parameters["xn"] = LogicalType::DOUBLE;
-	tf.named_parameters["dn"] = LogicalType::DOUBLE;
-	tf.named_parameters["mindiv"] = LogicalType::DOUBLE;
-	tf.named_parameters["mindiffs"] = LogicalType::INTEGER;
-	tf.named_parameters["sample_id"] = LogicalType::VARCHAR;
-	tf.named_parameters["threads"] = LogicalType::INTEGER;
+	AddNamedParameter(tf, "db", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "minh", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "xn", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "dn", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "mindiv", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "mindiffs", LogicalType::INTEGER);
+	AddNamedParameter(tf, "sample_id", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "threads", LogicalType::INTEGER);
 
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 

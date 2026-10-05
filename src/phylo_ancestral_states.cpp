@@ -21,7 +21,7 @@ PhyloAncestralStatesTableFunction::Data::Data(std::string tree_table, std::strin
 
 unique_ptr<FunctionData> PhyloAncestralStatesTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                                  vector<LogicalType> &return_types,
-                                                                 vector<std::string> &names) {
+                                                                 vector<Identifier> &names) {
 	auto tree_table_name = input.inputs[0].ToString();
 	auto traits_table_name = input.inputs[1].ToString();
 	RejectCTERelationName(input, tree_table_name);

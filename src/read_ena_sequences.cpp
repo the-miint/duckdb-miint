@@ -7,6 +7,7 @@
 #include "duckdb/common/vector/flat_vector.hpp"
 #include <cerrno>
 #include <fstream>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -74,7 +75,7 @@ static std::vector<miint::ENARunInfo> ResolveRuns(miint::ENAClient &client, cons
 
 unique_ptr<FunctionData> ReadENASequencesTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                              vector<LogicalType> &return_types,
-                                                             vector<std::string> &names) {
+                                                             vector<Identifier> &names) {
 	// Lateral / subquery dispatch: DuckDB's BindTableInTableOutFunction binds
 	// the expressions into a subquery and leaves `input.inputs` empty. An empty
 	// inputs vector is therefore the authoritative signal — it does not mean
@@ -817,13 +818,13 @@ TableFunction ReadENASequencesTableFunction::GetFunction() {
 	// progress); correlated / subquery args take `ExecuteInOut` (one outer row
 	// at a time, LIMIT-inside-LATERAL short-circuits via LocalState dtor).
 	tf.in_out_function = ExecuteInOut;
-	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
-	tf.named_parameters["qual_offset"] = LogicalType::BIGINT;
-	tf.named_parameters["download_method"] = LogicalType::VARCHAR;
-	tf.named_parameters["prefer_format"] = LogicalType::VARCHAR;
-	tf.named_parameters["trim_sff"] = LogicalType::BOOLEAN;
-	tf.named_parameters["max_sequences"] = LogicalType::BIGINT;
-	tf.named_parameters["verify_md5"] = LogicalType::BOOLEAN;
+	AddNamedParameter(tf, "include_filepath", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "qual_offset", LogicalType::BIGINT);
+	AddNamedParameter(tf, "download_method", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "prefer_format", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "trim_sff", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "max_sequences", LogicalType::BIGINT);
+	AddNamedParameter(tf, "verify_md5", LogicalType::BOOLEAN);
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	tf.table_scan_progress = Progress;
 	return tf;

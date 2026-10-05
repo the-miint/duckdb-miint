@@ -15,6 +15,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -38,7 +39,7 @@ PhyloAncestralMLTableFunction::Data::Data(std::string tree_table, std::string tr
 
 unique_ptr<FunctionData> PhyloAncestralMLTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                              vector<LogicalType> &return_types,
-                                                             vector<std::string> &names) {
+                                                             vector<Identifier> &names) {
 	auto tree_table_name = input.inputs[0].ToString();
 	auto traits_table_name = input.inputs[1].ToString();
 	RejectCTERelationName(input, tree_table_name);
@@ -219,8 +220,8 @@ void PhyloAncestralMLTableFunction::Execute(ClientContext &context, TableFunctio
 
 TableFunction PhyloAncestralMLTableFunction::GetFunction() {
 	TableFunction tf("phylo_ancestral_ml", {LogicalType::VARCHAR, LogicalType::VARCHAR}, Execute, Bind, InitGlobal);
-	tf.named_parameters["model"] = LogicalType::VARCHAR;
-	tf.named_parameters["rate"] = LogicalType::DOUBLE;
+	AddNamedParameter(tf, "model", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "rate", LogicalType::DOUBLE);
 	return tf;
 }
 

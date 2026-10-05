@@ -7,12 +7,13 @@
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include <read_sequences_sff.hpp>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
 unique_ptr<FunctionData> ReadSequencesSFFTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                              vector<duckdb::LogicalType> &return_types,
-                                                             vector<std::string> &names) {
+                                                             vector<Identifier> &names) {
 	FileSystem &fs = FileSystem::GetFileSystem(context);
 
 	std::vector<std::string> file_paths;
@@ -171,8 +172,8 @@ void ReadSequencesSFFTableFunction::Execute(ClientContext &context, TableFunctio
 
 TableFunction ReadSequencesSFFTableFunction::GetFunction() {
 	auto tf = TableFunction("read_sequences_sff", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
-	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
-	tf.named_parameters["trim"] = LogicalType::BOOLEAN;
+	AddNamedParameter(tf, "include_filepath", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "trim", LogicalType::BOOLEAN);
 	return tf;
 }
 

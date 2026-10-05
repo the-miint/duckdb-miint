@@ -6,6 +6,7 @@
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
 #include <sstream>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -170,7 +171,7 @@ bool ReadNCBIFastaTableFunction::GlobalState::FetchNextBatch(ClientContext &cont
 
 unique_ptr<FunctionData> ReadNCBIFastaTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                           vector<LogicalType> &return_types,
-                                                          vector<std::string> &names) {
+                                                          vector<Identifier> &names) {
 	// Parse accession(s) - can be VARCHAR or VARCHAR[]
 	std::vector<std::string> accessions;
 
@@ -346,9 +347,9 @@ void ReadNCBIFastaTableFunction::Execute(ClientContext &context, TableFunctionIn
 
 TableFunction ReadNCBIFastaTableFunction::GetFunction() {
 	auto tf = TableFunction("read_ncbi_fasta", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
-	tf.named_parameters["api_key"] = LogicalType::VARCHAR;
-	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
-	tf.named_parameters["batch_size"] = LogicalType::BIGINT;
+	AddNamedParameter(tf, "api_key", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "include_filepath", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "batch_size", LogicalType::BIGINT);
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return tf;
 }

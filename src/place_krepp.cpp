@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <functional>
 #include <stdexcept>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -31,7 +32,7 @@ void ReadOptional(const named_parameter_map_t &params, const char *key, T &targe
 } // namespace
 
 unique_ptr<FunctionData> PlaceKreppTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                       vector<LogicalType> &return_types, vector<std::string> &names) {
+                                                       vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 
 	auto query_param = input.named_parameters.find("query_table");
@@ -241,14 +242,14 @@ void PlaceKreppTableFunction::Execute(ClientContext &context, TableFunctionInput
 
 void PlaceKreppTableFunction::Register(ExtensionLoader &loader) {
 	TableFunction place("place_krepp", {}, Execute, Bind, InitGlobal, InitLocal);
-	place.named_parameters["query_table"] = LogicalType::VARCHAR;
-	place.named_parameters["index_path"] = LogicalType::VARCHAR;
-	place.named_parameters["newick_path"] = LogicalType::VARCHAR;
-	place.named_parameters["hdist_th"] = LogicalType::UINTEGER;
-	place.named_parameters["tau"] = LogicalType::UINTEGER;
-	place.named_parameters["chisq"] = LogicalType::DOUBLE;
-	place.named_parameters["multi"] = LogicalType::BOOLEAN;
-	place.named_parameters["filter"] = LogicalType::BOOLEAN;
+	AddNamedParameter(place, "query_table", LogicalType::VARCHAR);
+	AddNamedParameter(place, "index_path", LogicalType::VARCHAR);
+	AddNamedParameter(place, "newick_path", LogicalType::VARCHAR);
+	AddNamedParameter(place, "hdist_th", LogicalType::UINTEGER);
+	AddNamedParameter(place, "tau", LogicalType::UINTEGER);
+	AddNamedParameter(place, "chisq", LogicalType::DOUBLE);
+	AddNamedParameter(place, "multi", LogicalType::BOOLEAN);
+	AddNamedParameter(place, "filter", LogicalType::BOOLEAN);
 	loader.RegisterFunction(place);
 }
 

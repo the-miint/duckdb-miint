@@ -27,6 +27,7 @@
 #include <mutex>
 #include <tuple>
 #include <unistd.h>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 namespace bt2_daemon {
@@ -311,47 +312,47 @@ void AppendBowtie2AlignParams(ConfigJsonBuilder &cfg, const named_parameter_map_
 }
 
 void RegisterBowtie2AlignNamedParameterTypes(TableFunction &tf) {
-	tf.named_parameters["preset"] = LogicalType::VARCHAR;
-	tf.named_parameters["local"] = LogicalType::BOOLEAN;
-	tf.named_parameters["max_secondary"] = LogicalType::INTEGER;
-	tf.named_parameters["quiet"] = LogicalType::BOOLEAN;
+	AddNamedParameter(tf, "preset", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "local", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "max_secondary", LogicalType::INTEGER);
+	AddNamedParameter(tf, "quiet", LogicalType::BOOLEAN);
 
-	tf.named_parameters["seed"] = LogicalType::INTEGER;
-	tf.named_parameters["trim5"] = LogicalType::INTEGER;
-	tf.named_parameters["trim3"] = LogicalType::INTEGER;
-	tf.named_parameters["match_bonus"] = LogicalType::INTEGER;
-	tf.named_parameters["mismatch_penalty"] = LogicalType::INTEGER;
-	tf.named_parameters["mismatch_penalty_min"] = LogicalType::INTEGER;
-	tf.named_parameters["n_penalty"] = LogicalType::INTEGER;
-	tf.named_parameters["read_gap_open"] = LogicalType::INTEGER;
-	tf.named_parameters["read_gap_extend"] = LogicalType::INTEGER;
-	tf.named_parameters["ref_gap_open"] = LogicalType::INTEGER;
-	tf.named_parameters["ref_gap_extend"] = LogicalType::INTEGER;
-	tf.named_parameters["score_min"] = LogicalType::VARCHAR;
-	tf.named_parameters["min_insert"] = LogicalType::INTEGER;
-	tf.named_parameters["max_insert"] = LogicalType::INTEGER;
-	tf.named_parameters["mate_orientation"] = LogicalType::VARCHAR;
-	tf.named_parameters["no_mixed"] = LogicalType::BOOLEAN;
-	tf.named_parameters["no_discordant"] = LogicalType::BOOLEAN;
-	tf.named_parameters["dovetail"] = LogicalType::BOOLEAN;
-	tf.named_parameters["no_contain"] = LogicalType::BOOLEAN;
-	tf.named_parameters["no_overlap"] = LogicalType::BOOLEAN;
-	tf.named_parameters["nofw"] = LogicalType::BOOLEAN;
-	tf.named_parameters["norc"] = LogicalType::BOOLEAN;
-	tf.named_parameters["seed_mismatches"] = LogicalType::INTEGER;
-	tf.named_parameters["seed_length"] = LogicalType::INTEGER;
-	tf.named_parameters["max_dp_failures"] = LogicalType::INTEGER;
-	tf.named_parameters["max_seed_rounds"] = LogicalType::INTEGER;
-	tf.named_parameters["report_all"] = LogicalType::BOOLEAN;
-	tf.named_parameters["xeq"] = LogicalType::BOOLEAN;
-	tf.named_parameters["rg_id"] = LogicalType::VARCHAR;
-	tf.named_parameters["ignore_quals"] = LogicalType::BOOLEAN;
-	tf.named_parameters["reorder"] = LogicalType::BOOLEAN;
-	tf.named_parameters["no_exact_upfront"] = LogicalType::BOOLEAN;
-	tf.named_parameters["no_1mm_upfront"] = LogicalType::BOOLEAN;
-	tf.named_parameters["deterministic_seeds"] = LogicalType::BOOLEAN;
-	tf.named_parameters["lowseeds"] = LogicalType::VARCHAR;
-	tf.named_parameters["memory_mapped"] = LogicalType::BOOLEAN;
+	AddNamedParameter(tf, "seed", LogicalType::INTEGER);
+	AddNamedParameter(tf, "trim5", LogicalType::INTEGER);
+	AddNamedParameter(tf, "trim3", LogicalType::INTEGER);
+	AddNamedParameter(tf, "match_bonus", LogicalType::INTEGER);
+	AddNamedParameter(tf, "mismatch_penalty", LogicalType::INTEGER);
+	AddNamedParameter(tf, "mismatch_penalty_min", LogicalType::INTEGER);
+	AddNamedParameter(tf, "n_penalty", LogicalType::INTEGER);
+	AddNamedParameter(tf, "read_gap_open", LogicalType::INTEGER);
+	AddNamedParameter(tf, "read_gap_extend", LogicalType::INTEGER);
+	AddNamedParameter(tf, "ref_gap_open", LogicalType::INTEGER);
+	AddNamedParameter(tf, "ref_gap_extend", LogicalType::INTEGER);
+	AddNamedParameter(tf, "score_min", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "min_insert", LogicalType::INTEGER);
+	AddNamedParameter(tf, "max_insert", LogicalType::INTEGER);
+	AddNamedParameter(tf, "mate_orientation", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "no_mixed", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "no_discordant", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "dovetail", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "no_contain", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "no_overlap", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "nofw", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "norc", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "seed_mismatches", LogicalType::INTEGER);
+	AddNamedParameter(tf, "seed_length", LogicalType::INTEGER);
+	AddNamedParameter(tf, "max_dp_failures", LogicalType::INTEGER);
+	AddNamedParameter(tf, "max_seed_rounds", LogicalType::INTEGER);
+	AddNamedParameter(tf, "report_all", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "xeq", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "rg_id", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "ignore_quals", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "reorder", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "no_exact_upfront", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "no_1mm_upfront", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "deterministic_seeds", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "lowseeds", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "memory_mapped", LogicalType::BOOLEAN);
 }
 
 const char *const kOutputColumnNames[kNumOutputColumns] = {

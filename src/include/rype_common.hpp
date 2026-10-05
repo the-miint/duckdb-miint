@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <string>
 #include <vector>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -149,8 +150,8 @@ inline void ParseRypeSharedParams(TableFunctionBindInput &input, int64_t &max_me
 
 //! Declare the two shared named parameters on a RYpe table function.
 inline void AddRypeSharedNamedParameters(TableFunction &tf) {
-	tf.named_parameters["max_memory"] = LogicalType::BIGINT;
-	tf.named_parameters["debug"] = LogicalType::BOOLEAN;
+	AddNamedParameter(tf, "max_memory", LogicalType::BIGINT);
+	AddNamedParameter(tf, "debug", LogicalType::BOOLEAN);
 }
 
 //! Ask RYpe to size a classification batch, and report the numbers when asked.

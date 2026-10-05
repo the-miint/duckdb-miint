@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <stdexcept>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -41,7 +42,7 @@ struct ClusterKmeansGlobalState : public GlobalTableFunctionState {
 };
 
 unique_ptr<FunctionData> ClusterKmeansBind(ClientContext &context, TableFunctionBindInput &input,
-                                           vector<LogicalType> &return_types, vector<string> &names) {
+                                           vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<ClusterKmeansBindData>();
 	data->table_name = input.inputs[0].GetValue<string>();
 	RejectCTERelationName(input, data->table_name);
@@ -141,11 +142,11 @@ void ClusterKmeansExecute(ClientContext &, TableFunctionInput &data_p, DataChunk
 void RegisterClusterKmeans(ExtensionLoader &loader) {
 	TableFunction fn("cluster_kmeans", {LogicalType::VARCHAR}, ClusterKmeansExecute, ClusterKmeansBind,
 	                 ClusterKmeansInitGlobal);
-	fn.named_parameters["k"] = LogicalType::INTEGER;
-	fn.named_parameters["seed"] = LogicalType::BIGINT;
-	fn.named_parameters["max_iter"] = LogicalType::INTEGER;
-	fn.named_parameters["n_init"] = LogicalType::INTEGER;
-	fn.named_parameters["n_dims"] = LogicalType::INTEGER;
+	AddNamedParameter(fn, "k", LogicalType::INTEGER);
+	AddNamedParameter(fn, "seed", LogicalType::BIGINT);
+	AddNamedParameter(fn, "max_iter", LogicalType::INTEGER);
+	AddNamedParameter(fn, "n_init", LogicalType::INTEGER);
+	AddNamedParameter(fn, "n_dims", LogicalType::INTEGER);
 	fn.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(fn);
 }

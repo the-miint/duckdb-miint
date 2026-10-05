@@ -26,6 +26,7 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 namespace {
@@ -127,7 +128,7 @@ void RunFaithPd(const miint::unifrac::UnifracSupportBiomView &biom_view,
 }
 
 unique_ptr<FunctionData> UnifracFaithPdBind(ClientContext &context, TableFunctionBindInput &input,
-                                            vector<LogicalType> &return_types, vector<string> &names) {
+                                            vector<LogicalType> &return_types, vector<Identifier> &names) {
 	const std::string table_name = input.inputs[0].GetValue<string>();
 	const std::string tree_name = input.inputs[1].GetValue<string>();
 	RejectCTERelationName(input, table_name);
@@ -282,11 +283,11 @@ void UnifracFaithPdExecute(ClientContext &, TableFunctionInput &input, DataChunk
 void RegisterUnifracFaithPD(ExtensionLoader &loader) {
 	TableFunction fn("unifrac_faith_pd", {LogicalType::VARCHAR, LogicalType::VARCHAR}, UnifracFaithPdExecute,
 	                 UnifracFaithPdBind, UnifracFaithPdInitGlobal);
-	fn.named_parameters["subsample_depth"] = LogicalType::INTEGER;
-	fn.named_parameters["subsample_with_replacement"] = LogicalType::BOOLEAN;
-	fn.named_parameters["n_subsamples"] = LogicalType::INTEGER;
-	fn.named_parameters["seed"] = LogicalType::INTEGER;
-	fn.named_parameters["threads"] = LogicalType::INTEGER;
+	AddNamedParameter(fn, "subsample_depth", LogicalType::INTEGER);
+	AddNamedParameter(fn, "subsample_with_replacement", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "n_subsamples", LogicalType::INTEGER);
+	AddNamedParameter(fn, "seed", LogicalType::INTEGER);
+	AddNamedParameter(fn, "threads", LogicalType::INTEGER);
 	fn.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(fn);
 }

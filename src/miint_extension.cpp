@@ -183,7 +183,7 @@ struct MiintVersionsData : public TableFunctionData {
 };
 
 static unique_ptr<FunctionData> MiintVersionsBind(ClientContext &context, TableFunctionBindInput &input,
-                                                  vector<LogicalType> &return_types, vector<string> &names) {
+                                                  vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<MiintVersionsData>();
 	names = {"library", "version"};
 	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR};

@@ -21,6 +21,7 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "miint_named_parameter.hpp"
 
 namespace miint {
 
@@ -58,7 +59,7 @@ struct ModifyProjectBindData : public TableFunctionData {
 };
 
 unique_ptr<FunctionData> BindModifyProject(ClientContext &, TableFunctionBindInput &input,
-                                           vector<LogicalType> &return_types, vector<string> &names) {
+                                           vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto bd = make_uniq<ModifyProjectBindData>();
 
 	auto get_str = [&](const char *key, string &out, bool required, bool *was_set = nullptr) {
@@ -261,14 +262,14 @@ void ExecuteModifyProject(ClientContext &context, TableFunctionInput &data, Data
 }
 
 void AddModifyProjectNamedParameters(TableFunction &tf) {
-	tf.named_parameters["secret"] = LogicalType::VARCHAR;
-	tf.named_parameters["accession"] = LogicalType::VARCHAR;
-	tf.named_parameters["alias"] = LogicalType::VARCHAR;
-	tf.named_parameters["title"] = LogicalType::VARCHAR;
-	tf.named_parameters["description"] = LogicalType::VARCHAR;
-	tf.named_parameters["project_type"] = LogicalType::VARCHAR;
-	tf.named_parameters["is_umbrella"] = LogicalType::BOOLEAN;
-	tf.named_parameters["catalog"] = LogicalType::VARCHAR;
+	AddNamedParameter(tf, "secret", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "accession", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "alias", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "title", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "description", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "project_type", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "is_umbrella", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "catalog", LogicalType::VARCHAR);
 }
 
 // ===========================================================================
@@ -291,7 +292,7 @@ struct ModifySampleBindData : public TableFunctionData {
 };
 
 unique_ptr<FunctionData> BindModifySample(ClientContext &, TableFunctionBindInput &input,
-                                          vector<LogicalType> &return_types, vector<string> &names) {
+                                          vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto bd = make_uniq<ModifySampleBindData>();
 
 	auto get_str = [&](const char *key, string &out, bool required, bool *was_set = nullptr) {
@@ -508,17 +509,17 @@ void ExecuteModifySample(ClientContext &context, TableFunctionInput &data, DataC
 }
 
 void AddModifySampleNamedParameters(TableFunction &tf) {
-	tf.named_parameters["secret"] = LogicalType::VARCHAR;
-	tf.named_parameters["accession"] = LogicalType::VARCHAR;
-	tf.named_parameters["alias"] = LogicalType::VARCHAR;
-	tf.named_parameters["taxon_id"] = LogicalType::BIGINT;
-	tf.named_parameters["scientific_name"] = LogicalType::VARCHAR;
-	tf.named_parameters["title"] = LogicalType::VARCHAR;
-	tf.named_parameters["description"] = LogicalType::VARCHAR;
-	tf.named_parameters["checklist"] = LogicalType::VARCHAR;
-	tf.named_parameters["attributes"] = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR);
-	tf.named_parameters["attribute_units"] = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR);
-	tf.named_parameters["catalog"] = LogicalType::VARCHAR;
+	AddNamedParameter(tf, "secret", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "accession", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "alias", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "taxon_id", LogicalType::BIGINT);
+	AddNamedParameter(tf, "scientific_name", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "title", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "description", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "checklist", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "attributes", LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR));
+	AddNamedParameter(tf, "attribute_units", LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR));
+	AddNamedParameter(tf, "catalog", LogicalType::VARCHAR);
 }
 
 // ===========================================================================
@@ -562,7 +563,7 @@ struct ModifyExperimentBindData : public TableFunctionData {
 };
 
 unique_ptr<FunctionData> BindModifyExperiment(ClientContext &, TableFunctionBindInput &input,
-                                              vector<LogicalType> &return_types, vector<string> &names) {
+                                              vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto bd = make_uniq<ModifyExperimentBindData>();
 
 	auto get_str = [&](const char *key, string &out, bool required, bool *was_set = nullptr) {
@@ -809,24 +810,24 @@ void ExecuteModifyExperiment(ClientContext &context, TableFunctionInput &data, D
 }
 
 void AddModifyExperimentNamedParameters(TableFunction &tf) {
-	tf.named_parameters["secret"] = LogicalType::VARCHAR;
-	tf.named_parameters["accession"] = LogicalType::VARCHAR;
-	tf.named_parameters["alias"] = LogicalType::VARCHAR;
-	tf.named_parameters["title"] = LogicalType::VARCHAR;
+	AddNamedParameter(tf, "secret", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "accession", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "alias", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "title", LogicalType::VARCHAR);
 	// Cross-references: matches the `INSERT INTO ena.experiments` column
 	// names. Single VARCHAR each; accession-vs-refname disambiguated at
 	// Execute by `ResolveENARefDescriptor`.
-	tf.named_parameters["study_ref"] = LogicalType::VARCHAR;
-	tf.named_parameters["sample_descriptor"] = LogicalType::VARCHAR;
-	tf.named_parameters["design_description"] = LogicalType::VARCHAR;
-	tf.named_parameters["library_name"] = LogicalType::VARCHAR;
-	tf.named_parameters["library_strategy"] = LogicalType::VARCHAR;
-	tf.named_parameters["library_source"] = LogicalType::VARCHAR;
-	tf.named_parameters["library_selection"] = LogicalType::VARCHAR;
-	tf.named_parameters["library_layout"] = LogicalType::VARCHAR;
-	tf.named_parameters["platform"] = LogicalType::VARCHAR;
-	tf.named_parameters["instrument_model"] = LogicalType::VARCHAR;
-	tf.named_parameters["catalog"] = LogicalType::VARCHAR;
+	AddNamedParameter(tf, "study_ref", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "sample_descriptor", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "design_description", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "library_name", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "library_strategy", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "library_source", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "library_selection", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "library_layout", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "platform", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "instrument_model", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "catalog", LogicalType::VARCHAR);
 }
 
 // ===========================================================================
@@ -854,7 +855,7 @@ struct ModifyRunBindData : public TableFunctionData {
 };
 
 unique_ptr<FunctionData> BindModifyRun(ClientContext &, TableFunctionBindInput &input,
-                                       vector<LogicalType> &return_types, vector<string> &names) {
+                                       vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto bd = make_uniq<ModifyRunBindData>();
 
 	auto get_str = [&](const char *key, string &out, bool required, bool *was_set = nullptr) {
@@ -1044,23 +1045,25 @@ void ExecuteModifyRun(ClientContext &context, TableFunctionInput &data, DataChun
 }
 
 void AddModifyRunNamedParameters(TableFunction &tf) {
-	tf.named_parameters["secret"] = LogicalType::VARCHAR;
-	tf.named_parameters["accession"] = LogicalType::VARCHAR;
-	tf.named_parameters["alias"] = LogicalType::VARCHAR;
-	tf.named_parameters["title"] = LogicalType::VARCHAR;
+	AddNamedParameter(tf, "secret", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "accession", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "alias", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "title", LogicalType::VARCHAR);
 	// Cross-reference: matches the `INSERT INTO ena.runs` column name. Single
 	// VARCHAR; accession-vs-refname disambiguated at Execute by
 	// `ResolveENAExperimentRef`.
-	tf.named_parameters["experiment_ref"] = LogicalType::VARCHAR;
+	AddNamedParameter(tf, "experiment_ref", LogicalType::VARCHAR);
 	// `files` is LIST<STRUCT<filename, filetype, md5>>. Field names match the
 	// `INSERT INTO ena.runs.files` column shape so users can reuse the
 	// `ena_upload_reads` RETURNING projection (or anything else built from
 	// the INSERT-path schema) in `ena_modify_run` calls verbatim. DuckDB
 	// validates the outer LogicalType at bind; per-entry invariants
 	// (non-empty fields, no NULL entries) caught by ExtractENARunFilesList.
-	tf.named_parameters["files"] = LogicalType::LIST(LogicalType::STRUCT(
-	    {{"filename", LogicalType::VARCHAR}, {"filetype", LogicalType::VARCHAR}, {"md5", LogicalType::VARCHAR}}));
-	tf.named_parameters["catalog"] = LogicalType::VARCHAR;
+	AddNamedParameter(
+	    tf, "files",
+	    LogicalType::LIST(LogicalType::STRUCT(
+	        {{"filename", LogicalType::VARCHAR}, {"filetype", LogicalType::VARCHAR}, {"md5", LogicalType::VARCHAR}})));
+	AddNamedParameter(tf, "catalog", LogicalType::VARCHAR);
 }
 
 } // namespace

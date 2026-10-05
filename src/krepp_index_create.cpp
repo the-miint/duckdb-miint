@@ -28,6 +28,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -270,7 +271,7 @@ void ReadIndexMetadata(const std::string &index_dir, const std::string &suffix, 
 
 unique_ptr<FunctionData> KreppIndexCreateTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                              vector<LogicalType> &return_types,
-                                                             vector<std::string> &names) {
+                                                             vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 
 	if (input.inputs.size() < 2) {
@@ -765,17 +766,17 @@ void KreppIndexCreateTableFunction::Execute(ClientContext &context, TableFunctio
 TableFunction KreppIndexCreateTableFunction::GetFunction() {
 	auto tf =
 	    TableFunction(kCallerName, {LogicalType::VARCHAR, LogicalType::VARCHAR}, Execute, Bind, InitGlobal, InitLocal);
-	tf.named_parameters["tree_table"] = LogicalType::VARCHAR;
-	tf.named_parameters["newick_path"] = LogicalType::VARCHAR;
-	tf.named_parameters["k"] = LogicalType::INTEGER;
-	tf.named_parameters["w"] = LogicalType::INTEGER;
-	tf.named_parameters["h"] = LogicalType::INTEGER;
-	tf.named_parameters["m"] = LogicalType::INTEGER;
-	tf.named_parameters["r"] = LogicalType::INTEGER;
-	tf.named_parameters["frac"] = LogicalType::BOOLEAN;
-	tf.named_parameters["threads"] = LogicalType::INTEGER;
-	tf.named_parameters["sdust_t"] = LogicalType::INTEGER;
-	tf.named_parameters["sdust_w"] = LogicalType::INTEGER;
+	AddNamedParameter(tf, "tree_table", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "newick_path", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "k", LogicalType::INTEGER);
+	AddNamedParameter(tf, "w", LogicalType::INTEGER);
+	AddNamedParameter(tf, "h", LogicalType::INTEGER);
+	AddNamedParameter(tf, "m", LogicalType::INTEGER);
+	AddNamedParameter(tf, "r", LogicalType::INTEGER);
+	AddNamedParameter(tf, "frac", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "threads", LogicalType::INTEGER);
+	AddNamedParameter(tf, "sdust_t", LogicalType::INTEGER);
+	AddNamedParameter(tf, "sdust_w", LogicalType::INTEGER);
 	return tf;
 }
 

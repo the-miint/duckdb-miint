@@ -14,6 +14,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -51,7 +52,7 @@ std::unique_ptr<gb::Session> SpawnBuildSession() {
 
 unique_ptr<FunctionData> SaveBowtie2IndexTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                              vector<LogicalType> &return_types,
-                                                             vector<std::string> &names) {
+                                                             vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 
 	if (input.inputs.size() < 2) {
@@ -154,7 +155,7 @@ void SaveBowtie2IndexTableFunction::Execute(ClientContext &context, TableFunctio
 TableFunction SaveBowtie2IndexTableFunction::GetFunction() {
 	auto tf = TableFunction("save_bowtie2_index", {LogicalType::VARCHAR, LogicalType::VARCHAR}, Execute, Bind,
 	                        InitGlobal, InitLocal);
-	tf.named_parameters["threads"] = LogicalType::INTEGER;
+	AddNamedParameter(tf, "threads", LogicalType::INTEGER);
 	return tf;
 }
 

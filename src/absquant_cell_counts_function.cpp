@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -84,7 +85,7 @@ struct AbsQuantCellCountsGlobalState : public GlobalTableFunctionState {
 };
 
 unique_ptr<FunctionData> AbsQuantCellCountsBind(ClientContext &context, TableFunctionBindInput &input,
-                                                vector<LogicalType> &return_types, vector<string> &names) {
+                                                vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<AbsQuantCellCountsBindData>();
 	for (idx_t i = 0; i < 7; ++i) {
 		if (input.inputs[i].IsNull()) {
@@ -323,7 +324,7 @@ void RegisterAbsQuantCellCounts(ExtensionLoader &loader) {
 	                    {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
 	                     LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::DOUBLE},
 	                    AbsQuantCellCountsExecute, AbsQuantCellCountsBind, AbsQuantCellCountsInitGlobal);
-	cells.named_parameters["min_rsquared"] = LogicalType::DOUBLE;
+	AddNamedParameter(cells, "min_rsquared", LogicalType::DOUBLE);
 	cells.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(cells);
 }

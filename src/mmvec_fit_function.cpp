@@ -17,6 +17,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -80,7 +81,7 @@ LogicalType ResolveFeatureIdType(ClientContext &context, const std::string &tabl
 }
 
 unique_ptr<FunctionData> MmvecFitBind(ClientContext &context, TableFunctionBindInput &input,
-                                      vector<LogicalType> &return_types, vector<string> &names) {
+                                      vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<MmvecFitBindData>();
 	data->x_table = input.inputs[0].GetValue<string>();
 	data->y_table = input.inputs[1].GetValue<string>();
@@ -383,20 +384,20 @@ void RegisterMmvecFit(ExtensionLoader &loader) {
 	// is why there is no separate `epochs` parameter. There is deliberately no
 	// `threads` parameter either: the core is single-threaded and the fit pins
 	// Eigen to one thread, so a seeded fit is bit-reproducible.
-	fn.named_parameters["dimensions"] = LogicalType::INTEGER;
-	fn.named_parameters["optimizer"] = LogicalType::VARCHAR;
-	fn.named_parameters["max_iter"] = LogicalType::BIGINT;
-	fn.named_parameters["x_prior_mean"] = LogicalType::DOUBLE;
-	fn.named_parameters["x_prior_scale"] = LogicalType::DOUBLE;
-	fn.named_parameters["y_prior_mean"] = LogicalType::DOUBLE;
-	fn.named_parameters["y_prior_scale"] = LogicalType::DOUBLE;
-	fn.named_parameters["learning_rate"] = LogicalType::DOUBLE;
-	fn.named_parameters["batch_size"] = LogicalType::BIGINT;
-	fn.named_parameters["beta_1"] = LogicalType::DOUBLE;
-	fn.named_parameters["beta_2"] = LogicalType::DOUBLE;
-	fn.named_parameters["clipnorm"] = LogicalType::DOUBLE;
-	fn.named_parameters["batch_norm"] = LogicalType::VARCHAR;
-	fn.named_parameters["seed"] = LogicalType::BIGINT;
+	AddNamedParameter(fn, "dimensions", LogicalType::INTEGER);
+	AddNamedParameter(fn, "optimizer", LogicalType::VARCHAR);
+	AddNamedParameter(fn, "max_iter", LogicalType::BIGINT);
+	AddNamedParameter(fn, "x_prior_mean", LogicalType::DOUBLE);
+	AddNamedParameter(fn, "x_prior_scale", LogicalType::DOUBLE);
+	AddNamedParameter(fn, "y_prior_mean", LogicalType::DOUBLE);
+	AddNamedParameter(fn, "y_prior_scale", LogicalType::DOUBLE);
+	AddNamedParameter(fn, "learning_rate", LogicalType::DOUBLE);
+	AddNamedParameter(fn, "batch_size", LogicalType::BIGINT);
+	AddNamedParameter(fn, "beta_1", LogicalType::DOUBLE);
+	AddNamedParameter(fn, "beta_2", LogicalType::DOUBLE);
+	AddNamedParameter(fn, "clipnorm", LogicalType::DOUBLE);
+	AddNamedParameter(fn, "batch_norm", LogicalType::VARCHAR);
+	AddNamedParameter(fn, "seed", LogicalType::BIGINT);
 
 	fn.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(fn);

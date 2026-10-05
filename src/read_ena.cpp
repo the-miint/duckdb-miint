@@ -5,6 +5,7 @@
 #include "duckdb/common/vector/string_vector.hpp"
 #include <algorithm>
 #include <sstream>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -183,7 +184,7 @@ bool ReadENATableFunction::GlobalState::FetchNextAccession() {
 // ---- Bind ----
 
 unique_ptr<FunctionData> ReadENATableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                    vector<LogicalType> &return_types, vector<std::string> &names) {
+                                                    vector<LogicalType> &return_types, vector<Identifier> &names) {
 	std::vector<std::string> accessions;
 	if (input.inputs[0].IsNull()) {
 		throw InvalidInputException("read_ena: accession cannot be NULL");
@@ -383,8 +384,8 @@ void ReadENATableFunction::Execute(ClientContext &context, TableFunctionInput &d
 
 TableFunction ReadENATableFunction::GetFunction() {
 	auto tf = TableFunction("read_ena", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
-	tf.named_parameters["result"] = LogicalType::VARCHAR;
-	tf.named_parameters["fields"] = LogicalType::VARCHAR;
+	AddNamedParameter(tf, "result", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "fields", LogicalType::VARCHAR);
 	return tf;
 }
 

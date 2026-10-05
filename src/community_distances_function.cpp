@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -51,7 +52,7 @@ struct CommunityDistGlobalState : public GlobalTableFunctionState {
 };
 
 unique_ptr<FunctionData> CommunityDistBind(ClientContext &context, TableFunctionBindInput &input,
-                                           vector<LogicalType> &return_types, vector<string> &names) {
+                                           vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<CommunityDistBindData>();
 	data->table_name = input.inputs[0].GetValue<string>();
 	RejectCTERelationName(input, data->table_name);
@@ -195,7 +196,7 @@ void RegisterCommunityDistances(ExtensionLoader &loader) {
 	// Threads for the internal pair-loop parallelism (0 = follow DuckDB). The
 	// distances are computed up front in InitGlobal; row emission stays
 	// single-threaded (MaxThreads() == 1), so this only scales the compute.
-	fn.named_parameters["threads"] = LogicalType::INTEGER;
+	AddNamedParameter(fn, "threads", LogicalType::INTEGER);
 	fn.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(fn);
 }

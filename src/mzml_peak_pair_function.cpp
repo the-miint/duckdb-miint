@@ -48,7 +48,7 @@ static void ExtractSchema(MaterializedQueryResult &result, vector<LogicalType> &
 }
 
 static unique_ptr<FunctionData> PeakPairBind(ClientContext &context, TableFunctionBindInput &input,
-                                             vector<LogicalType> &return_types, vector<string> &names) {
+                                             vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<MzmlPeakPairData>();
 
 	auto relation = input.inputs[0].GetValue<string>();

@@ -5,6 +5,7 @@
 #include "duckdb/main/extension/extension_loader.hpp"
 
 #include <cctype>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -108,7 +109,7 @@ ReadJplaceNewickTableFunction::Data::Data(const std::vector<std::string> &paths,
 
 unique_ptr<FunctionData> ReadJplaceNewickTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                              vector<LogicalType> &return_types,
-                                                             vector<std::string> &names) {
+                                                             vector<Identifier> &names) {
 	FileSystem &fs = FileSystem::GetFileSystem(context);
 
 	std::vector<std::string> file_paths;
@@ -222,7 +223,7 @@ void ReadJplaceNewickTableFunction::Execute(ClientContext &context, TableFunctio
 
 TableFunction ReadJplaceNewickTableFunction::GetFunction() {
 	auto tf = TableFunction("read_jplace_newick", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
-	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
+	AddNamedParameter(tf, "include_filepath", LogicalType::BOOLEAN);
 	return tf;
 }
 

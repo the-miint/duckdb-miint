@@ -39,6 +39,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -491,7 +492,7 @@ std::string BuildAlignConfigJson(const named_parameter_map_t &named_params, cons
 // =============================================================================
 
 unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &return_types,
-                              vector<std::string> &names) {
+                              vector<Identifier> &names) {
 	if (input.inputs.size() < 1) {
 		throw BinderException("align_bowtie2_sharded requires query_table parameter");
 	}
@@ -1220,14 +1221,14 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 TableFunction AlignBowtie2ShardedTableFunction::GetFunction() {
 	auto tf = TableFunction("align_bowtie2_sharded", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal, InitLocal);
 	bt2_daemon::RegisterBowtie2AlignNamedParameterTypes(tf);
-	tf.named_parameters["shard_directory"] = LogicalType::VARCHAR;
-	tf.named_parameters["read_to_shard"] = LogicalType::VARCHAR;
-	tf.named_parameters["threads"] = LogicalType::INTEGER; // ignored in sharded mode; warning at bind
-	tf.named_parameters["max_threads_per_shard"] = LogicalType::INTEGER;
-	tf.named_parameters["include_shard_name"] = LogicalType::BOOLEAN;
-	tf.named_parameters["submit_batch_reads"] = LogicalType::INTEGER;
-	tf.named_parameters["prefetch_ahead"] = LogicalType::INTEGER;
-	tf.named_parameters["progress"] = LogicalType::BOOLEAN;
+	AddNamedParameter(tf, "shard_directory", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "read_to_shard", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "threads", LogicalType::INTEGER); // ignored in sharded mode; warning at bind
+	AddNamedParameter(tf, "max_threads_per_shard", LogicalType::INTEGER);
+	AddNamedParameter(tf, "include_shard_name", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "submit_batch_reads", LogicalType::INTEGER);
+	AddNamedParameter(tf, "prefetch_ahead", LogicalType::INTEGER);
+	AddNamedParameter(tf, "progress", LogicalType::BOOLEAN);
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return tf;
 }

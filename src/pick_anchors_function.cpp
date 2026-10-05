@@ -19,6 +19,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 namespace {
@@ -51,7 +52,7 @@ struct PickAnchorsGlobalState : public GlobalTableFunctionState {
 };
 
 unique_ptr<FunctionData> PickAnchorsBind(ClientContext &context, TableFunctionBindInput &input,
-                                         vector<LogicalType> &return_types, vector<string> &names) {
+                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<PickAnchorsData>();
 	data->table_name = input.inputs[0].GetValue<string>();
 	RejectCTERelationName(input, data->table_name);
@@ -171,11 +172,11 @@ void PickAnchorsExecute(ClientContext &, TableFunctionInput &input, DataChunk &o
 void RegisterPickAnchors(ExtensionLoader &loader) {
 	TableFunction fn("pick_anchors", {LogicalType::VARCHAR}, PickAnchorsExecute, PickAnchorsBind,
 	                 PickAnchorsInitGlobal);
-	fn.named_parameters["n_anchors"] = LogicalType::INTEGER;
-	fn.named_parameters["method"] = LogicalType::VARCHAR;
-	fn.named_parameters["seed"] = LogicalType::BIGINT;
-	fn.named_parameters["n_dims"] = LogicalType::INTEGER;
-	fn.named_parameters["n_bins"] = LogicalType::INTEGER;
+	AddNamedParameter(fn, "n_anchors", LogicalType::INTEGER);
+	AddNamedParameter(fn, "method", LogicalType::VARCHAR);
+	AddNamedParameter(fn, "seed", LogicalType::BIGINT);
+	AddNamedParameter(fn, "n_dims", LogicalType::INTEGER);
+	AddNamedParameter(fn, "n_bins", LogicalType::INTEGER);
 	loader.RegisterFunction(fn);
 }
 

@@ -124,7 +124,7 @@ PhyloAncestralParsimonyTableFunction::Data::Data(std::string tree_table, std::st
 unique_ptr<FunctionData> PhyloAncestralParsimonyTableFunction::Bind(ClientContext &context,
                                                                     TableFunctionBindInput &input,
                                                                     vector<LogicalType> &return_types,
-                                                                    vector<std::string> &names) {
+                                                                    vector<Identifier> &names) {
 	auto tree_table_name = input.inputs[0].ToString();
 	auto traits_table_name = input.inputs[1].ToString();
 	RejectCTERelationName(input, tree_table_name);

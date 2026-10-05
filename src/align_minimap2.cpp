@@ -8,12 +8,13 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 #include <exception>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
 unique_ptr<FunctionData> AlignMinimap2TableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                           vector<LogicalType> &return_types,
-                                                          vector<std::string> &names) {
+                                                          vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 
 	// Required: query_table (first positional parameter)
@@ -438,21 +439,21 @@ TableFunction AlignMinimap2TableFunction::GetFunction() {
 	auto tf = TableFunction("align_minimap2", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal, InitLocal);
 
 	// Named parameters
-	tf.named_parameters["subject_table"] = LogicalType::VARCHAR;
-	tf.named_parameters["index_path"] = LogicalType::VARCHAR;
-	tf.named_parameters["per_subject_database"] = LogicalType::BOOLEAN;
-	tf.named_parameters["preset"] = LogicalType::VARCHAR;
-	tf.named_parameters["max_secondary"] = LogicalType::INTEGER;
-	tf.named_parameters["k"] = LogicalType::INTEGER;
-	tf.named_parameters["w"] = LogicalType::INTEGER;
-	tf.named_parameters["eqx"] = LogicalType::BOOLEAN;
-	tf.named_parameters["debug"] = LogicalType::BOOLEAN;
-	tf.named_parameters["min_chain_coverage"] = LogicalType::FLOAT;
+	AddNamedParameter(tf, "subject_table", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "index_path", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "per_subject_database", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "preset", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "max_secondary", LogicalType::INTEGER);
+	AddNamedParameter(tf, "k", LogicalType::INTEGER);
+	AddNamedParameter(tf, "w", LogicalType::INTEGER);
+	AddNamedParameter(tf, "eqx", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "debug", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "min_chain_coverage", LogicalType::FLOAT);
 	// ANY so both `occ_filter := 0` and minimap2's two-value `occ_filter := '1000,5000'` bind;
 	// the value is read via ToString() either way. Same approach as read_alignments'
 	// reference_lengths.
-	tf.named_parameters["occ_filter"] = LogicalType::ANY;
-	tf.named_parameters["include_unmapped"] = LogicalType::BOOLEAN;
+	AddNamedParameter(tf, "occ_filter", LogicalType::ANY);
+	AddNamedParameter(tf, "include_unmapped", LogicalType::BOOLEAN);
 
 	// Alignment output order is non-deterministic (depends on thread scheduling),
 	// so NO_ORDER lets DuckDB parallelize CTAS pipelines instead of serializing

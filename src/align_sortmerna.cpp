@@ -11,7 +11,7 @@ namespace duckdb {
 
 unique_ptr<FunctionData> AlignSortMeRNATableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                            vector<LogicalType> &return_types,
-                                                           vector<std::string> &names) {
+                                                           vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 
 	if (input.inputs.empty() || input.inputs[0].IsNull()) {

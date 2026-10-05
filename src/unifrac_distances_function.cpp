@@ -24,6 +24,7 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 namespace {
@@ -111,7 +112,7 @@ void LoadIteration(const UnifracDistancesData &data, UnifracDistancesGlobalState
 }
 
 unique_ptr<FunctionData> UnifracDistancesBind(ClientContext &context, TableFunctionBindInput &input,
-                                              vector<LogicalType> &return_types, vector<string> &names) {
+                                              vector<LogicalType> &return_types, vector<Identifier> &names) {
 	const std::string table_name = input.inputs[0].GetValue<string>();
 	const std::string tree_name = input.inputs[1].GetValue<string>();
 	RejectCTERelationName(input, table_name);
@@ -307,16 +308,16 @@ void UnifracDistancesExecute(ClientContext &, TableFunctionInput &input, DataChu
 void RegisterUnifracDistances(ExtensionLoader &loader) {
 	TableFunction fn("unifrac_distances", {LogicalType::VARCHAR, LogicalType::VARCHAR}, UnifracDistancesExecute,
 	                 UnifracDistancesBind, UnifracDistancesInitGlobal);
-	fn.named_parameters["variant"] = LogicalType::VARCHAR;
-	fn.named_parameters["variance_adjust"] = LogicalType::BOOLEAN;
-	fn.named_parameters["alpha"] = LogicalType::DOUBLE;
-	fn.named_parameters["bypass_tips"] = LogicalType::BOOLEAN;
-	fn.named_parameters["normalize_sample_counts"] = LogicalType::BOOLEAN;
-	fn.named_parameters["subsample_depth"] = LogicalType::INTEGER;
-	fn.named_parameters["subsample_with_replacement"] = LogicalType::BOOLEAN;
-	fn.named_parameters["n_subsamples"] = LogicalType::INTEGER;
-	fn.named_parameters["seed"] = LogicalType::INTEGER;
-	fn.named_parameters["threads"] = LogicalType::INTEGER;
+	AddNamedParameter(fn, "variant", LogicalType::VARCHAR);
+	AddNamedParameter(fn, "variance_adjust", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "alpha", LogicalType::DOUBLE);
+	AddNamedParameter(fn, "bypass_tips", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "normalize_sample_counts", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "subsample_depth", LogicalType::INTEGER);
+	AddNamedParameter(fn, "subsample_with_replacement", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "n_subsamples", LogicalType::INTEGER);
+	AddNamedParameter(fn, "seed", LogicalType::INTEGER);
+	AddNamedParameter(fn, "threads", LogicalType::INTEGER);
 	fn.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(fn);
 }

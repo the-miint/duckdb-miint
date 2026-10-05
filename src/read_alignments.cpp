@@ -10,12 +10,13 @@
 #include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/vector_size.hpp"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
 unique_ptr<FunctionData> ReadAlignmentsTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                            vector<LogicalType> &return_types,
-                                                           vector<std::string> &names) {
+                                                           vector<Identifier> &names) {
 	FileSystem &fs = FileSystem::GetFileSystem(context);
 
 	std::vector<std::string> sam_paths;
@@ -266,9 +267,9 @@ void ReadAlignmentsTableFunction::Execute(ClientContext &context, TableFunctionI
 
 TableFunction ReadAlignmentsTableFunction::GetFunction() {
 	auto tf = TableFunction("read_alignments", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
-	tf.named_parameters["reference_lengths"] = LogicalType::ANY;
-	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
-	tf.named_parameters["include_seq_qual"] = LogicalType::BOOLEAN;
+	AddNamedParameter(tf, "reference_lengths", LogicalType::ANY);
+	AddNamedParameter(tf, "include_filepath", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "include_seq_qual", LogicalType::BOOLEAN);
 	return tf;
 }
 
@@ -278,9 +279,9 @@ void ReadAlignmentsTableFunction::Register(ExtensionLoader &loader) {
 
 	// Register backward compatibility alias
 	auto read_sam_alias = TableFunction("read_sam", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
-	read_sam_alias.named_parameters["reference_lengths"] = LogicalType::ANY;
-	read_sam_alias.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
-	read_sam_alias.named_parameters["include_seq_qual"] = LogicalType::BOOLEAN;
+	AddNamedParameter(read_sam_alias, "reference_lengths", LogicalType::ANY);
+	AddNamedParameter(read_sam_alias, "include_filepath", LogicalType::BOOLEAN);
+	AddNamedParameter(read_sam_alias, "include_seq_qual", LogicalType::BOOLEAN);
 	loader.RegisterFunction(read_sam_alias);
 }
 

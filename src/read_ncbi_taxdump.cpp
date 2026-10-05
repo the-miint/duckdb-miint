@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <thread>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -241,7 +242,7 @@ miint::TaxdumpFiles LoadTaxdumpFiles(ClientContext &context, const std::string &
 
 unique_ptr<FunctionData> ReadNCBITaxdumpTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                             vector<LogicalType> &return_types,
-                                                            vector<std::string> &names) {
+                                                            vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 	data->source = ParseSourceParam(input, "read_ncbi_taxdump");
 	data->refresh = ParseRefreshParam(input.named_parameters);
@@ -307,7 +308,7 @@ void ReadNCBITaxdumpTableFunction::Register(ExtensionLoader &loader) {
 	// read_ncbi_taxdump() -> default remote taxdump; read_ncbi_taxdump('path'|'url') -> explicit source.
 	for (const auto &args : {vector<LogicalType> {}, vector<LogicalType> {LogicalType::VARCHAR}}) {
 		TableFunction tf("read_ncbi_taxdump", args, Execute, Bind, InitGlobal, InitLocal);
-		tf.named_parameters["refresh"] = LogicalType::BOOLEAN;
+		AddNamedParameter(tf, "refresh", LogicalType::BOOLEAN);
 		set.AddFunction(tf);
 	}
 	loader.RegisterFunction(set);
@@ -317,7 +318,7 @@ void ReadNCBITaxdumpTableFunction::Register(ExtensionLoader &loader) {
 
 unique_ptr<FunctionData> ReadNCBITaxdumpMergedTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                                   vector<LogicalType> &return_types,
-                                                                  vector<std::string> &names) {
+                                                                  vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 	data->source = ParseSourceParam(input, "read_ncbi_taxdump_merged");
 	data->refresh = ParseRefreshParam(input.named_parameters);
@@ -367,7 +368,7 @@ void ReadNCBITaxdumpMergedTableFunction::Register(ExtensionLoader &loader) {
 	TableFunctionSet set("read_ncbi_taxdump_merged");
 	for (const auto &args : {vector<LogicalType> {}, vector<LogicalType> {LogicalType::VARCHAR}}) {
 		TableFunction tf("read_ncbi_taxdump_merged", args, Execute, Bind, InitGlobal, InitLocal);
-		tf.named_parameters["refresh"] = LogicalType::BOOLEAN;
+		AddNamedParameter(tf, "refresh", LogicalType::BOOLEAN);
 		set.AddFunction(tf);
 	}
 	loader.RegisterFunction(set);
@@ -377,7 +378,7 @@ void ReadNCBITaxdumpMergedTableFunction::Register(ExtensionLoader &loader) {
 
 unique_ptr<FunctionData> ReadNCBITaxdumpNamesTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                                  vector<LogicalType> &return_types,
-                                                                 vector<std::string> &names) {
+                                                                 vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 	data->source = ParseSourceParam(input, "read_ncbi_taxdump_names");
 	data->refresh = ParseRefreshParam(input.named_parameters);
@@ -431,7 +432,7 @@ void ReadNCBITaxdumpNamesTableFunction::Register(ExtensionLoader &loader) {
 	TableFunctionSet set("read_ncbi_taxdump_names");
 	for (const auto &args : {vector<LogicalType> {}, vector<LogicalType> {LogicalType::VARCHAR}}) {
 		TableFunction tf("read_ncbi_taxdump_names", args, Execute, Bind, InitGlobal, InitLocal);
-		tf.named_parameters["refresh"] = LogicalType::BOOLEAN;
+		AddNamedParameter(tf, "refresh", LogicalType::BOOLEAN);
 		set.AddFunction(tf);
 	}
 	loader.RegisterFunction(set);
@@ -442,7 +443,7 @@ void ReadNCBITaxdumpNamesTableFunction::Register(ExtensionLoader &loader) {
 unique_ptr<FunctionData> ReadNCBITaxdumpDeletedTableFunction::Bind(ClientContext &context,
                                                                    TableFunctionBindInput &input,
                                                                    vector<LogicalType> &return_types,
-                                                                   vector<std::string> &names) {
+                                                                   vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 	data->source = ParseSourceParam(input, "read_ncbi_taxdump_deleted");
 	data->refresh = ParseRefreshParam(input.named_parameters);
@@ -489,7 +490,7 @@ void ReadNCBITaxdumpDeletedTableFunction::Register(ExtensionLoader &loader) {
 	TableFunctionSet set("read_ncbi_taxdump_deleted");
 	for (const auto &args : {vector<LogicalType> {}, vector<LogicalType> {LogicalType::VARCHAR}}) {
 		TableFunction tf("read_ncbi_taxdump_deleted", args, Execute, Bind, InitGlobal, InitLocal);
-		tf.named_parameters["refresh"] = LogicalType::BOOLEAN;
+		AddNamedParameter(tf, "refresh", LogicalType::BOOLEAN);
 		set.AddFunction(tf);
 	}
 	loader.RegisterFunction(set);

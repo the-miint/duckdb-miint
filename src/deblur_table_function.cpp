@@ -13,6 +13,7 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -90,7 +91,7 @@ static void ValidateDeblurTableSchema(ClientContext &context, const std::string 
 }
 
 static unique_ptr<FunctionData> DeblurBind(ClientContext &context, TableFunctionBindInput &input,
-                                           vector<LogicalType> &return_types, vector<std::string> &names) {
+                                           vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<DeblurData>();
 	data->input_table = input.inputs[0].GetValue<std::string>();
 	RejectCTERelationName(input, data->input_table);
@@ -371,14 +372,14 @@ static void DeblurExecute(ClientContext & /*context*/, TableFunctionInput &data_
 TableFunction DeblurTableFunction::GetFunction() {
 	auto tf =
 	    TableFunction("deblur", {LogicalType::VARCHAR}, DeblurExecute, DeblurBind, DeblurInitGlobal, DeblurInitLocal);
-	tf.named_parameters["mean_error"] = LogicalType::DOUBLE;
-	tf.named_parameters["error_profile"] = LogicalType::LIST(LogicalType::DOUBLE);
-	tf.named_parameters["indel_prob"] = LogicalType::DOUBLE;
-	tf.named_parameters["indel_max"] = LogicalType::INTEGER;
-	tf.named_parameters["sample_id"] = LogicalType::VARCHAR;
-	tf.named_parameters["id_col"] = LogicalType::VARCHAR;
-	tf.named_parameters["sequence_col"] = LogicalType::VARCHAR;
-	tf.named_parameters["count_col"] = LogicalType::VARCHAR;
+	AddNamedParameter(tf, "mean_error", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "error_profile", LogicalType::LIST(LogicalType::DOUBLE));
+	AddNamedParameter(tf, "indel_prob", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "indel_max", LogicalType::INTEGER);
+	AddNamedParameter(tf, "sample_id", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "id_col", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "sequence_col", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "count_col", LogicalType::VARCHAR);
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return tf;
 }

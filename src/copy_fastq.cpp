@@ -52,7 +52,7 @@ struct FastqCopyBindData : public SequenceCopyBindData {
 // Bind
 //===--------------------------------------------------------------------===//
 static unique_ptr<FunctionData> FastqCopyBind(ClientContext &context, CopyFunctionBindInput &input,
-                                              const vector<string> &names, const vector<LogicalType> &sql_types) {
+                                              const vector<Identifier> &names, const vector<LogicalType> &sql_types) {
 	auto result = make_uniq<FastqCopyBindData>();
 	result->file_path = input.info.file_path;
 	result->names = names;

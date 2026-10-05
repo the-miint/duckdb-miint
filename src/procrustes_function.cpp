@@ -26,6 +26,7 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 namespace {
@@ -337,7 +338,7 @@ uint64_t ResolveSeed(int32_t seed_param) {
 }
 
 unique_ptr<FunctionData> ProcrustesBind(ClientContext &context, TableFunctionBindInput &input,
-                                        vector<LogicalType> &return_types, vector<string> &names) {
+                                        vector<LogicalType> &return_types, vector<Identifier> &names) {
 	const std::string ref_name = input.inputs[0].GetValue<string>();
 	const std::string other_name = input.inputs[1].GetValue<string>();
 	RejectCTERelationName(input, ref_name);
@@ -554,10 +555,10 @@ void ProcrustesExecute(ClientContext &, TableFunctionInput &data_p, DataChunk &o
 void RegisterProcrustes(ExtensionLoader &loader) {
 	TableFunction fn("procrustes", {LogicalType::VARCHAR, LogicalType::VARCHAR}, ProcrustesExecute, ProcrustesBind,
 	                 ProcrustesInitGlobal);
-	fn.named_parameters["pairing"] = LogicalType::VARCHAR;
-	fn.named_parameters["n_dims"] = LogicalType::INTEGER;
-	fn.named_parameters["permutations"] = LogicalType::INTEGER;
-	fn.named_parameters["seed"] = LogicalType::INTEGER;
+	AddNamedParameter(fn, "pairing", LogicalType::VARCHAR);
+	AddNamedParameter(fn, "n_dims", LogicalType::INTEGER);
+	AddNamedParameter(fn, "permutations", LogicalType::INTEGER);
+	AddNamedParameter(fn, "seed", LogicalType::INTEGER);
 	loader.RegisterFunction(fn);
 }
 

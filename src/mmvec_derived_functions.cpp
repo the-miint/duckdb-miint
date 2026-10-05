@@ -221,7 +221,7 @@ struct MmvecRanksBindData : public TableFunctionData {
 };
 
 unique_ptr<FunctionData> MmvecRanksBind(ClientContext &context, TableFunctionBindInput &input,
-                                        vector<LogicalType> &return_types, vector<string> &names) {
+                                        vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<MmvecRanksBindData>();
 	data->model_table = input.inputs[0].GetValue<string>();
 	RejectCTERelationName(input, data->model_table);
@@ -346,7 +346,7 @@ struct MmvecPredictBindData : public TableFunctionData {
 };
 
 unique_ptr<FunctionData> MmvecPredictBind(ClientContext &context, TableFunctionBindInput &input,
-                                          vector<LogicalType> &return_types, vector<string> &names) {
+                                          vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<MmvecPredictBindData>();
 	data->model_table = input.inputs[0].GetValue<string>();
 	data->x_table = input.inputs[1].GetValue<string>();
@@ -429,7 +429,7 @@ struct MmvecScoreBindData : public TableFunctionData {
 };
 
 unique_ptr<FunctionData> MmvecScoreBind(ClientContext &context, TableFunctionBindInput &input,
-                                        vector<LogicalType> &return_types, vector<string> &names) {
+                                        vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<MmvecScoreBindData>();
 	data->model_table = input.inputs[0].GetValue<string>();
 	data->x_table = input.inputs[1].GetValue<string>();

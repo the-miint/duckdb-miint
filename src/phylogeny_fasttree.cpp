@@ -31,6 +31,7 @@
 #include <unistd.h> // read(2) on macOS isn't reachable via <cstdio>; need this for ::read
 #include <unordered_set>
 #include <vector>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -444,7 +445,7 @@ std::string BuildConfigJson(const named_parameter_map_t &named_params) {
 // Bind
 // =============================================================================
 unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &return_types,
-                              vector<string> &names) {
+                              vector<Identifier> &names) {
 	if (input.inputs.empty() || input.inputs[0].IsNull()) {
 		throw InvalidInputException("phylogeny_fasttree: a non-NULL input table name is required");
 	}
@@ -925,32 +926,32 @@ void PhylogenyFastTreeAvailableImpl(DataChunk &args, ExpressionState &state, Vec
 
 TableFunction PhylogenyFastTreeTableFunction::GetFunction() {
 	TableFunction fn("phylogeny_fasttree", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal, InitLocal);
-	fn.named_parameters["seq_type"] = LogicalType::VARCHAR;
-	fn.named_parameters["seed"] = LogicalType::BIGINT;
-	fn.named_parameters["verbose"] = LogicalType::BOOLEAN;
-	fn.named_parameters["bootstrap"] = LogicalType::BIGINT;
-	fn.named_parameters["nosupport"] = LogicalType::BOOLEAN;
-	fn.named_parameters["pseudo"] = LogicalType::BOOLEAN;
-	fn.named_parameters["pseudo_weight"] = LogicalType::DOUBLE;
-	fn.named_parameters["nni"] = LogicalType::BIGINT;
-	fn.named_parameters["spr"] = LogicalType::BIGINT;
-	fn.named_parameters["mlnni"] = LogicalType::BIGINT;
-	fn.named_parameters["mlacc"] = LogicalType::BIGINT;
-	fn.named_parameters["cat"] = LogicalType::BIGINT;
-	fn.named_parameters["noml"] = LogicalType::BOOLEAN;
-	fn.named_parameters["threads"] = LogicalType::BIGINT;
-	fn.named_parameters["model"] = LogicalType::VARCHAR;
-	fn.named_parameters["gtrrates"] = LogicalType::LIST(LogicalType::DOUBLE);
-	fn.named_parameters["gtrfreq"] = LogicalType::LIST(LogicalType::DOUBLE);
-	fn.named_parameters["slow"] = LogicalType::BOOLEAN;
-	fn.named_parameters["bionj"] = LogicalType::BOOLEAN;
-	fn.named_parameters["nj"] = LogicalType::BOOLEAN;
-	fn.named_parameters["top"] = LogicalType::BOOLEAN;
-	fn.named_parameters["notop"] = LogicalType::BOOLEAN;
-	fn.named_parameters["topm"] = LogicalType::DOUBLE;
-	fn.named_parameters["quote"] = LogicalType::BOOLEAN;
-	fn.named_parameters["fastest"] = LogicalType::BOOLEAN;
-	fn.named_parameters["gamma"] = LogicalType::BOOLEAN;
+	AddNamedParameter(fn, "seq_type", LogicalType::VARCHAR);
+	AddNamedParameter(fn, "seed", LogicalType::BIGINT);
+	AddNamedParameter(fn, "verbose", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "bootstrap", LogicalType::BIGINT);
+	AddNamedParameter(fn, "nosupport", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "pseudo", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "pseudo_weight", LogicalType::DOUBLE);
+	AddNamedParameter(fn, "nni", LogicalType::BIGINT);
+	AddNamedParameter(fn, "spr", LogicalType::BIGINT);
+	AddNamedParameter(fn, "mlnni", LogicalType::BIGINT);
+	AddNamedParameter(fn, "mlacc", LogicalType::BIGINT);
+	AddNamedParameter(fn, "cat", LogicalType::BIGINT);
+	AddNamedParameter(fn, "noml", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "threads", LogicalType::BIGINT);
+	AddNamedParameter(fn, "model", LogicalType::VARCHAR);
+	AddNamedParameter(fn, "gtrrates", LogicalType::LIST(LogicalType::DOUBLE));
+	AddNamedParameter(fn, "gtrfreq", LogicalType::LIST(LogicalType::DOUBLE));
+	AddNamedParameter(fn, "slow", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "bionj", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "nj", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "top", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "notop", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "topm", LogicalType::DOUBLE);
+	AddNamedParameter(fn, "quote", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "fastest", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "gamma", LogicalType::BOOLEAN);
 	fn.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return fn;
 }

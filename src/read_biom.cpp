@@ -10,11 +10,12 @@
 #include "duckdb/common/vector/constant_vector.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
 unique_ptr<FunctionData> ReadBIOMTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                     vector<LogicalType> &return_types, vector<std::string> &names) {
+                                                     vector<LogicalType> &return_types, vector<Identifier> &names) {
 	FileSystem &fs = FileSystem::GetFileSystem(context);
 
 	std::vector<std::string> biom_paths;
@@ -177,7 +178,7 @@ void ReadBIOMTableFunction::Execute(ClientContext &context, TableFunctionInput &
 
 TableFunction ReadBIOMTableFunction::GetFunction() {
 	auto tf = TableFunction("read_biom", {LogicalType::ANY}, Execute, Bind, InitGlobal);
-	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
+	AddNamedParameter(tf, "include_filepath", LogicalType::BOOLEAN);
 	tf.init_local = InitLocal;
 	return tf;
 }

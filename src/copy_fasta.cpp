@@ -47,7 +47,7 @@ struct FastaCopyBindData : public SequenceCopyBindData {
 // Bind
 //===--------------------------------------------------------------------===//
 static unique_ptr<FunctionData> FastaCopyBind(ClientContext &context, CopyFunctionBindInput &input,
-                                              const vector<string> &names, const vector<LogicalType> &sql_types) {
+                                              const vector<Identifier> &names, const vector<LogicalType> &sql_types) {
 	auto result = make_uniq<FastaCopyBindData>();
 	result->file_path = input.info.file_path;
 	result->names = names;

@@ -12,6 +12,7 @@
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
 #include <unordered_set>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -60,7 +61,7 @@ static void ValidateAndGetConsensus(const std::string &sample_literal, LoadedSin
 }
 
 static unique_ptr<FunctionData> ConsensusAbpoaBind(ClientContext &context, TableFunctionBindInput &input,
-                                                   vector<LogicalType> &return_types, vector<string> &names) {
+                                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
 	if (input.inputs.empty() || input.inputs[0].IsNull()) {
 		throw BinderException("consensus_abpoa requires a sequence table name argument");
 	}
@@ -200,25 +201,25 @@ static void ConsensusAbpoaExecute(ClientContext & /*context*/, TableFunctionInpu
 TableFunction ConsensusAbpoaTableFunction::GetFunction() {
 	auto tf = TableFunction("consensus_abpoa", {LogicalType::VARCHAR}, ConsensusAbpoaExecute, ConsensusAbpoaBind,
 	                        ConsensusAbpoaInitGlobal, ConsensusAbpoaInitLocal);
-	tf.named_parameters["sample_id"] = LogicalType::VARCHAR;
-	tf.named_parameters["match"] = LogicalType::INTEGER;
-	tf.named_parameters["mismatch"] = LogicalType::INTEGER;
-	tf.named_parameters["gap_open1"] = LogicalType::INTEGER;
-	tf.named_parameters["gap_open2"] = LogicalType::INTEGER;
-	tf.named_parameters["gap_ext1"] = LogicalType::INTEGER;
-	tf.named_parameters["gap_ext2"] = LogicalType::INTEGER;
-	tf.named_parameters["align_mode"] = LogicalType::VARCHAR;
-	tf.named_parameters["progressive"] = LogicalType::BOOLEAN;
-	tf.named_parameters["disable_seeding"] = LogicalType::BOOLEAN;
-	tf.named_parameters["amb_strand"] = LogicalType::BOOLEAN;
-	tf.named_parameters["k"] = LogicalType::INTEGER;
-	tf.named_parameters["w"] = LogicalType::INTEGER;
-	tf.named_parameters["min_w"] = LogicalType::INTEGER;
-	tf.named_parameters["bandwidth"] = LogicalType::INTEGER;
-	tf.named_parameters["bandwidth_frac"] = LogicalType::FLOAT;
-	tf.named_parameters["max_num_cons"] = LogicalType::INTEGER;
-	tf.named_parameters["min_freq"] = LogicalType::FLOAT;
-	tf.named_parameters["algorithm"] = LogicalType::VARCHAR;
+	AddNamedParameter(tf, "sample_id", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "match", LogicalType::INTEGER);
+	AddNamedParameter(tf, "mismatch", LogicalType::INTEGER);
+	AddNamedParameter(tf, "gap_open1", LogicalType::INTEGER);
+	AddNamedParameter(tf, "gap_open2", LogicalType::INTEGER);
+	AddNamedParameter(tf, "gap_ext1", LogicalType::INTEGER);
+	AddNamedParameter(tf, "gap_ext2", LogicalType::INTEGER);
+	AddNamedParameter(tf, "align_mode", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "progressive", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "disable_seeding", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "amb_strand", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "k", LogicalType::INTEGER);
+	AddNamedParameter(tf, "w", LogicalType::INTEGER);
+	AddNamedParameter(tf, "min_w", LogicalType::INTEGER);
+	AddNamedParameter(tf, "bandwidth", LogicalType::INTEGER);
+	AddNamedParameter(tf, "bandwidth_frac", LogicalType::FLOAT);
+	AddNamedParameter(tf, "max_num_cons", LogicalType::INTEGER);
+	AddNamedParameter(tf, "min_freq", LogicalType::FLOAT);
+	AddNamedParameter(tf, "algorithm", LogicalType::VARCHAR);
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return tf;
 }

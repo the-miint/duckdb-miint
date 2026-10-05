@@ -8,6 +8,7 @@
 #include "duckdb/main/query_result.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
 #include <unordered_set>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -72,7 +73,7 @@ ShearTreeTableFunction::Data::Data(std::string tree_table, std::string tips_tabl
 }
 
 unique_ptr<FunctionData> ShearTreeTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                      vector<LogicalType> &return_types, vector<std::string> &names) {
+                                                      vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto tree_table_name = input.inputs[0].ToString();
 	auto tips_table_name = input.inputs[1].ToString();
 	RejectCTERelationName(input, tree_table_name);
@@ -152,8 +153,8 @@ void ShearTreeTableFunction::Execute(ClientContext &context, TableFunctionInput 
 
 TableFunction ShearTreeTableFunction::GetFunction() {
 	TableFunction tf("shear_tree", {LogicalType::VARCHAR, LogicalType::VARCHAR}, Execute, Bind, InitGlobal);
-	tf.named_parameters["collapse"] = LogicalType::BOOLEAN;
-	tf.named_parameters["ignore_missing"] = LogicalType::BOOLEAN;
+	AddNamedParameter(tf, "collapse", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "ignore_missing", LogicalType::BOOLEAN);
 	return tf;
 }
 

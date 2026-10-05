@@ -6,6 +6,7 @@
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -50,7 +51,7 @@ RypeLogRatioTableFunction::GlobalState::~GlobalState() {
 // Bind
 // ============================================================================
 unique_ptr<FunctionData> RypeLogRatioTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                         vector<LogicalType> &return_types, vector<string> &names) {
+                                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 
 	// Required: numerator_path (first positional parameter)
@@ -338,8 +339,8 @@ TableFunction RypeLogRatioTableFunction::GetFunction() {
 	                 Bind, InitGlobal, InitLocal);
 
 	// Named parameters
-	tf.named_parameters["id_column"] = LogicalType::VARCHAR;
-	tf.named_parameters["skip_threshold"] = LogicalType::DOUBLE;
+	AddNamedParameter(tf, "id_column", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "skip_threshold", LogicalType::DOUBLE);
 	AddRypeSharedNamedParameters(tf);
 
 	return tf;

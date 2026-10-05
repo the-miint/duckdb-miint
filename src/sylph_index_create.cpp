@@ -1,3 +1,4 @@
+#include "miint_named_parameter.hpp"
 // sylph_index_create() — build a sylph `.syldb` / `.syl2db` from a reference-sequence table.
 // See sylph_index_create.hpp for the contract. The build is a synchronous side
 // effect in InitGlobal: the distinct genome ids are enumerated, then N worker
@@ -66,7 +67,7 @@ void ApplyBoundedInt(TableFunctionBindInput &input, const std::string &param, in
 // =============================================================================
 unique_ptr<FunctionData> SylphIndexCreateTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                              vector<LogicalType> &return_types,
-                                                             vector<std::string> &names) {
+                                                             vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 
 	if (input.inputs.size() < 2) {
@@ -398,16 +399,16 @@ TableFunction SylphIndexCreateTableFunction::GetFunction() {
 	TableFunction tf("sylph_index_create", {LogicalType::VARCHAR, LogicalType::VARCHAR}, Execute, Bind, InitGlobal,
 	                 InitLocal);
 
-	tf.named_parameters["genome_id"] = LogicalType::VARCHAR;
-	tf.named_parameters["order_by"] = LogicalType::VARCHAR;
-	tf.named_parameters["k"] = LogicalType::INTEGER;
-	tf.named_parameters["c"] = LogicalType::INTEGER;
-	tf.named_parameters["min_spacing"] = LogicalType::INTEGER;
-	tf.named_parameters["pseudotax"] = LogicalType::BOOLEAN;
-	tf.named_parameters["threads"] = LogicalType::INTEGER;
-	tf.named_parameters["two_stage"] = LogicalType::BOOLEAN;
-	tf.named_parameters["screen_c"] = LogicalType::INTEGER;
-	tf.named_parameters["min_sparse_kmers"] = LogicalType::INTEGER;
+	AddNamedParameter(tf, "genome_id", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "order_by", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "k", LogicalType::INTEGER);
+	AddNamedParameter(tf, "c", LogicalType::INTEGER);
+	AddNamedParameter(tf, "min_spacing", LogicalType::INTEGER);
+	AddNamedParameter(tf, "pseudotax", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "threads", LogicalType::INTEGER);
+	AddNamedParameter(tf, "two_stage", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "screen_c", LogicalType::INTEGER);
+	AddNamedParameter(tf, "min_sparse_kmers", LogicalType::INTEGER);
 
 	return tf;
 }

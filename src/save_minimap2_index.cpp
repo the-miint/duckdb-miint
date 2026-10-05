@@ -3,12 +3,13 @@
 #include "sequence_table_reader.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
 unique_ptr<FunctionData> SaveMinimap2IndexTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                               vector<LogicalType> &return_types,
-                                                              vector<std::string> &names) {
+                                                              vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 
 	// Required positional parameters: subject_table, output_path
@@ -114,9 +115,9 @@ TableFunction SaveMinimap2IndexTableFunction::GetFunction() {
 	                        InitGlobal, InitLocal);
 
 	// Named parameters (same options as align_minimap2 for index building)
-	tf.named_parameters["preset"] = LogicalType::VARCHAR;
-	tf.named_parameters["k"] = LogicalType::INTEGER;
-	tf.named_parameters["w"] = LogicalType::INTEGER;
+	AddNamedParameter(tf, "preset", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "k", LogicalType::INTEGER);
+	AddNamedParameter(tf, "w", LogicalType::INTEGER);
 
 	return tf;
 }

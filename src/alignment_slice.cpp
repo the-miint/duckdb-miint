@@ -14,6 +14,7 @@
 #include "duckdb/main/query_result.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -50,7 +51,8 @@ const vector<AlignmentSliceTableFunction::ColumnInfo> &AlignmentSliceTableFuncti
 }
 
 unique_ptr<FunctionData> AlignmentSliceTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                           vector<LogicalType> &return_types, vector<string> &names) {
+                                                           vector<LogicalType> &return_types,
+                                                           vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 
 	// Extract positional parameters
@@ -337,7 +339,7 @@ void AlignmentSliceTableFunction::Execute(ClientContext &context, TableFunctionI
 void AlignmentSliceTableFunction::Register(ExtensionLoader &loader) {
 	auto tf = TableFunction("alignment_slice", {LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT},
 	                        Execute, Bind, InitGlobal);
-	tf.named_parameters["include_deletions"] = LogicalType::BOOLEAN;
+	AddNamedParameter(tf, "include_deletions", LogicalType::BOOLEAN);
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(tf);
 }

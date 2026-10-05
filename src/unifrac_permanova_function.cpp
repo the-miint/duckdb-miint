@@ -33,6 +33,7 @@
 
 // scikit-bio-binaries — PERMANOVA pseudo-F + p-value on a fp32 distance matrix.
 #include "distance.h"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 namespace {
@@ -274,7 +275,7 @@ void ComputeOneIteration(const miint::unifrac::UnifracSupportBiomView &biom_view
 }
 
 unique_ptr<FunctionData> UnifracPermanovaBind(ClientContext &context, TableFunctionBindInput &input,
-                                              vector<LogicalType> &return_types, vector<string> &names) {
+                                              vector<LogicalType> &return_types, vector<Identifier> &names) {
 	const std::string table_name = input.inputs[0].GetValue<string>();
 	const std::string tree_name = input.inputs[1].GetValue<string>();
 	const std::string metadata_name = input.inputs[2].GetValue<string>();
@@ -466,7 +467,7 @@ void UnifracPermanovaExecute(ClientContext &, TableFunctionInput &input, DataChu
 // unchanged — the output schema is identical, iteration is always 0 (kept for
 // parity), and there is no subsampling (a distance table is a fixed matrix).
 unique_ptr<FunctionData> PermanovaFromDistancesBind(ClientContext &context, TableFunctionBindInput &input,
-                                                    vector<LogicalType> &return_types, vector<string> &names) {
+                                                    vector<LogicalType> &return_types, vector<Identifier> &names) {
 	const std::string table_name = input.inputs[0].GetValue<string>();
 	const std::string metadata_name = input.inputs[1].GetValue<string>();
 	RejectCTERelationName(input, table_name);
@@ -523,28 +524,28 @@ unique_ptr<FunctionData> PermanovaFromDistancesBind(ClientContext &context, Tabl
 void RegisterUnifracPermanova(ExtensionLoader &loader) {
 	TableFunction fn("unifrac_permanova", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                 UnifracPermanovaExecute, UnifracPermanovaBind, UnifracPermanovaInitGlobal);
-	fn.named_parameters["variant"] = LogicalType::VARCHAR;
-	fn.named_parameters["n_permutations"] = LogicalType::INTEGER;
-	fn.named_parameters["variables"] = LogicalType::LIST(LogicalType::VARCHAR);
-	fn.named_parameters["variance_adjust"] = LogicalType::BOOLEAN;
-	fn.named_parameters["alpha"] = LogicalType::DOUBLE;
-	fn.named_parameters["bypass_tips"] = LogicalType::BOOLEAN;
-	fn.named_parameters["normalize_sample_counts"] = LogicalType::BOOLEAN;
-	fn.named_parameters["subsample_depth"] = LogicalType::INTEGER;
-	fn.named_parameters["subsample_with_replacement"] = LogicalType::BOOLEAN;
-	fn.named_parameters["n_subsamples"] = LogicalType::INTEGER;
-	fn.named_parameters["seed"] = LogicalType::INTEGER;
-	fn.named_parameters["threads"] = LogicalType::INTEGER;
+	AddNamedParameter(fn, "variant", LogicalType::VARCHAR);
+	AddNamedParameter(fn, "n_permutations", LogicalType::INTEGER);
+	AddNamedParameter(fn, "variables", LogicalType::LIST(LogicalType::VARCHAR));
+	AddNamedParameter(fn, "variance_adjust", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "alpha", LogicalType::DOUBLE);
+	AddNamedParameter(fn, "bypass_tips", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "normalize_sample_counts", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "subsample_depth", LogicalType::INTEGER);
+	AddNamedParameter(fn, "subsample_with_replacement", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "n_subsamples", LogicalType::INTEGER);
+	AddNamedParameter(fn, "seed", LogicalType::INTEGER);
+	AddNamedParameter(fn, "threads", LogicalType::INTEGER);
 	loader.RegisterFunction(fn);
 }
 
 void RegisterPermanovaFromDistances(ExtensionLoader &loader) {
 	TableFunction fn("permanova", {LogicalType::VARCHAR, LogicalType::VARCHAR}, UnifracPermanovaExecute,
 	                 PermanovaFromDistancesBind, UnifracPermanovaInitGlobal);
-	fn.named_parameters["n_permutations"] = LogicalType::INTEGER;
-	fn.named_parameters["variables"] = LogicalType::LIST(LogicalType::VARCHAR);
-	fn.named_parameters["seed"] = LogicalType::INTEGER;
-	fn.named_parameters["threads"] = LogicalType::INTEGER;
+	AddNamedParameter(fn, "n_permutations", LogicalType::INTEGER);
+	AddNamedParameter(fn, "variables", LogicalType::LIST(LogicalType::VARCHAR));
+	AddNamedParameter(fn, "seed", LogicalType::INTEGER);
+	AddNamedParameter(fn, "threads", LogicalType::INTEGER);
 	fn.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(fn);
 }

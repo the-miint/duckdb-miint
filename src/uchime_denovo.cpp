@@ -13,6 +13,7 @@
 #include "duckdb/main/database.hpp"
 
 #include <algorithm>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -164,8 +165,7 @@ static std::vector<miint::UchimeResult> RunDenovoForSet(const miint::UchimeParam
 }
 
 unique_ptr<FunctionData> UchimeDenovoTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                         vector<LogicalType> &return_types,
-                                                         vector<std::string> &names) {
+                                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 
 	data->input_table = input.inputs[0].GetValue<std::string>();
@@ -384,16 +384,16 @@ TableFunction UchimeDenovoTableFunction::GetFunction() {
 	auto tf =
 	    TableFunction("detect_chimera_uchime_denovo", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal, InitLocal);
 
-	tf.named_parameters["minh"] = LogicalType::DOUBLE;
-	tf.named_parameters["xn"] = LogicalType::DOUBLE;
-	tf.named_parameters["dn"] = LogicalType::DOUBLE;
-	tf.named_parameters["mindiv"] = LogicalType::DOUBLE;
-	tf.named_parameters["mindiffs"] = LogicalType::INTEGER;
-	tf.named_parameters["abskew"] = LogicalType::DOUBLE;
-	tf.named_parameters["sample_id"] = LogicalType::VARCHAR;
-	tf.named_parameters["id_col"] = LogicalType::VARCHAR;
-	tf.named_parameters["sequence_col"] = LogicalType::VARCHAR;
-	tf.named_parameters["count_col"] = LogicalType::VARCHAR;
+	AddNamedParameter(tf, "minh", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "xn", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "dn", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "mindiv", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "mindiffs", LogicalType::INTEGER);
+	AddNamedParameter(tf, "abskew", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "sample_id", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "id_col", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "sequence_col", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "count_col", LogicalType::VARCHAR);
 
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 

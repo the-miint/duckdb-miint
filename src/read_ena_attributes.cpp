@@ -320,7 +320,7 @@ bool ReadENAAttributesTableFunction::GlobalState::FetchNextStructuredBatch(
 
 unique_ptr<FunctionData> ReadENAAttributesTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                               vector<LogicalType> &return_types,
-                                                              vector<std::string> &names) {
+                                                              vector<Identifier> &names) {
 	std::vector<std::string> accessions;
 	if (input.inputs[0].IsNull()) {
 		throw InvalidInputException("read_ena_attributes: accession cannot be NULL");

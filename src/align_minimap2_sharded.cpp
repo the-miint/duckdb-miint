@@ -6,6 +6,7 @@
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -49,7 +50,7 @@ static std::vector<ShardInfo> BuildMinimap2ShardInfos(ClientContext &context, co
 
 unique_ptr<FunctionData> AlignMinimap2ShardedTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                                  vector<LogicalType> &return_types,
-                                                                 vector<std::string> &names) {
+                                                                 vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 
 	// Required: query_table (first positional parameter)
@@ -613,16 +614,16 @@ TableFunction AlignMinimap2ShardedTableFunction::GetFunction() {
 	auto tf = TableFunction("align_minimap2_sharded", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal, InitLocal);
 
 	// Named parameters
-	tf.named_parameters["shard_directory"] = LogicalType::VARCHAR;
-	tf.named_parameters["read_to_shard"] = LogicalType::VARCHAR;
-	tf.named_parameters["preset"] = LogicalType::VARCHAR;
-	tf.named_parameters["max_secondary"] = LogicalType::INTEGER;
-	tf.named_parameters["eqx"] = LogicalType::BOOLEAN;
-	tf.named_parameters["max_threads_per_shard"] = LogicalType::INTEGER;
-	tf.named_parameters["debug"] = LogicalType::BOOLEAN;
-	tf.named_parameters["progress"] = LogicalType::BOOLEAN;
-	tf.named_parameters["min_chain_coverage"] = LogicalType::FLOAT;
-	tf.named_parameters["include_shard_name"] = LogicalType::BOOLEAN;
+	AddNamedParameter(tf, "shard_directory", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "read_to_shard", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "preset", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "max_secondary", LogicalType::INTEGER);
+	AddNamedParameter(tf, "eqx", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "max_threads_per_shard", LogicalType::INTEGER);
+	AddNamedParameter(tf, "debug", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "progress", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "min_chain_coverage", LogicalType::FLOAT);
+	AddNamedParameter(tf, "include_shard_name", LogicalType::BOOLEAN);
 	// occ_filter is per-index, so it applies cleanly to each shard independently (#187).
 	//
 	// include_unmapped is deliberately NOT offered here (#185). A query that finds no chain in
@@ -632,7 +633,7 @@ TableFunction AlignMinimap2ShardedTableFunction::GetFunction() {
 	// mapped in no shard at all, which is a global aggregation this per-shard pipeline has no
 	// place to hang. Leaving it unregistered makes DuckDB reject the parameter outright rather
 	// than silently returning wrong rows.
-	tf.named_parameters["occ_filter"] = LogicalType::ANY;
+	AddNamedParameter(tf, "occ_filter", LogicalType::ANY);
 
 	tf.table_scan_progress = Progress;
 

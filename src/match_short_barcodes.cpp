@@ -18,6 +18,7 @@
 #include <cstring>
 #include <string>
 #include <vector>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -188,7 +189,7 @@ static void ValidateTableExists(ClientContext &context, const std::string &table
 // Bind
 // ---------------------------------------------------------------------------
 static unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input,
-                                     vector<LogicalType> &return_types, vector<std::string> &names) {
+                                     vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<MatchData>();
 	data->query_table = input.inputs[0].GetValue<std::string>();
 	data->ref_table = input.inputs[1].GetValue<std::string>();
@@ -320,8 +321,8 @@ static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChun
 // ---------------------------------------------------------------------------
 void MatchShortBarcodesTableFunction::Register(ExtensionLoader &loader) {
 	TableFunction tf("match_short_barcodes", {LogicalType::VARCHAR, LogicalType::VARCHAR}, Execute, Bind, InitGlobal);
-	tf.named_parameters["max_nm"] = LogicalType::INTEGER;
-	tf.named_parameters["report_all"] = LogicalType::BOOLEAN;
+	AddNamedParameter(tf, "max_nm", LogicalType::INTEGER);
+	AddNamedParameter(tf, "report_all", LogicalType::BOOLEAN);
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(tf);
 }

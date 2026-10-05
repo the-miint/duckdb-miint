@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <utility>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -180,7 +181,8 @@ idx_t AutoWindowFeatures(Connection &conn, const std::string &table_quoted, cons
 // Bind
 // ============================================================================
 unique_ptr<FunctionData> RypeIndexCreateTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                            vector<LogicalType> &return_types, vector<string> &names) {
+                                                            vector<LogicalType> &return_types,
+                                                            vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 
 	// Required positional parameters: chunk_table, output_path
@@ -411,13 +413,13 @@ TableFunction RypeIndexCreateTableFunction::GetFunction() {
 	TableFunction tf("rype_index_create", {LogicalType::VARCHAR, LogicalType::VARCHAR}, Execute, Bind, InitGlobal,
 	                 InitLocal);
 
-	tf.named_parameters["mapping_table"] = LogicalType::VARCHAR;
-	tf.named_parameters["k"] = LogicalType::INTEGER;
-	tf.named_parameters["w"] = LogicalType::INTEGER;
-	tf.named_parameters["salt"] = LogicalType::UBIGINT;
-	tf.named_parameters["orient"] = LogicalType::BOOLEAN;
-	tf.named_parameters["max_memory"] = LogicalType::BIGINT;
-	tf.named_parameters["feed_window_features"] = LogicalType::BIGINT;
+	AddNamedParameter(tf, "mapping_table", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "k", LogicalType::INTEGER);
+	AddNamedParameter(tf, "w", LogicalType::INTEGER);
+	AddNamedParameter(tf, "salt", LogicalType::UBIGINT);
+	AddNamedParameter(tf, "orient", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "max_memory", LogicalType::BIGINT);
+	AddNamedParameter(tf, "feed_window_features", LogicalType::BIGINT);
 
 	return tf;
 }

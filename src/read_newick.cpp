@@ -10,6 +10,7 @@
 #include <zlib.h>
 #include <memory>
 #include <sstream>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -145,7 +146,7 @@ std::vector<ReadNewickTableFunction::NodeRow> ReadNewickTableFunction::TreeToRow
 }
 
 unique_ptr<FunctionData> ReadNewickTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                       vector<LogicalType> &return_types, vector<std::string> &names) {
+                                                       vector<LogicalType> &return_types, vector<Identifier> &names) {
 	FileSystem &fs = FileSystem::GetFileSystem(context);
 
 	std::vector<std::string> file_paths;
@@ -328,7 +329,7 @@ void ReadNewickTableFunction::Execute(ClientContext &context, TableFunctionInput
 
 TableFunction ReadNewickTableFunction::GetFunction() {
 	auto tf = TableFunction("read_newick", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
-	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
+	AddNamedParameter(tf, "include_filepath", LogicalType::BOOLEAN);
 	return tf;
 }
 

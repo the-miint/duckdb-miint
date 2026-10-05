@@ -58,7 +58,7 @@ struct AbsQuantOrfCopiesGlobalState : public GlobalTableFunctionState {
 };
 
 unique_ptr<FunctionData> AbsQuantOrfCopiesBind(ClientContext &context, TableFunctionBindInput &input,
-                                               vector<LogicalType> &return_types, vector<string> &names) {
+                                               vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<AbsQuantOrfCopiesBindData>();
 	for (idx_t i = 0; i < 3; ++i) {
 		if (input.inputs[i].IsNull()) {

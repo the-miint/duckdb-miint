@@ -155,7 +155,8 @@ struct SAMCopyBindData : public FunctionData {
 // Bind
 //===--------------------------------------------------------------------===//
 static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, CopyFunctionBindInput &input,
-                                                    const vector<string> &names, const vector<LogicalType> &sql_types,
+                                                    const vector<Identifier> &names,
+                                                    const vector<LogicalType> &sql_types,
                                                     SAMOutputFormat default_format) {
 	auto result = make_uniq<SAMCopyBindData>();
 	result->file_path = input.info.file_path;
@@ -328,13 +329,13 @@ static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, Copy
 
 // Bind function for SAM format
 static unique_ptr<FunctionData> SAMCopyBind(ClientContext &context, CopyFunctionBindInput &input,
-                                            const vector<string> &names, const vector<LogicalType> &sql_types) {
+                                            const vector<Identifier> &names, const vector<LogicalType> &sql_types) {
 	return SAMCopyBindInternal(context, input, names, sql_types, SAMOutputFormat::SAM);
 }
 
 // Bind function for BAM format
 static unique_ptr<FunctionData> BAMCopyBind(ClientContext &context, CopyFunctionBindInput &input,
-                                            const vector<string> &names, const vector<LogicalType> &sql_types) {
+                                            const vector<Identifier> &names, const vector<LogicalType> &sql_types) {
 	return SAMCopyBindInternal(context, input, names, sql_types, SAMOutputFormat::BAM);
 }
 

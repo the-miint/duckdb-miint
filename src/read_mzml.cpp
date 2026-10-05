@@ -5,12 +5,13 @@
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include <read_mzml.hpp>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
 unique_ptr<FunctionData> ReadMzMLTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                      vector<duckdb::LogicalType> &return_types,
-                                                     vector<std::string> &names) {
+                                                     vector<Identifier> &names) {
 	FileSystem &fs = FileSystem::GetFileSystem(context);
 
 	std::vector<std::string> file_paths;
@@ -118,7 +119,7 @@ void ReadMzMLTableFunction::Execute(ClientContext &context, TableFunctionInput &
 
 TableFunction ReadMzMLTableFunction::GetFunction() {
 	auto tf = TableFunction("read_mzml", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
-	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
+	AddNamedParameter(tf, "include_filepath", LogicalType::BOOLEAN);
 	return tf;
 }
 

@@ -42,7 +42,7 @@ struct ClusterUpgmaGlobalState : public GlobalTableFunctionState {
 };
 
 unique_ptr<FunctionData> ClusterUpgmaBind(ClientContext &, TableFunctionBindInput &input,
-                                          vector<LogicalType> &return_types, vector<string> &names) {
+                                          vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<ClusterUpgmaBindData>();
 	data->table_name = input.inputs[0].GetValue<string>();
 	RejectCTERelationName(input, data->table_name);

@@ -8,6 +8,7 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -25,7 +26,7 @@ static std::vector<LogicalType> GetBlastOutputTypes(const LogicalType &query_id_
 }
 
 unique_ptr<FunctionData> BlastSearchTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                        vector<LogicalType> &return_types, vector<std::string> &names) {
+                                                        vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 
 	if (input.inputs[0].IsNull()) {
@@ -197,12 +198,12 @@ void BlastSearchTableFunction::Execute(ClientContext &context, TableFunctionInpu
 
 TableFunction BlastSearchTableFunction::GetFunction() {
 	auto tf = TableFunction("blast", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal, InitLocal);
-	tf.named_parameters["program"] = LogicalType::VARCHAR;
-	tf.named_parameters["database"] = LogicalType::VARCHAR;
-	tf.named_parameters["evalue"] = LogicalType::DOUBLE;
-	tf.named_parameters["max_targets"] = LogicalType::INTEGER;
-	tf.named_parameters["megablast"] = LogicalType::BOOLEAN;
-	tf.named_parameters["api_key"] = LogicalType::VARCHAR;
+	AddNamedParameter(tf, "program", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "database", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "evalue", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "max_targets", LogicalType::INTEGER);
+	AddNamedParameter(tf, "megablast", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "api_key", LogicalType::VARCHAR);
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return tf;
 }

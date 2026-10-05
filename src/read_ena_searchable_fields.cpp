@@ -22,7 +22,7 @@ ReadENASearchableFieldsTableFunction::GlobalState::GlobalState(DatabaseInstance 
 unique_ptr<FunctionData> ReadENASearchableFieldsTableFunction::Bind(ClientContext &context,
                                                                     TableFunctionBindInput &input,
                                                                     vector<LogicalType> &return_types,
-                                                                    vector<std::string> &names) {
+                                                                    vector<Identifier> &names) {
 	if (input.inputs.empty() || input.inputs[0].IsNull()) {
 		throw InvalidInputException(
 		    "ena_searchable_fields: result_type is required (e.g., 'sample', 'read_run', 'study', 'experiment')");

@@ -176,7 +176,7 @@ static void ParseTags(const Value &tags, const vector<string> &names, vector<UBA
 // Bind
 //===--------------------------------------------------------------------===//
 static unique_ptr<FunctionData> UBAMCopyBind(ClientContext &context, CopyFunctionBindInput &input,
-                                             const vector<string> &names, const vector<LogicalType> &sql_types) {
+                                             const vector<Identifier> &names, const vector<LogicalType> &sql_types) {
 	auto result = make_uniq<UBAMCopyBindData>();
 	result->file_path = input.info.file_path;
 	result->names = names;

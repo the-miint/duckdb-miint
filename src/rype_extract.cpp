@@ -7,6 +7,7 @@
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -244,7 +245,7 @@ static void ExecuteExtraction(RypeExtractGlobalState &gstate, RypeExtractLocalSt
 unique_ptr<FunctionData> RypeExtractMinimizerSetTableFunction::Bind(ClientContext &context,
                                                                     TableFunctionBindInput &input,
                                                                     vector<LogicalType> &return_types,
-                                                                    vector<string> &names) {
+                                                                    vector<Identifier> &names) {
 	auto data = BindExtraction(context, input, "rype_extract_minimizer_set");
 
 	data->names = {"read_id", "fwd_set", "rc_set"};
@@ -306,8 +307,8 @@ void RypeExtractMinimizerSetTableFunction::Execute(ClientContext &context, Table
 TableFunction RypeExtractMinimizerSetTableFunction::GetFunction() {
 	TableFunction tf("rype_extract_minimizer_set", {LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT},
 	                 Execute, Bind, InitGlobal, InitLocal);
-	tf.named_parameters["salt"] = LogicalType::UBIGINT;
-	tf.named_parameters["id_column"] = LogicalType::VARCHAR;
+	AddNamedParameter(tf, "salt", LogicalType::UBIGINT);
+	AddNamedParameter(tf, "id_column", LogicalType::VARCHAR);
 	AddRypeSharedNamedParameters(tf);
 	return tf;
 }
@@ -322,7 +323,7 @@ void RypeExtractMinimizerSetTableFunction::Register(ExtensionLoader &loader) {
 unique_ptr<FunctionData> RypeExtractStrandMinimizersTableFunction::Bind(ClientContext &context,
                                                                         TableFunctionBindInput &input,
                                                                         vector<LogicalType> &return_types,
-                                                                        vector<string> &names) {
+                                                                        vector<Identifier> &names) {
 	auto data = BindExtraction(context, input, "rype_extract_strand_minimizers");
 
 	data->names = {"read_id", "fwd_hashes", "fwd_positions", "rc_hashes", "rc_positions"};
@@ -385,8 +386,8 @@ void RypeExtractStrandMinimizersTableFunction::Execute(ClientContext &context, T
 TableFunction RypeExtractStrandMinimizersTableFunction::GetFunction() {
 	TableFunction tf("rype_extract_strand_minimizers", {LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT},
 	                 Execute, Bind, InitGlobal, InitLocal);
-	tf.named_parameters["salt"] = LogicalType::UBIGINT;
-	tf.named_parameters["id_column"] = LogicalType::VARCHAR;
+	AddNamedParameter(tf, "salt", LogicalType::UBIGINT);
+	AddNamedParameter(tf, "id_column", LogicalType::VARCHAR);
 	AddRypeSharedNamedParameters(tf);
 	return tf;
 }

@@ -1,3 +1,4 @@
+#include "miint_named_parameter.hpp"
 // =============================================================================
 // sylph_profile() — DuckDB table function for FracMinHash relative-abundance
 // profiling of shotgun metagenomic reads.
@@ -98,8 +99,7 @@ SylphProfileTableFunction::LocalState::~LocalState() {
 // Bind
 // =============================================================================
 unique_ptr<FunctionData> SylphProfileTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                         vector<LogicalType> &return_types,
-                                                         vector<std::string> &names) {
+                                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 	data->source_table = input.inputs[0].GetValue<std::string>();
 	RejectCTERelationName(input, data->source_table);
@@ -505,16 +505,16 @@ TableFunction SylphProfileTableFunction::GetFunction() {
 	auto tf = TableFunction("sylph_profile", {LogicalType::VARCHAR, LogicalType::VARCHAR}, Execute, Bind, InitGlobal,
 	                        InitLocal);
 
-	tf.named_parameters["sample_id"] = LogicalType::VARCHAR;
-	tf.named_parameters["min_ani"] = LogicalType::DOUBLE;
-	tf.named_parameters["min_number_kmers"] = LogicalType::UINTEGER;
-	tf.named_parameters["min_count_correct"] = LogicalType::DOUBLE;
-	tf.named_parameters["min_contain"] = LogicalType::UINTEGER;
-	tf.named_parameters["screen_ani"] = LogicalType::DOUBLE;
-	tf.named_parameters["estimate_unknown"] = LogicalType::BOOLEAN;
-	tf.named_parameters["dedup_paired_reads"] = LogicalType::BOOLEAN;
-	tf.named_parameters["dedup_fpr"] = LogicalType::DOUBLE;
-	tf.named_parameters["threads"] = LogicalType::UINTEGER;
+	AddNamedParameter(tf, "sample_id", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "min_ani", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "min_number_kmers", LogicalType::UINTEGER);
+	AddNamedParameter(tf, "min_count_correct", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "min_contain", LogicalType::UINTEGER);
+	AddNamedParameter(tf, "screen_ani", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "estimate_unknown", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "dedup_paired_reads", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "dedup_fpr", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "threads", LogicalType::UINTEGER);
 
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return tf;

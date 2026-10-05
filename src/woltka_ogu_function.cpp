@@ -6,6 +6,7 @@
 #include "catalog_utils.hpp"
 #include "id_column_utils.hpp"
 #include "per_sample_table_function.hpp"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -114,7 +115,7 @@ static unique_ptr<MaterializedQueryResult> RunSampleAggregation(Connection &conn
 }
 
 static unique_ptr<FunctionData> WoltkaOguBind(ClientContext &context, TableFunctionBindInput &input,
-                                              vector<LogicalType> &return_types, vector<string> &names) {
+                                              vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<WoltkaOguData>();
 	data->source = input.inputs[0].GetValue<string>();
 	RejectCTERelationName(input, data->source);
@@ -257,7 +258,7 @@ static void WoltkaOguExecute(ClientContext &context, TableFunctionInput &input, 
 void WoltkaOguFunction::Register(ExtensionLoader &loader) {
 	TableFunction fn("woltka_ogu", {LogicalType::VARCHAR, LogicalType::VARCHAR}, WoltkaOguExecute, WoltkaOguBind,
 	                 WoltkaOguInitGlobal, WoltkaOguInitLocal);
-	fn.named_parameters["sample_id"] = LogicalType::VARCHAR;
+	AddNamedParameter(fn, "sample_id", LogicalType::VARCHAR);
 	fn.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(fn);
 }

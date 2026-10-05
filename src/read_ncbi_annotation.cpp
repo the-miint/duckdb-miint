@@ -7,6 +7,7 @@
 #include "duckdb/common/vector/map_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
 #include <sstream>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -66,7 +67,7 @@ bool ReadNCBIAnnotationTableFunction::GlobalState::FetchNextAccession() {
 
 unique_ptr<FunctionData> ReadNCBIAnnotationTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                                vector<LogicalType> &return_types,
-                                                               vector<std::string> &names) {
+                                                               vector<Identifier> &names) {
 	// Parse accession(s) - can be VARCHAR or VARCHAR[]
 	std::vector<std::string> accessions;
 
@@ -258,8 +259,8 @@ void ReadNCBIAnnotationTableFunction::Execute(ClientContext &context, TableFunct
 
 TableFunction ReadNCBIAnnotationTableFunction::GetFunction() {
 	auto tf = TableFunction("read_ncbi_annotation", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
-	tf.named_parameters["api_key"] = LogicalType::VARCHAR;
-	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
+	AddNamedParameter(tf, "api_key", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "include_filepath", LogicalType::BOOLEAN);
 	return tf;
 }
 

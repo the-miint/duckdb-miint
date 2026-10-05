@@ -9,6 +9,7 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
 #include "per_sample_table_function.hpp"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -144,7 +145,7 @@ static void ExtractSchema(MaterializedQueryResult &result, vector<LogicalType> &
 }
 
 static unique_ptr<FunctionData> MassQLBind(ClientContext &context, TableFunctionBindInput &input,
-                                           vector<LogicalType> &return_types, vector<string> &names) {
+                                           vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<MassQLData>();
 
 	auto query_str = input.inputs[0].GetValue<string>();
@@ -313,7 +314,7 @@ void MassQLFunction::Register(ExtensionLoader &loader) {
 	// order_preservation_type=NO_ORDER: parallel samples produce non-deterministic interleaving.
 	TableFunction massql_func("massql", {LogicalType::VARCHAR, LogicalType::VARCHAR}, MassQLExecute, MassQLBind,
 	                          MassQLInitGlobal, MassQLInitLocal);
-	massql_func.named_parameters["sample_id"] = LogicalType::VARCHAR;
+	AddNamedParameter(massql_func, "sample_id", LogicalType::VARCHAR);
 	massql_func.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(massql_func);
 

@@ -11,6 +11,7 @@
 #include "duckdb/common/vector/flat_vector.hpp"
 
 #include <algorithm>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -103,7 +104,7 @@ static idx_t OutputSearchResults(DataChunk &output, const std::vector<miint::Sea
 
 unique_ptr<FunctionData> SearchSequencesTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                             vector<LogicalType> &return_types,
-                                                            vector<std::string> &names) {
+                                                            vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 
 	data->query_table = input.inputs[0].GetValue<std::string>();
@@ -213,11 +214,11 @@ void SearchSequencesTableFunction::Execute(ClientContext &context, TableFunction
 TableFunction SearchSequencesTableFunction::GetFunction() {
 	auto tf = TableFunction("search_sequences_vsearch", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal);
 
-	tf.named_parameters["db"] = LogicalType::VARCHAR;
-	tf.named_parameters["id"] = LogicalType::DOUBLE;
-	tf.named_parameters["maxaccepts"] = LogicalType::INTEGER;
-	tf.named_parameters["maxrejects"] = LogicalType::INTEGER;
-	tf.named_parameters["threads"] = LogicalType::INTEGER;
+	AddNamedParameter(tf, "db", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "id", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "maxaccepts", LogicalType::INTEGER);
+	AddNamedParameter(tf, "maxrejects", LogicalType::INTEGER);
+	AddNamedParameter(tf, "threads", LogicalType::INTEGER);
 
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 

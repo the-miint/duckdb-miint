@@ -10,6 +10,7 @@
 #include "duckdb/common/vector/string_vector.hpp"
 
 #include <algorithm>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -83,7 +84,7 @@ static idx_t OutputClusterResults(DataChunk &output, const std::vector<miint::Cl
 
 unique_ptr<FunctionData> ClusterSequencesTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                              vector<LogicalType> &return_types,
-                                                             vector<std::string> &names) {
+                                                             vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 
 	data->input_table = input.inputs[0].GetValue<std::string>();
@@ -184,9 +185,9 @@ void ClusterSequencesTableFunction::Execute(ClientContext &context, TableFunctio
 TableFunction ClusterSequencesTableFunction::GetFunction() {
 	auto tf = TableFunction("cluster_sequences_vsearch", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal);
 
-	tf.named_parameters["id"] = LogicalType::DOUBLE;
-	tf.named_parameters["strand"] = LogicalType::VARCHAR;
-	tf.named_parameters["threads"] = LogicalType::INTEGER;
+	AddNamedParameter(tf, "id", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "strand", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "threads", LogicalType::INTEGER);
 
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 

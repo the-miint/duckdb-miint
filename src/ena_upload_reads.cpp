@@ -45,6 +45,7 @@
 #include <unistd.h> // unlink, rmdir for temp-staging cleanup (available on MinGW)
 #include <vector>
 #include <zlib.h>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -755,7 +756,7 @@ void ResolveUploadCredentials(ClientContext &context, const string &transport_la
 // =====================================================================
 
 unique_ptr<FunctionData> Bind(ClientContext &, TableFunctionBindInput &input, vector<LogicalType> &return_types,
-                              vector<string> &names) {
+                              vector<Identifier> &names) {
 	auto bind = make_uniq<ENAUploadReadsBindData>();
 
 	auto get_string_param = [&](const char *key, string &out, bool required) {
@@ -886,12 +887,12 @@ void Execute(ClientContext &, TableFunctionInput &data_p, DataChunk &output) {
 
 TableFunction ENAUploadReadsTableFunction::GetFunction() {
 	TableFunction tf("ena_upload_reads", {}, Execute, Bind, InitGlobal);
-	tf.named_parameters["relation"] = LogicalType::VARCHAR;
-	tf.named_parameters["secret"] = LogicalType::VARCHAR;
-	tf.named_parameters["target_url"] = LogicalType::VARCHAR;
-	tf.named_parameters["qual_offset"] = LogicalType::BIGINT;
-	tf.named_parameters["layout"] = LogicalType::VARCHAR;
-	tf.named_parameters["aspera_rate_limit_mbps"] = LogicalType::BIGINT;
+	AddNamedParameter(tf, "relation", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "secret", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "target_url", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "qual_offset", LogicalType::BIGINT);
+	AddNamedParameter(tf, "layout", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "aspera_rate_limit_mbps", LogicalType::BIGINT);
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return tf;
 }

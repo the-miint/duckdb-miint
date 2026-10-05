@@ -12,6 +12,7 @@
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
 #include <unordered_set>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -134,7 +135,7 @@ static void ValidateAndAlignInto(const std::string &sample_literal, LoadedSingle
 }
 
 static unique_ptr<FunctionData> AlignMafftBind(ClientContext &context, TableFunctionBindInput &input,
-                                               vector<LogicalType> &return_types, vector<string> &names) {
+                                               vector<LogicalType> &return_types, vector<Identifier> &names) {
 	if (input.inputs.empty() || input.inputs[0].IsNull()) {
 		throw BinderException("align_mafft requires a sequence table name argument");
 	}
@@ -294,7 +295,7 @@ static void AlignMafftExecute(ClientContext & /*context*/, TableFunctionInput &d
 TableFunction AlignMafftTableFunction::GetFunction() {
 	auto tf = TableFunction("align_mafft", {LogicalType::VARCHAR}, AlignMafftExecute, AlignMafftBind,
 	                        AlignMafftInitGlobal, AlignMafftInitLocal);
-	tf.named_parameters["sample_id"] = LogicalType::VARCHAR;
+	AddNamedParameter(tf, "sample_id", LogicalType::VARCHAR);
 	// Match sibling aligners — allow downstream CTAS pipelines to parallelize.
 	// Callers that want deterministic order should ORDER BY (sample_id,) sequence_index.
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;

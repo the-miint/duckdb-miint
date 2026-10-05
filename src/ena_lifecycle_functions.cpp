@@ -23,6 +23,7 @@
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
+#include "miint_named_parameter.hpp"
 
 namespace miint {
 
@@ -66,7 +67,7 @@ struct LifecycleBindData : public TableFunctionData {
 // thunk (BindCancel/BindRelease/BindHold below) that calls BindLifecycle
 // with the right action+name.
 unique_ptr<FunctionData> BindLifecycle(ClientContext &, TableFunctionBindInput &input,
-                                       vector<LogicalType> &return_types, vector<string> &names, ENAAction action,
+                                       vector<LogicalType> &return_types, vector<Identifier> &names, ENAAction action,
                                        const char *fn_name) {
 	auto bd = make_uniq<LifecycleBindData>();
 	bd->action = action;
@@ -333,30 +334,30 @@ void ExecuteLifecycle(ClientContext &context, TableFunctionInput &data, DataChun
 }
 
 unique_ptr<FunctionData> BindCancel(ClientContext &ctx, TableFunctionBindInput &input, vector<LogicalType> &rt,
-                                    vector<string> &n) {
+                                    vector<Identifier> &n) {
 	return BindLifecycle(ctx, input, rt, n, ENAAction::CANCEL, "ena_cancel");
 }
 unique_ptr<FunctionData> BindRelease(ClientContext &ctx, TableFunctionBindInput &input, vector<LogicalType> &rt,
-                                     vector<string> &n) {
+                                     vector<Identifier> &n) {
 	return BindLifecycle(ctx, input, rt, n, ENAAction::RELEASE, "ena_release");
 }
 unique_ptr<FunctionData> BindHold(ClientContext &ctx, TableFunctionBindInput &input, vector<LogicalType> &rt,
-                                  vector<string> &n) {
+                                  vector<Identifier> &n) {
 	return BindLifecycle(ctx, input, rt, n, ENAAction::HOLD, "ena_hold");
 }
 
 void AddLifecycleNamedParameters(TableFunction &tf, bool include_until) {
-	tf.named_parameters["secret"] = LogicalType::VARCHAR;
-	tf.named_parameters["accession"] = LogicalType::VARCHAR;
+	AddNamedParameter(tf, "secret", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "accession", LogicalType::VARCHAR);
 	// L5: alias-based UX. `refname` is translated to accession at execute via
 	// the Webin Reports API; `kind` is required alongside (one of 'projects' /
 	// 'samples' / 'experiments' / 'runs'). Aliases are unique per-account-per-
 	// kind, so the kind disambiguates a reused alias.
-	tf.named_parameters["refname"] = LogicalType::VARCHAR;
-	tf.named_parameters["kind"] = LogicalType::VARCHAR;
-	tf.named_parameters["catalog"] = LogicalType::VARCHAR;
+	AddNamedParameter(tf, "refname", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "kind", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "catalog", LogicalType::VARCHAR);
 	if (include_until) {
-		tf.named_parameters["until"] = LogicalType::VARCHAR;
+		AddNamedParameter(tf, "until", LogicalType::VARCHAR);
 	}
 }
 

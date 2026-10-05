@@ -34,6 +34,7 @@
 #include <unistd.h>
 #include <unordered_set>
 #include <vector>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -241,7 +242,7 @@ void DetectQueryColumns(ClientContext &context, AlignBowtie2BindData &bd) {
 }
 
 unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &return_types,
-                              vector<std::string> &names) {
+                              vector<Identifier> &names) {
 	if (input.inputs.size() < 2) {
 		throw BinderException("align_bowtie2 requires query_table and subject_table parameters");
 	}
@@ -583,7 +584,7 @@ TableFunction AlignBowtie2TableFunction::GetFunction() {
 	auto tf = TableFunction("align_bowtie2", {LogicalType::VARCHAR, LogicalType::VARCHAR}, Execute, Bind, InitGlobal,
 	                        InitLocal);
 	bt2_daemon::RegisterBowtie2AlignNamedParameterTypes(tf);
-	tf.named_parameters["threads"] = LogicalType::INTEGER; // miint-side; maps to daemon nthreads
+	AddNamedParameter(tf, "threads", LogicalType::INTEGER); // miint-side; maps to daemon nthreads
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return tf;
 }

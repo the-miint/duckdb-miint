@@ -8,6 +8,7 @@
 
 #include <cstdlib>
 #include <unordered_set>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -129,7 +130,7 @@ bool ReadNCBILineageTableFunction::GlobalState::FetchNextBatch(ClientContext &co
 
 unique_ptr<FunctionData> ReadNCBILineageTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                             vector<LogicalType> &return_types,
-                                                            vector<std::string> &names) {
+                                                            vector<Identifier> &names) {
 	std::vector<std::string> taxids;
 
 	if (input.inputs[0].IsNull()) {
@@ -239,8 +240,8 @@ void ReadNCBILineageTableFunction::Execute(ClientContext &context, TableFunction
 
 TableFunction ReadNCBILineageTableFunction::GetFunction() {
 	auto tf = TableFunction("read_ncbi_lineage", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
-	tf.named_parameters["api_key"] = LogicalType::VARCHAR;
-	tf.named_parameters["batch_size"] = LogicalType::BIGINT;
+	AddNamedParameter(tf, "api_key", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "batch_size", LogicalType::BIGINT);
 	return tf;
 }
 

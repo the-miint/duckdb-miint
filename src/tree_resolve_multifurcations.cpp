@@ -13,7 +13,7 @@ TreeResolveMultifurcationsTableFunction::Data::Data(std::string tree_table) : tr
 unique_ptr<FunctionData> TreeResolveMultifurcationsTableFunction::Bind(ClientContext &context,
                                                                        TableFunctionBindInput &input,
                                                                        vector<LogicalType> &return_types,
-                                                                       vector<std::string> &names) {
+                                                                       vector<Identifier> &names) {
 	auto tree_table_name = input.inputs[0].ToString();
 	RejectCTERelationName(input, tree_table_name);
 

@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -57,7 +58,7 @@ struct AbsQuantFitGlobalState : public GlobalTableFunctionState {
 };
 
 unique_ptr<FunctionData> AbsQuantFitBind(ClientContext &context, TableFunctionBindInput &input,
-                                         vector<LogicalType> &return_types, vector<string> &names) {
+                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<AbsQuantFitBindData>();
 	for (idx_t i = 0; i < 4; ++i) {
 		if (input.inputs[i].IsNull()) {
@@ -228,7 +229,7 @@ void RegisterAbsQuant(ExtensionLoader &loader) {
 	TableFunction fit("absquant_fit_models",
 	                  {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::DOUBLE},
 	                  AbsQuantFitExecute, AbsQuantFitBind, AbsQuantFitInitGlobal);
-	fit.named_parameters["min_syndna_counts"] = LogicalType::BIGINT;
+	AddNamedParameter(fit, "min_syndna_counts", LogicalType::BIGINT);
 	fit.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(fit);
 }

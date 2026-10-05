@@ -174,7 +174,7 @@ static void ProcessAlignmentChunk(DataChunk &chunk, const std::unordered_map<std
 // Bind
 // ---------------------------------------------------------------------------
 static unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input,
-                                     vector<LogicalType> &return_types, vector<std::string> &names) {
+                                     vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<PileupBindData>();
 	data->alignments_table = input.inputs[0].GetValue<std::string>();
 	data->reference_table = input.inputs[1].GetValue<std::string>();

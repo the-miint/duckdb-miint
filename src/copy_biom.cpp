@@ -51,7 +51,7 @@ struct BiomCopyBindData : public FunctionData {
 // Bind
 //===--------------------------------------------------------------------===//
 static unique_ptr<FunctionData> BiomCopyBind(ClientContext &context, CopyFunctionBindInput &input,
-                                             const vector<string> &names, const vector<LogicalType> &sql_types) {
+                                             const vector<Identifier> &names, const vector<LogicalType> &sql_types) {
 	auto result = make_uniq<BiomCopyBindData>();
 	result->file_path = input.info.file_path;
 	result->names = names;

@@ -8,6 +8,7 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -58,7 +59,7 @@ RypeClassifyTableFunction::GlobalState::~GlobalState() {
 // Bind
 // ============================================================================
 unique_ptr<FunctionData> RypeClassifyTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                         vector<LogicalType> &return_types, vector<string> &names) {
+                                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 
 	// Required: index_path (first positional parameter)
@@ -368,9 +369,9 @@ TableFunction RypeClassifyTableFunction::GetFunction() {
 	                 InitLocal);
 
 	// Named parameters
-	tf.named_parameters["id_column"] = LogicalType::VARCHAR;
-	tf.named_parameters["threshold"] = LogicalType::DOUBLE;
-	tf.named_parameters["negative_index"] = LogicalType::VARCHAR;
+	AddNamedParameter(tf, "id_column", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "threshold", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "negative_index", LogicalType::VARCHAR);
 	AddRypeSharedNamedParameters(tf);
 
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;

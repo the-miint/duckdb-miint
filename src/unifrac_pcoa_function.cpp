@@ -45,6 +45,7 @@
 
 // scikit-bio-binaries — randomized PCoA on a libssu fp32 distance matrix.
 #include "ordination.h"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 namespace {
@@ -245,7 +246,7 @@ void ComputeOneIteration(const miint::unifrac::UnifracSupportBiomView &biom_view
 }
 
 unique_ptr<FunctionData> UnifracPcoaBind(ClientContext &context, TableFunctionBindInput &input,
-                                         vector<LogicalType> &return_types, vector<string> &names) {
+                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
 	const std::string table_name = input.inputs[0].GetValue<string>();
 	const std::string tree_name = input.inputs[1].GetValue<string>();
 	RejectCTERelationName(input, table_name);
@@ -513,7 +514,7 @@ void UnifracPcoaExecute(ClientContext &, TableFunctionInput &input, DataChunk &o
 // always 0 (kept for schema parity), and there is no subsampling (a distance
 // table is a fixed matrix).
 unique_ptr<FunctionData> PcoaFromDistancesBind(ClientContext &context, TableFunctionBindInput &input,
-                                               vector<LogicalType> &return_types, vector<string> &names) {
+                                               vector<LogicalType> &return_types, vector<Identifier> &names) {
 	const std::string table_name = input.inputs[0].GetValue<string>();
 	RejectCTERelationName(input, table_name);
 	if (table_name.empty()) {
@@ -1178,7 +1179,8 @@ miint::progressive::DistanceBlock QueryDistanceBlock(ClientContext &context, con
 }
 
 unique_ptr<FunctionData> ProgressivePcoaFromDistancesBind(ClientContext &context, TableFunctionBindInput &input,
-                                                          vector<LogicalType> &return_types, vector<string> &names) {
+                                                          vector<LogicalType> &return_types,
+                                                          vector<Identifier> &names) {
 	const std::string table_name = input.inputs[0].GetValue<string>();
 	RejectCTERelationName(input, table_name);
 	if (table_name.empty()) {
@@ -1933,7 +1935,7 @@ ComputeCommunityBlock(ClientContext &context, const std::string &qname, const st
 }
 
 unique_ptr<FunctionData> ProgressivePcoaFromUnifracBind(ClientContext &context, TableFunctionBindInput &input,
-                                                        vector<LogicalType> &return_types, vector<string> &names) {
+                                                        vector<LogicalType> &return_types, vector<Identifier> &names) {
 	const std::string table_name = input.inputs[0].GetValue<string>();
 	const std::string tree_name = input.inputs[1].GetValue<string>();
 	RejectCTERelationName(input, table_name);
@@ -2146,7 +2148,7 @@ unique_ptr<FunctionData> ProgressivePcoaFromUnifracBind(ClientContext &context, 
 // classification itself lives with the metric definitions
 // (IsPairwiseLocalCommunityMetric), where a future metric's author will meet it.
 unique_ptr<FunctionData> ProgressivePcoaFromFeaturesBind(ClientContext &context, TableFunctionBindInput &input,
-                                                         vector<LogicalType> &return_types, vector<string> &names) {
+                                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
 	const std::string table_name = input.inputs[0].GetValue<string>();
 	RejectCTERelationName(input, table_name);
 	const std::string metric = StringUtil::Lower(input.inputs[1].GetValue<string>());
@@ -2781,25 +2783,25 @@ void ProgressivePcoaExecute(ClientContext &context, TableFunctionInput &input, D
 void RegisterUnifracPcoa(ExtensionLoader &loader) {
 	TableFunction fn("unifrac_pcoa", {LogicalType::VARCHAR, LogicalType::VARCHAR}, UnifracPcoaExecute, UnifracPcoaBind,
 	                 UnifracPcoaInitGlobal);
-	fn.named_parameters["variant"] = LogicalType::VARCHAR;
-	fn.named_parameters["n_dims"] = LogicalType::INTEGER;
-	fn.named_parameters["variance_adjust"] = LogicalType::BOOLEAN;
-	fn.named_parameters["alpha"] = LogicalType::DOUBLE;
-	fn.named_parameters["bypass_tips"] = LogicalType::BOOLEAN;
-	fn.named_parameters["normalize_sample_counts"] = LogicalType::BOOLEAN;
-	fn.named_parameters["subsample_depth"] = LogicalType::INTEGER;
-	fn.named_parameters["subsample_with_replacement"] = LogicalType::BOOLEAN;
-	fn.named_parameters["n_subsamples"] = LogicalType::INTEGER;
-	fn.named_parameters["seed"] = LogicalType::INTEGER;
-	fn.named_parameters["threads"] = LogicalType::INTEGER;
+	AddNamedParameter(fn, "variant", LogicalType::VARCHAR);
+	AddNamedParameter(fn, "n_dims", LogicalType::INTEGER);
+	AddNamedParameter(fn, "variance_adjust", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "alpha", LogicalType::DOUBLE);
+	AddNamedParameter(fn, "bypass_tips", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "normalize_sample_counts", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "subsample_depth", LogicalType::INTEGER);
+	AddNamedParameter(fn, "subsample_with_replacement", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "n_subsamples", LogicalType::INTEGER);
+	AddNamedParameter(fn, "seed", LogicalType::INTEGER);
+	AddNamedParameter(fn, "threads", LogicalType::INTEGER);
 	loader.RegisterFunction(fn);
 }
 
 void RegisterPcoaFromDistances(ExtensionLoader &loader) {
 	TableFunction fn("pcoa", {LogicalType::VARCHAR}, UnifracPcoaExecute, PcoaFromDistancesBind, UnifracPcoaInitGlobal);
-	fn.named_parameters["n_dims"] = LogicalType::INTEGER;
-	fn.named_parameters["seed"] = LogicalType::INTEGER;
-	fn.named_parameters["threads"] = LogicalType::INTEGER;
+	AddNamedParameter(fn, "n_dims", LogicalType::INTEGER);
+	AddNamedParameter(fn, "seed", LogicalType::INTEGER);
+	AddNamedParameter(fn, "threads", LogicalType::INTEGER);
 	fn.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(fn);
 }
@@ -2807,44 +2809,44 @@ void RegisterPcoaFromDistances(ExtensionLoader &loader) {
 void RegisterProgressivePcoaFromDistances(ExtensionLoader &loader) {
 	TableFunction fn("progressive_pcoa_from_distances", {LogicalType::VARCHAR}, ProgressivePcoaExecute,
 	                 ProgressivePcoaFromDistancesBind, ProgressivePcoaInitGlobal);
-	fn.named_parameters["n_dims"] = LogicalType::INTEGER;
-	fn.named_parameters["n_anchors"] = LogicalType::INTEGER;
-	fn.named_parameters["batch_size"] = LogicalType::INTEGER;
-	fn.named_parameters["seed"] = LogicalType::INTEGER;
-	fn.named_parameters["threads"] = LogicalType::INTEGER;
-	fn.named_parameters["anchors"] = LogicalType::LIST(LogicalType::VARCHAR);
-	fn.named_parameters["global_rotation"] = LogicalType::BOOLEAN;
+	AddNamedParameter(fn, "n_dims", LogicalType::INTEGER);
+	AddNamedParameter(fn, "n_anchors", LogicalType::INTEGER);
+	AddNamedParameter(fn, "batch_size", LogicalType::INTEGER);
+	AddNamedParameter(fn, "seed", LogicalType::INTEGER);
+	AddNamedParameter(fn, "threads", LogicalType::INTEGER);
+	AddNamedParameter(fn, "anchors", LogicalType::LIST(LogicalType::VARCHAR));
+	AddNamedParameter(fn, "global_rotation", LogicalType::BOOLEAN);
 	loader.RegisterFunction(fn);
 }
 
 void RegisterProgressivePcoaFromFeatures(ExtensionLoader &loader) {
 	TableFunction fn("progressive_pcoa_from_features", {LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                 ProgressivePcoaExecute, ProgressivePcoaFromFeaturesBind, ProgressivePcoaInitGlobal);
-	fn.named_parameters["n_dims"] = LogicalType::INTEGER;
-	fn.named_parameters["n_anchors"] = LogicalType::INTEGER;
-	fn.named_parameters["batch_size"] = LogicalType::INTEGER;
-	fn.named_parameters["seed"] = LogicalType::INTEGER;
-	fn.named_parameters["threads"] = LogicalType::INTEGER;
-	fn.named_parameters["anchors"] = LogicalType::LIST(LogicalType::VARCHAR);
-	fn.named_parameters["global_rotation"] = LogicalType::BOOLEAN;
+	AddNamedParameter(fn, "n_dims", LogicalType::INTEGER);
+	AddNamedParameter(fn, "n_anchors", LogicalType::INTEGER);
+	AddNamedParameter(fn, "batch_size", LogicalType::INTEGER);
+	AddNamedParameter(fn, "seed", LogicalType::INTEGER);
+	AddNamedParameter(fn, "threads", LogicalType::INTEGER);
+	AddNamedParameter(fn, "anchors", LogicalType::LIST(LogicalType::VARCHAR));
+	AddNamedParameter(fn, "global_rotation", LogicalType::BOOLEAN);
 	loader.RegisterFunction(fn);
 }
 
 void RegisterProgressivePcoaFromUnifrac(ExtensionLoader &loader) {
 	TableFunction fn("progressive_pcoa_from_unifrac", {LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                 ProgressivePcoaExecute, ProgressivePcoaFromUnifracBind, ProgressivePcoaInitGlobal);
-	fn.named_parameters["variant"] = LogicalType::VARCHAR;
-	fn.named_parameters["n_dims"] = LogicalType::INTEGER;
-	fn.named_parameters["n_anchors"] = LogicalType::INTEGER;
-	fn.named_parameters["batch_size"] = LogicalType::INTEGER;
-	fn.named_parameters["seed"] = LogicalType::INTEGER;
-	fn.named_parameters["threads"] = LogicalType::INTEGER;
-	fn.named_parameters["variance_adjust"] = LogicalType::BOOLEAN;
-	fn.named_parameters["alpha"] = LogicalType::DOUBLE;
-	fn.named_parameters["bypass_tips"] = LogicalType::BOOLEAN;
-	fn.named_parameters["normalize_sample_counts"] = LogicalType::BOOLEAN;
-	fn.named_parameters["anchors"] = LogicalType::LIST(LogicalType::VARCHAR);
-	fn.named_parameters["global_rotation"] = LogicalType::BOOLEAN;
+	AddNamedParameter(fn, "variant", LogicalType::VARCHAR);
+	AddNamedParameter(fn, "n_dims", LogicalType::INTEGER);
+	AddNamedParameter(fn, "n_anchors", LogicalType::INTEGER);
+	AddNamedParameter(fn, "batch_size", LogicalType::INTEGER);
+	AddNamedParameter(fn, "seed", LogicalType::INTEGER);
+	AddNamedParameter(fn, "threads", LogicalType::INTEGER);
+	AddNamedParameter(fn, "variance_adjust", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "alpha", LogicalType::DOUBLE);
+	AddNamedParameter(fn, "bypass_tips", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "normalize_sample_counts", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "anchors", LogicalType::LIST(LogicalType::VARCHAR));
+	AddNamedParameter(fn, "global_rotation", LogicalType::BOOLEAN);
 	loader.RegisterFunction(fn);
 }
 

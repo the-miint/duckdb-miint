@@ -57,7 +57,7 @@ public:
 	struct LocalState : public LocalTableFunctionState {};
 
 	static unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input,
-	                                     vector<LogicalType> &return_types, vector<std::string> &names);
+	                                     vector<LogicalType> &return_types, vector<Identifier> &names);
 	static unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFunctionInitInput &input);
 	static unique_ptr<LocalTableFunctionState> InitLocal(ExecutionContext &context, TableFunctionInitInput &input,
 	                                                     GlobalTableFunctionState *global_state);
