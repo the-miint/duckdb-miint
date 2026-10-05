@@ -218,6 +218,10 @@ public:
 	// to physical. Routes the delete into the ENA lifecycle CANCEL path
 	// without ever materialising the LogicalGet child.
 	PhysicalOperator &PlanDelete(ClientContext &context, PhysicalPlanGenerator &planner, LogicalDelete &op) override;
+	// DuckDB v2.0 plans MERGE INTO / INSERT ... ON CONFLICT through PlanInsert/PlanDelete by default; ENA tables
+	// cannot be scanned to match rows, so keep v1.5's plan-time rejection, verbatim.
+	PhysicalOperator &PlanMergeInto(ClientContext &context, PhysicalPlanGenerator &planner, LogicalMergeInto &op,
+	                                PhysicalOperator &plan) override;
 	PhysicalOperator &PlanUpdate(ClientContext &context, PhysicalPlanGenerator &planner, LogicalUpdate &op,
 	                             PhysicalOperator &plan) override;
 
