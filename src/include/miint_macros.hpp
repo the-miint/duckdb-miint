@@ -2252,8 +2252,12 @@ public:
 		// The default catalog may be a database the user attached read-only, in
 		// which case a CREATE would abort extension load with an internal error.
 		// The system catalog is always writable and resolves across all catalogs.
+		//
+		// Parse with the built-in parser, as DuckDB does for its own default macros: built-in semantics (no
+		// connection settings, as before) and the process-wide compiled grammar, so the PEG grammar is compiled once
+		// rather than once per macro.
 		auto register_macro = [&](const std::string &sql, const char *name) {
-			Parser parser;
+			auto parser = Parser::GetBuiltinParser();
 			parser.ParseQuery(sql);
 			if (parser.statements.size() != 1 || parser.statements[0]->type != StatementType::CREATE_STATEMENT) {
 				throw InternalException("Failed to register macro '%s': expected a single CREATE statement", name);
