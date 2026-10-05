@@ -147,7 +147,7 @@ std::vector<miint::mmvec::ModelCell> ReadModelCells(ClientContext &context, cons
 	}
 
 	std::vector<miint::mmvec::ModelCell> cells;
-	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto &materialized = *result;
 	while (auto chunk = materialized.Fetch()) {
 		const idx_t n = chunk->size();
 		if (n == 0) {

@@ -216,7 +216,7 @@ static unique_ptr<GlobalTableFunctionState> DeblurInitGlobal(ClientContext &cont
 	}
 
 	std::vector<miint::DeblurSequence> sequences;
-	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto &materialized = *result;
 	while (auto chunk = materialized.Fetch()) {
 		for (idx_t i = 0; i < chunk->size(); i++) {
 			auto read_id_val = chunk->GetValue(0, i);
@@ -281,7 +281,7 @@ static std::vector<miint::DeblurResult> RunDeblurForSample(Connection &conn, con
 	}
 
 	std::vector<miint::DeblurSequence> sequences;
-	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto &materialized = *result;
 	while (auto chunk = materialized.Fetch()) {
 		for (idx_t i = 0; i < chunk->size(); i++) {
 			auto read_id_val = chunk->GetValue(0, i);

@@ -30,18 +30,18 @@ struct WoltkaOguData : public TableFunctionData {
 	PerSampleBindInfo sample_info;
 
 	// Non-sample path: pre-run at Bind; ownership moved to GlobalState at InitGlobal.
-	unique_ptr<MaterializedQueryResult> non_sample_result;
+	unique_ptr<QueryResult> non_sample_result;
 };
 
 struct WoltkaOguGlobalState : public PerSampleGlobalState {
 	// Non-sample path: pre-run result transferred from bind data at InitGlobal.
 	// Single thread drains it from Execute; no synchronization needed.
-	unique_ptr<MaterializedQueryResult> non_sample_result;
+	unique_ptr<QueryResult> non_sample_result;
 };
 
 struct WoltkaOguLocalState : public LocalTableFunctionState {
-	unique_ptr<Connection> conn;                // per-sample mode only
-	unique_ptr<MaterializedQueryResult> result; // current sample's result
+	unique_ptr<Connection> conn;    // per-sample mode only
+	unique_ptr<QueryResult> result; // current sample's result
 	// Keeps the fetched chunk alive while output.Reference() points into its
 	// buffers. Overwritten on the next Execute call, after the upstream
 	// operator has consumed the previous output (DuckDB pull-based guarantee).
@@ -70,8 +70,7 @@ static string BuildAggregationSql(const string &source, const string &seq_id_col
 	       "GROUP BY feature_id";
 }
 
-static unique_ptr<MaterializedQueryResult> RunGlobalAggregation(Connection &conn, const string &source,
-                                                                const string &seq_id_col) {
+static unique_ptr<QueryResult> RunGlobalAggregation(Connection &conn, const string &source, const string &seq_id_col) {
 	auto sql = BuildAggregationSql(source, seq_id_col);
 	auto result = conn.Query(sql);
 	if (result->HasError()) {
@@ -82,10 +81,9 @@ static unique_ptr<MaterializedQueryResult> RunGlobalAggregation(Connection &conn
 
 // Run the woltka_ogu pipeline for a single sample value. Creates a TEMP VIEW
 // scoped to `conn`. Each thread has its own Connection, so names don't collide.
-static unique_ptr<MaterializedQueryResult> RunSampleAggregation(Connection &conn, const string &source,
-                                                                const string &seq_id_col, const string &sample_col,
-                                                                const Value &sample_value,
-                                                                const LogicalType &sample_type) {
+static unique_ptr<QueryResult> RunSampleAggregation(Connection &conn, const string &source, const string &seq_id_col,
+                                                    const string &sample_col, const Value &sample_value,
+                                                    const LogicalType &sample_type) {
 	auto q_src = KeywordHelper::WriteOptionallyQuoted(source);
 	auto q_sample = KeywordHelper::WriteOptionallyQuoted(sample_col);
 	// ToSQLString handles all Value types (integers, timestamps, strings) safely.
@@ -157,9 +155,9 @@ static unique_ptr<FunctionData> WoltkaOguBind(ClientContext &context, TableFunct
 	// the probe's select list can't silently pick the wrong column's type.
 	LogicalType reference_type;
 	bool reference_found = false;
-	for (idx_t i = 0; i < probe->names.size(); i++) {
-		if (probe->names[i] == "reference") {
-			reference_type = probe->types[i];
+	for (idx_t i = 0; i < probe->GetNames().size(); i++) {
+		if (probe->GetNames()[i] == "reference") {
+			reference_type = probe->GetTypes()[i];
 			reference_found = true;
 			break;
 		}

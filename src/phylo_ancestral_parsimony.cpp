@@ -47,7 +47,7 @@ CostMatrix ReadCostMatrix(ClientContext &context, const std::string &table_name)
 
 	std::map<std::pair<std::string, std::string>, double> entries;
 	std::set<std::string> states;
-	auto &mat = res->Cast<MaterializedQueryResult>();
+	auto &mat = *res;
 	while (true) {
 		auto chunk = mat.Fetch();
 		if (!chunk || chunk->size() == 0) {

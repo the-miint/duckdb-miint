@@ -16,7 +16,7 @@
 
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
-#include "duckdb/main/materialized_query_result.hpp"
+#include "duckdb/main/query_result.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
@@ -870,7 +870,7 @@ LoadedSubjects LoadSingleEndSubjects(ClientContext &context, const std::string &
 	}
 
 	LoadedSubjects out;
-	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto &materialized = *result;
 	out.names.reserve(materialized.RowCount());
 	out.sequences.reserve(materialized.RowCount());
 	while (auto chunk = materialized.Fetch()) {

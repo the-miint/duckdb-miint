@@ -9,7 +9,7 @@
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
-#include "duckdb/main/materialized_query_result.hpp"
+#include "duckdb/main/query_result.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
 
@@ -132,7 +132,7 @@ static size_t LoadAndPack(ClientContext &context, const std::string &table_name,
 		                            result->GetError());
 	}
 
-	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto &materialized = *result;
 	size_t expected_len = 0;
 	bool first = true;
 	while (auto chunk = materialized.Fetch()) {

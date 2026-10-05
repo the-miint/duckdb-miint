@@ -22,7 +22,7 @@
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
-#include "duckdb/main/materialized_query_result.hpp"
+#include "duckdb/main/query_result.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
 
@@ -173,9 +173,10 @@ unique_ptr<FunctionData> SylphIndexCreateTableFunction::Bind(ClientContext &cont
 		// as read_id / the other tools (VARCHAR, BIGINT, or UUID). Its value is
 		// persisted as the genome's file_name; the decimal/canonical string form
 		// (what CAST/ToString produces) matches the id_column codec.
-		if (!IsAllowedIdType(probe->types[0])) {
+		if (!IsAllowedIdType(probe->GetTypes()[0])) {
 			throw BinderException("sylph_index_create: genome_id column '%s' must be %s (got %s)",
-			                      data->genome_id_col.c_str(), AllowedIdTypeList(), probe->types[0].ToString().c_str());
+			                      data->genome_id_col.c_str(), AllowedIdTypeList(),
+			                      probe->GetTypes()[0].ToString().c_str());
 		}
 		// Detect an optional `comment` column (present in read_fastx output). Its
 		// presence switches on full-header contig-name reconstruction below.
@@ -219,8 +220,10 @@ unique_ptr<GlobalTableFunctionState> SylphIndexCreateTableFunction::InitGlobal(C
 		if (res->HasError()) {
 			throw InvalidInputException("sylph_index_create: failed to enumerate genomes: %s", res->GetError());
 		}
-		for (idx_t r = 0; r < res->RowCount(); r++) {
-			auto v = res->GetValue(0, r);
+		// v2.0: Collection().GetValue rebuilds every row per call; build the rows once.
+		auto rows = res->Collection().GetRows();
+		for (idx_t r = 0; r < rows.size(); r++) {
+			auto v = rows.GetValue(0, r);
 			if (!v.IsNull()) {
 				ids.push_back(std::move(v));
 			}
@@ -295,11 +298,12 @@ unique_ptr<GlobalTableFunctionState> SylphIndexCreateTableFunction::InitGlobal(C
 						ThrowFFI("add_contig failed");
 					}
 				};
-				for (idx_t r = 0; r < res->RowCount(); r++) {
-					auto ordv = res->GetValue(0, r);
+				auto rows = res->Collection().GetRows();
+				for (idx_t r = 0; r < rows.size(); r++) {
+					auto ordv = rows.GetValue(0, r);
 					int64_t ord = ordv.IsNull() ? std::numeric_limits<int64_t>::max() : ordv.GetValue<int64_t>();
-					std::string nm = res->GetValue(1, r).ToString();
-					std::string seq = res->GetValue(2, r).ToString();
+					std::string nm = rows.GetValue(1, r).ToString();
+					std::string seq = rows.GetValue(2, r).ToString();
 					if (!have_contig || nm != cur_name) {
 						if (have_contig) {
 							flush();

@@ -87,8 +87,8 @@ WideMetadata ReadWideMetadata(ClientContext &context, const std::string &table_n
 		throw InvalidInputException("%s: failed to read metadata relation '%s': %s", caller_name, table_name,
 		                            probe->GetError());
 	}
-	auto &probe_mat = probe->Cast<MaterializedQueryResult>();
-	const auto &all_names = probe_mat.names;
+	auto &probe_mat = *probe;
+	const auto &all_names = probe_mat.GetNames();
 
 	idx_t sample_id_col = DConstants::INVALID_INDEX;
 	std::vector<std::string> non_sample_cols;
@@ -149,7 +149,7 @@ WideMetadata ReadWideMetadata(ClientContext &context, const std::string &table_n
 
 	WideMetadata out;
 	out.column_names = chosen_variables;
-	auto &mat = result->Cast<MaterializedQueryResult>();
+	auto &mat = *result;
 	while (auto chunk = mat.Fetch()) {
 		const idx_t n = chunk->size();
 		if (n == 0) {

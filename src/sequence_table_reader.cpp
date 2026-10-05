@@ -99,7 +99,7 @@ std::vector<miint::AlignmentSubject> ReadSubjectTable(ClientContext &context, co
 		}
 	}
 
-	auto &materialized = query_result->Cast<MaterializedQueryResult>();
+	auto &materialized = *query_result;
 	idx_t row_number = 0;
 
 	// Reusable buffers across chunks — populated by ExtractIdColumnAsStrings.
@@ -495,7 +495,7 @@ void ReadShardReadsFrom(ClientContext &context, const std::string &source_sql, c
 	output.clear();
 	output.is_paired = schema.has_sequence2;
 
-	auto &materialized = query_result->Cast<MaterializedQueryResult>();
+	auto &materialized = *query_result;
 	ProcessQueryResultChunks(materialized, schema, output);
 }
 
@@ -580,7 +580,7 @@ LoadedSingleEndSequences LoadSingleEndSequences(Connection &conn, const std::str
 	}
 
 	LoadedSingleEndSequences loaded;
-	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto &materialized = *result;
 	auto row_count = materialized.RowCount();
 	loaded.labels.reserve(row_count);
 	loaded.sequences.reserve(row_count);

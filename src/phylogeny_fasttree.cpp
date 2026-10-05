@@ -8,7 +8,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
-#include "duckdb/main/materialized_query_result.hpp"
+#include "duckdb/main/query_result.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
 #include "duckdb/common/vector/constant_vector.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
@@ -514,7 +514,7 @@ LoadedInput LoadInputTable(ClientContext &context, const std::string &table_name
 	}
 
 	LoadedInput out;
-	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto &materialized = *result;
 	out.names.reserve(materialized.RowCount());
 	out.sequences.reserve(materialized.RowCount());
 	while (auto chunk = materialized.Fetch()) {

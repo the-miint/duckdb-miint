@@ -59,8 +59,8 @@ static std::vector<std::pair<std::string, uint64_t>> ReadReferenceRows(ClientCon
 		                            query_result->GetError());
 	}
 
-	auto &materialized = query_result->Cast<MaterializedQueryResult>();
-	auto &result_types = materialized.types;
+	auto &materialized = *query_result;
+	auto &result_types = materialized.GetTypes();
 
 	// Get the length column type for proper extraction
 	auto &length_type = result_types[1];

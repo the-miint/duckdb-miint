@@ -26,11 +26,11 @@ namespace duckdb {
 static std::atomic<uint64_t> peak_pair_invocation_counter {0};
 
 struct MzmlPeakPairData : public TableFunctionData {
-	unique_ptr<MaterializedQueryResult> result;
+	unique_ptr<QueryResult> result;
 };
 
 struct MzmlPeakPairGlobalState : public GlobalTableFunctionState {
-	unique_ptr<MaterializedQueryResult> result;
+	unique_ptr<QueryResult> result;
 	idx_t MaxThreads() const override {
 		return 1;
 	}
@@ -40,10 +40,10 @@ struct MzmlPeakPairLocalState : public LocalTableFunctionState {
 	unique_ptr<DataChunk> current_chunk;
 };
 
-static void ExtractSchema(MaterializedQueryResult &result, vector<LogicalType> &return_types, vector<string> &names) {
+static void ExtractSchema(QueryResult &result, vector<LogicalType> &return_types, vector<string> &names) {
 	for (idx_t i = 0; i < result.ColumnCount(); i++) {
 		names.push_back(result.ColumnName(i));
-		return_types.push_back(result.types[i]);
+		return_types.push_back(result.GetTypes()[i]);
 	}
 }
 
@@ -143,7 +143,7 @@ static unique_ptr<FunctionData> PeakPairBind(ClientContext &context, TableFuncti
 		throw InvalidInputException("mzml_peak_pair: query failed: %s", query_result->GetError());
 	}
 
-	data->result = unique_ptr_cast<QueryResult, MaterializedQueryResult>(std::move(query_result));
+	data->result = std::move(query_result);
 	ExtractSchema(*data->result, return_types, names);
 
 	return data;

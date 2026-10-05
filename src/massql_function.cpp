@@ -19,14 +19,14 @@ namespace duckdb {
 
 struct MassQLData : public TableFunctionData {
 	// Non-sample_id: pre-run result at Bind time; ownership moved to GlobalState at InitGlobal.
-	unique_ptr<MaterializedQueryResult> non_sample_result;
+	unique_ptr<QueryResult> non_sample_result;
 
 	// Sample iteration state (sample_id path only)
 	bool has_sample_id = false;
 	PerSampleBindInfo sample_info;
 
 	// Sample_id: sample[0] pre-run for schema inference; moved to GlobalState at InitGlobal.
-	unique_ptr<MaterializedQueryResult> sample0_result;
+	unique_ptr<QueryResult> sample0_result;
 
 	// Deferred execution state (kept alive for per-sample pipeline in Execute)
 	miint::MassQLQuery parsed;
@@ -36,18 +36,18 @@ struct MassQLData : public TableFunctionData {
 struct MassQLGlobalState : public PerSampleGlobalState {
 	// Non-sample_id: pre-run result transferred from MassQLData at InitGlobal.
 	// Single thread drains it from Execute; no synchronization needed.
-	unique_ptr<MaterializedQueryResult> non_sample_result;
+	unique_ptr<QueryResult> non_sample_result;
 
 	// Sample_id: sample[0] pre-run result (schema probe); claimed by the first Execute thread.
 	// Each per-thread Connection owns its own TEMP objects (__massql_base, __massql_per_sample,
 	// __massql_ms1), so parallel threads never collide on those names despite the shared names.
-	unique_ptr<MaterializedQueryResult> sample0_result;
+	unique_ptr<QueryResult> sample0_result;
 	atomic<bool> sample0_claimed {false};
 };
 
 struct MassQLLocalState : public LocalTableFunctionState {
-	unique_ptr<Connection> conn;                // sample_id: per-thread isolated connection
-	unique_ptr<MaterializedQueryResult> result; // current sample's result
+	unique_ptr<Connection> conn;    // sample_id: per-thread isolated connection
+	unique_ptr<QueryResult> result; // current sample's result
 	// Keeps the fetched chunk alive while output.Reference() points into its buffers.
 	// Overwritten only on the next Execute call, after the upstream operator has consumed
 	// the previous output (DuckDB pull-based execution guarantee).
@@ -78,8 +78,7 @@ static string MaterializePeaks(Connection &conn, const miint::MassQLQuery &parse
 }
 
 // Materialize peaks, transpile, and execute. Returns the materialized result.
-static unique_ptr<MaterializedQueryResult> RunPipeline(Connection &conn, const miint::MassQLQuery &parsed,
-                                                       const string &source) {
+static unique_ptr<QueryResult> RunPipeline(Connection &conn, const miint::MassQLQuery &parsed, const string &source) {
 	auto ms1_table = MaterializePeaks(conn, parsed, source);
 
 	string exec_sql;
@@ -99,9 +98,9 @@ static unique_ptr<MaterializedQueryResult> RunPipeline(Connection &conn, const m
 // Run the MassQL pipeline for a single sample value. Returns the materialized result.
 // Each call creates its own TEMP objects (__massql_per_sample, __massql_base, __massql_ms1)
 // scoped to `conn`. Since each thread has its own Connection, parallel calls are safe.
-static unique_ptr<MaterializedQueryResult> RunSamplePipeline(Connection &conn, const miint::MassQLQuery &parsed,
-                                                             const string &effective_source,
-                                                             const string &sample_id_col, const Value &sample_value) {
+static unique_ptr<QueryResult> RunSamplePipeline(Connection &conn, const miint::MassQLQuery &parsed,
+                                                 const string &effective_source, const string &sample_id_col,
+                                                 const Value &sample_value) {
 	auto quoted_col = KeywordHelper::WriteOptionallyQuoted(sample_id_col);
 	auto quoted_source = KeywordHelper::WriteOptionallyQuoted(effective_source);
 
@@ -137,10 +136,10 @@ static unique_ptr<MaterializedQueryResult> RunSamplePipeline(Connection &conn, c
 	return result;
 }
 
-static void ExtractSchema(MaterializedQueryResult &result, vector<LogicalType> &return_types, vector<string> &names) {
+static void ExtractSchema(QueryResult &result, vector<LogicalType> &return_types, vector<string> &names) {
 	for (idx_t i = 0; i < result.ColumnCount(); i++) {
 		names.push_back(result.ColumnName(i));
-		return_types.push_back(result.types[i]);
+		return_types.push_back(result.GetTypes()[i]);
 	}
 }
 

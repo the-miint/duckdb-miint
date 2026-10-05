@@ -112,7 +112,7 @@ static void LoadDenovoSequences(Connection &conn, const std::string &table_name,
 		throw InvalidInputException("Failed to read table '%s': %s", table_name, result->GetError());
 	}
 
-	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto &materialized = *result;
 	while (auto chunk = materialized.Fetch()) {
 		for (idx_t i = 0; i < chunk->size(); i++) {
 			auto read_id_val = chunk->GetValue(0, i);

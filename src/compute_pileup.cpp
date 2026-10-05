@@ -10,7 +10,7 @@
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
-#include "duckdb/main/materialized_query_result.hpp"
+#include "duckdb/main/query_result.hpp"
 #include "duckdb/main/query_result.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
@@ -69,7 +69,7 @@ static void ValidateTableSchema(ClientContext &context, const std::string &table
 // Load reference table → ref_id → sequence map.
 //
 // NOTE: deviation from the plan, which suggested `string_view`. We use owning
-// `std::string` because the source `string_t` from MaterializedQueryResult is
+// `std::string` because the source `string_t` from QueryResult is
 // only valid for the lifetime of `result`, which is local to this function.
 // A string_view map would dangle as soon as LoadReference returned. For
 // human-scale references (chr1 = 250 MB) this doubles peak memory; for the
@@ -84,7 +84,7 @@ static std::unordered_map<std::string, std::string> LoadReference(ClientContext 
 		throw InvalidInputException("%s: failed to read reference table '%s': %s", FN_NAME, table_name,
 		                            result->GetError());
 	}
-	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto &materialized = *result;
 	while (auto chunk = materialized.Fetch()) {
 		UnifiedVectorFormat id_data, seq_data;
 		chunk->data[0].ToUnifiedFormat(chunk->size(), id_data);

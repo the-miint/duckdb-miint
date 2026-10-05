@@ -482,7 +482,7 @@ inline std::vector<ShardNameCount> ReadShardNameCounts(ClientContext &context, c
 	}
 
 	std::vector<ShardNameCount> shards;
-	auto &materialized = query_result->Cast<MaterializedQueryResult>();
+	auto &materialized = *query_result;
 
 	while (true) {
 		auto chunk = materialized.Fetch();

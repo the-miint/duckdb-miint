@@ -124,7 +124,7 @@ SequenceDataMap ReadSequenceDataTable(ClientContext &context, const std::string 
 		                            query_result->GetError());
 	}
 
-	auto &materialized = query_result->Cast<MaterializedQueryResult>();
+	auto &materialized = *query_result;
 	idx_t row_number = 0;
 
 	// Column indices in our SELECT — dynamic based on schema

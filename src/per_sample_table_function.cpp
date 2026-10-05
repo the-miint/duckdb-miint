@@ -33,7 +33,7 @@ void DiscoverSamples(Connection &conn, const string &source_relation, const stri
 	if (probe->HasError()) {
 		throw InvalidInputException("%s: sample_id column '%s' not found", fn_label, sample_id_col);
 	}
-	out.sample_id_type = probe->types[0];
+	out.sample_id_type = probe->GetTypes()[0];
 
 	// Single scan: DISTINCT with NULLs first so we can reject up-front.
 	auto distinct_result =
@@ -41,7 +41,7 @@ void DiscoverSamples(Connection &conn, const string &source_relation, const stri
 	if (distinct_result->HasError()) {
 		throw InvalidInputException("%s: failed to query sample_id values: %s", fn_label, distinct_result->GetError());
 	}
-	auto &materialized = distinct_result->Cast<MaterializedQueryResult>();
+	auto &materialized = *distinct_result;
 	while (auto chunk = materialized.Fetch()) {
 		for (idx_t i = 0; i < chunk->size(); i++) {
 			auto val = chunk->data[0].GetValue(i);

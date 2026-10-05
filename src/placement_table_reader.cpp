@@ -82,8 +82,8 @@ std::vector<miint::Placement> ReadPlacementTable(ClientContext &context, const s
 		                            query_result->GetError());
 	}
 
-	auto &materialized = query_result->Cast<MaterializedQueryResult>();
-	auto &result_types = materialized.types;
+	auto &materialized = *query_result;
+	auto &result_types = materialized.GetTypes();
 
 	// Get column types for proper data extraction
 	// Column order: fragment_id(0), edge_id(1), like_weight_ratio(2), distal_length(3), pendant_length(4)

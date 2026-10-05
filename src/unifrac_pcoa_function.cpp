@@ -995,14 +995,8 @@ private:
 	// counted and spillable instead: the same run under `memory_limit='2GB'`
 	// completes at 1.97 GB peak rather than dying.
 	static unique_ptr<QueryResult> RunWaveQuery(Connection &conn, const std::string &sql, const char *what) {
-		PendingQueryParameters params;
-		params.query_parameters.output_type = QueryResultOutputType::FORCE_MATERIALIZED;
-		params.query_parameters.memory_type = QueryResultMemoryType::BUFFER_MANAGED;
-		auto pending = conn.PendingQuery(sql, params);
-		if (pending->HasError()) {
-			throw InvalidInputException("progressive_pcoa_from_distances: %s failed: %s", what, pending->GetError());
-		}
-		auto res = pending->Execute();
+		// v2.0: Query() is blocking and fully materializes; the chunk format picks the buffer-managed collection.
+		auto res = conn.Query(sql, ChunkFormat::BufferManaged());
 		if (res->HasError()) {
 			throw InvalidInputException("progressive_pcoa_from_distances: %s failed: %s", what, res->GetError());
 		}
@@ -1140,7 +1134,7 @@ miint::progressive::DistanceBlock QueryDistanceBlock(ClientContext &context, con
 	// mirroring ReadDistanceTable. Self-rows are kept so BuildDenseDistanceMatrix
 	// can reject a nonzero self-distance.
 	std::vector<miint::unifrac::DistanceEntry> entries;
-	auto &mat = res->Cast<MaterializedQueryResult>();
+	auto &mat = *res;
 	while (auto chunk = mat.Fetch()) {
 		const idx_t rn = chunk->size();
 		if (rn == 0) {
@@ -1316,7 +1310,7 @@ struct FeatureTableIds {
 
 std::vector<std::string> CollectStringColumn(QueryResult &result) {
 	std::vector<std::string> out;
-	auto &mat = result.Cast<MaterializedQueryResult>();
+	auto &mat = result;
 	while (auto chunk = mat.Fetch()) {
 		const idx_t rn = chunk->size();
 		if (rn == 0) {
@@ -1455,7 +1449,7 @@ void WarnIfFeatureTableUnsorted(ClientContext &context, const char *caller, cons
 		                   caller, table_name, res->GetError());
 		return;
 	}
-	auto &mat = res->Cast<MaterializedQueryResult>();
+	auto &mat = *res;
 	auto chunk = mat.Fetch();
 	if (!chunk || chunk->size() == 0) {
 		return;
@@ -1496,7 +1490,7 @@ std::vector<miint::unifrac::CooRow> QueryFeatureRows(ClientContext &context, con
 		throw InvalidInputException("%s: feature slice query failed: %s", caller, res->GetError());
 	}
 	std::vector<miint::unifrac::CooRow> rows;
-	auto &mat = res->Cast<MaterializedQueryResult>();
+	auto &mat = *res;
 	while (auto chunk = mat.Fetch()) {
 		const idx_t rn = chunk->size();
 		if (rn == 0) {

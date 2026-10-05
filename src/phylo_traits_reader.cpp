@@ -40,7 +40,7 @@ std::map<std::string, std::unordered_map<std::string, double>> ReadContinuousTra
 		throw InvalidInputException("Failed to read from traits table '%s': %s", table_name, query_result->GetError());
 	}
 
-	auto &materialized = query_result->Cast<MaterializedQueryResult>();
+	auto &materialized = *query_result;
 	while (true) {
 		auto chunk = materialized.Fetch();
 		if (!chunk || chunk->size() == 0) {
@@ -104,7 +104,7 @@ std::map<std::string, std::unordered_map<std::string, std::string>> ReadDiscrete
 		throw InvalidInputException("Failed to read from traits table '%s': %s", table_name, query_result->GetError());
 	}
 
-	auto &materialized = query_result->Cast<MaterializedQueryResult>();
+	auto &materialized = *query_result;
 	while (true) {
 		auto chunk = materialized.Fetch();
 		if (!chunk || chunk->size() == 0) {

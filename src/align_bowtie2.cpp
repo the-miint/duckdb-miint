@@ -11,7 +11,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
-#include "duckdb/main/materialized_query_result.hpp"
+#include "duckdb/main/query_result.hpp"
 #include "duckdb/main/query_result.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
@@ -215,7 +215,7 @@ void DetectQueryColumns(ClientContext &context, AlignBowtie2BindData &bd) {
 		throw InvalidInputException("align_bowtie2: failed to introspect query table '%s': %s", bd.query_table,
 		                            result->GetError());
 	}
-	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto &materialized = *result;
 	while (auto chunk = materialized.Fetch()) {
 		for (idx_t i = 0; i < chunk->size(); ++i) {
 			const auto col = chunk->GetValue(0, i).ToString();

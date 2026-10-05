@@ -57,7 +57,7 @@ std::vector<miint::NodeInput> ReadTreeTable(ClientContext &context, const std::s
 		throw InvalidInputException("Failed to read from tree table '%s': %s", table_name, query_result->GetError());
 	}
 
-	auto &materialized = query_result->Cast<MaterializedQueryResult>();
+	auto &materialized = *query_result;
 
 	while (true) {
 		auto chunk = materialized.Fetch();

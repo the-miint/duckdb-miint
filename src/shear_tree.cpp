@@ -36,7 +36,7 @@ std::unordered_set<std::string> ReadTipNames(ClientContext &context, const std::
 		throw InvalidInputException("Failed to read from tips table '%s': %s", table_name, query_result->GetError());
 	}
 
-	auto &materialized = query_result->Cast<MaterializedQueryResult>();
+	auto &materialized = *query_result;
 	while (true) {
 		auto chunk = materialized.Fetch();
 		if (!chunk || chunk->size() == 0) {

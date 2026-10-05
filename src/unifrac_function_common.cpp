@@ -86,7 +86,7 @@ std::vector<miint::unifrac::CooRow> ReadFeatureTable(ClientContext &context, con
 	}
 
 	std::vector<miint::unifrac::CooRow> rows;
-	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto &materialized = *result;
 	while (auto chunk = materialized.Fetch()) {
 		const idx_t n = chunk->size();
 		if (n == 0) {
@@ -257,7 +257,7 @@ DistanceRelationIds EnumerateDistanceIds(ClientContext &context, const std::stri
 		throw InvalidInputException("%s: failed to enumerate ids of distance-table '%s': %s", caller_name, table_name,
 		                            res->GetError());
 	}
-	auto &mat = res->Cast<MaterializedQueryResult>();
+	auto &mat = *res;
 	while (auto chunk = mat.Fetch()) {
 		const idx_t rn = chunk->size();
 		if (rn == 0) {
@@ -450,7 +450,7 @@ CoordinateTable ReadCoordinateTable(ClientContext &context, const std::string &t
 	// resulting row order a function of the data rather than of scan order.
 	std::map<std::string, std::map<int32_t, double>> by_sample;
 	std::set<int32_t> axes_seen;
-	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto &materialized = *result;
 	while (auto chunk = materialized.Fetch()) {
 		const idx_t n = chunk->size();
 		if (n == 0) {

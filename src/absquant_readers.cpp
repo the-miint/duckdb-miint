@@ -63,7 +63,7 @@ KeyedColumns ReadKeyedColumns(ClientContext &context, const std::string &table_n
 		column_data.push_back(&inserted.first->second);
 	}
 
-	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto &materialized = *result;
 	while (auto chunk = materialized.Fetch()) {
 		const idx_t n = chunk->size();
 		if (n == 0) {
@@ -115,7 +115,7 @@ std::vector<LongFormRow> ReadLongFormValues(ClientContext &context, const std::s
 	}
 
 	std::vector<LongFormRow> rows;
-	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto &materialized = *result;
 	while (auto chunk = materialized.Fetch()) {
 		const idx_t n = chunk->size();
 		if (n == 0) {

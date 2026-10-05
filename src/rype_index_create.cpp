@@ -164,7 +164,7 @@ idx_t AutoWindowFeatures(Connection &conn, const std::string &table_quoted, cons
 	if (result->HasError()) {
 		return kFallback;
 	}
-	auto value = result->GetValue(0, 0);
+	auto value = result->Collection().GetValue(0, 0);
 	if (value.IsNull()) {
 		return kFallback;
 	}

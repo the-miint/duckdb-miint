@@ -109,7 +109,7 @@ OrdinationTable ReadOrdinationTable(ClientContext &context, const std::string &t
 	};
 	std::vector<Entry> entries;
 	std::vector<std::string> ids_raw;
-	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto &materialized = *result;
 	while (auto chunk = materialized.Fetch()) {
 		const idx_t rn = chunk->size();
 		if (rn == 0) {
@@ -230,7 +230,7 @@ std::vector<std::pair<std::string, std::string>> ReadPairing(ClientContext &cont
 	}
 
 	std::vector<std::pair<std::string, std::string>> pairs;
-	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto &materialized = *result;
 	while (auto chunk = materialized.Fetch()) {
 		const idx_t rn = chunk->size();
 		if (rn == 0) {
