@@ -158,6 +158,7 @@ void KsTwoSampleFunction::Register(ExtensionLoader &loader) {
 	ScalarFunctionSet function_set("ks_2samp");
 	function_set.AddFunction(two_arg);
 	function_set.AddFunction(three_arg);
+	function_set.SetFallible();
 	loader.RegisterFunction(function_set);
 }
 

@@ -318,23 +318,28 @@ static void SequenceSplitFunction(DataChunk &args, ExpressionState &state, Vecto
 void SequenceFunctions::Register(ExtensionLoader &loader) {
 	ScalarFunction sequence_dna_reverse_complement("sequence_dna_reverse_complement", {LogicalType::VARCHAR},
 	                                               LogicalType::VARCHAR, SequenceDnaReverseComplementFunction);
+	sequence_dna_reverse_complement.SetFallible();
 	loader.RegisterFunction(sequence_dna_reverse_complement);
 
 	ScalarFunction sequence_rna_reverse_complement("sequence_rna_reverse_complement", {LogicalType::VARCHAR},
 	                                               LogicalType::VARCHAR, SequenceRnaReverseComplementFunction);
+	sequence_rna_reverse_complement.SetFallible();
 	loader.RegisterFunction(sequence_rna_reverse_complement);
 
 	ScalarFunction sequence_dna_as_regexp("sequence_dna_as_regexp", {LogicalType::VARCHAR}, LogicalType::VARCHAR,
 	                                      SequenceDnaAsRegexpFunction);
+	sequence_dna_as_regexp.SetFallible();
 	loader.RegisterFunction(sequence_dna_as_regexp);
 
 	ScalarFunction sequence_rna_as_regexp("sequence_rna_as_regexp", {LogicalType::VARCHAR}, LogicalType::VARCHAR,
 	                                      SequenceRnaAsRegexpFunction);
+	sequence_rna_as_regexp.SetFallible();
 	loader.RegisterFunction(sequence_rna_as_regexp);
 
 	ScalarFunction sequence_split("sequence_split", {LogicalType::VARCHAR, LogicalType::INTEGER},
 	                              SequenceSplitReturnType(), SequenceSplitFunction);
 	sequence_split.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	sequence_split.SetFallible();
 	loader.RegisterFunction(sequence_split);
 }
 

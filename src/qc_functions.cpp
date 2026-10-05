@@ -993,6 +993,7 @@ static void RegisterTrimQualityFamily(ExtensionLoader &loader, const std::string
 	four_arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	set.AddFunction(four_arg);
 
+	set.SetFallible();
 	loader.RegisterFunction(set);
 }
 
@@ -1021,6 +1022,7 @@ void QcFunctions::Register(ExtensionLoader &loader) {
 		                        TrimResultStructType(), TrimPolygExecute);
 		five_arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 		set.AddFunction(five_arg);
+		set.SetFallible();
 		loader.RegisterFunction(set);
 	}
 
@@ -1038,6 +1040,7 @@ void QcFunctions::Register(ExtensionLoader &loader) {
 		                        TrimResultStructType(), TrimPolyxExecute);
 		four_arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 		set.AddFunction(four_arg);
+		set.SetFallible();
 		loader.RegisterFunction(set);
 	}
 
@@ -1058,6 +1061,7 @@ void QcFunctions::Register(ExtensionLoader &loader) {
 		eight_arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 		set.AddFunction(eight_arg);
 
+		set.SetFallible();
 		loader.RegisterFunction(set);
 	}
 
@@ -1092,6 +1096,7 @@ void QcFunctions::Register(ExtensionLoader &loader) {
 		list_6arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 		set.AddFunction(list_6arg);
 
+		set.SetFallible();
 		loader.RegisterFunction(set);
 	}
 
@@ -1119,6 +1124,7 @@ void QcFunctions::Register(ExtensionLoader &loader) {
 		eleven_arg.SetInitStateCallback(TrimAdaptersPeInitLocalState);
 		set.AddFunction(eleven_arg);
 
+		set.SetFallible();
 		loader.RegisterFunction(set);
 	}
 }

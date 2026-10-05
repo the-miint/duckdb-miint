@@ -190,7 +190,9 @@ ScalarFunction AlignmentSeqIdentityFunction::GetFunction() {
 }
 
 void AlignmentSeqIdentityFunction::Register(ExtensionLoader &loader) {
-	loader.RegisterFunction(GetFunction());
+	auto function = GetFunction();
+	function.SetFallible();
+	loader.RegisterFunction(function);
 }
 
 // cigar_sequence_identity(cigar) — one-arg convenience over the type='cigar'
@@ -246,7 +248,9 @@ ScalarFunction CigarSequenceIdentityFunction::GetFunction() {
 }
 
 void CigarSequenceIdentityFunction::Register(ExtensionLoader &loader) {
-	loader.RegisterFunction(GetFunction());
+	auto function = GetFunction();
+	function.SetFallible();
+	loader.RegisterFunction(function);
 }
 
 // cigar_query_length implementation
@@ -317,6 +321,7 @@ void CigarQueryLengthFunction::Register(ExtensionLoader &loader) {
 	ScalarFunctionSet function_set("cigar_query_length");
 	function_set.AddFunction(func_one_param);
 	function_set.AddFunction(func_two_params);
+	function_set.SetFallible();
 	loader.RegisterFunction(function_set);
 }
 
@@ -392,6 +397,7 @@ void CigarQueryCoverageFunction::Register(ExtensionLoader &loader) {
 	ScalarFunctionSet function_set("cigar_query_coverage");
 	function_set.AddFunction(func_one_param);
 	function_set.AddFunction(func_two_params);
+	function_set.SetFallible();
 	loader.RegisterFunction(function_set);
 }
 
@@ -501,6 +507,7 @@ void CigarQueryIntervalsFunction::Register(ExtensionLoader &loader) {
 	ScalarFunctionSet function_set("cigar_query_intervals");
 	function_set.AddFunction(func_two_args);
 	function_set.AddFunction(GetFunction());
+	function_set.SetFallible();
 	loader.RegisterFunction(function_set);
 }
 

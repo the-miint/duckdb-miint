@@ -340,6 +340,7 @@ void MergePairsFunction::Register(ExtensionLoader &loader) {
 	merge_10arg.SetInitStateCallback(MergePairsInitLocalState);
 	function_set.AddFunction(merge_10arg);
 
+	function_set.SetFallible();
 	loader.RegisterFunction(function_set);
 }
 

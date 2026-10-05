@@ -499,6 +499,7 @@ void ExtractLinkedAmpliconFunction::Register(ExtensionLoader &loader) {
 	eight.SetInitStateCallback(InitLocalState);
 	set.AddFunction(eight);
 
+	set.SetFallible();
 	loader.RegisterFunction(set);
 }
 

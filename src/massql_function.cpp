@@ -320,6 +320,7 @@ void MassQLFunction::Register(ExtensionLoader &loader) {
 	// massql_to_sql(query, source) scalar function
 	ScalarFunction to_sql_func("massql_to_sql", {LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::VARCHAR,
 	                           MassQLToSQLFunction);
+	to_sql_func.SetFallible();
 	loader.RegisterFunction(to_sql_func);
 }
 
