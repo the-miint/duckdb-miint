@@ -91,7 +91,7 @@ unique_ptr<CreateTableInfo> BuildENATableInfo(SchemaCatalogEntry &schema, ENATab
 
 	switch (kind) {
 	case ENATableKind::PROJECTS:
-		info->table = "projects";
+		info->SetTableName("projects");
 		add("alias", LogicalType::VARCHAR);
 		add("title", LogicalType::VARCHAR);
 		add("description", LogicalType::VARCHAR);
@@ -103,7 +103,7 @@ unique_ptr<CreateTableInfo> BuildENATableInfo(SchemaCatalogEntry &schema, ENATab
 		add("hold_until_date", LogicalType::DATE);
 		break;
 	case ENATableKind::SAMPLES:
-		info->table = "samples";
+		info->SetTableName("samples");
 		// Column order matters — BuildFromBuffer uses positional COL_*
 		// constants in src/ena_samples_insert_op.cpp.
 		add("alias", LogicalType::VARCHAR);
@@ -122,7 +122,7 @@ unique_ptr<CreateTableInfo> BuildENATableInfo(SchemaCatalogEntry &schema, ENATab
 		add("samea_accession", LogicalType::VARCHAR);
 		break;
 	case ENATableKind::EXPERIMENTS:
-		info->table = "experiments";
+		info->SetTableName("experiments");
 		// Column order matters — BuildFromBuffer uses positional COL_*
 		// constants in src/ena_experiments_insert_op.cpp.
 		add("alias", LogicalType::VARCHAR);
@@ -140,7 +140,7 @@ unique_ptr<CreateTableInfo> BuildENATableInfo(SchemaCatalogEntry &schema, ENATab
 		add("erx_accession", LogicalType::VARCHAR);
 		break;
 	case ENATableKind::RUNS:
-		info->table = "runs";
+		info->SetTableName("runs");
 		// Column order matters — BuildFromBuffer uses positional COL_*
 		// constants in src/ena_runs_insert_op.cpp. The `files` LIST(STRUCT)
 		// shape matches the SRA.run.xsd <FILES> element: each entry carries
@@ -155,14 +155,14 @@ unique_ptr<CreateTableInfo> BuildENATableInfo(SchemaCatalogEntry &schema, ENATab
 		add("err_accession", LogicalType::VARCHAR);
 		break;
 	case ENATableKind::ANALYSES:
-		info->table = "analyses";
+		info->SetTableName("analyses");
 		add("alias", LogicalType::VARCHAR);
 		add("study_ref", LogicalType::VARCHAR);
 		add("analysis_type", LogicalType::VARCHAR);
 		add("accession", LogicalType::VARCHAR);
 		break;
 	case ENATableKind::SUBMISSION_LOG:
-		info->table = "submission_log";
+		info->SetTableName("submission_log");
 		AddSubmissionLogColumns(info->columns);
 		break;
 	}
@@ -185,7 +185,7 @@ struct ENASubmissionLogState : public GlobalTableFunctionState {
 	idx_t cursor = 0;
 };
 
-void EmitSubmissionLogColumns(vector<LogicalType> &return_types, vector<string> &names) {
+void EmitSubmissionLogColumns(vector<LogicalType> &return_types, vector<Identifier> &names) {
 	// Single source of truth for the submission_log column list — defer to the
 	// declarations in `AddSubmissionLogColumns` so the catalog and the scan
 	// function cannot drift apart.
@@ -352,7 +352,11 @@ BindInfo ENAVirtualScanGetBindInfo(const optional_ptr<FunctionData> bind_data) {
 //===--------------------------------------------------------------------===//
 
 ENATableEntry::ENATableEntry(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info, ENATableKind kind_p)
-    : TableCatalogEntry(catalog, schema, info), kind(kind_p) {
+    : TableCatalogEntry(catalog, schema, info), kind(kind_p), columns(std::move(info.columns)) {
+}
+
+const ColumnList &ENATableEntry::GetColumns() const {
+	return columns;
 }
 
 unique_ptr<BaseStatistics> ENATableEntry::GetStatistics(ClientContext &, column_t) {
@@ -530,7 +534,7 @@ ENACatalog::~ENACatalog() = default;
 
 void ENACatalog::Initialize(bool) {
 	CreateSchemaInfo info;
-	info.schema = "main";
+	info.SetQualifiedName(QualifiedName({Identifier::DefaultSchema()}, Identifier()));
 	info.internal = true;
 	main_schema = make_uniq<ENASchemaEntry>(*this, info);
 }

@@ -147,42 +147,41 @@ DeletePredicate ExtractDeletePredicate(LogicalDelete &op, const string &caller) 
 		ThrowBadPredicate(caller);
 	}
 	auto &expr = *filter.expressions[0];
-	if (expr.GetExpressionClass() != ExpressionClass::BOUND_COMPARISON) {
+	if (!BoundComparisonExpression::IsComparison(expr) || expr.GetExpressionType() != ExpressionType::COMPARE_EQUAL) {
 		ThrowBadPredicate(caller);
 	}
-	auto &cmp = expr.Cast<BoundComparisonExpression>();
-	if (cmp.GetExpressionType() != ExpressionType::COMPARE_EQUAL) {
-		ThrowBadPredicate(caller);
-	}
+	auto &cmp = expr.Cast<BoundFunctionExpression>();
+	auto &left = BoundComparisonExpression::Left(cmp);
+	auto &right = BoundComparisonExpression::Right(cmp);
 	// Allow `col = const` and `const = col` — neither the binder nor the
 	// optimizer canonicalises operand order, so we have to.
-	Expression *col_expr = nullptr;
-	BoundConstantExpression *const_expr = nullptr;
-	if (IsBoundColumn(*cmp.left) && cmp.right->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-		col_expr = cmp.left.get();
-		const_expr = &cmp.right->Cast<BoundConstantExpression>();
-	} else if (cmp.left->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT && IsBoundColumn(*cmp.right)) {
-		col_expr = cmp.right.get();
-		const_expr = &cmp.left->Cast<BoundConstantExpression>();
+	const Expression *col_expr = nullptr;
+	const BoundConstantExpression *const_expr = nullptr;
+	if (IsBoundColumn(left) && right.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+		col_expr = &left;
+		const_expr = &right.Cast<BoundConstantExpression>();
+	} else if (left.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT && IsBoundColumn(right)) {
+		col_expr = &right;
+		const_expr = &left.Cast<BoundConstantExpression>();
 	} else {
 		ThrowBadPredicate(caller);
 	}
-	if (const_expr->value.IsNull()) {
+	if (const_expr->GetValue().IsNull()) {
 		throw BinderException("%s: WHERE value must be non-NULL", caller);
 	}
 	// Type-guard against integer/date/timestamp constants that survived the
 	// binder's coercion (e.g. `WHERE accession = 12345`). `ToString()` on
 	// those would silently produce a numeric string and we'd ship it as a
 	// CANCEL target — better to fail explicitly with the actual type.
-	if (const_expr->value.type().id() != LogicalTypeId::VARCHAR) {
+	if (const_expr->GetValue().type().id() != LogicalTypeId::VARCHAR) {
 		throw BinderException("%s: WHERE value must be a string literal (got %s)", caller,
-		                      const_expr->value.type().ToString());
+		                      const_expr->GetValue().type().ToString());
 	}
 	DeletePredicate result;
 	// `alias` is set to the unqualified column name by the binder
 	// (`ColumnRefExpression::GetName`) and preserved through the
 	// column-binding-resolver rewrite to BoundReferenceExpression.
-	result.column_name = col_expr->alias;
+	result.column_name = col_expr->GetAlias().GetIdentifierName();
 	// If a future DuckDB optimizer ever drops the alias on the rewrite to
 	// BoundReferenceExpression we'd silently see an empty column name, fall
 	// through every branch in `ResolveDeleteTarget`, and emit a misleading
@@ -192,7 +191,7 @@ DeletePredicate ExtractDeletePredicate(LogicalDelete &op, const string &caller) 
 		throw InternalException("%s: column reference in WHERE has no alias (expression class=%d) — please file a bug",
 		                        caller, static_cast<int>(col_expr->GetExpressionClass()));
 	}
-	result.value = const_expr->value.ToString();
+	result.value = const_expr->GetValue().ToString();
 	if (result.value.empty()) {
 		throw BinderException("%s: WHERE value must not be empty", caller);
 	}

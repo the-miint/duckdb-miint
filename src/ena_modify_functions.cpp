@@ -33,6 +33,7 @@ using duckdb::DataChunk;
 using duckdb::ExtensionLoader;
 using duckdb::FunctionData;
 using duckdb::GlobalTableFunctionState;
+using duckdb::Identifier;
 using duckdb::InvalidInputException;
 using duckdb::LogicalType;
 using duckdb::make_uniq;

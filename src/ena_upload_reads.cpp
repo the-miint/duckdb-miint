@@ -162,7 +162,7 @@ bool ValidateSchemaDetectR2(Connection &conn, const string &relation_name) {
 		throw InvalidInputException("ena_upload_reads: failed to read relation '%s': %s", relation_name,
 		                            result->GetError());
 	}
-	auto &names = result->GetNames();
+	auto names = IdentifiersToStrings(result->GetNames());
 	auto &types = result->GetTypes();
 
 	const int sample_ref_idx = FindColumn(names, "sample_ref");
