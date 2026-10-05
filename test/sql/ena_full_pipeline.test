@@ -23,7 +23,7 @@ require-env ASPERA_AVAILABLE
 statement ok
 CREATE SECRET test_ena_full_pipeline (
     TYPE ENA,
-    USER '${ENA_WEBIN_TEST_USER}',
+    USER '{ENA_WEBIN_TEST_USER}',
     PASSWORD_ENV 'ENA_WEBIN_TEST_PASSWORD',
     ENDPOINT 'test'
 );

@@ -22,7 +22,7 @@ CREATE TABLE upload_input AS
 # Output schema is locked at bind time.
 query IIIIII
 DESCRIBE SELECT * FROM ena_upload_reads(relation := 'upload_input',
-                                        target_url := 'file://__TEST_DIR__/uploads/');
+                                        target_url := 'file://{TEST_DIR}/uploads/');
 ----
 sample_ref	VARCHAR	YES	NULL	NULL	NULL
 filename	VARCHAR	YES	NULL	NULL	NULL
@@ -35,7 +35,7 @@ layout	VARCHAR	YES	NULL	NULL	NULL
 statement ok
 CREATE TABLE upload_result AS
   SELECT * FROM ena_upload_reads(relation := 'upload_input',
-                                 target_url := 'file://__TEST_DIR__/uploads/')
+                                 target_url := 'file://{TEST_DIR}/uploads/')
   ORDER BY sample_ref, filename;
 
 # sampleA single-end → 1 file; sampleB paired-end → 2 files; 3 rows total.
@@ -58,11 +58,11 @@ sampleB	sampleB_2.fastq.gz	fastq	paired	true	true
 
 # Files must actually exist on disk; glob the upload directory and join.
 # Compare basenames so the test is portable: on Windows glob() returns paths
-# with backslash separators, but __TEST_DIR__ expands to a mixed-separator
+# with backslash separators, but {TEST_DIR} expands to a mixed-separator
 # prefix, which broke a literal-string join. parse_filename() handles both.
 query I
 SELECT count(*) FROM upload_result r
-LEFT JOIN (SELECT file FROM glob('__TEST_DIR__/uploads/*.fastq.gz')) g
+LEFT JOIN (SELECT file FROM glob('{TEST_DIR}/uploads/*.fastq.gz')) g
        ON parse_filename(g.file) = r.filename
 WHERE g.file IS NULL;
 ----
@@ -74,19 +74,19 @@ WHERE g.file IS NULL;
 # per known sample/file instead of a join.
 query I
 SELECT md5(content) = (SELECT md5 FROM upload_result WHERE filename = 'sampleA.fastq.gz')
-FROM read_blob('__TEST_DIR__/uploads/sampleA.fastq.gz');
+FROM read_blob('{TEST_DIR}/uploads/sampleA.fastq.gz');
 ----
 true
 
 query I
 SELECT md5(content) = (SELECT md5 FROM upload_result WHERE filename = 'sampleB_1.fastq.gz')
-FROM read_blob('__TEST_DIR__/uploads/sampleB_1.fastq.gz');
+FROM read_blob('{TEST_DIR}/uploads/sampleB_1.fastq.gz');
 ----
 true
 
 query I
 SELECT md5(content) = (SELECT md5 FROM upload_result WHERE filename = 'sampleB_2.fastq.gz')
-FROM read_blob('__TEST_DIR__/uploads/sampleB_2.fastq.gz');
+FROM read_blob('{TEST_DIR}/uploads/sampleB_2.fastq.gz');
 ----
 true
 
@@ -101,7 +101,7 @@ CREATE TABLE upload_input_paired AS
 query IIII
 SELECT sample_ref, filename, layout, bytes_written > 0
 FROM ena_upload_reads(relation := 'upload_input_paired',
-                      target_url := 'file://__TEST_DIR__/uploads_paired/',
+                      target_url := 'file://{TEST_DIR}/uploads_paired/',
                       layout := 'paired_interleaved');
 ----
 sampleC	sampleC.fastq.gz	paired_interleaved	true
@@ -109,7 +109,7 @@ sampleC	sampleC.fastq.gz	paired_interleaved	true
 # Layout error: explicit layout=single with paired-end input should fail clearly.
 statement error
 SELECT * FROM ena_upload_reads(relation := 'upload_input_paired',
-                               target_url := 'file://__TEST_DIR__/uploads_err/',
+                               target_url := 'file://{TEST_DIR}/uploads_err/',
                                layout := 'single');
 ----
 sampleC
@@ -117,7 +117,7 @@ sampleC
 # Layout error: unknown layout name surfaces at bind time.
 statement error
 SELECT * FROM ena_upload_reads(relation := 'upload_input',
-                               target_url := 'file://__TEST_DIR__/uploads_err/',
+                               target_url := 'file://{TEST_DIR}/uploads_err/',
                                layout := 'triple');
 ----
 triple
@@ -128,7 +128,7 @@ CREATE TABLE upload_input_empty AS SELECT * FROM upload_input WHERE 1=0;
 
 query I
 SELECT count(*) FROM ena_upload_reads(relation := 'upload_input_empty',
-                                       target_url := 'file://__TEST_DIR__/uploads_empty/');
+                                       target_url := 'file://{TEST_DIR}/uploads_empty/');
 ----
 0
 
@@ -147,6 +147,6 @@ CREATE TABLE upload_input_mixed AS
 
 statement error
 SELECT * FROM ena_upload_reads(relation := 'upload_input_mixed',
-                               target_url := 'file://__TEST_DIR__/uploads_err/');
+                               target_url := 'file://{TEST_DIR}/uploads_err/');
 ----
 sampleM

@@ -126,10 +126,10 @@ statement ok
 COPY (
     SELECT * FROM align_sortmerna_rrna(
         'smr_q_bigint', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1)
-) TO '__TEST_DIR__/sortmerna_rrna_bigint.parquet' (FORMAT PARQUET);
+) TO '{TEST_DIR}/sortmerna_rrna_bigint.parquet' (FORMAT PARQUET);
 
 query III
 SELECT read_id, typeof(read_id), aligned
-FROM read_parquet('__TEST_DIR__/sortmerna_rrna_bigint.parquet');
+FROM read_parquet('{TEST_DIR}/sortmerna_rrna_bigint.parquet');
 ----
 271211	BIGINT	1

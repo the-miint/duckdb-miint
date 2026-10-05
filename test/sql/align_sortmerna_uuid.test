@@ -99,11 +99,11 @@ statement ok
 COPY (
     SELECT * FROM align_sortmerna(
         'smr_q_uuid', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1)
-) TO '__TEST_DIR__/sortmerna_uuid.sam'
+) TO '{TEST_DIR}/sortmerna_uuid.sam'
 (FORMAT SAM, REFERENCE_LENGTHS 'smr_ref_lengths');
 
 query III
 SELECT read_id, typeof(read_id), reference
-FROM read_sam('__TEST_DIR__/sortmerna_uuid.sam');
+FROM read_sam('{TEST_DIR}/sortmerna_uuid.sam');
 ----
 11111111-1111-1111-1111-111111111111	VARCHAR	Unc49508

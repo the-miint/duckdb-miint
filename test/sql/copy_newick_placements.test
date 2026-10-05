@@ -31,7 +31,7 @@ SELECT * FROM (VALUES
 # PLACEMENTS table does not exist
 statement error
 COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
-TO '__TEST_DIR__/error_nonexistent.nwk' (FORMAT NEWICK, PLACEMENTS 'nonexistent_table');
+TO '{TEST_DIR}/error_nonexistent.nwk' (FORMAT NEWICK, PLACEMENTS 'nonexistent_table');
 ----
 does not exist
 
@@ -46,7 +46,7 @@ SELECT edge_id, like_weight_ratio, distal_length, pendant_length FROM valid_plac
 
 statement error
 COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
-TO '__TEST_DIR__/error_missing_col.nwk' (FORMAT NEWICK, PLACEMENTS 'missing_fragment_id');
+TO '{TEST_DIR}/error_missing_col.nwk' (FORMAT NEWICK, PLACEMENTS 'missing_fragment_id');
 ----
 fragment_id
 
@@ -60,7 +60,7 @@ SELECT fragment_id, like_weight_ratio, distal_length, pendant_length FROM valid_
 
 statement error
 COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
-TO '__TEST_DIR__/error_missing_edge.nwk' (FORMAT NEWICK, PLACEMENTS 'missing_edge_id');
+TO '{TEST_DIR}/error_missing_edge.nwk' (FORMAT NEWICK, PLACEMENTS 'missing_edge_id');
 ----
 edge_id
 
@@ -74,7 +74,7 @@ SELECT fragment_id, edge_id, distal_length, pendant_length FROM valid_placements
 
 statement error
 COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
-TO '__TEST_DIR__/error_missing_lwr.nwk' (FORMAT NEWICK, PLACEMENTS 'missing_lwr');
+TO '{TEST_DIR}/error_missing_lwr.nwk' (FORMAT NEWICK, PLACEMENTS 'missing_lwr');
 ----
 like_weight_ratio
 
@@ -88,7 +88,7 @@ SELECT fragment_id, edge_id, like_weight_ratio, pendant_length FROM valid_placem
 
 statement error
 COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
-TO '__TEST_DIR__/error_missing_distal.nwk' (FORMAT NEWICK, PLACEMENTS 'missing_distal');
+TO '{TEST_DIR}/error_missing_distal.nwk' (FORMAT NEWICK, PLACEMENTS 'missing_distal');
 ----
 distal_length
 
@@ -102,7 +102,7 @@ SELECT fragment_id, edge_id, like_weight_ratio, distal_length FROM valid_placeme
 
 statement error
 COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
-TO '__TEST_DIR__/error_missing_pendant.nwk' (FORMAT NEWICK, PLACEMENTS 'missing_pendant');
+TO '{TEST_DIR}/error_missing_pendant.nwk' (FORMAT NEWICK, PLACEMENTS 'missing_pendant');
 ----
 pendant_length
 
@@ -119,7 +119,7 @@ SELECT * FROM valid_placements WHERE 1=0;
 
 statement error
 COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
-TO '__TEST_DIR__/error_empty.nwk' (FORMAT NEWICK, PLACEMENTS 'empty_placements');
+TO '{TEST_DIR}/error_empty.nwk' (FORMAT NEWICK, PLACEMENTS 'empty_placements');
 ----
 empty
 
@@ -139,7 +139,7 @@ SELECT * FROM (VALUES
 
 statement error
 COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
-TO '__TEST_DIR__/error_null_edge.nwk' (FORMAT NEWICK, PLACEMENTS 'null_edge_id');
+TO '{TEST_DIR}/error_null_edge.nwk' (FORMAT NEWICK, PLACEMENTS 'null_edge_id');
 ----
 NULL edge_id
 
@@ -155,7 +155,7 @@ SELECT * FROM (VALUES
 
 statement error
 COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
-TO '__TEST_DIR__/error_null_lwr.nwk' (FORMAT NEWICK, PLACEMENTS 'null_lwr');
+TO '{TEST_DIR}/error_null_lwr.nwk' (FORMAT NEWICK, PLACEMENTS 'null_lwr');
 ----
 NULL like_weight_ratio
 
@@ -171,7 +171,7 @@ SELECT * FROM (VALUES
 
 statement error
 COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
-TO '__TEST_DIR__/error_null_distal.nwk' (FORMAT NEWICK, PLACEMENTS 'null_distal');
+TO '{TEST_DIR}/error_null_distal.nwk' (FORMAT NEWICK, PLACEMENTS 'null_distal');
 ----
 NULL distal_length
 
@@ -187,7 +187,7 @@ SELECT * FROM (VALUES
 
 statement error
 COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
-TO '__TEST_DIR__/error_null_pendant.nwk' (FORMAT NEWICK, PLACEMENTS 'null_pendant');
+TO '{TEST_DIR}/error_null_pendant.nwk' (FORMAT NEWICK, PLACEMENTS 'null_pendant');
 ----
 NULL pendant_length
 
@@ -204,11 +204,11 @@ SELECT * FROM (VALUES
 
 statement ok
 COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
-TO '__TEST_DIR__/null_fragment_skipped.nwk' (FORMAT NEWICK, PLACEMENTS 'null_fragment_id');
+TO '{TEST_DIR}/null_fragment_skipped.nwk' (FORMAT NEWICK, PLACEMENTS 'null_fragment_id');
 
 # Only the valid fragment should be inserted (5 original + 2 = 7)
 query I
-SELECT COUNT(*) FROM read_newick('__TEST_DIR__/null_fragment_skipped.nwk');
+SELECT COUNT(*) FROM read_newick('{TEST_DIR}/null_fragment_skipped.nwk');
 ----
 7
 
@@ -221,7 +221,7 @@ DROP TABLE null_fragment_id;
 
 statement error
 COPY (SELECT node_index, name, branch_length, parent_index FROM read_newick('data/newick/with_edge_ids.nwk'))
-TO '__TEST_DIR__/error_no_edge_col.nwk' (FORMAT NEWICK, PLACEMENTS 'valid_placements');
+TO '{TEST_DIR}/error_no_edge_col.nwk' (FORMAT NEWICK, PLACEMENTS 'valid_placements');
 ----
 edge_id
 
@@ -232,7 +232,7 @@ edge_id
 statement error
 COPY (SELECT node_index, name, branch_length, NULL::BIGINT AS edge_id, parent_index
       FROM read_newick('data/newick/simple.nwk'))
-TO '__TEST_DIR__/error_null_edges.nwk' (FORMAT NEWICK, PLACEMENTS 'valid_placements');
+TO '{TEST_DIR}/error_null_edges.nwk' (FORMAT NEWICK, PLACEMENTS 'valid_placements');
 ----
 edge_id
 
@@ -248,7 +248,7 @@ SELECT * FROM (VALUES
 
 statement error
 COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
-TO '__TEST_DIR__/error_bad_edge.nwk' (FORMAT NEWICK, PLACEMENTS 'bad_edge_placement');
+TO '{TEST_DIR}/error_bad_edge.nwk' (FORMAT NEWICK, PLACEMENTS 'bad_edge_placement');
 ----
 Unknown edge_id
 
@@ -267,7 +267,7 @@ SELECT * FROM (VALUES
 
 statement error
 COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
-TO '__TEST_DIR__/error_neg_distal.nwk' (FORMAT NEWICK, PLACEMENTS 'negative_distal');
+TO '{TEST_DIR}/error_neg_distal.nwk' (FORMAT NEWICK, PLACEMENTS 'negative_distal');
 ----
 distal_length
 
@@ -286,7 +286,7 @@ SELECT * FROM (VALUES
 
 statement error
 COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
-TO '__TEST_DIR__/error_neg_pendant.nwk' (FORMAT NEWICK, PLACEMENTS 'negative_pendant');
+TO '{TEST_DIR}/error_neg_pendant.nwk' (FORMAT NEWICK, PLACEMENTS 'negative_pendant');
 ----
 pendant_length
 
@@ -306,7 +306,7 @@ SELECT * FROM (VALUES
 
 statement error
 COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
-TO '__TEST_DIR__/error_exceeds.nwk' (FORMAT NEWICK, PLACEMENTS 'exceeds_edge');
+TO '{TEST_DIR}/error_exceeds.nwk' (FORMAT NEWICK, PLACEMENTS 'exceeds_edge');
 ----
 exceeds
 
@@ -320,23 +320,23 @@ DROP TABLE exceeds_edge;
 # Write tree with single placement
 statement ok
 COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
-TO '__TEST_DIR__/single_placement.nwk' (FORMAT NEWICK, PLACEMENTS 'single_placement');
+TO '{TEST_DIR}/single_placement.nwk' (FORMAT NEWICK, PLACEMENTS 'single_placement');
 
 # Verify node count increased (original 5 + 2 new nodes per placement = 7)
 query I
-SELECT COUNT(*) FROM read_newick('__TEST_DIR__/single_placement.nwk');
+SELECT COUNT(*) FROM read_newick('{TEST_DIR}/single_placement.nwk');
 ----
 7
 
 # Verify fragment name appears in tree
 query I
-SELECT COUNT(*) FROM read_newick('__TEST_DIR__/single_placement.nwk') WHERE name = 'single_frag';
+SELECT COUNT(*) FROM read_newick('{TEST_DIR}/single_placement.nwk') WHERE name = 'single_frag';
 ----
 1
 
 # Verify fragment is a tip
 query I
-SELECT CASE WHEN is_tip THEN 1 ELSE 0 END FROM read_newick('__TEST_DIR__/single_placement.nwk') WHERE name = 'single_frag';
+SELECT CASE WHEN is_tip THEN 1 ELSE 0 END FROM read_newick('{TEST_DIR}/single_placement.nwk') WHERE name = 'single_frag';
 ----
 1
 
@@ -346,17 +346,17 @@ SELECT CASE WHEN is_tip THEN 1 ELSE 0 END FROM read_newick('__TEST_DIR__/single_
 
 statement ok
 COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
-TO '__TEST_DIR__/multi_placement.nwk' (FORMAT NEWICK, PLACEMENTS 'valid_placements');
+TO '{TEST_DIR}/multi_placement.nwk' (FORMAT NEWICK, PLACEMENTS 'valid_placements');
 
 # Verify node count (original 5 + 2*2 = 9)
 query I
-SELECT COUNT(*) FROM read_newick('__TEST_DIR__/multi_placement.nwk');
+SELECT COUNT(*) FROM read_newick('{TEST_DIR}/multi_placement.nwk');
 ----
 9
 
 # Verify both fragments appear
 query T
-SELECT name FROM read_newick('__TEST_DIR__/multi_placement.nwk')
+SELECT name FROM read_newick('{TEST_DIR}/multi_placement.nwk')
 WHERE name IN ('frag1', 'frag2') ORDER BY name;
 ----
 frag1
@@ -375,16 +375,16 @@ SELECT * FROM (VALUES
 
 statement ok
 COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
-TO '__TEST_DIR__/same_edge.nwk' (FORMAT NEWICK, PLACEMENTS 'same_edge_placements');
+TO '{TEST_DIR}/same_edge.nwk' (FORMAT NEWICK, PLACEMENTS 'same_edge_placements');
 
 # Both fragments should appear (5 original + 4 new = 9)
 query I
-SELECT COUNT(*) FROM read_newick('__TEST_DIR__/same_edge.nwk');
+SELECT COUNT(*) FROM read_newick('{TEST_DIR}/same_edge.nwk');
 ----
 9
 
 query T
-SELECT name FROM read_newick('__TEST_DIR__/same_edge.nwk')
+SELECT name FROM read_newick('{TEST_DIR}/same_edge.nwk')
 WHERE name IN ('frag_a', 'frag_b') ORDER BY name;
 ----
 frag_a
@@ -406,16 +406,16 @@ SELECT * FROM (VALUES
 
 statement ok
 COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
-TO '__TEST_DIR__/dup_frag.nwk' (FORMAT NEWICK, PLACEMENTS 'duplicate_frags');
+TO '{TEST_DIR}/dup_frag.nwk' (FORMAT NEWICK, PLACEMENTS 'duplicate_frags');
 
 # Only one dup_frag should appear (5 original + 2 = 7)
 query I
-SELECT COUNT(*) FROM read_newick('__TEST_DIR__/dup_frag.nwk');
+SELECT COUNT(*) FROM read_newick('{TEST_DIR}/dup_frag.nwk');
 ----
 7
 
 query I
-SELECT COUNT(*) FROM read_newick('__TEST_DIR__/dup_frag.nwk') WHERE name = 'dup_frag';
+SELECT COUNT(*) FROM read_newick('{TEST_DIR}/dup_frag.nwk') WHERE name = 'dup_frag';
 ----
 1
 
@@ -428,17 +428,17 @@ DROP TABLE duplicate_frags;
 
 statement ok
 COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
-TO '__TEST_DIR__/no_edge_ids.nwk' (FORMAT NEWICK, PLACEMENTS 'single_placement', EDGE_IDS false);
+TO '{TEST_DIR}/no_edge_ids.nwk' (FORMAT NEWICK, PLACEMENTS 'single_placement', EDGE_IDS false);
 
 # Verify output has no edge_ids
 query I
-SELECT COUNT(*) FROM read_newick('__TEST_DIR__/no_edge_ids.nwk') WHERE edge_id IS NOT NULL;
+SELECT COUNT(*) FROM read_newick('{TEST_DIR}/no_edge_ids.nwk') WHERE edge_id IS NOT NULL;
 ----
 0
 
 # But placements were still inserted
 query I
-SELECT COUNT(*) FROM read_newick('__TEST_DIR__/no_edge_ids.nwk') WHERE name = 'single_frag';
+SELECT COUNT(*) FROM read_newick('{TEST_DIR}/no_edge_ids.nwk') WHERE name = 'single_frag';
 ----
 1
 
@@ -448,10 +448,10 @@ SELECT COUNT(*) FROM read_newick('__TEST_DIR__/no_edge_ids.nwk') WHERE name = 's
 
 statement ok
 COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
-TO '__TEST_DIR__/compressed_placements.nwk.gz' (FORMAT NEWICK, PLACEMENTS 'single_placement');
+TO '{TEST_DIR}/compressed_placements.nwk.gz' (FORMAT NEWICK, PLACEMENTS 'single_placement');
 
 query I
-SELECT COUNT(*) FROM read_newick('__TEST_DIR__/compressed_placements.nwk.gz');
+SELECT COUNT(*) FROM read_newick('{TEST_DIR}/compressed_placements.nwk.gz');
 ----
 7
 
@@ -468,17 +468,17 @@ FROM valid_placements;
 # Using a view as PLACEMENTS should work
 statement ok
 COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
-TO '__TEST_DIR__/view_placements.nwk' (FORMAT NEWICK, PLACEMENTS 'placements_view');
+TO '{TEST_DIR}/view_placements.nwk' (FORMAT NEWICK, PLACEMENTS 'placements_view');
 
 # Verify the output is correct
 query I
-SELECT COUNT(*) FROM read_newick('__TEST_DIR__/view_placements.nwk');
+SELECT COUNT(*) FROM read_newick('{TEST_DIR}/view_placements.nwk');
 ----
 9
 
 # Verify both fragments from the view are present
 query T
-SELECT name FROM read_newick('__TEST_DIR__/view_placements.nwk')
+SELECT name FROM read_newick('{TEST_DIR}/view_placements.nwk')
 WHERE name IN ('frag1', 'frag2') ORDER BY name;
 ----
 frag1
@@ -496,21 +496,21 @@ WHERE like_weight_ratio > 0.85;
 
 statement ok
 COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
-TO '__TEST_DIR__/filtered_view.nwk' (FORMAT NEWICK, PLACEMENTS 'filtered_placements_view');
+TO '{TEST_DIR}/filtered_view.nwk' (FORMAT NEWICK, PLACEMENTS 'filtered_placements_view');
 
 # Only frag1 (lwr=0.95) should be included, not frag2 (lwr=0.80)
 query I
-SELECT COUNT(*) FROM read_newick('__TEST_DIR__/filtered_view.nwk');
+SELECT COUNT(*) FROM read_newick('{TEST_DIR}/filtered_view.nwk');
 ----
 7
 
 query I
-SELECT COUNT(*) FROM read_newick('__TEST_DIR__/filtered_view.nwk') WHERE name = 'frag1';
+SELECT COUNT(*) FROM read_newick('{TEST_DIR}/filtered_view.nwk') WHERE name = 'frag1';
 ----
 1
 
 query I
-SELECT COUNT(*) FROM read_newick('__TEST_DIR__/filtered_view.nwk') WHERE name = 'frag2';
+SELECT COUNT(*) FROM read_newick('{TEST_DIR}/filtered_view.nwk') WHERE name = 'frag2';
 ----
 0
 
@@ -529,16 +529,16 @@ FROM valid_placements;
 
 statement ok
 COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
-TO '__TEST_DIR__/jplace_workflow.nwk' (FORMAT NEWICK, PLACEMENTS 'jplace_style_placements');
+TO '{TEST_DIR}/jplace_workflow.nwk' (FORMAT NEWICK, PLACEMENTS 'jplace_style_placements');
 
 query I
-SELECT COUNT(*) FROM read_newick('__TEST_DIR__/jplace_workflow.nwk');
+SELECT COUNT(*) FROM read_newick('{TEST_DIR}/jplace_workflow.nwk');
 ----
 9
 
 # Verify both fragments are present
 query T
-SELECT name FROM read_newick('__TEST_DIR__/jplace_workflow.nwk')
+SELECT name FROM read_newick('{TEST_DIR}/jplace_workflow.nwk')
 WHERE name IN ('frag1', 'frag2') ORDER BY name;
 ----
 frag1

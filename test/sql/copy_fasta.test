@@ -9,30 +9,30 @@ statement ok
 CREATE TABLE test_fasta_single AS SELECT sequence_index, read_id, comment, sequence1 FROM read_fastx('data/fastq/test.fa');
 
 statement ok
-COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single ORDER BY sequence_index) TO '__TEST_DIR__/output1.fa' (FORMAT FASTA);
+COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single ORDER BY sequence_index) TO '{TEST_DIR}/output1.fa' (FORMAT FASTA);
 
 query IIII
-SELECT sequence_index, read_id, sequence1, comment FROM read_fastx('__TEST_DIR__/output1.fa') ORDER BY sequence_index;
+SELECT sequence_index, read_id, sequence1, comment FROM read_fastx('{TEST_DIR}/output1.fa') ORDER BY sequence_index;
 ----
 1	seq1	ATGCATGCATGC	NULL
 2	seq2	GGCCGGCCGGCC	NULL
 
 # Test 2: Single-end with ID_AS_SEQUENCE_INDEX
 statement ok
-COPY (SELECT sequence_index, read_id, comment, sequence1 FROM test_fasta_single ORDER BY sequence_index) TO '__TEST_DIR__/output2.fa' (FORMAT FASTA, ID_AS_SEQUENCE_INDEX true);
+COPY (SELECT sequence_index, read_id, comment, sequence1 FROM test_fasta_single ORDER BY sequence_index) TO '{TEST_DIR}/output2.fa' (FORMAT FASTA, ID_AS_SEQUENCE_INDEX true);
 
 query IIII
-SELECT sequence_index, read_id, sequence1, comment FROM read_fastx('__TEST_DIR__/output2.fa') ORDER BY sequence_index;
+SELECT sequence_index, read_id, sequence1, comment FROM read_fastx('{TEST_DIR}/output2.fa') ORDER BY sequence_index;
 ----
 1	1	ATGCATGCATGC	NULL
 2	2	GGCCGGCCGGCC	NULL
 
 # Test 3: Single-end with compression
 statement ok
-COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single ORDER BY sequence_index) TO '__TEST_DIR__/output3.fa.gz' (FORMAT FASTA);
+COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single ORDER BY sequence_index) TO '{TEST_DIR}/output3.fa.gz' (FORMAT FASTA);
 
 query IIII
-SELECT sequence_index, read_id, sequence1, comment FROM read_fastx('__TEST_DIR__/output3.fa.gz') ORDER BY sequence_index;
+SELECT sequence_index, read_id, sequence1, comment FROM read_fastx('{TEST_DIR}/output3.fa.gz') ORDER BY sequence_index;
 ----
 1	seq1	ATGCATGCATGC	NULL
 2	seq2	GGCCGGCCGGCC	NULL
@@ -42,10 +42,10 @@ statement ok
 CREATE TABLE test_fasta_comment AS SELECT sequence_index, read_id, 'my comment' as comment, sequence1 FROM test_fasta_single WHERE sequence_index = 1;
 
 statement ok
-COPY (SELECT read_id, comment, sequence1 FROM test_fasta_comment) TO '__TEST_DIR__/output4.fa' (FORMAT FASTA, INCLUDE_COMMENT true);
+COPY (SELECT read_id, comment, sequence1 FROM test_fasta_comment) TO '{TEST_DIR}/output4.fa' (FORMAT FASTA, INCLUDE_COMMENT true);
 
 query IIII
-SELECT sequence_index, read_id, sequence1, comment FROM read_fastx('__TEST_DIR__/output4.fa') ORDER BY sequence_index;
+SELECT sequence_index, read_id, sequence1, comment FROM read_fastx('{TEST_DIR}/output4.fa') ORDER BY sequence_index;
 ----
 1	seq1	ATGCATGCATGC	my comment
 
@@ -55,94 +55,94 @@ statement ok
 CREATE TABLE test_fasta_paired AS SELECT sequence_index, read_id, comment, sequence1, sequence2 FROM read_fastx('data/fastq/small_a_r1.fq', sequence2='data/fastq/small_a_r2.fq');
 
 statement ok
-COPY (SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired ORDER BY sequence_index) TO '__TEST_DIR__/output5.fa' (FORMAT FASTA, INTERLEAVE true);
+COPY (SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired ORDER BY sequence_index) TO '{TEST_DIR}/output5.fa' (FORMAT FASTA, INTERLEAVE true);
 
 query III
-SELECT read_id, sequence1, comment FROM read_fastx('__TEST_DIR__/output5.fa') ORDER BY sequence_index;
+SELECT read_id, sequence1, comment FROM read_fastx('{TEST_DIR}/output5.fa') ORDER BY sequence_index;
 ----
 pair_a1	AAAA	NULL
 pair_a1	TTTT	NULL
 
 # Test 6: Paired-end split (R1/R2)
 statement ok
-COPY (SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired ORDER BY sequence_index) TO '__TEST_DIR__/output6.{ORIENTATION}.fa' (FORMAT FASTA, INTERLEAVE false);
+COPY (SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired ORDER BY sequence_index) TO '{TEST_DIR}/output6.{ORIENTATION}.fa' (FORMAT FASTA, INTERLEAVE false);
 
 query IIIII
-SELECT sequence_index, read_id, sequence1, sequence2, comment FROM read_fastx('__TEST_DIR__/output6.R1.fa', sequence2='__TEST_DIR__/output6.R2.fa') ORDER BY sequence_index;
+SELECT sequence_index, read_id, sequence1, sequence2, comment FROM read_fastx('{TEST_DIR}/output6.R1.fa', sequence2='{TEST_DIR}/output6.R2.fa') ORDER BY sequence_index;
 ----
 1	pair_a1	AAAA	TTTT	NULL
 
 # Test 7: Paired-end split with compression
 statement ok
-COPY (SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired ORDER BY sequence_index) TO '__TEST_DIR__/output7.{ORIENTATION}.fa.gz' (FORMAT FASTA, INTERLEAVE false, COMPRESSION gzip);
+COPY (SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired ORDER BY sequence_index) TO '{TEST_DIR}/output7.{ORIENTATION}.fa.gz' (FORMAT FASTA, INTERLEAVE false, COMPRESSION gzip);
 
 query IIIII
-SELECT sequence_index, read_id, sequence1, sequence2, comment FROM read_fastx('__TEST_DIR__/output7.R1.fa.gz', sequence2='__TEST_DIR__/output7.R2.fa.gz') ORDER BY sequence_index;
+SELECT sequence_index, read_id, sequence1, sequence2, comment FROM read_fastx('{TEST_DIR}/output7.R1.fa.gz', sequence2='{TEST_DIR}/output7.R2.fa.gz') ORDER BY sequence_index;
 ----
 1	pair_a1	AAAA	TTTT	NULL
 
 # Test 8: Error - missing required column (read_id)
 statement error
-COPY (SELECT sequence1 FROM test_fasta_single) TO '__TEST_DIR__/error1.fa' (FORMAT FASTA);
+COPY (SELECT sequence1 FROM test_fasta_single) TO '{TEST_DIR}/error1.fa' (FORMAT FASTA);
 ----
 COPY FORMAT FASTA requires 'read_id' column
 
 # Test 9: Error - missing required column (sequence1)
 statement error
-COPY (SELECT read_id FROM test_fasta_single) TO '__TEST_DIR__/error2.fa' (FORMAT FASTA);
+COPY (SELECT read_id FROM test_fasta_single) TO '{TEST_DIR}/error2.fa' (FORMAT FASTA);
 ----
 COPY FORMAT FASTA requires 'sequence1' column
 
 # Test 10: Error - genuinely paired data sent to a single-file path
 # (no {ORIENTATION} to split into, INTERLEAVE not requested) -> fail loud with guidance
 statement error
-COPY (SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired) TO '__TEST_DIR__/error3.fa' (FORMAT FASTA);
+COPY (SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired) TO '{TEST_DIR}/error3.fa' (FORMAT FASTA);
 ----
 Use the {ORIENTATION} placeholder
 
 # Test 11: Error - explicit INTERLEAVE=false but no {ORIENTATION} for genuinely paired data.
 statement error
-COPY (SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired) TO '__TEST_DIR__/error4.fa' (FORMAT FASTA, INTERLEAVE false);
+COPY (SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired) TO '{TEST_DIR}/error4.fa' (FORMAT FASTA, INTERLEAVE false);
 ----
 Use the {ORIENTATION} placeholder
 
 # Test 12: Single-end data (no sequence2 column) + {ORIENTATION} now writes the R1 file only.
 statement ok
-COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single ORDER BY sequence_index) TO '__TEST_DIR__/output12.{ORIENTATION}.fa' (FORMAT FASTA);
+COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single ORDER BY sequence_index) TO '{TEST_DIR}/output12.{ORIENTATION}.fa' (FORMAT FASTA);
 
 query II
-SELECT read_id, sequence1 FROM read_fastx('__TEST_DIR__/output12.R1.fa') ORDER BY sequence_index;
+SELECT read_id, sequence1 FROM read_fastx('{TEST_DIR}/output12.R1.fa') ORDER BY sequence_index;
 ----
 seq1	ATGCATGCATGC
 seq2	GGCCGGCCGGCC
 
 # Test 13: Error - ID_AS_SEQUENCE_INDEX without sequence_index column
 statement error
-COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single) TO '__TEST_DIR__/error6.fa' (FORMAT FASTA, ID_AS_SEQUENCE_INDEX true);
+COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single) TO '{TEST_DIR}/error6.fa' (FORMAT FASTA, ID_AS_SEQUENCE_INDEX true);
 ----
 ID_AS_SEQUENCE_INDEX=true requires 'sequence_index' column
 
 # Test 14: Test with original comments preserved (INCLUDE_COMMENT=true)
 statement ok
-COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single ORDER BY sequence_index) TO '__TEST_DIR__/output_with_comments.fa' (FORMAT FASTA, INCLUDE_COMMENT true);
+COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single ORDER BY sequence_index) TO '{TEST_DIR}/output_with_comments.fa' (FORMAT FASTA, INCLUDE_COMMENT true);
 
 query IIII
-SELECT sequence_index, read_id, sequence1, comment FROM read_fastx('__TEST_DIR__/output_with_comments.fa') ORDER BY sequence_index;
+SELECT sequence_index, read_id, sequence1, comment FROM read_fastx('{TEST_DIR}/output_with_comments.fa') ORDER BY sequence_index;
 ----
 1	seq1	ATGCATGCATGC	test sequence 1
 2	seq2	GGCCGGCCGGCC	NULL
 
 # Test 15: Round-trip with NULL comments
 statement ok
-COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single ORDER BY sequence_index) TO '__TEST_DIR__/output_nulls.fa' (FORMAT FASTA);
+COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single ORDER BY sequence_index) TO '{TEST_DIR}/output_nulls.fa' (FORMAT FASTA);
 
 query I
-SELECT COUNT(*) FROM read_fastx('__TEST_DIR__/output_nulls.fa');
+SELECT COUNT(*) FROM read_fastx('{TEST_DIR}/output_nulls.fa');
 ----
 2
 
 query III
-SELECT read_id, sequence1, comment FROM read_fastx('__TEST_DIR__/output_nulls.fa') ORDER BY sequence_index;
+SELECT read_id, sequence1, comment FROM read_fastx('{TEST_DIR}/output_nulls.fa') ORDER BY sequence_index;
 ----
 seq1	ATGCATGCATGC	NULL
 seq2	GGCCGGCCGGCC	NULL
@@ -150,40 +150,40 @@ seq2	GGCCGGCCGGCC	NULL
 # Test 16: Problem #1 - selecting sequence2 from a single-end source yields a NULL sequence2
 # column. Writing to a plain path must produce a single-end file, not error.
 statement ok
-COPY (SELECT read_id, comment, sequence1, sequence2 FROM read_fastx('data/fastq/test.fa') ORDER BY sequence_index) TO '__TEST_DIR__/fa_p1.fa' (FORMAT FASTA);
+COPY (SELECT read_id, comment, sequence1, sequence2 FROM read_fastx('data/fastq/test.fa') ORDER BY sequence_index) TO '{TEST_DIR}/fa_p1.fa' (FORMAT FASTA);
 
 query III
-SELECT read_id, sequence1, comment FROM read_fastx('__TEST_DIR__/fa_p1.fa') ORDER BY sequence_index;
+SELECT read_id, sequence1, comment FROM read_fastx('{TEST_DIR}/fa_p1.fa') ORDER BY sequence_index;
 ----
 seq1	ATGCATGCATGC	NULL
 seq2	GGCCGGCCGGCC	NULL
 
 # Test 17: Problem #2 - paired data + {ORIENTATION} with NO INTERLEAVE parameter -> split R1/R2.
 statement ok
-COPY (SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired ORDER BY sequence_index) TO '__TEST_DIR__/fa_p2.{ORIENTATION}.fa' (FORMAT FASTA);
+COPY (SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired ORDER BY sequence_index) TO '{TEST_DIR}/fa_p2.{ORIENTATION}.fa' (FORMAT FASTA);
 
 query IIII
-SELECT sequence_index, read_id, sequence1, sequence2 FROM read_fastx('__TEST_DIR__/fa_p2.R1.fa', sequence2='__TEST_DIR__/fa_p2.R2.fa') ORDER BY sequence_index;
+SELECT sequence_index, read_id, sequence1, sequence2 FROM read_fastx('{TEST_DIR}/fa_p2.R1.fa', sequence2='{TEST_DIR}/fa_p2.R2.fa') ORDER BY sequence_index;
 ----
 1	pair_a1	AAAA	TTTT
 
 # Test 18: Headline - NULL sequence2 column + {ORIENTATION} writes a single R1 file, no R2 file.
 statement ok
-COPY (SELECT read_id, comment, sequence1, sequence2 FROM read_fastx('data/fastq/test.fa') ORDER BY sequence_index) TO '__TEST_DIR__/fa_headline.{ORIENTATION}.fa' (FORMAT FASTA);
+COPY (SELECT read_id, comment, sequence1, sequence2 FROM read_fastx('data/fastq/test.fa') ORDER BY sequence_index) TO '{TEST_DIR}/fa_headline.{ORIENTATION}.fa' (FORMAT FASTA);
 
 query II
-SELECT read_id, sequence1 FROM read_fastx('__TEST_DIR__/fa_headline.R1.fa') ORDER BY sequence_index;
+SELECT read_id, sequence1 FROM read_fastx('{TEST_DIR}/fa_headline.R1.fa') ORDER BY sequence_index;
 ----
 seq1	ATGCATGCATGC
 seq2	GGCCGGCCGGCC
 
 statement error
-SELECT * FROM read_fastx('__TEST_DIR__/fa_headline.R2.fa');
+SELECT * FROM read_fastx('{TEST_DIR}/fa_headline.R2.fa');
 ----
 
 # Test 19: Contradiction - {ORIENTATION} placeholder combined with INTERLEAVE=true.
 statement error
-COPY (SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired) TO '__TEST_DIR__/fa_contradiction.{ORIENTATION}.fa' (FORMAT FASTA, INTERLEAVE true);
+COPY (SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired) TO '{TEST_DIR}/fa_contradiction.{ORIENTATION}.fa' (FORMAT FASTA, INTERLEAVE true);
 ----
 Cannot combine the {ORIENTATION} placeholder with INTERLEAVE=true
 
@@ -193,7 +193,7 @@ COPY (
   SELECT read_id, comment, sequence1, sequence2 FROM test_fasta_paired
   UNION ALL
   SELECT read_id, comment, sequence1, sequence2 FROM read_fastx('data/fastq/test.fa')
-) TO '__TEST_DIR__/fa_mixed.{ORIENTATION}.fa' (FORMAT FASTA);
+) TO '{TEST_DIR}/fa_mixed.{ORIENTATION}.fa' (FORMAT FASTA);
 ----
 Inconsistent paired-end data
 
@@ -207,7 +207,7 @@ statement ok
 CREATE TABLE fa_bad_seq1 AS SELECT 'r1' AS read_id, 12345678 AS sequence1;
 
 statement error
-COPY fa_bad_seq1 TO '__TEST_DIR__/fa_bad_seq1.fa' (FORMAT FASTA);
+COPY fa_bad_seq1 TO '{TEST_DIR}/fa_bad_seq1.fa' (FORMAT FASTA);
 ----
 sequence1
 
@@ -227,26 +227,26 @@ DROP TABLE fa_bad_seq1;
 statement error
 COPY (
   SELECT 'r1' AS read_id, 'ACGT' AS sequence1, 7::INTEGER AS sequence_index
-) TO '__TEST_DIR__/fa_si_used.fa' (FORMAT FASTA, ID_AS_SEQUENCE_INDEX true);
+) TO '{TEST_DIR}/fa_si_used.fa' (FORMAT FASTA, ID_AS_SEQUENCE_INDEX true);
 ----
 sequence_index
 
 statement ok
 COPY (
   SELECT 'r1' AS read_id, 'ACGT' AS sequence1, 7::INTEGER AS sequence_index
-) TO '__TEST_DIR__/fa_si_unused.fa' (FORMAT FASTA);
+) TO '{TEST_DIR}/fa_si_unused.fa' (FORMAT FASTA);
 
 statement error
 COPY (
   SELECT 'r1' AS read_id, 'ACGT' AS sequence1, 99::INTEGER AS comment
-) TO '__TEST_DIR__/fa_cm_used.fa' (FORMAT FASTA, INCLUDE_COMMENT true);
+) TO '{TEST_DIR}/fa_cm_used.fa' (FORMAT FASTA, INCLUDE_COMMENT true);
 ----
 comment
 
 statement ok
 COPY (
   SELECT 'r1' AS read_id, 'ACGT' AS sequence1, 99::INTEGER AS comment
-) TO '__TEST_DIR__/fa_cm_unused.fa' (FORMAT FASTA);
+) TO '{TEST_DIR}/fa_cm_unused.fa' (FORMAT FASTA);
 
 # The FASTA writer ignores quality columns rather than reading them, so an INTEGER[] qual1
 # in the relation is harmless and must NOT be rejected -- only columns this writer actually
@@ -254,10 +254,10 @@ COPY (
 statement ok
 COPY (
   SELECT 'r1' AS read_id, 'ACGT' AS sequence1, [40 for _ in range(4)] AS qual1
-) TO '__TEST_DIR__/fa_ignored_qual.fa' (FORMAT FASTA);
+) TO '{TEST_DIR}/fa_ignored_qual.fa' (FORMAT FASTA);
 
 query II
-SELECT read_id, sequence1 FROM read_fastx('__TEST_DIR__/fa_ignored_qual.fa');
+SELECT read_id, sequence1 FROM read_fastx('{TEST_DIR}/fa_ignored_qual.fa');
 ----
 r1	ACGT
 

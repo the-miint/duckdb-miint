@@ -200,17 +200,17 @@ statement ok
 COPY (
     SELECT node_index, name, branch_length, edge_id, parent_index
     FROM shear_tree('t', 'tips_abc')
-) TO '__TEST_DIR__/sheared.nwk' (FORMAT NEWICK);
+) TO '{TEST_DIR}/sheared.nwk' (FORMAT NEWICK);
 
 query I
-SELECT count(*) FROM read_newick('__TEST_DIR__/sheared.nwk');
+SELECT count(*) FROM read_newick('{TEST_DIR}/sheared.nwk');
 ----
 5
 
 # Output columns are UNION ALL-compatible with read_newick.
 statement ok
 SELECT node_index, name, branch_length, edge_id, parent_index, is_tip
-    FROM read_newick('__TEST_DIR__/sheared.nwk')
+    FROM read_newick('{TEST_DIR}/sheared.nwk')
 UNION ALL
 SELECT * FROM shear_tree('t', 'tips_abc');
 

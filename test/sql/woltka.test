@@ -15,7 +15,7 @@ CREATE TABLE mock_lengths AS SELECT DISTINCT reference, 10000000 AS length FROM 
 
 statement ok
 COPY (SELECT * FROM test_sam_data)
-TO '__TEST_DIR__/test_woltka_sam_data.sam' (FORMAT SAM, INCLUDE_HEADER false, REFERENCE_LENGTHS 'mock_lengths');
+TO '{TEST_DIR}/test_woltka_sam_data.sam' (FORMAT SAM, INCLUDE_HEADER false, REFERENCE_LENGTHS 'mock_lengths');
 
 # Test against woltka produced outputs
 # woltka classify ... --no-demux --digits 10
@@ -61,7 +61,7 @@ foo	G016766915	15.500
 
 # Test direct from headerless SAM
 statement ok
-CREATE TABLE from_sam AS FROM read_sam('__TEST_DIR__/test_woltka_sam_data.sam', reference_lengths='mock_lengths');
+CREATE TABLE from_sam AS FROM read_sam('{TEST_DIR}/test_woltka_sam_data.sam', reference_lengths='mock_lengths');
 
 query II
 SELECT * FROM woltka_ogu('from_sam', 'read_id') order by value;

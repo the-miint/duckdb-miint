@@ -19,11 +19,11 @@ CREATE TABLE test_fasta_paired AS SELECT sequence_index, read_id, comment, seque
 # Test 1: Explicit COMPRESSION='gzip'
 statement ok
 COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single ORDER BY sequence_index)
-TO '__TEST_DIR__/output_explicit_gzip.fa' (FORMAT FASTA, COMPRESSION 'gzip');
+TO '{TEST_DIR}/output_explicit_gzip.fa' (FORMAT FASTA, COMPRESSION 'gzip');
 
 query IIII
 SELECT sequence_index, read_id, sequence1, comment
-FROM read_fastx('__TEST_DIR__/output_explicit_gzip.fa') ORDER BY sequence_index;
+FROM read_fastx('{TEST_DIR}/output_explicit_gzip.fa') ORDER BY sequence_index;
 ----
 1	seq1	ATGCATGCATGC	NULL
 2	seq2	GGCCGGCCGGCC	NULL
@@ -31,11 +31,11 @@ FROM read_fastx('__TEST_DIR__/output_explicit_gzip.fa') ORDER BY sequence_index;
 # Test 2: Explicit COMPRESSION='gz' (alternative name)
 statement ok
 COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single ORDER BY sequence_index)
-TO '__TEST_DIR__/output_gz.fa' (FORMAT FASTA, COMPRESSION 'gz');
+TO '{TEST_DIR}/output_gz.fa' (FORMAT FASTA, COMPRESSION 'gz');
 
 query III
 SELECT read_id, sequence1, comment
-FROM read_fastx('__TEST_DIR__/output_gz.fa') ORDER BY sequence_index;
+FROM read_fastx('{TEST_DIR}/output_gz.fa') ORDER BY sequence_index;
 ----
 seq1	ATGCATGCATGC	NULL
 seq2	GGCCGGCCGGCC	NULL
@@ -43,11 +43,11 @@ seq2	GGCCGGCCGGCC	NULL
 # Test 3: Explicit COMPRESSION='none' (overrides .gz extension)
 statement ok
 COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single ORDER BY sequence_index) 
-TO '__TEST_DIR__/output_uncompressed.fa.gz' (FORMAT FASTA, COMPRESSION 'none');
+TO '{TEST_DIR}/output_uncompressed.fa.gz' (FORMAT FASTA, COMPRESSION 'none');
 
 query IIII
 SELECT sequence_index, read_id, sequence1, comment 
-FROM read_fastx('__TEST_DIR__/output_uncompressed.fa.gz') ORDER BY sequence_index;
+FROM read_fastx('{TEST_DIR}/output_uncompressed.fa.gz') ORDER BY sequence_index;
 ----
 1	seq1	ATGCATGCATGC	NULL
 2	seq2	GGCCGGCCGGCC	NULL
@@ -55,11 +55,11 @@ FROM read_fastx('__TEST_DIR__/output_uncompressed.fa.gz') ORDER BY sequence_inde
 # Test 4: Verify gzip backward compatibility (existing .gz auto-detect still works)
 statement ok
 COPY (SELECT read_id, comment, sequence1 FROM test_fasta_single ORDER BY sequence_index) 
-TO '__TEST_DIR__/backward_compat.fa.gz' (FORMAT FASTA);
+TO '{TEST_DIR}/backward_compat.fa.gz' (FORMAT FASTA);
 
 query IIII
 SELECT sequence_index, read_id, sequence1, comment 
-FROM read_fastx('__TEST_DIR__/backward_compat.fa.gz') ORDER BY sequence_index;
+FROM read_fastx('{TEST_DIR}/backward_compat.fa.gz') ORDER BY sequence_index;
 ----
 1	seq1	ATGCATGCATGC	NULL
 2	seq2	GGCCGGCCGGCC	NULL

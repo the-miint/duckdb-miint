@@ -76,10 +76,10 @@ s2	f_zero
 # ---------------------------------------------------------------------------
 
 statement ok
-COPY (SELECT feature_id, sample_id, value FROM b_mine) TO '__TEST_DIR__/sparse.biom' (FORMAT BIOM);
+COPY (SELECT feature_id, sample_id, value FROM b_mine) TO '{TEST_DIR}/sparse.biom' (FORMAT BIOM);
 
 statement ok
-CREATE TABLE rt_sparse AS SELECT sample_id, feature_id, value FROM read_biom('__TEST_DIR__/sparse.biom');
+CREATE TABLE rt_sparse AS SELECT sample_id, feature_id, value FROM read_biom('{TEST_DIR}/sparse.biom');
 
 query TTR
 (SELECT * FROM rt_sparse EXCEPT SELECT * FROM b_mine)
@@ -106,10 +106,10 @@ SELECT count(*) FROM b_dense;
 9
 
 statement ok
-COPY (SELECT feature_id, sample_id, value FROM b_dense) TO '__TEST_DIR__/dense.biom' (FORMAT BIOM);
+COPY (SELECT feature_id, sample_id, value FROM b_dense) TO '{TEST_DIR}/dense.biom' (FORMAT BIOM);
 
 statement ok
-CREATE TABLE rt_dense AS SELECT sample_id, feature_id, value FROM read_biom('__TEST_DIR__/dense.biom');
+CREATE TABLE rt_dense AS SELECT sample_id, feature_id, value FROM read_biom('{TEST_DIR}/dense.biom');
 
 # THE claim: the dense write and the sparse write are the same table.
 query TTR
@@ -193,10 +193,10 @@ CREATE TABLE a_mine AS SELECT * FROM absquant_cell_counts(
     'a_counts', 'a_models', 'a_coverage', 'a_lengths', 'a_params', 'cells_per_g_of_gdna', 0.1);
 
 statement ok
-COPY (SELECT feature_id, sample_id, value FROM a_mine) TO '__TEST_DIR__/set_a.biom' (FORMAT BIOM);
+COPY (SELECT feature_id, sample_id, value FROM a_mine) TO '{TEST_DIR}/set_a.biom' (FORMAT BIOM);
 
 statement ok
-CREATE TABLE rt_a AS SELECT sample_id, feature_id, value FROM read_biom('__TEST_DIR__/set_a.biom');
+CREATE TABLE rt_a AS SELECT sample_id, feature_id, value FROM read_biom('{TEST_DIR}/set_a.biom');
 
 query TTR
 (SELECT * FROM rt_a EXCEPT SELECT * FROM a_mine)

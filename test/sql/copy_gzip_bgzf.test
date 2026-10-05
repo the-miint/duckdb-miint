@@ -18,18 +18,18 @@ FROM read_fastx('data/fastq/small_a.fq') CROSS JOIN generate_series(1, 100000) t
 
 statement ok
 COPY (SELECT read_id, sequence1, qual1 FROM big_se ORDER BY sequence_index)
-TO '__TEST_DIR__/bgzf_se.fq.gz' (FORMAT FASTQ);
+TO '{TEST_DIR}/bgzf_se.fq.gz' (FORMAT FASTQ);
 
 # Count preserved (no truncation / no duplication across blocks).
 query I
-SELECT (SELECT count(*) FROM read_fastx('__TEST_DIR__/bgzf_se.fq.gz')) - (SELECT count(*) FROM big_se);
+SELECT (SELECT count(*) FROM read_fastx('{TEST_DIR}/bgzf_se.fq.gz')) - (SELECT count(*) FROM big_se);
 ----
 0
 
 # Content lossless, both directions (corruption in any record -> nonzero).
 query I
 SELECT count(*) FROM (
-  SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/bgzf_se.fq.gz')
+  SELECT read_id, sequence1, qual1 FROM read_fastx('{TEST_DIR}/bgzf_se.fq.gz')
   EXCEPT
   SELECT read_id, sequence1, qual1 FROM big_se
 );
@@ -40,7 +40,7 @@ query I
 SELECT count(*) FROM (
   SELECT read_id, sequence1, qual1 FROM big_se
   EXCEPT
-  SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/bgzf_se.fq.gz')
+  SELECT read_id, sequence1, qual1 FROM read_fastx('{TEST_DIR}/bgzf_se.fq.gz')
 );
 ----
 0
@@ -50,7 +50,7 @@ SELECT count(*) FROM (
 query I
 SELECT count(*) FROM (
   SELECT row_number() OVER (ORDER BY sequence_index) AS rn, read_id
-  FROM read_fastx('__TEST_DIR__/bgzf_se.fq.gz')
+  FROM read_fastx('{TEST_DIR}/bgzf_se.fq.gz')
 ) rb
 JOIN big_se b ON b.sequence_index = rb.rn
 WHERE b.read_id <> rb.read_id;
@@ -68,7 +68,7 @@ CROSS JOIN generate_series(1, 100000) t(i);
 
 statement ok
 COPY (SELECT read_id, sequence1, sequence2, qual1, qual2 FROM big_pe ORDER BY sequence_index)
-TO '__TEST_DIR__/bgzf_pe.{ORIENTATION}.fq.gz' (FORMAT FASTQ);
+TO '{TEST_DIR}/bgzf_pe.{ORIENTATION}.fq.gz' (FORMAT FASTQ);
 
 # Reading R1+R2 as a pair must reproduce each original (read_id, R1, R2) tuple.
 # If R1/R2 desynchronized across blocks/threads, seq2 would attach to the wrong
@@ -76,7 +76,7 @@ TO '__TEST_DIR__/bgzf_pe.{ORIENTATION}.fq.gz' (FORMAT FASTQ);
 query I
 SELECT count(*) FROM (
   SELECT read_id, sequence1, sequence2, qual1, qual2
-  FROM read_fastx('__TEST_DIR__/bgzf_pe.R1.fq.gz', sequence2='__TEST_DIR__/bgzf_pe.R2.fq.gz')
+  FROM read_fastx('{TEST_DIR}/bgzf_pe.R1.fq.gz', sequence2='{TEST_DIR}/bgzf_pe.R2.fq.gz')
   EXCEPT
   SELECT read_id, sequence1, sequence2, qual1, qual2 FROM big_pe
 );
@@ -88,7 +88,7 @@ SELECT count(*) FROM (
   SELECT read_id, sequence1, sequence2, qual1, qual2 FROM big_pe
   EXCEPT
   SELECT read_id, sequence1, sequence2, qual1, qual2
-  FROM read_fastx('__TEST_DIR__/bgzf_pe.R1.fq.gz', sequence2='__TEST_DIR__/bgzf_pe.R2.fq.gz')
+  FROM read_fastx('{TEST_DIR}/bgzf_pe.R1.fq.gz', sequence2='{TEST_DIR}/bgzf_pe.R2.fq.gz')
 );
 ----
 0
@@ -96,23 +96,23 @@ SELECT count(*) FROM (
 # Each split file must have exactly the full record count (catches truncation/duplication on
 # either file independently of the set-based EXCEPT checks above).
 query I
-SELECT (SELECT count(*) FROM read_fastx('__TEST_DIR__/bgzf_pe.R1.fq.gz')) - (SELECT count(*) FROM big_pe);
+SELECT (SELECT count(*) FROM read_fastx('{TEST_DIR}/bgzf_pe.R1.fq.gz')) - (SELECT count(*) FROM big_pe);
 ----
 0
 
 query I
-SELECT (SELECT count(*) FROM read_fastx('__TEST_DIR__/bgzf_pe.R2.fq.gz')) - (SELECT count(*) FROM big_pe);
+SELECT (SELECT count(*) FROM read_fastx('{TEST_DIR}/bgzf_pe.R2.fq.gz')) - (SELECT count(*) FROM big_pe);
 ----
 0
 
 # --- FASTA gzip multi-block round-trip ---
 statement ok
 COPY (SELECT read_id, sequence1 FROM big_se ORDER BY sequence_index)
-TO '__TEST_DIR__/bgzf.fa.gz' (FORMAT FASTA);
+TO '{TEST_DIR}/bgzf.fa.gz' (FORMAT FASTA);
 
 query I
 SELECT count(*) FROM (
-  SELECT read_id, sequence1 FROM read_fastx('__TEST_DIR__/bgzf.fa.gz')
+  SELECT read_id, sequence1 FROM read_fastx('{TEST_DIR}/bgzf.fa.gz')
   EXCEPT
   SELECT read_id, sequence1 FROM big_se
 );
@@ -125,14 +125,14 @@ SELECT count(*) FROM (
 # file, so a read-back of 1 proves replacement (not append) and a valid bgzf file.
 statement ok
 COPY (SELECT read_id, sequence1, qual1 FROM big_se ORDER BY sequence_index)
-TO '__TEST_DIR__/bgzf_exists.fq.gz' (FORMAT FASTQ);
+TO '{TEST_DIR}/bgzf_exists.fq.gz' (FORMAT FASTQ);
 
 statement ok
 COPY (SELECT read_id, sequence1, qual1 FROM big_se ORDER BY sequence_index LIMIT 1)
-TO '__TEST_DIR__/bgzf_exists.fq.gz' (FORMAT FASTQ);
+TO '{TEST_DIR}/bgzf_exists.fq.gz' (FORMAT FASTQ);
 
 query I
-SELECT count(*) FROM read_fastx('__TEST_DIR__/bgzf_exists.fq.gz');
+SELECT count(*) FROM read_fastx('{TEST_DIR}/bgzf_exists.fq.gz');
 ----
 1
 

@@ -156,11 +156,11 @@ statement ok
 COPY (
     SELECT * FROM align_sortmerna(
         'smr_q_bigint', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1)
-) TO '__TEST_DIR__/sortmerna_bigint.sam'
+) TO '{TEST_DIR}/sortmerna_bigint.sam'
 (FORMAT SAM, REFERENCE_LENGTHS 'smr_ref_lengths');
 
 query III
 SELECT read_id, typeof(read_id), reference
-FROM read_sam('__TEST_DIR__/sortmerna_bigint.sam');
+FROM read_sam('{TEST_DIR}/sortmerna_bigint.sam');
 ----
 271211	VARCHAR	Unc49508

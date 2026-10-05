@@ -43,19 +43,19 @@ CREATE TABLE result_all_uuid AS SELECT
     NULL::VARCHAR AS tag_yt, NULL::VARCHAR AS tag_md, NULL::VARCHAR AS tag_sa;
 
 statement ok
-COPY result_all_uuid TO '__TEST_DIR__/all_uuid.sam'
+COPY result_all_uuid TO '{TEST_DIR}/all_uuid.sam'
 (FORMAT SAM, REFERENCE_LENGTHS 'ref_uuid_lengths');
 
 # Canonical stringification on write, VARCHAR on read-back.
 query III
 SELECT read_id, reference, mate_reference
-FROM read_sam('__TEST_DIR__/all_uuid.sam');
+FROM read_sam('{TEST_DIR}/all_uuid.sam');
 ----
 11111111-1111-1111-1111-111111111111	aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa	bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
 
 query III
 SELECT typeof(read_id), typeof(reference), typeof(mate_reference)
-FROM read_sam('__TEST_DIR__/all_uuid.sam')
+FROM read_sam('{TEST_DIR}/all_uuid.sam')
 LIMIT 1;
 ----
 VARCHAR	VARCHAR	VARCHAR
@@ -83,12 +83,12 @@ CREATE TABLE result_uuid_eq AS SELECT
     NULL::VARCHAR AS tag_yt, NULL::VARCHAR AS tag_md, NULL::VARCHAR AS tag_sa;
 
 statement ok
-COPY result_uuid_eq TO '__TEST_DIR__/uuid_eq.sam'
+COPY result_uuid_eq TO '{TEST_DIR}/uuid_eq.sam'
 (FORMAT SAM, REFERENCE_LENGTHS 'ref_uuid_lengths');
 
 query III
 SELECT read_id, reference, mate_reference
-FROM read_sam('__TEST_DIR__/uuid_eq.sam');
+FROM read_sam('{TEST_DIR}/uuid_eq.sam');
 ----
 22222222-2222-2222-2222-222222222222	aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa	=
 
@@ -117,12 +117,12 @@ statement ok
 CREATE TABLE ref_dummy AS SELECT 'dummy' AS name, 1000 AS length;
 
 statement ok
-COPY result_null_uuid TO '__TEST_DIR__/null_uuid_ids.sam'
+COPY result_null_uuid TO '{TEST_DIR}/null_uuid_ids.sam'
 (FORMAT SAM, INCLUDE_HEADER false, REFERENCE_LENGTHS 'ref_dummy');
 
 query III
 SELECT read_id, reference, mate_reference
-FROM read_sam('__TEST_DIR__/null_uuid_ids.sam', reference_lengths='ref_dummy');
+FROM read_sam('{TEST_DIR}/null_uuid_ids.sam', reference_lengths='ref_dummy');
 ----
 *	*	*
 
@@ -149,11 +149,11 @@ CREATE TABLE result_mixed_uuid AS SELECT
     NULL::VARCHAR AS tag_yt, NULL::VARCHAR AS tag_md, NULL::VARCHAR AS tag_sa;
 
 statement ok
-COPY result_mixed_uuid TO '__TEST_DIR__/mixed_uuid.sam'
+COPY result_mixed_uuid TO '{TEST_DIR}/mixed_uuid.sam'
 (FORMAT SAM, REFERENCE_LENGTHS 'ref_uuid_lengths');
 
 query III
-SELECT read_id, reference, mate_reference FROM read_sam('__TEST_DIR__/mixed_uuid.sam');
+SELECT read_id, reference, mate_reference FROM read_sam('{TEST_DIR}/mixed_uuid.sam');
 ----
 read-mixed-1	bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb	aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
 
@@ -163,11 +163,11 @@ read-mixed-1	bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb	aaaaaaaa-aaaa-aaaa-aaaa-aaaaaa
 # ---------------------------------------------------------------------------
 
 statement ok
-COPY result_all_uuid TO '__TEST_DIR__/all_uuid.bam'
+COPY result_all_uuid TO '{TEST_DIR}/all_uuid.bam'
 (FORMAT BAM, REFERENCE_LENGTHS 'ref_uuid_lengths');
 
 query III
-SELECT read_id, reference, mate_reference FROM read_sam('__TEST_DIR__/all_uuid.bam');
+SELECT read_id, reference, mate_reference FROM read_sam('{TEST_DIR}/all_uuid.bam');
 ----
 11111111-1111-1111-1111-111111111111	aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa	bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
 
@@ -180,6 +180,6 @@ COPY (SELECT
     1::INTEGER AS read_id, 0::USMALLINT AS flags, 'r' AS reference, 1::BIGINT AS position,
     1::BIGINT AS stop_position, 0::UTINYINT AS mapq, '*' AS cigar, '*' AS mate_reference,
     0::BIGINT AS mate_position, 0::BIGINT AS template_length
-) TO '__TEST_DIR__/bad_read_id_uuid.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_dummy');
+) TO '{TEST_DIR}/bad_read_id_uuid.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_dummy');
 ----
 Column 'read_id' must be VARCHAR, BIGINT, or UUID

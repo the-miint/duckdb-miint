@@ -56,10 +56,10 @@ COPY (
         'three_' || lpad((i::INTEGER)::VARCHAR, 6, '0') AS read_id,
         repeat('ACGTACGT', 7) AS sequence1
     FROM range(0, 25000) t(i)
-) TO '__TEST_DIR__/rype_adv.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 5000);
+) TO '{TEST_DIR}/rype_adv.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 5000);
 
 statement ok
-CREATE OR REPLACE VIEW seqs_view AS SELECT * FROM read_parquet('__TEST_DIR__/rype_adv.parquet');
+CREATE OR REPLACE VIEW seqs_view AS SELECT * FROM read_parquet('{TEST_DIR}/rype_adv.parquet');
 
 # Sanity: fixture has the expected row counts
 query II
@@ -232,10 +232,10 @@ COPY (
         'neg_' || lpad((i::INTEGER)::VARCHAR, 6, '0') AS read_id,
         repeat('AATTAATT', 7) AS sequence1
     FROM range(0, 25000) t(i)
-) TO '__TEST_DIR__/rype_adv_lr.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 5000);
+) TO '{TEST_DIR}/rype_adv_lr.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 5000);
 
 statement ok
-CREATE OR REPLACE VIEW lr_view AS SELECT * FROM read_parquet('__TEST_DIR__/rype_adv_lr.parquet');
+CREATE OR REPLACE VIEW lr_view AS SELECT * FROM read_parquet('{TEST_DIR}/rype_adv_lr.parquet');
 
 statement ok
 CREATE TEMP TABLE lr_run AS

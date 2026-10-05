@@ -50,7 +50,7 @@ CREATE TABLE backbone AS SELECT * FROM (VALUES
 ) AS t(node_index, parent_index, name, branch_length, edge_id, is_tip);
 
 statement error
-SELECT * FROM krepp_index_create('refs', '__TEST_DIR__/idx_threads', tree_table := 'backbone', threads := 2);
+SELECT * FROM krepp_index_create('refs', '{TEST_DIR}/idx_threads', tree_table := 'backbone', threads := 2);
 ----
 needs an OpenMP runtime
 
@@ -59,6 +59,6 @@ needs an OpenMP runtime
 # existing caller. Asserting the build rather than the binder, so this cannot
 # pass because of some unrelated rejection.
 query I
-SELECT status FROM krepp_index_create('refs', '__TEST_DIR__/idx_one_thread', tree_table := 'backbone', threads := 1);
+SELECT status FROM krepp_index_create('refs', '{TEST_DIR}/idx_one_thread', tree_table := 'backbone', threads := 1);
 ----
 ok

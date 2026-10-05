@@ -280,12 +280,12 @@ CREATE TABLE shard_subjects2 AS SELECT * FROM (VALUES
 ) AS t(read_id, sequence1);
 
 query I
-SELECT success FROM save_minimap2_index('shard_subjects', '__TEST_DIR__/tmpres_shard.mmi', k := 5);
+SELECT success FROM save_minimap2_index('shard_subjects', '{TEST_DIR}/tmpres_shard.mmi', k := 5);
 ----
 true
 
 query I
-SELECT success FROM save_minimap2_index('shard_subjects2', '__TEST_DIR__/tmpres_shard2.mmi', k := 5);
+SELECT success FROM save_minimap2_index('shard_subjects2', '{TEST_DIR}/tmpres_shard2.mmi', k := 5);
 ----
 true
 
@@ -306,7 +306,7 @@ CREATE TEMP TABLE tmp_read_to_shard AS SELECT * FROM (VALUES
 query II
 SELECT read_id, reference
 FROM align_minimap2_sharded('tmp_shard_queries',
-    shard_directory := '__TEST_DIR__/',
+    shard_directory := '{TEST_DIR}/',
     read_to_shard := 'tmp_read_to_shard',
     max_secondary := 0)
 WHERE flags & 4 = 0
@@ -338,7 +338,7 @@ FROM tmp_shard_queries;
 
 statement error
 SELECT count(*) FROM align_minimap2_sharded('tmp_shard_boom',
-    shard_directory := '__TEST_DIR__/',
+    shard_directory := '{TEST_DIR}/',
     read_to_shard := 'tmp_read_to_shard',
     max_secondary := 0);
 ----

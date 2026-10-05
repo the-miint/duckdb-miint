@@ -33,7 +33,7 @@ require-env MIINT_KREPP_TOY_REFS
 statement ok
 CREATE TABLE refs AS
 SELECT regexp_extract(filepath, '([^/]+)\.fna$', 1) AS read_id, sequence1
-FROM read_fastx('${MIINT_KREPP_TOY_REFS}/*.fna', include_filepath := true);
+FROM read_fastx('{MIINT_KREPP_TOY_REFS}/*.fna', include_filepath := true);
 
 statement ok
 CREATE TABLE backbone AS
@@ -47,30 +47,30 @@ CREATE TABLE toy_reads AS SELECT read_id, sequence1 FROM read_fastx('ext/krepp/t
 # means adding a partial was refused. k := 25 puts h at 9 and keeps each partial
 # small; none of the partial logic depends on k.
 query I
-SELECT status FROM krepp_index_create('refs', '__TEST_DIR__/idx_parts', tree_table := 'backbone', k := 25, m := 4, r := 1, frac := false);
+SELECT status FROM krepp_index_create('refs', '{TEST_DIR}/idx_parts', tree_table := 'backbone', k := 25, m := 4, r := 1, frac := false);
 ----
 ok
 
 query I
-SELECT status FROM krepp_index_create('refs', '__TEST_DIR__/idx_parts', tree_table := 'backbone', k := 25, m := 4, r := 2, frac := false);
+SELECT status FROM krepp_index_create('refs', '{TEST_DIR}/idx_parts', tree_table := 'backbone', k := 25, m := 4, r := 2, frac := false);
 ----
 ok
 
 query I
-SELECT status FROM krepp_index_create('refs', '__TEST_DIR__/idx_parts', tree_table := 'backbone', k := 25, m := 4, r := 3, frac := false);
+SELECT status FROM krepp_index_create('refs', '{TEST_DIR}/idx_parts', tree_table := 'backbone', k := 25, m := 4, r := 3, frac := false);
 ----
 ok
 
 # One residue on its own, to compare against below.
 query I
-SELECT status FROM krepp_index_create('refs', '__TEST_DIR__/idx_one', tree_table := 'backbone', k := 25, m := 4, r := 1, frac := false);
+SELECT status FROM krepp_index_create('refs', '{TEST_DIR}/idx_one', tree_table := 'backbone', k := 25, m := 4, r := 1, frac := false);
 ----
 ok
 
 # Three complete partials on disk rather than one overwritten three times: six
 # files per partial, with the metadata .txt sidecar falling outside the pattern.
 query I
-SELECT count(*) FROM glob('__TEST_DIR__/idx_parts/*') WHERE file LIKE '%-no_frac';
+SELECT count(*) FROM glob('{TEST_DIR}/idx_parts/*') WHERE file LIKE '%-no_frac';
 ----
 18
 
@@ -82,7 +82,7 @@ query III
 SELECT count(*) > 0,
        count(*) FILTER (WHERE edge_num NOT IN (SELECT edge_id FROM backbone)) = 0,
        count(DISTINCT edge_num) > 1
-FROM place_krepp(query_table='toy_reads', index_path='__TEST_DIR__/idx_parts');
+FROM place_krepp(query_table='toy_reads', index_path='{TEST_DIR}/idx_parts');
 ----
 true	true	true
 
@@ -95,9 +95,9 @@ true	true	true
 # residues 2 and 3 to stop being loaded, this drops to 0.
 query I
 SELECT count(*) > 0 FROM (
-    SELECT fragment, edge_num FROM place_krepp(query_table='toy_reads', index_path='__TEST_DIR__/idx_parts')
+    SELECT fragment, edge_num FROM place_krepp(query_table='toy_reads', index_path='{TEST_DIR}/idx_parts')
     EXCEPT
-    SELECT fragment, edge_num FROM place_krepp(query_table='toy_reads', index_path='__TEST_DIR__/idx_one')
+    SELECT fragment, edge_num FROM place_krepp(query_table='toy_reads', index_path='{TEST_DIR}/idx_one')
 );
 ----
 true
@@ -105,7 +105,7 @@ true
 # Writing the same residue twice would write over the partial that is there.
 # Under frac := false a different r is a way out, and the message says so.
 statement error
-SELECT status FROM krepp_index_create('refs', '__TEST_DIR__/idx_parts', tree_table := 'backbone', k := 25, m := 4, r := 2, frac := false);
+SELECT status FROM krepp_index_create('refs', '{TEST_DIR}/idx_parts', tree_table := 'backbone', k := 25, m := 4, r := 2, frac := false);
 ----
 already holds the partial this build would write ('-m4r2-no_frac'). krepp does not clear what is there, so this would write over it. Use a different r, or another path
 
@@ -115,14 +115,14 @@ already holds the partial this build would write ('-m4r2-no_frac'). krepp does n
 # fires only after krepp has already written a second index into the directory,
 # so deleting the check under test still passed.
 statement error
-SELECT status FROM krepp_index_create('refs', '__TEST_DIR__/idx_parts', tree_table := 'backbone', k := 25, m := 8, r := 1, frac := false);
+SELECT status FROM krepp_index_create('refs', '{TEST_DIR}/idx_parts', tree_table := 'backbone', k := 25, m := 8, r := 1, frac := false);
 ----
 different hash configuration ('m4-no_frac' vs this build's 'm8-no_frac')
 
 # k is in no filename but decides the LSH positions just as much, so it is
 # compared against the metadata of a partial already there.
 statement error
-SELECT status FROM krepp_index_create('refs', '__TEST_DIR__/idx_parts', tree_table := 'backbone', k := 29, m := 4, r := 4, frac := false);
+SELECT status FROM krepp_index_create('refs', '{TEST_DIR}/idx_parts', tree_table := 'backbone', k := 29, m := 4, r := 4, frac := false);
 ----
 holds partials built with k := 25, but this build uses k := 29
 
@@ -134,12 +134,12 @@ holds partials built with k := 25, but this build uses k := 29
 # query time, after the build. The comparison is against the EFFECTIVE values
 # now, so the order no longer matters.
 query I
-SELECT status FROM krepp_index_create('refs', '__TEST_DIR__/idx_hgap', tree_table := 'backbone', k := 25, m := 4, r := 1, frac := false, h := 10);
+SELECT status FROM krepp_index_create('refs', '{TEST_DIR}/idx_hgap', tree_table := 'backbone', k := 25, m := 4, r := 1, frac := false, h := 10);
 ----
 ok
 
 statement error
-SELECT status FROM krepp_index_create('refs', '__TEST_DIR__/idx_hgap', tree_table := 'backbone', k := 25, m := 4, r := 2, frac := false);
+SELECT status FROM krepp_index_create('refs', '{TEST_DIR}/idx_hgap', tree_table := 'backbone', k := 25, m := 4, r := 2, frac := false);
 ----
 holds partials built with h := 10, but this build uses h := 9
 
@@ -151,12 +151,12 @@ holds partials built with h := 10, but this build uses h := 9
 # nowhere downstream - it just leaves one index holding two different sets of
 # minimizers, with no error at any point.
 query I
-SELECT status FROM krepp_index_create('refs', '__TEST_DIR__/idx_wgap', tree_table := 'backbone', k := 25, m := 4, r := 1, frac := false, w := 40);
+SELECT status FROM krepp_index_create('refs', '{TEST_DIR}/idx_wgap', tree_table := 'backbone', k := 25, m := 4, r := 1, frac := false, w := 40);
 ----
 ok
 
 statement error
-SELECT status FROM krepp_index_create('refs', '__TEST_DIR__/idx_wgap', tree_table := 'backbone', k := 25, m := 4, r := 2, frac := false);
+SELECT status FROM krepp_index_create('refs', '{TEST_DIR}/idx_wgap', tree_table := 'backbone', k := 25, m := 4, r := 2, frac := false);
 ----
 holds partials built with w := 40, but this build uses w := 31
 
@@ -167,30 +167,30 @@ holds partials built with w := 40, but this build uses w := 31
 # second one is refused before the build. As above, the expected text reaches
 # into 'vs this build's', which only the pre-build refusal emits.
 query I
-SELECT status FROM krepp_index_create('refs', '__TEST_DIR__/idx_frac', tree_table := 'backbone', k := 25, m := 4, r := 1, frac := true);
+SELECT status FROM krepp_index_create('refs', '{TEST_DIR}/idx_frac', tree_table := 'backbone', k := 25, m := 4, r := 1, frac := true);
 ----
 ok
 
 statement error
-SELECT status FROM krepp_index_create('refs', '__TEST_DIR__/idx_frac', tree_table := 'backbone', k := 25, m := 4, r := 2, frac := true);
+SELECT status FROM krepp_index_create('refs', '{TEST_DIR}/idx_frac', tree_table := 'backbone', k := 25, m := 4, r := 2, frac := true);
 ----
 different hash configuration ('m4r1-frac' vs this build's 'm4r2-frac')
 
 # The same frac := true build again is refused as the partial already there, and
 # the message does not offer a different r, which the refusal above rules out.
 statement error
-SELECT status FROM krepp_index_create('refs', '__TEST_DIR__/idx_frac', tree_table := 'backbone', k := 25, m := 4, r := 1, frac := true);
+SELECT status FROM krepp_index_create('refs', '{TEST_DIR}/idx_frac', tree_table := 'backbone', k := 25, m := 4, r := 1, frac := true);
 ----
 so this would write over it. Use another path
 
 # Nothing was written by the refused builds: one partial's six files, and the
 # directory still places.
 query I
-SELECT count(*) FROM glob('__TEST_DIR__/idx_frac/*') WHERE file LIKE '%-frac';
+SELECT count(*) FROM glob('{TEST_DIR}/idx_frac/*') WHERE file LIKE '%-frac';
 ----
 6
 
 query I
-SELECT count(*) > 0 FROM place_krepp(query_table='toy_reads', index_path='__TEST_DIR__/idx_frac');
+SELECT count(*) > 0 FROM place_krepp(query_table='toy_reads', index_path='{TEST_DIR}/idx_frac');
 ----
 true

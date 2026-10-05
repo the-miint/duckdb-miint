@@ -32,7 +32,7 @@ SELECT count(DISTINCT filepath) FROM refs;
 query TIII
 SELECT regexp_replace(output_path, '.*/', ''), k, c, num_genomes
   FROM sylph_index_create(
-    'refs', '__TEST_DIR__/miint_tiny.syldb',
+    'refs', '{TEST_DIR}/miint_tiny.syldb',
     genome_id := 'filepath', order_by := 'sequence_index');
 ----
 miint_tiny.syldb	31	200	3
@@ -49,7 +49,7 @@ CREATE TABLE k12_reads AS
 query TT
 SELECT regexp_extract(genome_name, 'K12'),
        round(taxonomic_abundance, 2)
-  FROM sylph_profile('k12_reads', '__TEST_DIR__/miint_tiny.syldb');
+  FROM sylph_profile('k12_reads', '{TEST_DIR}/miint_tiny.syldb');
 ----
 K12	100.00
 
@@ -60,13 +60,13 @@ SELECT round(taxonomic_abundance, 2),
        round(adjusted_ani * 100.0, 2),
        round(naive_ani * 100.0, 2),
        kmers_reassigned
-  FROM sylph_profile('k12_reads', '__TEST_DIR__/miint_tiny.syldb');
+  FROM sylph_profile('k12_reads', '{TEST_DIR}/miint_tiny.syldb');
 ----
 100.00	100.00	98.89	88.48	0
 
 # Eff_cov golden 0.032 (band avoids 3rd-decimal FP flakiness).
 query I
-SELECT count(*) FROM sylph_profile('k12_reads', '__TEST_DIR__/miint_tiny.syldb')
+SELECT count(*) FROM sylph_profile('k12_reads', '{TEST_DIR}/miint_tiny.syldb')
   WHERE eff_cov BETWEEN 0.031 AND 0.033;
 ----
 1
@@ -76,7 +76,7 @@ SELECT count(*) FROM sylph_profile('k12_reads', '__TEST_DIR__/miint_tiny.syldb')
 # numbers (single K12 row each; compared to 6 dp).
 query I
 SELECT count(*)
-  FROM sylph_profile('k12_reads', '__TEST_DIR__/miint_tiny.syldb') mine,
+  FROM sylph_profile('k12_reads', '{TEST_DIR}/miint_tiny.syldb') mine,
        sylph_profile('k12_reads', 'data/sylph/tiny.syldb') oracle
  WHERE round(mine.adjusted_ani, 6) = round(oracle.adjusted_ani, 6)
    AND round(mine.taxonomic_abundance, 6) = round(oracle.taxonomic_abundance, 6);
@@ -87,7 +87,7 @@ SELECT count(*)
 # reconstruction, matching sylph's first_contig_name.
 query I
 SELECT count(*)
-  FROM sylph_profile('k12_reads', '__TEST_DIR__/miint_tiny.syldb') mine
+  FROM sylph_profile('k12_reads', '{TEST_DIR}/miint_tiny.syldb') mine
   JOIN sylph_profile('k12_reads', 'data/sylph/tiny.syldb') oracle
     ON mine.contig_name = oracle.contig_name;
 ----
@@ -97,12 +97,12 @@ SELECT count(*)
 
 statement ok
 SELECT num_genomes FROM sylph_index_create(
-  'refs', '__TEST_DIR__/miint_query.syldb',
+  'refs', '{TEST_DIR}/miint_query.syldb',
   genome_id := 'filepath', pseudotax := false);
 
 query I
 SELECT k FROM sylph_index_create(
-  'refs', '__TEST_DIR__/miint_k21.syldb',
+  'refs', '{TEST_DIR}/miint_k21.syldb',
   genome_id := 'filepath', k := 21);
 ----
 21
@@ -115,7 +115,7 @@ CREATE TABLE refs_bigint AS
 
 query I
 SELECT num_genomes FROM sylph_index_create(
-  'refs_bigint', '__TEST_DIR__/miint_bigint.syldb',
+  'refs_bigint', '{TEST_DIR}/miint_bigint.syldb',
   genome_id := 'feature_id', order_by := 'sequence_index');
 ----
 3
@@ -124,22 +124,22 @@ SELECT num_genomes FROM sylph_index_create(
 
 # genome_id is required.
 statement error
-SELECT * FROM sylph_index_create('refs', '__TEST_DIR__/err.syldb');
+SELECT * FROM sylph_index_create('refs', '{TEST_DIR}/err.syldb');
 ----
 genome_id
 
 # Non-existent source table.
 statement error
-SELECT * FROM sylph_index_create('does_not_exist', '__TEST_DIR__/err.syldb', genome_id := 'filepath');
+SELECT * FROM sylph_index_create('does_not_exist', '{TEST_DIR}/err.syldb', genome_id := 'filepath');
 ----
 
 # Non-existent genome_id column.
 statement error
-SELECT * FROM sylph_index_create('refs', '__TEST_DIR__/err.syldb', genome_id := 'not_a_column');
+SELECT * FROM sylph_index_create('refs', '{TEST_DIR}/err.syldb', genome_id := 'not_a_column');
 ----
 
 # Unsupported k.
 statement error
-SELECT * FROM sylph_index_create('refs', '__TEST_DIR__/err.syldb', genome_id := 'filepath', k := 30);
+SELECT * FROM sylph_index_create('refs', '{TEST_DIR}/err.syldb', genome_id := 'filepath', k := 30);
 ----
 k must be 21 or 31

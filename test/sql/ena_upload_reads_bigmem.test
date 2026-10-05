@@ -41,7 +41,7 @@ CREATE VIEW big_reads AS
 statement ok
 CREATE TABLE big_result AS
   SELECT * FROM ena_upload_reads(relation := 'big_reads',
-                                 target_url := 'file://__TEST_DIR__/bigmem/');
+                                 target_url := 'file://{TEST_DIR}/bigmem/');
 
 # One single-end file, non-empty.
 query II
@@ -51,6 +51,6 @@ single	true
 
 # Losslessness at scale: every read survived the encode→gzip→decode round-trip.
 query I
-SELECT count(*) FROM read_fastx('__TEST_DIR__/bigmem/bigsample.fastq.gz');
+SELECT count(*) FROM read_fastx('{TEST_DIR}/bigmem/bigsample.fastq.gz');
 ----
 3000000

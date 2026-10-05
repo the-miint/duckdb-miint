@@ -17,7 +17,7 @@ CREATE SECRET test_ena_experiments_mock (
     USER 'Webin-99999',
     PASSWORD 'mock-password',
     ENDPOINT 'test',
-    ENDPOINT_URL '${ENA_WEBIN_MOCK_URL}'
+    ENDPOINT_URL '{ENA_WEBIN_MOCK_URL}'
 );
 
 statement ok

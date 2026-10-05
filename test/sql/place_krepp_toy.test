@@ -30,7 +30,7 @@ SELECT count(*) FROM toy_reads;
 # collect sequence quietly yields nothing and every other assertion below
 # passes vacuously over an empty result.
 query I
-SELECT count(*) > 0 FROM place_krepp(query_table='toy_reads', index_path='${MIINT_KREPP_TOY_INDEX}');
+SELECT count(*) > 0 FROM place_krepp(query_table='toy_reads', index_path='{MIINT_KREPP_TOY_INDEX}');
 ----
 true
 
@@ -41,7 +41,7 @@ true
 # sequence, which no downstream query could detect.
 query I
 SELECT count(*)
-FROM place_krepp(query_table='toy_reads', index_path='${MIINT_KREPP_TOY_INDEX}') p
+FROM place_krepp(query_table='toy_reads', index_path='{MIINT_KREPP_TOY_INDEX}') p
 LEFT JOIN toy_reads r ON p.fragment = r.read_id
 WHERE r.read_id IS NULL;
 ----
@@ -52,7 +52,7 @@ WHERE r.read_id IS NULL;
 # and drops the rest.
 query I
 SELECT count(DISTINCT fragment) <= 100
-FROM place_krepp(query_table='toy_reads', index_path='${MIINT_KREPP_TOY_INDEX}');
+FROM place_krepp(query_table='toy_reads', index_path='{MIINT_KREPP_TOY_INDEX}');
 ----
 true
 
@@ -64,7 +64,7 @@ true
 query I
 SELECT count(*) FROM (
     SELECT fragment, sum(like_weight_ratio) AS total
-    FROM place_krepp(query_table='toy_reads', index_path='${MIINT_KREPP_TOY_INDEX}')
+    FROM place_krepp(query_table='toy_reads', index_path='{MIINT_KREPP_TOY_INDEX}')
     GROUP BY fragment
 ) WHERE abs(total - 1.0) > 1e-9;
 ----
@@ -87,7 +87,7 @@ SELECT count(*) FROM (
 # krepp's output on this index, this clause matches those 270 rows.
 query I
 SELECT count(*)
-FROM place_krepp(query_table='toy_reads', index_path='${MIINT_KREPP_TOY_INDEX}')
+FROM place_krepp(query_table='toy_reads', index_path='{MIINT_KREPP_TOY_INDEX}')
 WHERE distal_length < 0 OR pendant_length < 0 OR distance < 0
    OR like_weight_ratio < 0 OR like_weight_ratio > 1;
 ----
@@ -105,7 +105,7 @@ statement ok
 CREATE TABLE one_read AS
 SELECT read_id, sequence1 FROM toy_reads
 WHERE read_id = (SELECT min(fragment) FROM place_krepp(
-    query_table='toy_reads', index_path='${MIINT_KREPP_TOY_INDEX}'));
+    query_table='toy_reads', index_path='{MIINT_KREPP_TOY_INDEX}'));
 
 query I
 SELECT count(*) FROM one_read;
@@ -115,7 +115,7 @@ SELECT count(*) FROM one_read;
 query I
 SELECT count(DISTINCT fragment) = 1
    AND max(fragment) = (SELECT read_id FROM one_read)
-FROM place_krepp(query_table='one_read', index_path='${MIINT_KREPP_TOY_INDEX}');
+FROM place_krepp(query_table='one_read', index_path='{MIINT_KREPP_TOY_INDEX}');
 ----
 true
 
@@ -134,7 +134,7 @@ SELECT row_number() OVER () ::BIGINT AS read_id, sequence1 FROM toy_reads;
 
 query I
 SELECT typeof(fragment) FROM place_krepp(query_table='toy_reads_bigint',
-                                         index_path='${MIINT_KREPP_TOY_INDEX}') LIMIT 1;
+                                         index_path='{MIINT_KREPP_TOY_INDEX}') LIMIT 1;
 ----
 BIGINT
 
@@ -143,7 +143,7 @@ BIGINT
 # formats or truncates the id differently from the VARCHAR one.
 query I
 SELECT count(*) FROM place_krepp(query_table='toy_reads_bigint',
-                                 index_path='${MIINT_KREPP_TOY_INDEX}') b
+                                 index_path='{MIINT_KREPP_TOY_INDEX}') b
 LEFT JOIN toy_reads_bigint r ON b.fragment = r.read_id
 WHERE r.read_id IS NULL;
 ----
@@ -155,7 +155,7 @@ SELECT uuid()::UUID AS read_id, sequence1 FROM toy_reads;
 
 query I
 SELECT typeof(fragment) FROM place_krepp(query_table='toy_reads_uuid',
-                                         index_path='${MIINT_KREPP_TOY_INDEX}') LIMIT 1;
+                                         index_path='{MIINT_KREPP_TOY_INDEX}') LIMIT 1;
 ----
 UUID
 
@@ -164,7 +164,7 @@ UUID
 # above: every fragment must be an id we actually sent.
 query I
 SELECT count(*) FROM place_krepp(query_table='toy_reads_uuid',
-                                 index_path='${MIINT_KREPP_TOY_INDEX}') u
+                                 index_path='{MIINT_KREPP_TOY_INDEX}') u
 LEFT JOIN toy_reads_uuid r ON u.fragment = r.read_id
 WHERE r.read_id IS NULL;
 ----
@@ -203,7 +203,7 @@ SELECT count(*) FROM toy_reads_rna WHERE sequence1 NOT LIKE '%U%';
 # rebuilt with a smaller k.
 query I
 SELECT count(*) FROM place_krepp(
-    query_table='toy_reads_ambiguous', index_path='${MIINT_KREPP_TOY_INDEX}');
+    query_table='toy_reads_ambiguous', index_path='{MIINT_KREPP_TOY_INDEX}');
 ----
 0
 
@@ -217,10 +217,10 @@ SELECT count(*) FROM place_krepp(
 query I
 WITH rna AS (
     SELECT DISTINCT fragment
-    FROM place_krepp(query_table='toy_reads_rna', index_path='${MIINT_KREPP_TOY_INDEX}')
+    FROM place_krepp(query_table='toy_reads_rna', index_path='{MIINT_KREPP_TOY_INDEX}')
 ), dna AS (
     SELECT DISTINCT fragment
-    FROM place_krepp(query_table='toy_reads', index_path='${MIINT_KREPP_TOY_INDEX}')
+    FROM place_krepp(query_table='toy_reads', index_path='{MIINT_KREPP_TOY_INDEX}')
 )
 SELECT (SELECT count(*) FROM (SELECT * FROM rna EXCEPT SELECT * FROM dna))
      + (SELECT count(*) FROM (SELECT * FROM dna EXCEPT SELECT * FROM rna));
@@ -229,9 +229,9 @@ SELECT (SELECT count(*) FROM (SELECT * FROM rna EXCEPT SELECT * FROM dna))
 
 query I
 SELECT (SELECT count(*) FROM place_krepp(query_table='toy_reads_rna',
-                                         index_path='${MIINT_KREPP_TOY_INDEX}'))
+                                         index_path='{MIINT_KREPP_TOY_INDEX}'))
      = (SELECT count(*) FROM place_krepp(query_table='toy_reads',
-                                         index_path='${MIINT_KREPP_TOY_INDEX}'));
+                                         index_path='{MIINT_KREPP_TOY_INDEX}'));
 ----
 true
 
@@ -259,7 +259,7 @@ true
 
 query I
 SELECT count(*) FROM place_krepp(query_table='toy_reads_short',
-                                 index_path='${MIINT_KREPP_TOY_INDEX}');
+                                 index_path='{MIINT_KREPP_TOY_INDEX}');
 ----
 0
 
@@ -307,7 +307,7 @@ FROM toy_reads_mixed;
 # No placement may be attributed to a read that was skipped for being short.
 query I
 SELECT count(*)
-FROM place_krepp(query_table='toy_reads_mixed', index_path='${MIINT_KREPP_TOY_INDEX}') p
+FROM place_krepp(query_table='toy_reads_mixed', index_path='{MIINT_KREPP_TOY_INDEX}') p
 JOIN toy_reads_mixed m ON p.fragment = m.read_id
 WHERE length(m.sequence1) < 27;
 ----
@@ -319,10 +319,10 @@ WHERE length(m.sequence1) < 27;
 query I
 WITH mixed AS (
     SELECT DISTINCT fragment
-    FROM place_krepp(query_table='toy_reads_mixed', index_path='${MIINT_KREPP_TOY_INDEX}')
+    FROM place_krepp(query_table='toy_reads_mixed', index_path='{MIINT_KREPP_TOY_INDEX}')
 ), expected AS (
     SELECT DISTINCT fragment
-    FROM place_krepp(query_table='toy_reads', index_path='${MIINT_KREPP_TOY_INDEX}')
+    FROM place_krepp(query_table='toy_reads', index_path='{MIINT_KREPP_TOY_INDEX}')
     WHERE fragment IN (SELECT read_id FROM toy_reads_mixed WHERE length(sequence1) >= 27)
 )
 SELECT (SELECT count(*) FROM (SELECT * FROM mixed EXCEPT SELECT * FROM expected))
@@ -342,7 +342,7 @@ CREATE TABLE toy_reads_gapped AS
 SELECT read_id, '--------' || sequence1 AS sequence1 FROM toy_reads LIMIT 1;
 
 statement error
-SELECT * FROM place_krepp(query_table='toy_reads_gapped', index_path='${MIINT_KREPP_TOY_INDEX}');
+SELECT * FROM place_krepp(query_table='toy_reads_gapped', index_path='{MIINT_KREPP_TOY_INDEX}');
 ----
 is not a nucleotide code
 
@@ -361,21 +361,21 @@ is not a nucleotide code
 
 statement ok
 COPY (SELECT '((A:1,B:1)100:1,(C:1,D:1)100:1);')
-TO '__TEST_DIR__/dup_label.nwk' (FORMAT csv, HEADER false, QUOTE '');
+TO '{TEST_DIR}/dup_label.nwk' (FORMAT csv, HEADER false, QUOTE '');
 
 statement ok
 COPY (SELECT '((A:1):1,B:1);')
-TO '__TEST_DIR__/unifurcation.nwk' (FORMAT csv, HEADER false, QUOTE '');
+TO '{TEST_DIR}/unifurcation.nwk' (FORMAT csv, HEADER false, QUOTE '');
 
 statement error
 SELECT count(*) FROM place_krepp(query_table='one_read',
-    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/dup_label.nwk');
+    index_path='{MIINT_KREPP_TOY_INDEX}', newick_path='{TEST_DIR}/dup_label.nwk');
 ----
 more than one node named '100'
 
 statement error
 SELECT count(*) FROM place_krepp(query_table='one_read',
-    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/unifurcation.nwk');
+    index_path='{MIINT_KREPP_TOY_INDEX}', newick_path='{TEST_DIR}/unifurcation.nwk');
 ----
 contains a unifurcation
 
@@ -383,7 +383,7 @@ contains a unifurcation
 # error_exit this statement would never run — the process would already be gone.
 query I
 SELECT count(*) > 0 FROM place_krepp(query_table='one_read',
-                                     index_path='${MIINT_KREPP_TOY_INDEX}');
+                                     index_path='{MIINT_KREPP_TOY_INDEX}');
 ----
 true
 
@@ -394,12 +394,12 @@ true
 # -k 27 by run_tests.sh, so 31 is past it.
 
 statement error
-SELECT * FROM place_krepp(query_table='one_read', index_path='${MIINT_KREPP_TOY_INDEX}', hdist_th=31);
+SELECT * FROM place_krepp(query_table='one_read', index_path='{MIINT_KREPP_TOY_INDEX}', hdist_th=31);
 ----
 must not exceed the index's k-mer length
 
 statement ok
-SELECT count(*) FROM place_krepp(query_table='one_read', index_path='${MIINT_KREPP_TOY_INDEX}', hdist_th=27);
+SELECT count(*) FROM place_krepp(query_table='one_read', index_path='{MIINT_KREPP_TOY_INDEX}', hdist_th=27);
 
 # --- Newick shapes krepp rejects lexically ----------------------------------
 #
@@ -410,45 +410,45 @@ SELECT count(*) FROM place_krepp(query_table='one_read', index_path='${MIINT_KRE
 # is why ";\n" is fine and ";\n\n" is not.
 
 statement ok
-COPY (SELECT '((A:1,B:1):1,(C:1,D:1):1);' || chr(10)) TO '__TEST_DIR__/trailing_blank.nwk'
+COPY (SELECT '((A:1,B:1):1,(C:1,D:1):1);' || chr(10)) TO '{TEST_DIR}/trailing_blank.nwk'
     (FORMAT csv, HEADER false, QUOTE '');
 
 statement ok
-COPY (SELECT '[&R] ((A:1,B:1):1,(C:1,D:1):1);') TO '__TEST_DIR__/rooted_marker.nwk'
+COPY (SELECT '[&R] ((A:1,B:1):1,(C:1,D:1):1);') TO '{TEST_DIR}/rooted_marker.nwk'
     (FORMAT csv, HEADER false, QUOTE '');
 
 statement error
 SELECT * FROM place_krepp(query_table='one_read',
-    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/trailing_blank.nwk');
+    index_path='{MIINT_KREPP_TOY_INDEX}', newick_path='{TEST_DIR}/trailing_blank.nwk');
 ----
 must end with ';' followed by at most one newline
 
 # CRLF, the other half of the same rule: krepp pops one '\n' and then finds
 # '\r'. Named in the comment above, so tested rather than merely asserted.
 statement ok
-COPY (SELECT '((A:1,B:1):1,(C:1,D:1):1);' || chr(13)) TO '__TEST_DIR__/crlf.nwk'
+COPY (SELECT '((A:1,B:1):1,(C:1,D:1):1);' || chr(13)) TO '{TEST_DIR}/crlf.nwk'
     (FORMAT csv, HEADER false, QUOTE '');
 
 statement error
 SELECT * FROM place_krepp(query_table='one_read',
-    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/crlf.nwk');
+    index_path='{MIINT_KREPP_TOY_INDEX}', newick_path='{TEST_DIR}/crlf.nwk');
 ----
 must end with ';' followed by at most one newline
 
 statement error
 SELECT * FROM place_krepp(query_table='one_read',
-    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/rooted_marker.nwk');
+    index_path='{MIINT_KREPP_TOY_INDEX}', newick_path='{TEST_DIR}/rooted_marker.nwk');
 ----
 contains an unquoted '[' or ']'
 
 # An indented or line-wrapped tree, which is how most tools pretty-print one.
 statement ok
 COPY (SELECT '(' || chr(10) || '  (A:1,B:1):1,' || chr(10) || '  (C:1,D:1):1' || chr(10) || ');')
-TO '__TEST_DIR__/indented.nwk' (FORMAT csv, HEADER false, QUOTE '');
+TO '{TEST_DIR}/indented.nwk' (FORMAT csv, HEADER false, QUOTE '');
 
 statement error
 SELECT * FROM place_krepp(query_table='one_read',
-    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/indented.nwk');
+    index_path='{MIINT_KREPP_TOY_INDEX}', newick_path='{TEST_DIR}/indented.nwk');
 ----
 contains whitespace outside a quoted label
 
@@ -464,28 +464,28 @@ contains whitespace outside a quoted label
 # through it for comparison.)
 statement ok
 COPY (SELECT '((A:1, B:1):1,(C:1,D:1):1);')
-TO '__TEST_DIR__/space_after_comma.nwk' (FORMAT csv, HEADER false, QUOTE '');
+TO '{TEST_DIR}/space_after_comma.nwk' (FORMAT csv, HEADER false, QUOTE '');
 
 statement error
 SELECT * FROM place_krepp(query_table='one_read',
-    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/space_after_comma.nwk');
+    index_path='{MIINT_KREPP_TOY_INDEX}', newick_path='{TEST_DIR}/space_after_comma.nwk');
 ----
 contains whitespace outside a quoted label
 
 # A concatenated multi-tree file - bootstrap replicates, most commonly.
 statement ok
 COPY (SELECT '(A:1,B:1);' || chr(10) || '(C:1,D:1);')
-TO '__TEST_DIR__/twotrees.nwk' (FORMAT csv, HEADER false, QUOTE '');
+TO '{TEST_DIR}/twotrees.nwk' (FORMAT csv, HEADER false, QUOTE '');
 
 statement error
 SELECT * FROM place_krepp(query_table='one_read',
-    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/twotrees.nwk');
+    index_path='{MIINT_KREPP_TOY_INDEX}', newick_path='{TEST_DIR}/twotrees.nwk');
 ----
 contains a ';' before the end of the file
 
 # The session survives all of it.
 query I
-SELECT count(*) > 0 FROM place_krepp(query_table='one_read', index_path='${MIINT_KREPP_TOY_INDEX}');
+SELECT count(*) > 0 FROM place_krepp(query_table='one_read', index_path='{MIINT_KREPP_TOY_INDEX}');
 ----
 true
 
@@ -501,15 +501,15 @@ true
 
 query I
 SELECT count(*) = count(DISTINCT fragment)
-FROM place_krepp(query_table='toy_reads', index_path='${MIINT_KREPP_TOY_INDEX}', multi=false);
+FROM place_krepp(query_table='toy_reads', index_path='{MIINT_KREPP_TOY_INDEX}', multi=false);
 ----
 true
 
 query I
 SELECT (SELECT count(*) FROM place_krepp(query_table='toy_reads',
-            index_path='${MIINT_KREPP_TOY_INDEX}', multi=false))
+            index_path='{MIINT_KREPP_TOY_INDEX}', multi=false))
      < (SELECT count(*) FROM place_krepp(query_table='toy_reads',
-            index_path='${MIINT_KREPP_TOY_INDEX}'));
+            index_path='{MIINT_KREPP_TOY_INDEX}'));
 ----
 true
 
@@ -519,9 +519,9 @@ true
 # below rules that out.
 query I
 SELECT (SELECT count(*) FROM place_krepp(query_table='toy_reads',
-            index_path='${MIINT_KREPP_TOY_INDEX}', filter=false))
+            index_path='{MIINT_KREPP_TOY_INDEX}', filter=false))
      > (SELECT count(*) FROM place_krepp(query_table='toy_reads',
-            index_path='${MIINT_KREPP_TOY_INDEX}'));
+            index_path='{MIINT_KREPP_TOY_INDEX}'));
 ----
 true
 
@@ -531,9 +531,9 @@ true
 # Measured on this index: chisq 0.001/2.706/10.0/100.0 give 264/404/514/872 rows.
 query I
 SELECT (SELECT count(*) FROM place_krepp(query_table='toy_reads',
-            index_path='${MIINT_KREPP_TOY_INDEX}', chisq=10.0))
+            index_path='{MIINT_KREPP_TOY_INDEX}', chisq=10.0))
      > (SELECT count(*) FROM place_krepp(query_table='toy_reads',
-            index_path='${MIINT_KREPP_TOY_INDEX}'));
+            index_path='{MIINT_KREPP_TOY_INDEX}'));
 ----
 true
 
@@ -565,12 +565,12 @@ SELECT node_index, parent_index, name, branch_length, node_index * 10 + 3 AS edg
 FROM read_newick('ext/krepp/test/tree_toy.nwk');
 
 statement ok
-COPY distal_bound_backbone TO '__TEST_DIR__/distal_bound_backbone.nwk' (FORMAT NEWICK, EDGE_IDS true);
+COPY distal_bound_backbone TO '{TEST_DIR}/distal_bound_backbone.nwk' (FORMAT NEWICK, EDGE_IDS true);
 
 statement ok
 CREATE TABLE distal_bound_placements AS
-SELECT * FROM place_krepp(query_table='toy_reads', index_path='${MIINT_KREPP_TOY_INDEX}',
-                          newick_path='__TEST_DIR__/distal_bound_backbone.nwk');
+SELECT * FROM place_krepp(query_table='toy_reads', index_path='{MIINT_KREPP_TOY_INDEX}',
+                          newick_path='{TEST_DIR}/distal_bound_backbone.nwk');
 
 # Every row lands on an edge the backbone names, so the two checks below see
 # every row rather than whatever happened to join.
@@ -630,42 +630,42 @@ COPY (
     SELECT '(' || a || ':1{0},' || b || ':1{1}):0{2};'
     FROM (SELECT min(name) AS a, max(name) AS b
           FROM read_newick('ext/krepp/test/tree_toy.nwk') WHERE is_tip)
-) TO '__TEST_DIR__/decorated_all.nwk' (FORMAT csv, HEADER false, QUOTE '');
+) TO '{TEST_DIR}/decorated_all.nwk' (FORMAT csv, HEADER false, QUOTE '');
 
 statement ok
-COPY (SELECT '((A:1,B:1):1{1},(C:1,D:1):1{2}):0{3};') TO '__TEST_DIR__/decorated_partial.nwk'
+COPY (SELECT '((A:1,B:1):1{1},(C:1,D:1):1{2}):0{3};') TO '{TEST_DIR}/decorated_partial.nwk'
     (FORMAT csv, HEADER false, QUOTE '');
 
 statement ok
-COPY (SELECT '(A:1{0},B:1{0}):0{2};') TO '__TEST_DIR__/decorated_dup.nwk'
+COPY (SELECT '(A:1{0},B:1{0}):0{2};') TO '{TEST_DIR}/decorated_dup.nwk'
     (FORMAT csv, HEADER false, QUOTE '');
 
 # Fully decorated is accepted. Anti-vacuity for the two rejections below: if
 # this threw, they would pass without discriminating the decoration state.
 statement ok
 SELECT count(*) FROM place_krepp(query_table='one_read',
-    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/decorated_all.nwk');
+    index_path='{MIINT_KREPP_TOY_INDEX}', newick_path='{TEST_DIR}/decorated_all.nwk');
 
 statement error
 SELECT * FROM place_krepp(query_table='one_read',
-    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/decorated_partial.nwk');
+    index_path='{MIINT_KREPP_TOY_INDEX}', newick_path='{TEST_DIR}/decorated_partial.nwk');
 ----
 only partially decorated
 
 statement error
 SELECT * FROM place_krepp(query_table='one_read',
-    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/decorated_dup.nwk');
+    index_path='{MIINT_KREPP_TOY_INDEX}', newick_path='{TEST_DIR}/decorated_dup.nwk');
 ----
 on more than one node
 
 # A backbone miint's parser cannot read reports as an input error naming the
 # file, not as an IO error - it is malformed input, not a failed read.
 statement ok
-COPY (SELECT '((A:1,B:1);') TO '__TEST_DIR__/malformed.nwk' (FORMAT csv, HEADER false, QUOTE '');
+COPY (SELECT '((A:1,B:1);') TO '{TEST_DIR}/malformed.nwk' (FORMAT csv, HEADER false, QUOTE '');
 
 statement error
 SELECT * FROM place_krepp(query_table='one_read',
-    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/malformed.nwk');
+    index_path='{MIINT_KREPP_TOY_INDEX}', newick_path='{TEST_DIR}/malformed.nwk');
 ----
 could not be parsed
 
@@ -683,9 +683,9 @@ could not be parsed
 # Measured on this index: hdist_th 1/2/4/8/20 give 405/406/404/319/229 rows.
 query I
 SELECT (SELECT count(*) FROM place_krepp(query_table='toy_reads',
-            index_path='${MIINT_KREPP_TOY_INDEX}', hdist_th=2, tau=2))
+            index_path='{MIINT_KREPP_TOY_INDEX}', hdist_th=2, tau=2))
     <> (SELECT count(*) FROM place_krepp(query_table='toy_reads',
-            index_path='${MIINT_KREPP_TOY_INDEX}', hdist_th=20, tau=2));
+            index_path='{MIINT_KREPP_TOY_INDEX}', hdist_th=20, tau=2));
 ----
 true
 
@@ -700,9 +700,9 @@ true
 # hardcoded. This is why it is pinned here and not there.
 query I
 SELECT (SELECT count(*) FROM place_krepp(query_table='toy_reads',
-            index_path='${MIINT_KREPP_TOY_INDEX}', hdist_th=20, tau=0))
+            index_path='{MIINT_KREPP_TOY_INDEX}', hdist_th=20, tau=0))
      < (SELECT count(*) FROM place_krepp(query_table='toy_reads',
-            index_path='${MIINT_KREPP_TOY_INDEX}', hdist_th=20, tau=20));
+            index_path='{MIINT_KREPP_TOY_INDEX}', hdist_th=20, tau=20));
 ----
 true
 
@@ -721,7 +721,7 @@ true
 # instead of carving tip names here.
 query I
 SELECT count(*) > 0 FROM place_krepp(query_table='toy_reads',
-    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='ext/krepp/test/tree_toy.nwk');
+    index_path='{MIINT_KREPP_TOY_INDEX}', newick_path='ext/krepp/test/tree_toy.nwk');
 ----
 true
 
@@ -733,16 +733,16 @@ query II
 SELECT
   (SELECT count(*) FROM (
      SELECT fragment, edge_num FROM place_krepp(query_table='toy_reads',
-         index_path='${MIINT_KREPP_TOY_INDEX}')
+         index_path='{MIINT_KREPP_TOY_INDEX}')
      EXCEPT
      SELECT fragment, edge_num FROM place_krepp(query_table='toy_reads',
-         index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='ext/krepp/test/tree_toy.nwk'))),
+         index_path='{MIINT_KREPP_TOY_INDEX}', newick_path='ext/krepp/test/tree_toy.nwk'))),
   (SELECT count(*) FROM (
      SELECT fragment, edge_num FROM place_krepp(query_table='toy_reads',
-         index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='ext/krepp/test/tree_toy.nwk')
+         index_path='{MIINT_KREPP_TOY_INDEX}', newick_path='ext/krepp/test/tree_toy.nwk')
      EXCEPT
      SELECT fragment, edge_num FROM place_krepp(query_table='toy_reads',
-         index_path='${MIINT_KREPP_TOY_INDEX}')));
+         index_path='{MIINT_KREPP_TOY_INDEX}')));
 ----
 0	0
 
@@ -755,12 +755,12 @@ SELECT
 # "these reads placed nowhere". Measured before the guard existed: one read
 # that places on the real backbone returned 0 rows here, silently.
 statement ok
-COPY (SELECT '(A_NOT_IN_INDEX:1,B_NOT_IN_INDEX:1):0;') TO '__TEST_DIR__/nomatch.nwk'
+COPY (SELECT '(A_NOT_IN_INDEX:1,B_NOT_IN_INDEX:1):0;') TO '{TEST_DIR}/nomatch.nwk'
     (FORMAT csv, HEADER false, QUOTE '');
 
 statement error
 SELECT * FROM place_krepp(query_table='toy_reads',
-    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/nomatch.nwk');
+    index_path='{MIINT_KREPP_TOY_INDEX}', newick_path='{TEST_DIR}/nomatch.nwk');
 ----
 shares no tip labels
 
@@ -771,12 +771,12 @@ shares no tip labels
 # check_unique_labels skips unlabeled nodes (phytree.cpp:456) rather than
 # exiting, so nothing rejects this tree before the check runs.
 statement ok
-COPY (SELECT '(:1,:1):0;') TO '__TEST_DIR__/unlabeled.nwk'
+COPY (SELECT '(:1,:1):0;') TO '{TEST_DIR}/unlabeled.nwk'
     (FORMAT csv, HEADER false, QUOTE '');
 
 statement error
 SELECT * FROM place_krepp(query_table='one_read',
-    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/unlabeled.nwk');
+    index_path='{MIINT_KREPP_TOY_INDEX}', newick_path='{TEST_DIR}/unlabeled.nwk');
 ----
 has no labeled tips
 
@@ -786,7 +786,7 @@ has no labeled tips
 # which sends the caller hunting for a typo that isn't there.
 statement error
 SELECT * FROM place_krepp(query_table='one_read',
-    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='ext/krepp/test');
+    index_path='{MIINT_KREPP_TOY_INDEX}', newick_path='ext/krepp/test');
 ----
 not a regular file
 
@@ -797,11 +797,11 @@ statement ok
 COPY (
     SELECT '(' || a || ':1,NOT_IN_INDEX_XYZ:1):0;'
     FROM (SELECT min(name) AS a FROM read_newick('ext/krepp/test/tree_toy.nwk') WHERE is_tip)
-) TO '__TEST_DIR__/partialmatch.nwk' (FORMAT csv, HEADER false, QUOTE '');
+) TO '{TEST_DIR}/partialmatch.nwk' (FORMAT csv, HEADER false, QUOTE '');
 
 statement ok
 SELECT count(*) FROM place_krepp(query_table='one_read',
-    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/partialmatch.nwk');
+    index_path='{MIINT_KREPP_TOY_INDEX}', newick_path='{TEST_DIR}/partialmatch.nwk');
 
 query I
 SELECT count(*) FROM miint_warnings()
@@ -822,11 +822,11 @@ COPY (
     SELECT '(' || a || ':1{-5},' || b || ':1{1}):0{2};'
     FROM (SELECT min(name) AS a, max(name) AS b
           FROM read_newick('ext/krepp/test/tree_toy.nwk') WHERE is_tip)
-) TO '__TEST_DIR__/edge_negative.nwk' (FORMAT csv, HEADER false, QUOTE '');
+) TO '{TEST_DIR}/edge_negative.nwk' (FORMAT csv, HEADER false, QUOTE '');
 
 statement error
 SELECT * FROM place_krepp(query_table='one_read',
-    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/edge_negative.nwk');
+    index_path='{MIINT_KREPP_TOY_INDEX}', newick_path='{TEST_DIR}/edge_negative.nwk');
 ----
 outside the range krepp represents
 
@@ -835,15 +835,15 @@ COPY (
     SELECT '(' || a || ':1{5000000000},' || b || ':1{1}):0{2};'
     FROM (SELECT min(name) AS a, max(name) AS b
           FROM read_newick('ext/krepp/test/tree_toy.nwk') WHERE is_tip)
-) TO '__TEST_DIR__/edge_toobig.nwk' (FORMAT csv, HEADER false, QUOTE '');
+) TO '{TEST_DIR}/edge_toobig.nwk' (FORMAT csv, HEADER false, QUOTE '');
 
 statement error
 SELECT * FROM place_krepp(query_table='one_read',
-    index_path='${MIINT_KREPP_TOY_INDEX}', newick_path='__TEST_DIR__/edge_toobig.nwk');
+    index_path='{MIINT_KREPP_TOY_INDEX}', newick_path='{TEST_DIR}/edge_toobig.nwk');
 ----
 outside the range krepp represents
 
 query I
-SELECT count(*) > 0 FROM place_krepp(query_table='one_read', index_path='${MIINT_KREPP_TOY_INDEX}');
+SELECT count(*) > 0 FROM place_krepp(query_table='one_read', index_path='{MIINT_KREPP_TOY_INDEX}');
 ----
 true

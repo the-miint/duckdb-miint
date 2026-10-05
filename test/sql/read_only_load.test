@@ -5,7 +5,7 @@
 require miint
 
 # Create a persistent database file we can later reopen read-only.
-load __TEST_DIR__/miint_readonly.db
+load {TEST_DIR}/miint_readonly.db
 
 statement ok
 CREATE TABLE t(i INTEGER);
@@ -19,7 +19,7 @@ INSERT INTO t VALUES (1), (2), (3);
 # extension load aborts with:
 #   INTERNAL Error: Failed to register macro 'miint_warnings': ...
 #   Cannot execute statement of type "CREATE" on database ... attached in read-only mode!
-load __TEST_DIR__/miint_readonly.db readonly
+load {TEST_DIR}/miint_readonly.db readonly
 
 # The committed data is still readable.
 query I

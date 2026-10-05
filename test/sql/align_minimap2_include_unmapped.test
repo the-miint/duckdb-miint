@@ -142,12 +142,12 @@ CREATE TABLE iu_reflen AS SELECT 'ref1' AS reference, 1000::BIGINT AS length;
 
 statement ok
 COPY (SELECT * FROM align_minimap2('iu_q', subject_table:='iu_subj', max_secondary:=0, include_unmapped:=true))
-TO '__TEST_DIR__/iu_roundtrip.bam' (FORMAT BAM, REFERENCE_LENGTHS 'iu_reflen');
+TO '{TEST_DIR}/iu_roundtrip.bam' (FORMAT BAM, REFERENCE_LENGTHS 'iu_reflen');
 
 # All three rows survive, and the unmapped ones come back as SAM's '*' sentinel -- NULL in SQL,
 # '*' on disk. Reading back gives '*', not NULL; that asymmetry is documented.
 query TIT
-SELECT read_id, flags, reference FROM read_sam('__TEST_DIR__/iu_roundtrip.bam') ORDER BY read_id;
+SELECT read_id, flags, reference FROM read_sam('{TEST_DIR}/iu_roundtrip.bam') ORDER BY read_id;
 ----
 empty	4	*
 hit	0	ref1

@@ -77,7 +77,7 @@ CREATE TABLE refs AS
 query TIII
 SELECT regexp_replace(output_path, '.*/', ''), k, c, num_genomes
   FROM sylph_index_create(
-    'refs', '__TEST_DIR__/miint_tiny.syl2db',
+    'refs', '{TEST_DIR}/miint_tiny.syl2db',
     genome_id := 'filepath', order_by := 'sequence_index');
 ----
 miint_tiny.syl2db	31	200	3
@@ -85,7 +85,7 @@ miint_tiny.syl2db	31	200	3
 # A miint-built .syl2db profiles identically to the CLI-built one.
 query I
 SELECT count(*)
-  FROM sylph_profile('k12_reads', '__TEST_DIR__/miint_tiny.syl2db') mine,
+  FROM sylph_profile('k12_reads', '{TEST_DIR}/miint_tiny.syl2db') mine,
        sylph_profile('k12_reads', 'data/sylph/tiny.syl2db') oracle
  WHERE mine.contig_name = oracle.contig_name
    AND round(mine.adjusted_ani, 6) = round(oracle.adjusted_ani, 6)
@@ -98,36 +98,36 @@ SELECT count(*)
 # format from the file, never the name).
 query I
 SELECT num_genomes FROM sylph_index_create(
-  'refs', '__TEST_DIR__/named_plain.syldb', genome_id := 'filepath', two_stage := true);
+  'refs', '{TEST_DIR}/named_plain.syldb', genome_id := 'filepath', two_stage := true);
 ----
 3
 
 query T
-SELECT decode(content[1:4]) FROM read_blob('__TEST_DIR__/named_plain.syldb');
+SELECT decode(content[1:4]) FROM read_blob('{TEST_DIR}/named_plain.syldb');
 ----
 SY2D
 
 query I
 SELECT num_genomes FROM sylph_index_create(
-  'refs', '__TEST_DIR__/named_two.syl2db', genome_id := 'filepath', two_stage := false);
+  'refs', '{TEST_DIR}/named_two.syl2db', genome_id := 'filepath', two_stage := false);
 ----
 3
 
 query I
-SELECT count(*) FROM read_blob('__TEST_DIR__/named_two.syl2db') WHERE decode(content[1:4]) = 'SY2D';
+SELECT count(*) FROM read_blob('{TEST_DIR}/named_two.syl2db') WHERE decode(content[1:4]) = 'SY2D';
 ----
 0
 
 # Either way, profiling does not care which name the file was given.
 query I
-SELECT count(*) FROM sylph_profile('k12_reads', '__TEST_DIR__/named_plain.syldb');
+SELECT count(*) FROM sylph_profile('k12_reads', '{TEST_DIR}/named_plain.syldb');
 ----
 1
 
 # The screen can be made sparser than the default ...
 query I
 SELECT num_genomes FROM sylph_index_create(
-  'refs', '__TEST_DIR__/miint_tiny_sparse.syl2db',
+  'refs', '{TEST_DIR}/miint_tiny_sparse.syl2db',
   genome_id := 'filepath', screen_c := 5000);
 ----
 3
@@ -136,32 +136,32 @@ SELECT num_genomes FROM sylph_index_create(
 # before the (non-atomic) build runs.
 statement error
 SELECT * FROM sylph_index_create(
-  'refs', '__TEST_DIR__/err.syl2db', genome_id := 'filepath', screen_c := 100);
+  'refs', '{TEST_DIR}/err.syl2db', genome_id := 'filepath', screen_c := 100);
 ----
 screen_c
 
 # A two-stage database always needs profiling k-mers, however it was requested.
 statement error
 SELECT * FROM sylph_index_create(
-  'refs', '__TEST_DIR__/err.syl2db', genome_id := 'filepath', pseudotax := false);
+  'refs', '{TEST_DIR}/err.syl2db', genome_id := 'filepath', pseudotax := false);
 ----
 pseudotax
 
 statement error
 SELECT * FROM sylph_index_create(
-  'refs', '__TEST_DIR__/err.syldb', genome_id := 'filepath', two_stage := true, pseudotax := false);
+  'refs', '{TEST_DIR}/err.syldb', genome_id := 'filepath', two_stage := true, pseudotax := false);
 ----
 pseudotax
 
 # Two-stage-only knobs on a plain output are an error, not silently ignored.
 statement error
 SELECT * FROM sylph_index_create(
-  'refs', '__TEST_DIR__/err.syldb', genome_id := 'filepath', screen_c := 5000);
+  'refs', '{TEST_DIR}/err.syldb', genome_id := 'filepath', screen_c := 5000);
 ----
 two_stage
 
 statement error
 SELECT * FROM sylph_index_create(
-  'refs', '__TEST_DIR__/err.syl2db', genome_id := 'filepath', two_stage := false, screen_c := 5000);
+  'refs', '{TEST_DIR}/err.syl2db', genome_id := 'filepath', two_stage := false, screen_c := 5000);
 ----
 two_stage

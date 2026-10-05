@@ -16,16 +16,16 @@ require miint
 # ---------------------------------------------------------------------------
 statement ok
 COPY (SELECT 42::BIGINT AS read_id, 'ACGT' AS sequence1, [35, 35, 35, 35]::UTINYINT[] AS qual1)
-TO '__TEST_DIR__/bigint.fq' (FORMAT FASTQ);
+TO '{TEST_DIR}/bigint.fq' (FORMAT FASTQ);
 
 query III
-SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/bigint.fq');
+SELECT read_id, sequence1, qual1 FROM read_fastx('{TEST_DIR}/bigint.fq');
 ----
 42	ACGT	[35, 35, 35, 35]
 
 # read_id survives a round-trip back to BIGINT (qiita's use case).
 query I
-SELECT read_id::BIGINT FROM read_fastx('__TEST_DIR__/bigint.fq');
+SELECT read_id::BIGINT FROM read_fastx('{TEST_DIR}/bigint.fq');
 ----
 42
 
@@ -41,10 +41,10 @@ SELECT 1;
 # ---------------------------------------------------------------------------
 statement ok
 COPY (SELECT '12345678-1234-5678-1234-567812345678'::UUID AS read_id, 'ACGT' AS sequence1, [35, 35, 35, 35]::UTINYINT[] AS qual1)
-TO '__TEST_DIR__/uuid.fq' (FORMAT FASTQ);
+TO '{TEST_DIR}/uuid.fq' (FORMAT FASTQ);
 
 query II
-SELECT read_id, sequence1 FROM read_fastx('__TEST_DIR__/uuid.fq');
+SELECT read_id, sequence1 FROM read_fastx('{TEST_DIR}/uuid.fq');
 ----
 12345678-1234-5678-1234-567812345678	ACGT
 
@@ -52,10 +52,10 @@ SELECT read_id, sequence1 FROM read_fastx('__TEST_DIR__/uuid.fq');
 # form (proves UUID::ToString canonicalization, not verbatim pass-through).
 statement ok
 COPY (SELECT 'AABBCCDD-EEFF-1122-3344-556677889900'::UUID AS read_id, 'ACGT' AS sequence1, [35, 35, 35, 35]::UTINYINT[] AS qual1)
-TO '__TEST_DIR__/uuid_upper.fq' (FORMAT FASTQ);
+TO '{TEST_DIR}/uuid_upper.fq' (FORMAT FASTQ);
 
 query II
-SELECT read_id, sequence1 FROM read_fastx('__TEST_DIR__/uuid_upper.fq');
+SELECT read_id, sequence1 FROM read_fastx('{TEST_DIR}/uuid_upper.fq');
 ----
 aabbccdd-eeff-1122-3344-556677889900	ACGT
 
@@ -65,10 +65,10 @@ aabbccdd-eeff-1122-3344-556677889900	ACGT
 # ---------------------------------------------------------------------------
 statement ok
 COPY (SELECT 999::BIGINT AS read_id, 7::BIGINT AS sequence_index, 'ACGT' AS sequence1, [35, 35, 35, 35]::UTINYINT[] AS qual1)
-TO '__TEST_DIR__/idx.fq' (FORMAT FASTQ, ID_AS_SEQUENCE_INDEX true);
+TO '{TEST_DIR}/idx.fq' (FORMAT FASTQ, ID_AS_SEQUENCE_INDEX true);
 
 query II
-SELECT read_id, sequence1 FROM read_fastx('__TEST_DIR__/idx.fq');
+SELECT read_id, sequence1 FROM read_fastx('{TEST_DIR}/idx.fq');
 ----
 7	ACGT
 
@@ -77,19 +77,19 @@ SELECT read_id, sequence1 FROM read_fastx('__TEST_DIR__/idx.fq');
 # ---------------------------------------------------------------------------
 statement ok
 COPY (SELECT 42::BIGINT AS read_id, 'ACGT' AS sequence1)
-TO '__TEST_DIR__/bigint.fa' (FORMAT FASTA);
+TO '{TEST_DIR}/bigint.fa' (FORMAT FASTA);
 
 query II
-SELECT read_id, sequence1 FROM read_fastx('__TEST_DIR__/bigint.fa');
+SELECT read_id, sequence1 FROM read_fastx('{TEST_DIR}/bigint.fa');
 ----
 42	ACGT
 
 statement ok
 COPY (SELECT '12345678-1234-5678-1234-567812345678'::UUID AS read_id, 'ACGT' AS sequence1)
-TO '__TEST_DIR__/uuid.fa' (FORMAT FASTA);
+TO '{TEST_DIR}/uuid.fa' (FORMAT FASTA);
 
 query II
-SELECT read_id, sequence1 FROM read_fastx('__TEST_DIR__/uuid.fa');
+SELECT read_id, sequence1 FROM read_fastx('{TEST_DIR}/uuid.fa');
 ----
 12345678-1234-5678-1234-567812345678	ACGT
 
@@ -99,12 +99,12 @@ SELECT read_id, sequence1 FROM read_fastx('__TEST_DIR__/uuid.fa');
 # ---------------------------------------------------------------------------
 statement error
 COPY (SELECT 3.14::DOUBLE AS read_id, 'ACGT' AS sequence1, [35, 35, 35, 35]::UTINYINT[] AS qual1)
-TO '__TEST_DIR__/bad.fq' (FORMAT FASTQ);
+TO '{TEST_DIR}/bad.fq' (FORMAT FASTQ);
 ----
 Column 'read_id' must be VARCHAR, BIGINT, or UUID
 
 statement error
 COPY (SELECT 3.14::DOUBLE AS read_id, 'ACGT' AS sequence1)
-TO '__TEST_DIR__/bad.fa' (FORMAT FASTA);
+TO '{TEST_DIR}/bad.fa' (FORMAT FASTA);
 ----
 Column 'read_id' must be VARCHAR, BIGINT, or UUID

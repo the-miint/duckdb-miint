@@ -26,7 +26,7 @@ CREATE TABLE upload_input AS
 statement ok
 CREATE SECRET ena_live (
     TYPE ENA,
-    USER '${ENA_WEBIN_TEST_USER}',
+    USER '{ENA_WEBIN_TEST_USER}',
     PASSWORD_ENV 'ENA_WEBIN_TEST_PASSWORD',
     ENDPOINT 'test'
 );
