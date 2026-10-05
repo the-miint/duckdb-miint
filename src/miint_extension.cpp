@@ -335,9 +335,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// subsystem is compiled out (e.g., on WASM/Windows). The table functions
 	// (align_bowtie2 / align_bowtie2_sharded) are also unavailable in that
 	// case — the daemon is the only path.
-	ScalarFunction bowtie2_stub(
-	    "bowtie2_available", {}, LogicalType::BOOLEAN,
-	    [](DataChunk &args, ExpressionState &state, Vector &result) { result.Reference(Value::BOOLEAN(false)); });
+	ScalarFunction bowtie2_stub("bowtie2_available", {}, LogicalType::BOOLEAN,
+	                            [](DataChunk &args, ExpressionState &state, Vector &result) {
+		                            result.Reference(Value::BOOLEAN(false), count_t(args.size()));
+	                            });
 	loader.RegisterFunction(bowtie2_stub);
 #endif
 	ReadNCBIFastaTableFunction::Register(loader);
@@ -441,9 +442,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 #else
 	// Stub: phylogeny_fasttree_available() always returns false when gpl-boundary
 	// support is compiled out (e.g., on WASM/Windows).
-	ScalarFunction phylogeny_fasttree_stub(
-	    "phylogeny_fasttree_available", {}, LogicalType::BOOLEAN,
-	    [](DataChunk &args, ExpressionState &state, Vector &result) { result.Reference(Value::BOOLEAN(false)); });
+	ScalarFunction phylogeny_fasttree_stub("phylogeny_fasttree_available", {}, LogicalType::BOOLEAN,
+	                                       [](DataChunk &args, ExpressionState &state, Vector &result) {
+		                                       result.Reference(Value::BOOLEAN(false), count_t(args.size()));
+	                                       });
 	loader.RegisterFunction(phylogeny_fasttree_stub);
 
 	// Stub: install_gpl_boundary() reports the platform doesn't support
@@ -454,19 +456,19 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                                                 {"message", LogicalType::VARCHAR}});
 	const auto install_stub_exec = [](DataChunk &args, ExpressionState &state, Vector &result) {
 		auto &entries = StructVector::GetEntries(result);
-		auto installed_data = FlatVector::GetData<bool>(*entries[0]);
-		auto &path_vec = *entries[1];
-		auto &version_vec = *entries[2];
-		auto &message_vec = *entries[3];
+		auto installed_data = FlatVector::GetDataMutable<bool>(entries[0]);
+		auto &path_vec = entries[1];
+		auto &version_vec = entries[2];
+		auto &message_vec = entries[3];
 		const idx_t n = args.size();
 		const string msg = "install_gpl_boundary: this miint build was compiled without "
 		                   "MIINT_ENABLE_GPL_BOUNDARY (typically WASM or Windows). gpl-boundary "
 		                   "is not supported on this platform.";
 		for (idx_t i = 0; i < n; i++) {
 			installed_data[i] = false;
-			FlatVector::GetData<string_t>(path_vec)[i] = StringVector::AddString(path_vec, "");
-			FlatVector::GetData<string_t>(version_vec)[i] = StringVector::AddString(version_vec, "");
-			FlatVector::GetData<string_t>(message_vec)[i] = StringVector::AddString(message_vec, msg);
+			FlatVector::GetDataMutable<string_t>(path_vec)[i] = StringVector::AddString(path_vec, "");
+			FlatVector::GetDataMutable<string_t>(version_vec)[i] = StringVector::AddString(version_vec, "");
+			FlatVector::GetDataMutable<string_t>(message_vec)[i] = StringVector::AddString(message_vec, msg);
 		}
 		result.SetVectorType(VectorType::CONSTANT_VECTOR);
 	};
