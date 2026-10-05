@@ -5,6 +5,7 @@
 #include "duckdb/common/serializer/buffered_file_writer.hpp"
 #include "duckdb/common/serializer/memory_stream.hpp"
 #include "duckdb/common/enums/file_compression_type.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
 // ResolveSequenceRecordId is header-inline (hot path) so it needs the id codec,
 // UUID::ToString, AllowedIdTypeList, exception types, and UnifiedVectorFormat --
 // id_column_utils.hpp transitively provides all of them.

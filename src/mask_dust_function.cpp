@@ -5,6 +5,7 @@
 #include "duckdb/common/vector_operations/binary_executor.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 
 #include "mask.h"
 

@@ -28,6 +28,8 @@
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/query_result.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 
 // scikit-bio-binaries — PERMANOVA pseudo-F + p-value on a fp32 distance matrix.
 #include "distance.h"

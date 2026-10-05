@@ -4,6 +4,7 @@
 #include "miint_log.hpp"
 #include "read_ena_sequences_policy.hpp"
 #include "duckdb/common/vector_size.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
 #include <cerrno>
 #include <fstream>
 

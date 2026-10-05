@@ -23,6 +23,7 @@
 #include "duckdb/main/query_result.hpp"
 #include "duckdb/main/settings.hpp"
 #include "duckdb/storage/block_allocator.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
 #include <cstdlib>
 #include <functional>
 #include <string>

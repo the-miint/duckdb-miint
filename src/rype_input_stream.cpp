@@ -2,6 +2,7 @@
 
 #include "duckdb/common/arrow/arrow_converter.hpp"
 #include "duckdb/main/chunk_scan_state/query_result.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
 
 namespace duckdb {
 

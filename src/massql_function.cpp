@@ -7,6 +7,7 @@
 #include "duckdb/common/vector_operations/binary_executor.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 #include "per_sample_table_function.hpp"
 
 namespace duckdb {

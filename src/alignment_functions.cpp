@@ -3,6 +3,9 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/string_type.hpp"
 #include "duckdb/function/scalar_function.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
 #include <string>
 
 namespace duckdb {

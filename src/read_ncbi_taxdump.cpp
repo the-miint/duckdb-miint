@@ -11,6 +11,8 @@
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/function/function_set.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 
 #include <algorithm>
 #include <chrono>

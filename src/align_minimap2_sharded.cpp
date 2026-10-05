@@ -4,6 +4,8 @@
 #include "shard_debug.hpp"
 #include "shard_progress.hpp"
 #include "duckdb/common/file_system.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 
 namespace duckdb {
 

@@ -2,6 +2,8 @@
 #include "id_column_utils.hpp"
 
 #include <algorithm>
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 
 namespace duckdb {
 

@@ -6,6 +6,8 @@
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 
 namespace duckdb {
 

@@ -1,6 +1,8 @@
 #include "read_ena_searchable_fields.hpp"
 
 #include "duckdb/common/vector_size.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 
 #include <sstream>
 

@@ -5,6 +5,7 @@
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
 #include <read_sequences_sff.hpp>
 
 namespace duckdb {

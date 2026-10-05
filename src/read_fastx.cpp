@@ -7,6 +7,7 @@
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/storage/statistics/node_statistics.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
 #include <filesystem>
 #include <read_fastx.hpp>
 

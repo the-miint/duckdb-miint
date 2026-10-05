@@ -5,6 +5,8 @@
  */
 
 #include "duckdb/common/types/vector.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 #include <cstdint>
 #include <string>
 #include <vector>

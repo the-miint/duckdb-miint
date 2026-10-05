@@ -41,6 +41,7 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/query_result.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
 
 // scikit-bio-binaries — randomized PCoA on a libssu fp32 distance matrix.
 #include "ordination.h"

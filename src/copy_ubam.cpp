@@ -8,6 +8,8 @@
 #include "duckdb/common/types.hpp"
 #include "duckdb/function/copy_function.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
 #include <htslib-1.22.1/htslib/hts.h>
 #include <htslib-1.22.1/htslib/sam.h>
 

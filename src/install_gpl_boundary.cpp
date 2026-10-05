@@ -12,6 +12,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <vector>
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
 
 namespace duckdb {
 

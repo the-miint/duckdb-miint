@@ -5,6 +5,8 @@
 #include "NewickTree.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 #include <cctype>
 #include <cmath>
 #include <map>

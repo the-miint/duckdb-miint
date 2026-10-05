@@ -8,6 +8,8 @@
 #include "duckdb/main/query_result.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/common/types/uuid.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
 
 namespace duckdb {
 

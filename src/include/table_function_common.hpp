@@ -7,6 +7,7 @@
 #include "duckdb/common/named_parameter_map.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
 #include "SpectrumBatch.hpp"
 #include "QualScore.hpp"
 

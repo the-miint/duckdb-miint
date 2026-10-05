@@ -3,6 +3,8 @@
 #include "remote_file_helper.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 
 // htslib comes in via SAMReader.hpp, which owns the SAMFilePtr/SAMHeaderPtr RAII
 // wrappers used below (note the version-prefixed include path this tree uses).
