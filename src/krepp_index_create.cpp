@@ -29,6 +29,7 @@
 #include <unordered_set>
 #include <vector>
 #include "miint_named_parameter.hpp"
+#include "miint_streaming_query.hpp"
 
 namespace duckdb {
 
@@ -595,7 +596,7 @@ unique_ptr<GlobalTableFunctionState> KreppIndexCreateTableFunction::InitGlobal(C
 		const std::string sql = "SELECT read_id::VARCHAR AS read_id, sequence1" +
 		                        std::string(data.schema.has_sequence2 ? ", sequence2" : "") + " FROM " +
 		                        KeywordHelper::WriteOptionallyQuoted(data.sequence_table);
-		auto result = conn.SendQuery(sql);
+		auto result = SubmitStream(conn, sql);
 		if (result->HasError()) {
 			throw InvalidInputException("%s: failed to read '%s': %s", kCallerName, data.sequence_table,
 			                            result->GetError());

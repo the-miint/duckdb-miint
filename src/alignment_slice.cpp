@@ -15,6 +15,7 @@
 #include "duckdb/parser/keyword_helper.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "miint_named_parameter.hpp"
+#include "miint_streaming_query.hpp"
 
 namespace duckdb {
 
@@ -188,7 +189,7 @@ unique_ptr<GlobalTableFunctionState> AlignmentSliceTableFunction::InitGlobal(Cli
 	auto &db = DatabaseInstance::GetDatabase(context);
 	gstate->conn = make_uniq<Connection>(db);
 	InheritTempObjects(context, *gstate->conn);
-	gstate->query_result = gstate->conn->SendQuery(data.select_query);
+	gstate->query_result = SubmitStream(*gstate->conn, data.select_query);
 
 	return gstate;
 }

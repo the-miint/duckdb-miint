@@ -22,6 +22,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include "miint_streaming_query.hpp"
 
 namespace duckdb {
 
@@ -40,7 +41,7 @@ struct PileupGlobalState : public GlobalTableFunctionState {
 
 	// Streaming alignment reader — conn must outlive alignment_stream.
 	unique_ptr<Connection> conn;
-	unique_ptr<QueryResult> alignment_stream;
+	unique_ptr<StreamingQuery> alignment_stream;
 	bool stream_exhausted = false;
 
 	// Result buffer: pileup rows from the current alignment chunk.
@@ -205,7 +206,7 @@ static unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, T
 	InheritTempObjects(context, *gstate->conn);
 	std::string query = "SELECT read_id, reference, position, cigar, sequence, qual FROM " +
 	                    KeywordHelper::WriteOptionallyQuoted(data.alignments_table);
-	gstate->alignment_stream = gstate->conn->SendQuery(query);
+	gstate->alignment_stream = SubmitStream(*gstate->conn, query);
 	if (gstate->alignment_stream->HasError()) {
 		throw InvalidInputException("%s: failed to read alignments table '%s': %s", FN_NAME, data.alignments_table,
 		                            gstate->alignment_stream->GetError());

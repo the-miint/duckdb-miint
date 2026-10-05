@@ -40,7 +40,7 @@
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/function/table/arrow/arrow_duck_schema.hpp"
-#include "duckdb/main/chunk_scan_state.hpp"
+#include "miint_streaming_query.hpp"
 #include "duckdb/main/client_properties.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/query_result.hpp"
@@ -134,7 +134,7 @@ public:
 	//! GlobalState teardown, whatever RYpe did.
 	ArrowArrayStream stream;
 
-	RypeInputStream(unique_ptr<QueryResult> result, RypeIdMap &id_map, RypeInputStreamOptions options);
+	RypeInputStream(unique_ptr<StreamingQuery> result, RypeIdMap &id_map, RypeInputStreamOptions options);
 
 	RypeInputStream(const RypeInputStream &) = delete;
 	RypeInputStream &operator=(const RypeInputStream &) = delete;
@@ -208,8 +208,10 @@ private:
 	idx_t AppendSlice(ArrowAppender &appender, DataChunk &chunk, idx_t from, idx_t row_limit, bool require_progress,
 	                  idx_t &batch_bytes);
 
-	unique_ptr<QueryResult> result;
-	unique_ptr<ChunkScanState> scan_state;
+	unique_ptr<StreamingQuery> result;
+	//! Cursor over the stream (v1.5 used duckdb's ChunkScanState, removed in v2.0)
+	unique_ptr<DataChunk> current_chunk;
+	idx_t chunk_offset = 0;
 	RypeIdMap &id_map;
 	RypeInputStreamOptions options;
 

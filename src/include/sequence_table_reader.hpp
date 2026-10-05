@@ -10,6 +10,7 @@
 #include <mutex>
 #include <string>
 #include <vector>
+#include "miint_streaming_query.hpp"
 
 namespace duckdb {
 
@@ -168,7 +169,7 @@ private:
 	// points to the live connection.
 	unique_ptr<Connection> owned_conn_;
 	Connection *conn_ptr_;
-	unique_ptr<QueryResult> stream_;
+	unique_ptr<StreamingQuery> stream_;
 	SequenceTableSchema schema_;
 	idx_t sub_batch_size_;
 	miint::SequenceRecordBatch partial_; // Partially-filled sub-batch carried across Fetch() calls

@@ -1,7 +1,6 @@
 #include "rype_input_stream.hpp"
 
 #include "duckdb/common/arrow/arrow_converter.hpp"
-#include "duckdb/main/chunk_scan_state/query_result.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 
 namespace duckdb {
@@ -40,14 +39,13 @@ idx_t GetRypeArrowBatchBytes(ClientContext &context) {
 // Construction
 // ============================================================================
 
-RypeInputStream::RypeInputStream(unique_ptr<QueryResult> result_p, RypeIdMap &id_map_p,
+RypeInputStream::RypeInputStream(unique_ptr<StreamingQuery> result_p, RypeIdMap &id_map_p,
                                  RypeInputStreamOptions options_p)
     : result(std::move(result_p)), id_map(id_map_p), options(std::move(options_p)) {
 	D_ASSERT(result);
 	appender_capacity =
 	    options.batch_bytes > 0 ? MinValue<idx_t>(options.batch_rows, STANDARD_VECTOR_SIZE) : options.batch_rows;
-	client_properties = result->client_properties;
-	scan_state = make_uniq<QueryResultChunkScanState>(*result);
+	client_properties = result->GetClientProperties();
 
 	// The Arrow schema RYpe validates against (ext/rype/src/arrow/schema.rs):
 	// id Int64, sequence + optional pair_sequence as a binary/string type. BLOB
@@ -87,7 +85,7 @@ unique_ptr<RypeInputStream> BuildRypeInputStream(Connection &conn, RypeIdMap &id
 	// SendQuery, not Query: the result must stream so memory stays O(batch)
 	// instead of materializing the whole corpus. A prepared statement would
 	// force-materialize even with allow_stream_result.
-	auto query_result = conn.SendQuery("SELECT " + select_cols + " FROM " + options.relation_quoted);
+	auto query_result = SubmitStream(conn, "SELECT " + select_cols + " FROM " + options.relation_quoted);
 	if (query_result->HasError()) {
 		throw InvalidInputException("Failed to read sequences from '%s': %s", options.source_name,
 		                            query_result->GetError());
@@ -155,8 +153,7 @@ void RypeInputStream::ReleaseScan() {
 	// restores the vectors from their own caches, releasing the references; the
 	// !result guard in FetchBatch means nothing reads transformed afterwards.
 	transformed.Reset();
-	// Order matters: the scan state borrows the QueryResult.
-	scan_state.reset();
+	current_chunk.reset();
 	result.reset();
 }
 
@@ -173,26 +170,18 @@ const char *RypeInputStream::StreamGetLastError(ArrowArrayStream *stream) {
 // ============================================================================
 
 bool RypeInputStream::EnsureChunk() {
-	if (scan_state->RemainingInChunk() > 0) {
+	if (current_chunk && chunk_offset < current_chunk->size()) {
 		return true;
 	}
-	ErrorData error;
-	if (scan_state->LoadNextChunk(error)) {
-		return !(scan_state->ChunkIsEmpty() || scan_state->Finished());
+	current_chunk = result->Fetch();
+	chunk_offset = 0;
+	if (current_chunk && current_chunk->size() > 0) {
+		return true;
 	}
-	// LoadNextChunk returns false for two different situations: a genuine fetch
-	// failure, which populates one of the two error slots, and a call made after
-	// it has already finished, which returns early and leaves `error`
-	// default-constructed (duckdb/src/main/chunk_scan_state/query_result.cpp:42).
-	// Throwing unconditionally would assert on !initialized in a debug build and,
-	// in release, replace the real cause with an empty message. Report only a real
-	// error; otherwise this is end of stream, which is what DuckDB's own
-	// ArrowUtil::TryFetchChunk returns here.
-	if (scan_state->HasError()) {
-		scan_state->GetError().Throw();
-	}
-	if (error.HasError()) {
-		error.Throw();
+	current_chunk.reset();
+	// A stream reports an execution error by ending early with HasError() set; rethrow it with its original type
+	if (result->HasError()) {
+		result->GetErrorObject().Throw();
 	}
 	return false;
 }
@@ -215,9 +204,9 @@ RypeInputStream::Sizing RypeInputStream::SampleSizing(size_t fallback_read_lengt
 	// EnsureChunk leaves the chunk current with its offset untouched, so the rows
 	// measured here are the same rows the first get_next will append. Nothing is
 	// consumed and the relation is read once.
-	auto &chunk = scan_state->CurrentChunk();
+	auto &chunk = *current_chunk;
 	const idx_t chunk_size = chunk.size();
-	const idx_t from = scan_state->CurrentOffset();
+	const idx_t from = chunk_offset;
 
 	UnifiedVectorFormat sequence_format;
 	chunk.data[COL_SEQUENCE].ToUnifiedFormat(chunk_size, sequence_format);
@@ -282,11 +271,11 @@ void RypeInputStream::FetchBatch(ArrowArray *out) {
 		if (!EnsureChunk()) {
 			break;
 		}
-		auto &chunk = scan_state->CurrentChunk();
-		const idx_t from = scan_state->CurrentOffset();
+		auto &chunk = *current_chunk;
+		const idx_t from = chunk_offset;
 		const idx_t row_limit = MinValue<idx_t>(chunk.size(), from + (options.batch_rows - appended));
 		const idx_t to = AppendSlice(appender, chunk, from, row_limit, appended == 0, batch_bytes);
-		scan_state->IncreaseOffset(to - from);
+		chunk_offset += to - from;
 		appended += to - from;
 		if (to < row_limit) {
 			// The byte ceiling closed the batch mid-chunk; the rest of this chunk

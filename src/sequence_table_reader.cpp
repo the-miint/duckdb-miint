@@ -10,6 +10,7 @@
 #include "duckdb/common/types/uuid.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/list_vector.hpp"
+#include "miint_streaming_query.hpp"
 
 namespace duckdb {
 
@@ -420,7 +421,7 @@ std::string MaterializeQueryReads(Connection &conn, const std::string &query_tab
 	// statements against `conn` as it flushes, which would otherwise collide
 	// with `conn`'s still-open SendQuery stream mid-loop.
 	Connection stream_conn = MakeReadOnlyHelperConnection(*conn.context);
-	auto stream = stream_conn.SendQuery(BuildQueryReadsSelect(query_table, schema));
+	auto stream = SubmitStream(stream_conn, BuildQueryReadsSelect(query_table, schema));
 	if (stream->HasError()) {
 		throw InvalidInputException("%s: %s", error_context, stream->GetError());
 	}
@@ -432,11 +433,12 @@ std::string MaterializeQueryReads(Connection &conn, const std::string &query_tab
 	// of its own (e.g. read_fastx opening/sniffing the underlying file) — one
 	// query against it here means that work happens once, not twice.
 	std::string create_sql = "CREATE TEMP TABLE " + tmp_quoted + " (";
-	for (idx_t i = 0; i < stream->types.size(); i++) {
+	for (idx_t i = 0; i < stream->GetTypes().size(); i++) {
 		if (i > 0) {
 			create_sql += ", ";
 		}
-		create_sql += KeywordHelper::WriteOptionallyQuoted(stream->names[i]) + " " + stream->types[i].ToString();
+		create_sql +=
+		    KeywordHelper::WriteOptionallyQuoted(stream->GetNames()[i]) + " " + stream->GetTypes()[i].ToString();
 	}
 	create_sql += ")";
 	auto create_result = conn.Query(create_sql);
@@ -523,7 +525,7 @@ void QuerySequenceStream::InitStream(const std::string &table_name) {
 
 	// Same projection the snapshot was built with, so replaying a snapshot binds
 	// against exactly the columns it holds.
-	stream_ = conn_ptr_->SendQuery(BuildQueryReadsSelect(table_name, schema_));
+	stream_ = SubmitStream(*conn_ptr_, BuildQueryReadsSelect(table_name, schema_));
 	if (stream_->HasError()) {
 		throw InvalidInputException("Failed to read from query table '%s': %s", table_name, stream_->GetError());
 	}

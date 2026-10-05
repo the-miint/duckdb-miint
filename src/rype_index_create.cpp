@@ -4,7 +4,7 @@
 
 // The chunk-table input is still exported through DuckDB's generic wrapper: it
 // feeds rype_index_create, not the (id, sequence) shape RypeInputStream builds.
-#include "duckdb/common/arrow/result_arrow_wrapper.hpp"
+#include "miint_arrow_stream.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 
@@ -47,7 +47,7 @@ struct WindowedChunkStream {
 	std::vector<std::pair<int64_t, int64_t>> windows; // inclusive [lo, hi] feature_idx ranges, ascending
 	idx_t batch_size;
 	idx_t next_window = 0; // index of the next window to open
-	unique_ptr<ResultArrowArrayStreamWrapper> active;
+	unique_ptr<ChunkSourceArrowStream<StreamingQuery>> active;
 	std::string last_error;
 
 	WindowedChunkStream(Connection &conn_p, std::string table_quoted_p,
@@ -62,12 +62,13 @@ struct WindowedChunkStream {
 	}
 
 	bool OpenQuery(const std::string &sql) {
-		auto result = conn.SendQuery(sql);
+		auto result = SubmitStream(conn, sql);
 		if (result->HasError()) {
 			last_error = result->GetError();
 			return false;
 		}
-		active = make_uniq<ResultArrowArrayStreamWrapper>(std::move(result), batch_size);
+		auto props = result->GetClientProperties();
+		active = make_uniq<ChunkSourceArrowStream<StreamingQuery>>(std::move(result), batch_size, std::move(props));
 		return true;
 	}
 
@@ -316,7 +317,10 @@ unique_ptr<GlobalTableFunctionState> RypeIndexCreateTableFunction::InitGlobal(Cl
 		                            bind_data.mapping_table.empty() ? bind_data.chunk_table : bind_data.mapping_table,
 		                            mapping_result->GetError());
 	}
-	auto mapping_wrapper = make_uniq<ResultArrowArrayStreamWrapper>(std::move(mapping_result), STANDARD_VECTOR_SIZE);
+	// Materialized on purpose: the windowed chunk stream reuses `conn`, which allows one open stream at a time.
+	auto mapping_props = mapping_result->client_properties;
+	auto mapping_wrapper = make_uniq<ChunkSourceArrowStream<QueryResult>>(
+	    std::move(mapping_result), STANDARD_VECTOR_SIZE, std::move(mapping_props));
 
 	// Chunk stream: feature_idx Int64, chunk_index Int32, chunk_data. RYpe requires
 	// each feature's chunks to arrive contiguously in ascending, 0-based, gap-free

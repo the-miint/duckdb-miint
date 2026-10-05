@@ -46,6 +46,7 @@
 #include <vector>
 #include <zlib.h>
 #include "miint_named_parameter.hpp"
+#include "miint_streaming_query.hpp"
 
 namespace duckdb {
 
@@ -616,7 +617,7 @@ void UploadOneSample(ClientContext &context, const ENAUploadReadsBindData &bind,
 		// torn down (its dtor runs cleanup) and never reused, so the dangling
 		// active query never matters here.
 		FastqEncoder encoder(bind.qual_offset);
-		auto result = conn.SendQuery(data_query_prefix + KeywordHelper::WriteQuoted(plan.sample_ref, '\''));
+		auto result = SubmitStream(conn, data_query_prefix + KeywordHelper::WriteQuoted(plan.sample_ref, '\''));
 		if (result->HasError()) {
 			throw InvalidInputException("ena_upload_reads: failed to read sample '%s': %s", plan.sample_ref,
 			                            result->GetError());

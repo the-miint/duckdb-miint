@@ -35,6 +35,7 @@
 #include <unordered_set>
 #include <vector>
 #include "miint_named_parameter.hpp"
+#include "miint_streaming_query.hpp"
 
 namespace duckdb {
 
@@ -147,7 +148,7 @@ struct AlignBowtie2GlobalState : public GlobalTableFunctionState {
 
 	// Streaming input cursor.
 	std::unique_ptr<Connection> input_conn;
-	std::unique_ptr<QueryResult> input_stream;
+	unique_ptr<StreamingQuery> input_stream;
 	bool input_exhausted = false;
 	std::string query_select_sql;
 
@@ -365,7 +366,7 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	}
 	select += " FROM " + KeywordHelper::WriteOptionallyQuoted(bd.query_table);
 	gs->query_select_sql = select;
-	gs->input_stream = gs->input_conn->SendQuery(select);
+	gs->input_stream = SubmitStream(*gs->input_conn, select);
 	if (gs->input_stream->HasError()) {
 		throw InvalidInputException("align_bowtie2: failed to open streaming cursor on query table '%s': %s",
 		                            bd.query_table, gs->input_stream->GetError());

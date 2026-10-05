@@ -40,6 +40,7 @@
 #include <unordered_set>
 #include <vector>
 #include "miint_named_parameter.hpp"
+#include "miint_streaming_query.hpp"
 
 namespace duckdb {
 
@@ -356,7 +357,7 @@ struct AlignBowtie2ShardedLocalState : public LocalTableFunctionState {
 	// Current shard claim. Sentinel value DConstants::INVALID_INDEX means
 	// "no shard claimed yet"; Execute will claim next on the next iteration.
 	idx_t current_shard_idx = DConstants::INVALID_INDEX;
-	std::unique_ptr<QueryResult> input_stream;
+	unique_ptr<StreamingQuery> input_stream;
 	std::string current_shard_name; // copied for `include_shard_name`
 	// Set once `input_stream->Fetch()` returns EOF. A streaming QueryResult
 	// throws "closed pending query result" if Fetch() is called again after it
@@ -804,7 +805,7 @@ void OpenCurrentShardStream(AlignBowtie2ShardedLocalState &local, const AlignBow
 	// the convention already used in sequence_table_reader.cpp:377.
 	select += " WHERE rts.shard_name = " + KeywordHelper::WriteQuoted(shard.name, '\'');
 
-	local.input_stream = local.input_conn->SendQuery(select);
+	local.input_stream = SubmitStream(*local.input_conn, select);
 	local.stream_exhausted = false;
 	if (local.input_stream->HasError()) {
 		throw InvalidInputException("align_bowtie2_sharded: failed to open cursor for shard '%s': %s", shard.name,

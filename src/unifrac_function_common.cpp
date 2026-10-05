@@ -18,6 +18,7 @@
 #include "duckdb/main/query_result.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
+#include "miint_streaming_query.hpp"
 
 namespace duckdb::unifrac_internal {
 
@@ -346,7 +347,7 @@ DenseDistanceMatrix ReadDistanceTable(ClientContext &context, const std::string 
 	// then fails on the very next query.
 	auto conn = MakeReadOnlyHelperConnection(context);
 	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
-	auto result = conn.SendQuery("SELECT sample_a::VARCHAR, sample_b::VARCHAR, distance::DOUBLE FROM " + qname);
+	auto result = SubmitStream(conn, "SELECT sample_a::VARCHAR, sample_b::VARCHAR, distance::DOUBLE FROM " + qname);
 	if (result->HasError()) {
 		throw InvalidInputException("%s: failed to read distance-table '%s': %s", caller_name, table_name,
 		                            result->GetError());
