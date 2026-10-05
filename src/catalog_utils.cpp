@@ -64,6 +64,7 @@ void RejectRelationNameAsLiteral(ClientContext &context, const std::string &func
 		// "NC_001416" / name "1", which does not exist, and we fall through. The guard
 		// still keys off catalog residency, never off the string's shape.
 		auto qname = QualifiedName::Parse(literal);
+		// v2.0: the QualifiedName carries catalog/schema; no separate catalog/schema arguments
 		EntryLookupInfo qualified_lookup(CatalogType::TABLE_ENTRY, qname, QueryErrorContext());
 		entry = Catalog::GetEntry(context, qualified_lookup, OnEntryNotFound::RETURN_NULL);
 	}

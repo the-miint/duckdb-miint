@@ -437,8 +437,8 @@ std::string MaterializeQueryReads(Connection &conn, const std::string &query_tab
 		if (i > 0) {
 			create_sql += ", ";
 		}
-		create_sql +=
-		    KeywordHelper::WriteOptionallyQuoted(stream->GetNames()[i]) + " " + stream->GetTypes()[i].ToString();
+		create_sql += KeywordHelper::WriteOptionallyQuoted(stream->GetNames()[i].GetIdentifierName()) + " " +
+		              stream->GetTypes()[i].ToString();
 	}
 	create_sql += ")";
 	auto create_result = conn.Query(create_sql);

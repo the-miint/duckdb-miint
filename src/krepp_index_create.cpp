@@ -586,7 +586,9 @@ unique_ptr<GlobalTableFunctionState> KreppIndexCreateTableFunction::InitGlobal(C
 		// this connection's ClientConfig rather than through SET, which
 		// lock_configuration refuses (DBConfig::CheckLock); no other connection
 		// sees it.
-		ClientConfig::GetConfig(*conn.context).streaming_buffer_size = 1000;
+		// DuckDB v2.0 renamed the setting to max_streaming_buffer_size (default 10 MB). The figures above were
+		// measured on 1.5; the same cap is kept until the v2.0 peak RSS is re-measured.
+		ClientConfig::GetConfig(*conn.context).max_streaming_buffer_size = 1000;
 		// Cast to VARCHAR so a BIGINT read_id and a text one reach krepp the
 		// same way; a reference name is text on both sides of the map.
 		// sequence2 is selected only to refuse it. A krepp reference is one

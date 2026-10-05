@@ -123,7 +123,7 @@ struct CompressIntervalsOperation {
 		// so do not read this as making the aggregate scale with cores.
 	}
 
-	static void Finalize(Vector &state_vector, AggregateInputData &aggr_input_data, Vector &result, idx_t count,
+	static void Finalize(Vector &state_vector, AggregateFinalizeInputData &aggr_input_data, Vector &result, idx_t count,
 	                     idx_t offset) {
 		UnifiedVectorFormat state_data;
 		state_vector.ToUnifiedFormat(count, state_data);

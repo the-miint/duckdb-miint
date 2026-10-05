@@ -195,7 +195,7 @@ void RunPcoaOnMatrix(float *mat, uint32_t n, const std::vector<std::string> &ids
 // columns positionally identical to pcoa's, so `SELECT sample_id, axis,
 // coordinate` and column-name-based consumers work across all four functions.
 void DeclarePcoaOutputSchema(const LogicalType &sample_id_type, vector<LogicalType> &return_types,
-                             vector<string> &names, bool with_batch_diagnostics = false) {
+                             vector<Identifier> &names, bool with_batch_diagnostics = false) {
 	names.emplace_back("iteration");
 	return_types.emplace_back(LogicalType::INTEGER);
 	names.emplace_back("sample_id");

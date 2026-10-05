@@ -103,7 +103,7 @@ static void ParseReadGroup(const Value &rg, string &out_line, string &out_id) {
 	string id;
 	string rest; // non-ID fields, in user order
 	for (idx_t i = 0; i < child_types.size(); i++) {
-		string field = StringUtil::Upper(child_types[i].first);
+		string field = StringUtil::Upper(child_types[i].first.GetIdentifierName());
 		// @RG fields are 2-character SAM codes (ID, PL, DS, SM, LB, ...). Reject
 		// anything else at bind rather than emitting a malformed @RG line that
 		// sam_hdr_add_lines fails on later with an opaque error.
@@ -143,7 +143,7 @@ static void ParseTags(const Value &tags, const vector<string> &names, vector<UBA
 	auto &child_types = StructType::GetChildTypes(tags.type());
 	auto children = StructValue::GetChildren(tags);
 	for (idx_t i = 0; i < child_types.size(); i++) {
-		const string &tag = child_types[i].first;
+		const string &tag = child_types[i].first.GetIdentifierName();
 		if (tag.size() != 2) {
 			throw BinderException("TAGS tag name '%s' must be exactly 2 characters", tag);
 		}
@@ -220,7 +220,7 @@ static unique_ptr<FunctionData> UBAMCopyBind(ClientContext &context, CopyFunctio
 			ParseReadGroup(option.second[0], result->rg_line, result->rg_id);
 			result->has_read_group = true;
 		} else if (option.first == "tags") {
-			ParseTags(option.second[0], names, result->tags, sql_types);
+			ParseTags(option.second[0], IdentifiersToStrings(names), result->tags, sql_types);
 		} else if (option.first == "compression_level") {
 			result->compression_level = option.second[0].GetValue<int32_t>();
 			if (result->compression_level < 0 || result->compression_level > 9) {

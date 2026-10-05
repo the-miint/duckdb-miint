@@ -141,7 +141,7 @@ static void EmitConsensusRows(const ConsensusAbpoaData &data, ConsensusAbpoaLoca
 
 	idx_t col = 0;
 	if (data.has_sample_id) {
-		output.data[col++].Reference(lstate.sample_value);
+		output.data[col++].Reference(lstate.sample_value, count_t(count));
 	}
 	auto &cons_id_vec = output.data[col++];
 	auto &cons_seq_vec = output.data[col++];

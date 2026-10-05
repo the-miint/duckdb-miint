@@ -2266,7 +2266,7 @@ public:
 			// Pin to the system catalog's default schema. RegisterFunction targets
 			// the system catalog directly; the parsed statement leaves the schema
 			// empty, which GetSchema would otherwise fail to resolve there.
-			macro_info.schema = DEFAULT_SCHEMA;
+			macro_info.SetSchema(DEFAULT_SCHEMA);
 			// The system catalog only accepts internal entries (same as built-in
 			// macros and RegisterType). Mark accordingly.
 			macro_info.internal = true;

@@ -1,4 +1,5 @@
 #include "read_newick.hpp"
+#include <iostream>
 #include "remote_file_helper.hpp"
 #include "table_function_common.hpp"
 #include "duckdb/common/file_open_flags.hpp"

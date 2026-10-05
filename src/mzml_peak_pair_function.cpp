@@ -40,9 +40,9 @@ struct MzmlPeakPairLocalState : public LocalTableFunctionState {
 	unique_ptr<DataChunk> current_chunk;
 };
 
-static void ExtractSchema(QueryResult &result, vector<LogicalType> &return_types, vector<string> &names) {
+static void ExtractSchema(QueryResult &result, vector<LogicalType> &return_types, vector<Identifier> &names) {
 	for (idx_t i = 0; i < result.ColumnCount(); i++) {
-		names.push_back(result.ColumnName(i).GetIdentifierName());
+		names.push_back(result.ColumnName(i));
 		return_types.push_back(result.GetTypes()[i]);
 	}
 }

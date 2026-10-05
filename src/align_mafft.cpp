@@ -229,7 +229,7 @@ static void EmitRows(const AlignMafftData &data, AlignMafftLocalState &lstate, c
 
 	idx_t col = 0;
 	if (data.has_sample_id) {
-		output.data[col++].Reference(lstate.sample_value);
+		output.data[col++].Reference(lstate.sample_value, count_t(count));
 	}
 	auto &sequence_index_vec = output.data[col++];
 	auto &read_id_vec = output.data[col++];

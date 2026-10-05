@@ -64,7 +64,7 @@ unique_ptr<FunctionData> AlignmentSliceTableFunction::Bind(ClientContext &contex
 
 	// Extract named parameters
 	data->include_deletions = false;
-	if (input.named_parameters.count("include_deletions")) {
+	if (input.named_parameters.contains("include_deletions")) {
 		data->include_deletions = input.named_parameters.at("include_deletions").GetValue<bool>();
 	}
 

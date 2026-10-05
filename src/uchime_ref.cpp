@@ -26,7 +26,7 @@ static bool EmitFromBuffer(const std::vector<miint::UchimeResult> &buffer, idx_t
 	idx_t remaining = buffer.size() - result_offset;
 	idx_t count = std::min(remaining, static_cast<idx_t>(STANDARD_VECTOR_SIZE));
 	if (has_sample_id) {
-		output.data[0].Reference(sample_value);
+		output.data[0].Reference(sample_value, count_t(count));
 		OutputUchimeResults(output, buffer, result_offset, count, read_id_type, parent_type, /*start_col=*/1);
 	} else {
 		OutputUchimeResults(output, buffer, result_offset, count, read_id_type, parent_type);

@@ -134,7 +134,7 @@ unique_ptr<FunctionData> SylphIndexCreateTableFunction::Bind(ClientContext &cont
 		throw IOException("sylph_index_create: sylph_two_stage_params_default failed");
 	}
 	const bool has_two_stage_knobs =
-	    input.named_parameters.count("screen_c") != 0 || input.named_parameters.count("min_sparse_kmers") != 0;
+	    input.named_parameters.contains("screen_c") || input.named_parameters.contains("min_sparse_kmers");
 	if (data->two_stage) {
 		ApplyBoundedInt(input, "screen_c", 4294967295LL, data->two_stage_params.screen_c);
 		ApplyBoundedInt(input, "min_sparse_kmers", 4294967295LL, data->two_stage_params.min_sparse_kmers);

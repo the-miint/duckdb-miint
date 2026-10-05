@@ -186,10 +186,6 @@ ScalarFunction AlignmentSeqIdentityFunction::GetFunction() {
 	// Allow NULL values for optional parameters (nm and md)
 	func.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 
-	// Set default value for type parameter
-	func.arguments[3] = LogicalType::VARCHAR;
-	func.varargs = LogicalType::INVALID;
-
 	return func;
 }
 
@@ -285,10 +281,6 @@ ScalarFunction CigarQueryLengthFunction::GetFunction() {
 	// Allow NULL CIGAR (returns NULL)
 	func.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 
-	// Set default value for include_hard_clips parameter (defaults to true)
-	func.arguments[1] = LogicalType::BOOLEAN;
-	func.varargs = LogicalType::INVALID;
-
 	return func;
 }
 
@@ -363,10 +355,6 @@ ScalarFunction CigarQueryCoverageFunction::GetFunction() {
 
 	// Allow NULL values (returns NULL for NULL CIGAR, error for invalid type)
 	func.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-
-	// Set default value for type parameter (defaults to 'aligned')
-	func.arguments[1] = LogicalType::VARCHAR;
-	func.varargs = LogicalType::INVALID;
 
 	return func;
 }

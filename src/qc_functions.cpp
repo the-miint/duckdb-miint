@@ -981,13 +981,13 @@ static void FilterReadExecute(DataChunk &args, ExpressionState &state, Vector &r
 static void RegisterTrimQualityFamily(ExtensionLoader &loader, const std::string &name, scalar_function_t fn) {
 	ScalarFunctionSet set {Identifier(name)};
 
-	ScalarFunction two_arg(name, {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT)},
+	ScalarFunction two_arg(Identifier(name), {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT)},
 	                       TrimResultStructType(), fn);
 	two_arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	set.AddFunction(two_arg);
 
 	ScalarFunction four_arg(
-	    name,
+	    Identifier(name),
 	    {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT), LogicalType::INTEGER, LogicalType::INTEGER},
 	    TrimResultStructType(), fn);
 	four_arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);

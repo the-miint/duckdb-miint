@@ -58,7 +58,7 @@ static unique_ptr<FunctionData> FastqCopyBind(ClientContext &context, CopyFuncti
 	result->names = IdentifiersToStrings(names);
 
 	// Detect and store column indices (computed once at bind time)
-	result->indices.FindIndices(names);
+	result->indices.FindIndices(IdentifiersToStrings(names));
 
 	bool has_sequence1 = result->indices.sequence1_idx != DConstants::INVALID_INDEX;
 	bool has_sequence2 = result->indices.sequence2_idx != DConstants::INVALID_INDEX;
@@ -254,7 +254,7 @@ static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 		if (!qual1_data.validity.RowIsValid(qual1_row)) {
 			throw InvalidInputException("NULL value in qual1 column (row %llu)", row);
 		}
-		auto qual1_list = ListVector::GetEntry(input.data[indices.qual1_idx]);
+		auto &qual1_list = ListVector::GetEntry(input.data[indices.qual1_idx]);
 		auto qual1_list_data = FlatVector::GetData<uint8_t>(qual1_list);
 		auto qual1_entries = UnifiedVectorFormat::GetData<list_entry_t>(qual1_data);
 		idx_t qual1_length = qual1_entries[qual1_row].length;
@@ -297,7 +297,7 @@ static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 				const char *seq2_ptr = seq2_strings[seq2_row].GetData();
 				idx_t seq2_size = seq2_strings[seq2_row].GetSize();
 
-				auto qual2_list = ListVector::GetEntry(input.data[indices.qual2_idx]);
+				auto &qual2_list = ListVector::GetEntry(input.data[indices.qual2_idx]);
 				auto qual2_list_data = FlatVector::GetData<uint8_t>(qual2_list);
 				auto qual2_entries = UnifiedVectorFormat::GetData<list_entry_t>(qual2_data);
 				idx_t qual2_length = qual2_entries[qual2_row].length;

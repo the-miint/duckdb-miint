@@ -95,7 +95,7 @@ struct CommonCopyParameters {
 	FileCompressionType compression = FileCompressionType::UNCOMPRESSED;
 	idx_t flush_size = DEFAULT_COPY_FLUSH_SIZE;
 
-	void ParseFromOptions(const case_insensitive_map_t<vector<Value>> &options, const string &file_path);
+	void ParseFromOptions(const identifier_map_t<vector<Value>> &options, const string &file_path);
 };
 
 //===--------------------------------------------------------------------===//

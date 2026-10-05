@@ -318,7 +318,7 @@ static void EmitRows(const DeblurData &data, DeblurLocalState &lstate, const std
 
 	idx_t col = 0;
 	if (data.has_sample_id) {
-		output.data[col++].Reference(lstate.sample_value);
+		output.data[col++].Reference(lstate.sample_value, count_t(count));
 	}
 	auto &read_id_vec = output.data[col++];
 	auto &seq_vec = output.data[col++];

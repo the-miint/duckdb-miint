@@ -164,7 +164,7 @@ static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, Copy
 	result->format = default_format;
 
 	// Detect and cache column indices
-	result->indices.FindIndices(names);
+	result->indices.FindIndices(IdentifiersToStrings(names));
 	auto &indices = result->indices;
 
 	// Validate required columns exist
@@ -260,7 +260,8 @@ static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, Copy
 			result->reference_lengths_table = table_value.ToString();
 
 			// Validate table or view exists (use TABLE_ENTRY lookup which returns either)
-			EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, result->reference_lengths_table.value(),
+			EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY,
+			                            QualifiedName(Identifier(result->reference_lengths_table.value())),
 			                            QueryErrorContext());
 			auto entry =
 			    Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
@@ -279,7 +280,8 @@ static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, Copy
 			result->sequence_data_table = table_value.ToString();
 
 			// Validate table or view exists
-			EntryLookupInfo sd_lookup(CatalogType::TABLE_ENTRY, result->sequence_data_table.value(),
+			EntryLookupInfo sd_lookup(CatalogType::TABLE_ENTRY,
+			                          QualifiedName(Identifier(result->sequence_data_table.value())),
 			                          QueryErrorContext());
 			auto sd_entry =
 			    Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, sd_lookup, OnEntryNotFound::RETURN_NULL);

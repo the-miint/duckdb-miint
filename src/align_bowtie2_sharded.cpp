@@ -620,7 +620,11 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 	// Output schema reflects captured id types: read_id mirrors the query
 	// side; reference and mate_reference are always VARCHAR (subject side
 	// is opaque bytes in the prebuilt bowtie2 index).
-	bt2_daemon::PopulateOutputSchema(names, return_types, bd->query_id_type, bd->subject_id_type);
+	std::vector<std::string> schema_names;
+	bt2_daemon::PopulateOutputSchema(schema_names, return_types, bd->query_id_type, bd->subject_id_type);
+	for (auto &n : schema_names) {
+		names.emplace_back(n);
+	}
 	if (bd->include_shard_name) {
 		names.emplace_back("shard_name");
 		return_types.emplace_back(LogicalType::VARCHAR);

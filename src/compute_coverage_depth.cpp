@@ -4,6 +4,7 @@
 #include "duckdb/function/aggregate_function.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/common/vector/list_vector.hpp"
 
 namespace duckdb {
@@ -152,7 +153,7 @@ struct CoverageDepthOperation {
 		}
 	}
 
-	static void Finalize(Vector &state_vector, AggregateInputData &aggr_input_data, Vector &result, idx_t count,
+	static void Finalize(Vector &state_vector, AggregateFinalizeInputData &aggr_input_data, Vector &result, idx_t count,
 	                     idx_t offset) {
 		UnifiedVectorFormat state_data;
 		state_vector.ToUnifiedFormat(count, state_data);
@@ -206,8 +207,9 @@ void ComputeCoverageDepthFunction::Register(ExtensionLoader &loader) {
 	    AggregateFunction::StateDestroy<CoverageDepthState, CoverageDepthOperation>);
 
 	// Validate mode parameter at bind time
-	fun.bind = [](ClientContext &context, AggregateFunction &function,
-	              vector<unique_ptr<Expression>> &arguments) -> unique_ptr<FunctionData> {
+	fun.SetBindCallback([](BindAggregateFunctionInput &input) -> unique_ptr<FunctionData> {
+		auto &context = input.GetClientContext();
+		auto &arguments = input.GetArguments();
 		if (arguments[4]->IsFoldable()) {
 			auto mode_val = ExpressionExecutor::EvaluateScalar(context, *arguments[4]);
 			if (!mode_val.IsNull()) {
@@ -226,7 +228,7 @@ void ComputeCoverageDepthFunction::Register(ExtensionLoader &loader) {
 		}
 		throw InvalidInputException("compute_coverage_depth: mode parameter must be a constant string "
 		                            "('include_deletions' or 'exclude_deletions')");
-	};
+	});
 
 	loader.RegisterFunction(fun);
 }

@@ -276,7 +276,11 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 		}
 	}
 
-	bt2_daemon::PopulateOutputSchema(names, return_types, bd->query_id_type, bd->subject_id_type);
+	std::vector<std::string> schema_names;
+	bt2_daemon::PopulateOutputSchema(schema_names, return_types, bd->query_id_type, bd->subject_id_type);
+	for (auto &n : schema_names) {
+		names.emplace_back(n);
+	}
 	return std::move(bd);
 }
 

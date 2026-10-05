@@ -298,7 +298,7 @@ struct ProcrustesGlobalState : public GlobalTableFunctionState {
 };
 
 void DeclareProcrustesOutputSchema(const LogicalType &sample_id_type, vector<LogicalType> &return_types,
-                                   vector<string> &names) {
+                                   vector<Identifier> &names) {
 	names.emplace_back("matrix");
 	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("sample_id");

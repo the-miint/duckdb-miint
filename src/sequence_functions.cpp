@@ -125,12 +125,12 @@ static constexpr const char RNA_TYPE[] = "RNA";
 template <const std::array<char, 256> &COMPLEMENT_TABLE, const char *MOLECULE_TYPE>
 struct ReverseComplementOperator {
 	template <class INPUT_TYPE, class RESULT_TYPE>
-	static RESULT_TYPE Operation(INPUT_TYPE input, Vector &result) {
+	static RESULT_TYPE Operation(INPUT_TYPE input, StringHeap &heap) {
 		auto input_data = input.GetData();
 		auto input_len = input.GetSize();
 
 		// Pre-allocate result string for performance
-		auto result_str = StringVector::EmptyString(result, input_len);
+		auto result_str = heap.EmptyString(input_len);
 		auto result_data = result_str.GetDataWriteable();
 
 		// Reverse complement: iterate input in reverse, compute complement
@@ -155,7 +155,7 @@ struct ReverseComplementOperator {
 template <const std::array<const char *, 256> &REGEXP_TABLE, const char *MOLECULE_TYPE>
 struct AsRegexpOperator {
 	template <class INPUT_TYPE, class RESULT_TYPE>
-	static RESULT_TYPE Operation(INPUT_TYPE input, Vector &result) {
+	static RESULT_TYPE Operation(INPUT_TYPE input, StringHeap &heap) {
 		auto input_data = input.GetData();
 		auto input_len = input.GetSize();
 
@@ -179,7 +179,7 @@ struct AsRegexpOperator {
 		}
 
 		// Allocate result string with exact size
-		auto result_str = StringVector::EmptyString(result, output_len);
+		auto result_str = heap.EmptyString(output_len);
 		auto result_data = result_str.GetDataWriteable();
 
 		// Second pass: build the regexp string

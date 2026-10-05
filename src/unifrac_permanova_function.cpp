@@ -100,7 +100,7 @@ WideMetadata ReadWideMetadata(ClientContext &context, const std::string &table_n
 			}
 			sample_id_col = i;
 		} else {
-			non_sample_cols.push_back(all_names[i]);
+			non_sample_cols.push_back(all_names[i].GetIdentifierName());
 			non_sample_indices.push_back(i);
 		}
 	}
@@ -135,9 +135,10 @@ WideMetadata ReadWideMetadata(ClientContext &context, const std::string &table_n
 		}
 	}
 
-	std::string sql = "SELECT " + KeywordHelper::WriteOptionallyQuoted(all_names[sample_id_col]) + "::VARCHAR";
+	std::string sql =
+	    "SELECT " + KeywordHelper::WriteOptionallyQuoted(all_names[sample_id_col].GetIdentifierName()) + "::VARCHAR";
 	for (auto col_idx : chosen_indices) {
-		sql += ", " + KeywordHelper::WriteOptionallyQuoted(all_names[col_idx]) + "::VARCHAR";
+		sql += ", " + KeywordHelper::WriteOptionallyQuoted(all_names[col_idx].GetIdentifierName()) + "::VARCHAR";
 	}
 	sql += " FROM " + qname;
 
@@ -234,7 +235,7 @@ void RunPermanovaOnMatrix(const float *mat, uint32_t n, const std::vector<std::s
 // Declare the PERMANOVA output schema. Shared by unifrac_permanova and permanova
 // so the two functions can never drift apart column-wise — the "identical output
 // schema" invariant is enforced structurally rather than by discipline.
-void DeclarePermanovaOutputSchema(vector<LogicalType> &return_types, vector<string> &names) {
+void DeclarePermanovaOutputSchema(vector<LogicalType> &return_types, vector<Identifier> &names) {
 	names.emplace_back("iteration");
 	return_types.emplace_back(LogicalType::INTEGER);
 	names.emplace_back("variable");

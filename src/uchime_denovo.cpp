@@ -350,7 +350,7 @@ void UchimeDenovoTableFunction::Execute(ClientContext & /*context*/, TableFuncti
 		if (lstate.result_offset < lstate.results.size()) {
 			idx_t remaining = lstate.results.size() - lstate.result_offset;
 			idx_t count = std::min(remaining, static_cast<idx_t>(STANDARD_VECTOR_SIZE));
-			output.data[0].Reference(lstate.sample_value);
+			output.data[0].Reference(lstate.sample_value, count_t(count));
 			OutputUchimeResults(output, lstate.results, lstate.result_offset, count, data.id_type, data.id_type,
 			                    /*start_col=*/1);
 			lstate.result_offset += count;

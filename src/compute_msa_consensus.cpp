@@ -154,7 +154,8 @@ struct ConsensusOperation {
 		tgt.quals.insert(tgt.quals.end(), src.quals.begin(), src.quals.end());
 	}
 
-	static void Finalize(Vector &state_vector, AggregateInputData &, Vector &result, idx_t count, idx_t offset) {
+	static void Finalize(Vector &state_vector, AggregateFinalizeInputData &, Vector &result, idx_t count,
+	                     idx_t offset) {
 		UnifiedVectorFormat state_data;
 		state_vector.ToUnifiedFormat(count, state_data);
 		auto states = UnifiedVectorFormat::GetData<ConsensusState *>(state_data);

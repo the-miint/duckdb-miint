@@ -458,7 +458,7 @@ void SylphProfileTableFunction::Execute(ClientContext &context, TableFunctionInp
 	while (true) {
 		idx_t emitted = EmitFromArrow(lstate.arrow, output, /*start_col=*/1, context);
 		if (emitted > 0) {
-			output.data[0].Reference(lstate.sample_value);
+			output.data[0].Reference(lstate.sample_value, count_t(emitted));
 			output.SetCardinality(emitted);
 			return;
 		}

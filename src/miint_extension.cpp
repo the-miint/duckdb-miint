@@ -171,9 +171,9 @@ void SetupSignalHandling() {
 
 static void MiintVersionFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 #ifdef EXT_VERSION_MIINT
-	result.Reference(Value(EXT_VERSION_MIINT));
+	result.Reference(Value(EXT_VERSION_MIINT), count_t(args.size()));
 #else
-	result.Reference(Value("unversioned"));
+	result.Reference(Value("unversioned"), count_t(args.size()));
 #endif
 }
 

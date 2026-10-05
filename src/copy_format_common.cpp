@@ -235,21 +235,20 @@ void ColumnIndices::FindIndices(const vector<string> &names) {
 //===--------------------------------------------------------------------===//
 // CommonCopyParameters Implementation
 //===--------------------------------------------------------------------===//
-void CommonCopyParameters::ParseFromOptions(const case_insensitive_map_t<vector<Value>> &options,
-                                            const string &file_path) {
+void CommonCopyParameters::ParseFromOptions(const identifier_map_t<vector<Value>> &options, const string &file_path) {
 	Value interleave_param;
 	Value id_as_sequence_index_param;
 	Value include_comment_param;
 	Value compression_param;
 
 	for (auto &option : options) {
-		if (StringUtil::CIEquals(option.first, "interleave")) {
+		if (option.first == "interleave") {
 			interleave_param = option.second[0];
-		} else if (StringUtil::CIEquals(option.first, "id_as_sequence_index")) {
+		} else if (option.first == "id_as_sequence_index") {
 			id_as_sequence_index_param = option.second[0];
-		} else if (StringUtil::CIEquals(option.first, "include_comment")) {
+		} else if (option.first == "include_comment") {
 			include_comment_param = option.second[0];
-		} else if (StringUtil::CIEquals(option.first, "compression")) {
+		} else if (option.first == "compression") {
 			compression_param = option.second[0];
 		}
 	}

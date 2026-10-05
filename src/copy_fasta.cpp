@@ -53,7 +53,7 @@ static unique_ptr<FunctionData> FastaCopyBind(ClientContext &context, CopyFuncti
 	result->names = IdentifiersToStrings(names);
 
 	// Detect and store column indices (computed once at bind time)
-	result->indices.FindIndices(names);
+	result->indices.FindIndices(IdentifiersToStrings(names));
 
 	bool has_sequence1 = result->indices.sequence1_idx != DConstants::INVALID_INDEX;
 	bool has_sequence2 = result->indices.sequence2_idx != DConstants::INVALID_INDEX;

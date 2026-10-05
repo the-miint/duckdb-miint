@@ -53,7 +53,7 @@ inline idx_t EffectiveShardThreads(idx_t base_threads_per_shard, idx_t db_thread
 template <class Map, class MakeBool>
 void InjectMemoryMappedDefault(Map &params, MakeBool make_bool) {
 	if (params.find("memory_mapped") == params.end()) {
-		params.emplace("memory_mapped", make_bool(false));
+		params["memory_mapped"] = make_bool(false); // v2.0 named_argument_map_t has no emplace()
 	}
 }
 
