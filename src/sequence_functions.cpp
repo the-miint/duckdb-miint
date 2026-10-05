@@ -124,8 +124,10 @@ static constexpr const char RNA_TYPE[] = "RNA";
 // Templated reverse complement operator - works for both DNA and RNA
 template <const std::array<char, 256> &COMPLEMENT_TABLE, const char *MOLECULE_TYPE>
 struct ReverseComplementOperator {
+	// Kept out of line: inlined into DuckDB v2.0's ScalarExecutor loop, the per-string path compiles ~40% slower
+	// than on v1.5 (15M 150 bp rows: 1290 vs 917 ms); out of line it matches v1.5 (937 ms).
 	template <class INPUT_TYPE, class RESULT_TYPE>
-	static RESULT_TYPE Operation(INPUT_TYPE input, StringHeap &heap) {
+	[[gnu::noinline]] static RESULT_TYPE Operation(INPUT_TYPE input, StringHeap &heap) {
 		auto input_data = input.GetData();
 		auto input_len = input.GetSize();
 
