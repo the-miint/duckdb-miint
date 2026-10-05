@@ -255,9 +255,9 @@ static void MiintVersionsExecute(ClientContext &context, TableFunctionInput &dat
 	}
 	idx_t count = data.versions.size();
 	for (idx_t i = 0; i < count; i++) {
-		FlatVector::GetData<string_t>(output.data[0])[i] =
+		FlatVector::GetDataMutable<string_t>(output.data[0])[i] =
 		    StringVector::AddString(output.data[0], data.versions[i].first);
-		FlatVector::GetData<string_t>(output.data[1])[i] =
+		FlatVector::GetDataMutable<string_t>(output.data[1])[i] =
 		    StringVector::AddString(output.data[1], data.versions[i].second);
 	}
 	output.SetCardinality(count);

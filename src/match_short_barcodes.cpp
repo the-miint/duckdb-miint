@@ -302,13 +302,14 @@ static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChun
 
 	auto &query_id_vec = output.data[0];
 	auto &ref_id_vec = output.data[1];
-	auto nm_data = FlatVector::GetData<int32_t>(output.data[2]);
+	auto nm_data = FlatVector::GetDataMutable<int32_t>(output.data[2]);
 
 	for (idx_t i = 0; i < count; ++i) {
 		const auto &hit = gstate.hits[gstate.hit_offset + i];
-		FlatVector::GetData<string_t>(query_id_vec)[i] =
+		FlatVector::GetDataMutable<string_t>(query_id_vec)[i] =
 		    StringVector::AddString(query_id_vec, gstate.queries[hit.query_idx].id);
-		FlatVector::GetData<string_t>(ref_id_vec)[i] = StringVector::AddString(ref_id_vec, gstate.refs[hit.ref_idx].id);
+		FlatVector::GetDataMutable<string_t>(ref_id_vec)[i] =
+		    StringVector::AddString(ref_id_vec, gstate.refs[hit.ref_idx].id);
 		nm_data[i] = hit.nm;
 	}
 

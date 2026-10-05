@@ -1016,8 +1016,8 @@ void SubmitAndDecode(AlignBowtie2ShardedLocalState &local, const AlignBowtie2Sha
 // Synthesize `shard_name` into the last output column when include_shard_name=true.
 void FillShardNameColumn(DataChunk &output, idx_t to_emit, const std::string &shard_name) {
 	auto &v = output.data[bt2_daemon::kNumOutputColumns]; // 21st (0-indexed) column
-	auto *out_data = FlatVector::GetData<string_t>(v);
-	auto &validity = FlatVector::Validity(v);
+	auto *out_data = FlatVector::GetDataMutable<string_t>(v);
+	auto &validity = FlatVector::ValidityMutable(v);
 	for (idx_t i = 0; i < to_emit; ++i) {
 		out_data[i] = StringVector::AddString(v, shard_name);
 		validity.SetValid(i);

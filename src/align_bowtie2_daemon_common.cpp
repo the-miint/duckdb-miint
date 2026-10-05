@@ -625,7 +625,8 @@ void emit_string(Vector &out, idx_t out_row, const ArrowArray &col, idx_t logica
 		throw IOException("align_bowtie2: corrupt utf8 offsets at row %lld (start=%d end=%d)",
 		                  static_cast<long long>(a), start, end);
 	}
-	FlatVector::GetData<string_t>(out)[out_row] = StringVector::AddString(out, data + start, static_cast<idx_t>(len));
+	FlatVector::GetDataMutable<string_t>(out)[out_row] =
+	    StringVector::AddString(out, data + start, static_cast<idx_t>(len));
 }
 
 // Read an Arrow utf8 cell into an owned std::string. Used by the BIGINT id-
@@ -660,38 +661,38 @@ void EmitChunkRows(DataChunk &output, idx_t to_emit, idx_t row_start, const Arro
 	const bool query_needs_codec = query_id_type.id() != LogicalTypeId::VARCHAR;
 	const bool subject_needs_codec = subject_id_type.id() != LogicalTypeId::VARCHAR;
 	auto &v_read_id = output.data[0];
-	auto *out_flags = FlatVector::GetData<uint16_t>(output.data[1]);
+	auto *out_flags = FlatVector::GetDataMutable<uint16_t>(output.data[1]);
 	auto &v_reference = output.data[2];
-	auto *out_position = FlatVector::GetData<int64_t>(output.data[3]);
-	auto *out_stop = FlatVector::GetData<int64_t>(output.data[4]);
-	auto *out_mapq = FlatVector::GetData<uint8_t>(output.data[5]);
+	auto *out_position = FlatVector::GetDataMutable<int64_t>(output.data[3]);
+	auto *out_stop = FlatVector::GetDataMutable<int64_t>(output.data[4]);
+	auto *out_mapq = FlatVector::GetDataMutable<uint8_t>(output.data[5]);
 	auto &v_cigar = output.data[6];
 	auto &v_mate_ref = output.data[7];
-	auto *out_mate_pos = FlatVector::GetData<int64_t>(output.data[8]);
-	auto *out_tlen = FlatVector::GetData<int64_t>(output.data[9]);
-	auto *out_tag_as = FlatVector::GetData<int64_t>(output.data[10]);
-	auto *out_tag_xs = FlatVector::GetData<int64_t>(output.data[11]);
-	auto *out_tag_ys = FlatVector::GetData<int64_t>(output.data[12]);
-	auto *out_tag_xn = FlatVector::GetData<int64_t>(output.data[13]);
-	auto *out_tag_xm = FlatVector::GetData<int64_t>(output.data[14]);
-	auto *out_tag_xo = FlatVector::GetData<int64_t>(output.data[15]);
-	auto *out_tag_xg = FlatVector::GetData<int64_t>(output.data[16]);
-	auto *out_tag_nm = FlatVector::GetData<int64_t>(output.data[17]);
+	auto *out_mate_pos = FlatVector::GetDataMutable<int64_t>(output.data[8]);
+	auto *out_tlen = FlatVector::GetDataMutable<int64_t>(output.data[9]);
+	auto *out_tag_as = FlatVector::GetDataMutable<int64_t>(output.data[10]);
+	auto *out_tag_xs = FlatVector::GetDataMutable<int64_t>(output.data[11]);
+	auto *out_tag_ys = FlatVector::GetDataMutable<int64_t>(output.data[12]);
+	auto *out_tag_xn = FlatVector::GetDataMutable<int64_t>(output.data[13]);
+	auto *out_tag_xm = FlatVector::GetDataMutable<int64_t>(output.data[14]);
+	auto *out_tag_xo = FlatVector::GetDataMutable<int64_t>(output.data[15]);
+	auto *out_tag_xg = FlatVector::GetDataMutable<int64_t>(output.data[16]);
+	auto *out_tag_nm = FlatVector::GetDataMutable<int64_t>(output.data[17]);
 	auto &v_tag_yt = output.data[18];
 	auto &v_tag_md = output.data[19];
 	auto &v_tag_sa = output.data[20];
 
-	auto &mask_tag_as = FlatVector::Validity(output.data[10]);
-	auto &mask_tag_xs = FlatVector::Validity(output.data[11]);
-	auto &mask_tag_ys = FlatVector::Validity(output.data[12]);
-	auto &mask_tag_xn = FlatVector::Validity(output.data[13]);
-	auto &mask_tag_xm = FlatVector::Validity(output.data[14]);
-	auto &mask_tag_xo = FlatVector::Validity(output.data[15]);
-	auto &mask_tag_xg = FlatVector::Validity(output.data[16]);
-	auto &mask_tag_nm = FlatVector::Validity(output.data[17]);
-	auto &mask_tag_yt = FlatVector::Validity(v_tag_yt);
-	auto &mask_tag_md = FlatVector::Validity(v_tag_md);
-	auto &mask_tag_sa = FlatVector::Validity(v_tag_sa);
+	auto &mask_tag_as = FlatVector::ValidityMutable(output.data[10]);
+	auto &mask_tag_xs = FlatVector::ValidityMutable(output.data[11]);
+	auto &mask_tag_ys = FlatVector::ValidityMutable(output.data[12]);
+	auto &mask_tag_xn = FlatVector::ValidityMutable(output.data[13]);
+	auto &mask_tag_xm = FlatVector::ValidityMutable(output.data[14]);
+	auto &mask_tag_xo = FlatVector::ValidityMutable(output.data[15]);
+	auto &mask_tag_xg = FlatVector::ValidityMutable(output.data[16]);
+	auto &mask_tag_nm = FlatVector::ValidityMutable(output.data[17]);
+	auto &mask_tag_yt = FlatVector::ValidityMutable(v_tag_yt);
+	auto &mask_tag_md = FlatVector::ValidityMutable(v_tag_md);
+	auto &mask_tag_sa = FlatVector::ValidityMutable(v_tag_sa);
 
 	const auto &col_read_id = *batch.children[0];
 	const auto &col_flags = *batch.children[1];

@@ -327,7 +327,7 @@ void RypeClassifyTableFunction::Execute(ClientContext &context, TableFunctionInp
 		if (!name) {
 			throw IOException("RYpe returned unknown bucket_id %u - index may be corrupted", bucket_id);
 		}
-		FlatVector::GetData<string_t>(output.data[2])[i] = StringVector::AddString(output.data[2], name);
+		FlatVector::GetDataMutable<string_t>(output.data[2])[i] = StringVector::AddString(output.data[2], name);
 	}
 
 	// --- Column 1 (bucket_id) and Column 3 (score): zero-copy via Arrow conversion ---

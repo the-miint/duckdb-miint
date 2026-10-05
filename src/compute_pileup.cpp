@@ -220,15 +220,15 @@ static unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, T
 // ---------------------------------------------------------------------------
 static void EmitPileupRows(DataChunk &output, const std::vector<miint::PileupRow> &rows, idx_t offset, idx_t count) {
 	auto &ref_id_vec = output.data[0];
-	auto ref_pos_data = FlatVector::GetData<int64_t>(output.data[1]);
+	auto ref_pos_data = FlatVector::GetDataMutable<int64_t>(output.data[1]);
 	auto &read_id_vec = output.data[2];
 	auto &ref_base_vec = output.data[3];
 	auto &query_base_vec = output.data[4];
-	auto query_qual_data = FlatVector::GetData<uint8_t>(output.data[5]);
-	auto insert_pos_data = FlatVector::GetData<int32_t>(output.data[6]);
-	auto &ref_base_validity = FlatVector::Validity(output.data[3]);
-	auto &query_base_validity = FlatVector::Validity(output.data[4]);
-	auto &query_qual_validity = FlatVector::Validity(output.data[5]);
+	auto query_qual_data = FlatVector::GetDataMutable<uint8_t>(output.data[5]);
+	auto insert_pos_data = FlatVector::GetDataMutable<int32_t>(output.data[6]);
+	auto &ref_base_validity = FlatVector::ValidityMutable(output.data[3]);
+	auto &query_base_validity = FlatVector::ValidityMutable(output.data[4]);
+	auto &query_qual_validity = FlatVector::ValidityMutable(output.data[5]);
 
 	ref_base_validity.SetAllValid(count);
 	query_base_validity.SetAllValid(count);
@@ -236,19 +236,20 @@ static void EmitPileupRows(DataChunk &output, const std::vector<miint::PileupRow
 
 	for (idx_t i = 0; i < count; ++i) {
 		const auto &r = rows[offset + i];
-		FlatVector::GetData<string_t>(ref_id_vec)[i] = StringVector::AddString(ref_id_vec, r.ref_id);
+		FlatVector::GetDataMutable<string_t>(ref_id_vec)[i] = StringVector::AddString(ref_id_vec, r.ref_id);
 		ref_pos_data[i] = r.ref_pos;
-		FlatVector::GetData<string_t>(read_id_vec)[i] = StringVector::AddString(read_id_vec, r.read_id);
+		FlatVector::GetDataMutable<string_t>(read_id_vec)[i] = StringVector::AddString(read_id_vec, r.read_id);
 		insert_pos_data[i] = r.insert_pos;
 		if (r.ref_base_is_null) {
 			ref_base_validity.SetInvalid(i);
 		} else {
-			FlatVector::GetData<string_t>(ref_base_vec)[i] = StringVector::AddString(ref_base_vec, &r.ref_base, 1);
+			FlatVector::GetDataMutable<string_t>(ref_base_vec)[i] =
+			    StringVector::AddString(ref_base_vec, &r.ref_base, 1);
 		}
 		if (r.query_is_null) {
 			query_base_validity.SetInvalid(i);
 		} else {
-			FlatVector::GetData<string_t>(query_base_vec)[i] =
+			FlatVector::GetDataMutable<string_t>(query_base_vec)[i] =
 			    StringVector::AddString(query_base_vec, &r.query_base, 1);
 		}
 		if (r.qual_is_null) {

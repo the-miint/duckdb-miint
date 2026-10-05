@@ -362,7 +362,7 @@ idx_t RypeInputStream::AppendSlice(ArrowAppender &appender, DataChunk &chunk, id
 	// buffers into the Arrow batch. transformed is deliberately not Reset(): every
 	// index in [from, to) of the id vector is written below, and the sequence
 	// columns are re-referenced each call.
-	auto ids = FlatVector::GetData<int64_t>(transformed.data[COL_ID]);
+	auto ids = FlatVector::GetDataMutable<int64_t>(transformed.data[COL_ID]);
 	for (idx_t i = from; i < to; i++) {
 		ids[i] = static_cast<int64_t>(base + (i - from));
 	}

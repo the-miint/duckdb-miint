@@ -789,23 +789,23 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 	const auto &col_is_tip = *batch.children[6];
 	const auto &col_name = *batch.children[7];
 
-	auto *out_node_idx = FlatVector::GetData<int64_t>(output.data[0]);
-	auto *out_parent_idx = FlatVector::GetData<int64_t>(output.data[1]);
-	auto *out_edge_id = FlatVector::GetData<int64_t>(output.data[2]);
-	auto *out_branch_len = FlatVector::GetData<double>(output.data[3]);
-	auto *out_support = FlatVector::GetData<double>(output.data[4]);
-	auto *out_is_tip = FlatVector::GetData<bool>(output.data[5]);
-	auto *out_n_children = FlatVector::GetData<int64_t>(output.data[7]);
+	auto *out_node_idx = FlatVector::GetDataMutable<int64_t>(output.data[0]);
+	auto *out_parent_idx = FlatVector::GetDataMutable<int64_t>(output.data[1]);
+	auto *out_edge_id = FlatVector::GetDataMutable<int64_t>(output.data[2]);
+	auto *out_branch_len = FlatVector::GetDataMutable<double>(output.data[3]);
+	auto *out_support = FlatVector::GetDataMutable<double>(output.data[4]);
+	auto *out_is_tip = FlatVector::GetDataMutable<bool>(output.data[5]);
+	auto *out_n_children = FlatVector::GetDataMutable<int64_t>(output.data[7]);
 
 	auto &v_name = output.data[6];
 
-	auto &mask_node_idx = FlatVector::Validity(output.data[0]);
-	auto &mask_parent_idx = FlatVector::Validity(output.data[1]);
-	auto &mask_edge_id = FlatVector::Validity(output.data[2]);
-	auto &mask_branch_len = FlatVector::Validity(output.data[3]);
-	auto &mask_support = FlatVector::Validity(output.data[4]);
-	auto &mask_name = FlatVector::Validity(v_name);
-	auto &mask_n_children = FlatVector::Validity(output.data[7]);
+	auto &mask_node_idx = FlatVector::ValidityMutable(output.data[0]);
+	auto &mask_parent_idx = FlatVector::ValidityMutable(output.data[1]);
+	auto &mask_edge_id = FlatVector::ValidityMutable(output.data[2]);
+	auto &mask_branch_len = FlatVector::ValidityMutable(output.data[3]);
+	auto &mask_support = FlatVector::ValidityMutable(output.data[4]);
+	auto &mask_name = FlatVector::ValidityMutable(v_name);
+	auto &mask_n_children = FlatVector::ValidityMutable(output.data[7]);
 
 	// For variable-length Utf8: offsets is `length + 1` int32s, indexed at
 	// the column's own offset. data is a contiguous byte buffer addressed by
@@ -855,7 +855,7 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 				throw IOException("phylogeny_fasttree: corrupt utf8 offsets at row %lld (start=%d end=%d)",
 				                  static_cast<long long>(a), start, end);
 			}
-			FlatVector::GetData<string_t>(v_name)[i] =
+			FlatVector::GetDataMutable<string_t>(v_name)[i] =
 			    StringVector::AddString(v_name, p_name_data + start, static_cast<idx_t>(len));
 		}
 
