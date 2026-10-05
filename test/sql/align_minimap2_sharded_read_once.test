@@ -10,7 +10,7 @@ require miint
 # Naming the user's relation there read it that many times, so a routing
 # relation that is not stable across repeated reads assigned each read to a
 # different set of shards on every pass — reads it stopped naming were simply
-# never aligned, with no error. The fix snapshots (read_id, shard_name) once in
+# never aligned, with no error. The fix snapshots (read_id, shard_id) once in
 # InitGlobal and filters against the snapshot.
 #
 # The volatility below lives in `shard_name` itself, which the filter must
@@ -86,13 +86,11 @@ WHERE flags & 4 = 0;
 # nextval 1-2 and sees only 'ro_a', the snapshot consumes 3-4 and sees only
 # 'ro_b'.
 
+# Only ro_a.mmi is written: bind's pass over the view sees only 'ro_a', so the
+# shard list never contains 'ro_b' and no index is looked up for it. The query
+# fails on the NULL shard id before any index is opened.
 query I
 SELECT success FROM save_minimap2_index('ro_ref', '__TEST_DIR__/ro_a.mmi', preset := 'map-hifi');
-----
-true
-
-query I
-SELECT success FROM save_minimap2_index('ro_ref', '__TEST_DIR__/ro_b.mmi', preset := 'map-hifi');
 ----
 true
 
@@ -113,7 +111,7 @@ SELECT count(*) FROM align_minimap2_sharded('ro_pair',
     read_to_shard := 'ro_shifting',
     preset := 'map-hifi');
 ----
-name a shard that was not present when the shard list was read
+whose shard was not in the shard list discovered for this query
 
 statement ok
 DROP VIEW ro_shifting;

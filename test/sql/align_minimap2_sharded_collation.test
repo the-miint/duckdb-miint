@@ -14,8 +14,18 @@ statement ok
 CREATE TABLE coll_subj AS SELECT 'ref1' AS read_id,
        'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT' AS sequence1;
 
+# Both spellings are written. DuckDB does not promise WHICH spelling survives a
+# NOCASE GROUP BY fold, and that spelling is what BuildMinimap2ShardInfos turns
+# into a filename. On a case-insensitive filesystem (macOS) either resolves; on
+# a case-sensitive one (Linux CI) only the exact one does, so writing one file
+# would make this test pass locally and fail in CI if the fold ever flipped.
 query I
 SELECT success FROM save_minimap2_index('coll_subj', '__TEST_DIR__/Shard_A.mmi', k := 5);
+----
+true
+
+query I
+SELECT success FROM save_minimap2_index('coll_subj', '__TEST_DIR__/shard_a.mmi', k := 5);
 ----
 true
 

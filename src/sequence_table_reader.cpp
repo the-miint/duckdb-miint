@@ -413,6 +413,32 @@ static std::string MaterializeSelectIntoTemp(Connection &conn, const std::string
 		throw InvalidInputException("%s: %s", error_context, create_result->GetError());
 	}
 
+	// The DDL above round-trips the stream's types through text, and
+	// LogicalType::ToString() is a display renderer, not a serializer: besides
+	// the COLLATE restored above, it drops collation nested inside
+	// STRUCT/LIST/MAP, returns a bare alias name for a user type, and renders
+	// SQLNULL as an unparseable "NULL". Rather than enumerate what it loses —
+	// the list grows with DuckDB — check the result. A snapshot whose column
+	// types differ from the stream's does not stand in for the relation it
+	// copies: it compares, sorts and groups differently, and nothing downstream
+	// would report that.
+	auto probe = conn.Query("SELECT * FROM " + tmp_quoted + " LIMIT 0");
+	if (probe->HasError()) {
+		DropHelperTempRelation(conn, tmp_quoted);
+		throw InvalidInputException("%s: %s", error_context, probe->GetError());
+	}
+	for (idx_t i = 0; i < stream->types.size(); i++) {
+		if (probe->types[i] != stream->types[i]) {
+			const auto source_type = stream->types[i].ToString();
+			const auto snapshot_type = probe->types[i].ToString();
+			DropHelperTempRelation(conn, tmp_quoted);
+			throw InvalidInputException(
+			    "%s: column '%s' has type %s, which this snapshot cannot represent faithfully (it came back as %s). "
+			    "Cast the column to a plain type in the relation being read.",
+			    error_context, stream->names[i], source_type, snapshot_type);
+		}
+	}
+
 	// From here on, the empty snapshot table above is committed in conn's TEMP
 	// catalog. If the fill below throws partway (a mid-stream query error, or
 	// OOM), drop it before propagating — otherwise the caller never receives
@@ -462,7 +488,7 @@ std::string MaterializeReadToShard(Connection &conn, const std::string &read_to_
 	// caller's shard list, which ActiveShard already carries as shard_idx, so
 	// nothing has to be resolved back.
 	//
-	// Three things this buys, in order of importance:
+	// Two things this buys:
 	//
 	// 1. Zonemap pruning that actually prunes. Every shard re-reads this
 	//    snapshot once per index part with an equality filter, and pruning is
@@ -475,12 +501,13 @@ std::string MaterializeReadToShard(Connection &conn, const std::string &read_to_
 	//    routing rows over 60 shards: filtering the name-sorted snapshot scanned
 	//    all 6,000,000 rows, the id-sorted one 182,272. Integer statistics are
 	//    exact.
-	// 2. The user's collation decides membership. The join below compares
-	//    shard names under the routing relation's own collation, before anything
-	//    is copied; afterwards only integers are compared. Encoding is therefore
-	//    collation-correct even where the snapshot's own DDL is not.
-	// 3. A shard name the caller's list does not contain becomes a NULL id
+	// 2. A shard name the caller's list does not contain becomes a NULL id
 	//    instead of a row that quietly matches no shard. Checked below.
+	//
+	// (The user's collation is also applied by the join below, before anything is
+	// copied — but that is no longer load-bearing on its own: MaterializeSelectIntoTemp
+	// now carries collation into the snapshot DDL too, so either mechanism alone
+	// would fold case-insensitive shard names correctly.)
 	//
 	// The snapshot is also narrower — 4 bytes per routing row instead of a
 	// string — which shrinks the sort, its spill, and the temp_directory budget.
@@ -488,59 +515,74 @@ std::string MaterializeReadToShard(Connection &conn, const std::string &read_to_
 	const std::string dim_quoted = KeywordHelper::WriteOptionallyQuoted(dim_name);
 	const std::string error_context = "Failed to materialize read_to_shard table '" + read_to_shard_table + "'";
 
+	// Armed before the CREATE: DropHelperTempRelation is DROP ... IF EXISTS, so
+	// guarding a table that was never created is a no-op, and this way no later
+	// failure path can leak it. Same pattern as StageWaveMaps in
+	// src/unifrac_pcoa_function.cpp.
+	HelperTempRelation dim_guard(conn, dim_quoted);
 	auto dim_result = conn.Query("CREATE TEMP TABLE " + dim_quoted + " (shard_name VARCHAR, shard_id UINTEGER)");
 	if (dim_result->HasError()) {
 		throw InvalidInputException("%s: %s", error_context, dim_result->GetError());
 	}
-
-	std::string snapshot;
-	try {
+	{
 		Appender dim_appender(conn, dim_name);
 		for (idx_t i = 0; i < shard_names.size(); i++) {
-			dim_appender.BeginRow();
-			dim_appender.Append(Value(shard_names[i]));
-			dim_appender.Append(Value::UINTEGER(NumericCast<uint32_t>(i)));
-			dim_appender.EndRow();
+			dim_appender.AppendRow(Value(shard_names[i]), Value::UINTEGER(NumericCast<uint32_t>(i)));
 		}
 		dim_appender.Close();
-
-		// LEFT JOIN, not INNER: an unmatched routing row must survive as a NULL
-		// so the check below can see it. An INNER JOIN would drop exactly the
-		// rows we want to complain about.
-		const std::string select_sql = "SELECT r.read_id, s.shard_id FROM " +
-		                               KeywordHelper::WriteOptionallyQuoted(read_to_shard_table) + " r LEFT JOIN " +
-		                               dim_quoted + " s ON r.shard_name = s.shard_name ORDER BY s.shard_id";
-		snapshot = MaterializeSelectIntoTemp(conn, select_sql, "_miint_read_to_shard_", error_context, out_row_count);
-	} catch (...) {
-		DropHelperTempRelation(conn, dim_quoted);
-		throw;
 	}
-	// The dimension table has done its job once the ids are encoded; only the
-	// snapshot is read from here on.
-	DropHelperTempRelation(conn, dim_quoted);
+
+	// LEFT JOIN, not INNER: an unmatched routing row must survive as a NULL so
+	// the check below can see it. An INNER JOIN would drop exactly the rows we
+	// want to complain about.
+	//
+	// The ORDER BY is what puts a shard's rows together for (1) above, and it is
+	// the expensive part of this function: a blocking global sort of a
+	// reads x shards relation, on the calling thread, before the first index is
+	// opened. Measured at 50M routing rows: peak RSS 6.18GB sorted against
+	// 4.16GB unsorted, 6.3s against 4.6s. That transient is worth paying because
+	// it is paid once and saves a full scan of this relation per shard per part
+	// — but with a single shard there is nothing to prune to, so it would be
+	// pure cost.
+	const bool worth_sorting = shard_names.size() > 1;
+	std::string select_sql = "SELECT r.read_id, s.shard_id FROM " +
+	                         KeywordHelper::WriteOptionallyQuoted(read_to_shard_table) + " r LEFT JOIN " + dim_quoted +
+	                         " s ON r.shard_name = s.shard_name";
+	if (worth_sorting) {
+		select_sql += " ORDER BY s.shard_id";
+	}
+	const std::string snapshot =
+	    MaterializeSelectIntoTemp(conn, select_sql, "_miint_read_to_shard_", error_context, out_row_count);
+	const std::string snapshot_quoted = KeywordHelper::WriteOptionallyQuoted(snapshot);
+	// The snapshot is returned on success, so it is guarded only for the throws
+	// below; the dimension table has done its job and can go now.
+	HelperTempRelation snapshot_guard(conn, snapshot_quoted);
 
 	// A NULL id means the routing relation named a shard that shard discovery
-	// did not see. Discovery runs at bind time against the user's relation and
-	// this snapshot is taken at execution time, so an unstable relation can
-	// disagree between them. We cannot make the two agree here, but we can
-	// refuse to align a partial result silently.
+	// did not see. Discovery runs against the user's relation when the query is
+	// bound and this snapshot is taken when it executes, so the two can disagree
+	// — either because the relation itself is unstable, or because a prepared
+	// statement is being re-executed against a bind that was cached earlier. We
+	// cannot make them agree here, but we can refuse to align a partial result
+	// silently.
 	//
-	// ORDER BY above puts the NULLs last and integer statistics are exact, so
-	// this scan prunes to the tail row groups rather than reading the snapshot.
-	const std::string snapshot_quoted = KeywordHelper::WriteOptionallyQuoted(snapshot);
+	// Costs nothing in the normal case: the column's statistics record that it
+	// has no NULLs, so DuckDB eliminates this scan at plan time rather than
+	// reading the snapshot.
 	auto orphan_result = conn.Query("SELECT count(*) FROM " + snapshot_quoted + " WHERE shard_id IS NULL");
 	if (orphan_result->HasError()) {
-		DropHelperTempRelation(conn, snapshot_quoted);
 		throw InvalidInputException("%s: %s", error_context, orphan_result->GetError());
 	}
 	const auto orphans = orphan_result->GetValue(0, 0).GetValue<idx_t>();
 	if (orphans > 0) {
-		DropHelperTempRelation(conn, snapshot_quoted);
 		throw InvalidInputException(
-		    "read_to_shard table '%s' changed while align_minimap2_sharded was starting: %llu routing row(s) name a "
-		    "shard that was not present when the shard list was read. Materialize '%s' into a table before aligning.",
+		    "read_to_shard table '%s' names %llu row(s) whose shard was not in the shard list discovered for this "
+		    "query. The shard list is read when the query is bound and the routing rows when it runs, so they "
+		    "disagree if '%s' changed in between, or if this is a prepared statement re-executed after it changed — "
+		    "re-prepare the statement, or materialize an unstable routing relation into a table, and retry.",
 		    read_to_shard_table, static_cast<unsigned long long>(orphans), read_to_shard_table);
 	}
+	snapshot_guard.Release();
 	return snapshot;
 }
 
