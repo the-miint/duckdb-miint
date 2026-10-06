@@ -9,6 +9,8 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/query_result.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 #include <cmath>
 #include <map>
 #include <set>
@@ -36,8 +38,8 @@ struct CostMatrix {
 // reading-tables-views.md).
 CostMatrix ReadCostMatrix(ClientContext &context, const std::string &table_name) {
 	auto conn = MakeReadOnlyHelperConnection(context);
-	std::string q = "SELECT from_state::VARCHAR, to_state::VARCHAR, cost::DOUBLE FROM " +
-	                KeywordHelper::WriteOptionallyQuoted(table_name);
+	std::string q =
+	    "SELECT from_state::VARCHAR, to_state::VARCHAR, cost::DOUBLE FROM " + SQLIdentifier::ToString(table_name);
 	auto res = conn.Query(q);
 	if (res->HasError()) {
 		throw InvalidInputException("Failed to read from cost matrix table '%s': %s", table_name, res->GetError());
@@ -45,16 +47,16 @@ CostMatrix ReadCostMatrix(ClientContext &context, const std::string &table_name)
 
 	std::map<std::pair<std::string, std::string>, double> entries;
 	std::set<std::string> states;
-	auto &mat = res->Cast<MaterializedQueryResult>();
+	auto &mat = *res;
 	while (true) {
 		auto chunk = mat.Fetch();
 		if (!chunk || chunk->size() == 0) {
 			break;
 		}
 		UnifiedVectorFormat fd, td, cd;
-		chunk->data[0].ToUnifiedFormat(chunk->size(), fd);
-		chunk->data[1].ToUnifiedFormat(chunk->size(), td);
-		chunk->data[2].ToUnifiedFormat(chunk->size(), cd);
+		chunk->data[0].ToUnifiedFormat(fd);
+		chunk->data[1].ToUnifiedFormat(td);
+		chunk->data[2].ToUnifiedFormat(cd);
 		auto fs = UnifiedVectorFormat::GetData<string_t>(fd);
 		auto ts = UnifiedVectorFormat::GetData<string_t>(td);
 		auto cs = UnifiedVectorFormat::GetData<double>(cd);
@@ -122,7 +124,7 @@ PhyloAncestralParsimonyTableFunction::Data::Data(std::string tree_table, std::st
 unique_ptr<FunctionData> PhyloAncestralParsimonyTableFunction::Bind(ClientContext &context,
                                                                     TableFunctionBindInput &input,
                                                                     vector<LogicalType> &return_types,
-                                                                    vector<std::string> &names) {
+                                                                    vector<Identifier> &names) {
 	auto tree_table_name = input.inputs[0].ToString();
 	auto traits_table_name = input.inputs[1].ToString();
 	RejectCTERelationName(input, tree_table_name);
@@ -262,17 +264,17 @@ void PhyloAncestralParsimonyTableFunction::Execute(ClientContext &context, Table
 	auto &gstate = data_p.global_state->Cast<GlobalState>();
 
 	if (gstate.current_row_idx >= gstate.rows.size()) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
 	size_t count = std::min<size_t>(STANDARD_VECTOR_SIZE, gstate.rows.size() - gstate.current_row_idx);
 
-	auto node_index_data = FlatVector::GetData<int64_t>(output.data[0]);
-	auto trait_data = FlatVector::GetData<string_t>(output.data[1]);
-	auto state_data = FlatVector::GetData<string_t>(output.data[2]);
-	auto in_mpr_data = FlatVector::GetData<bool>(output.data[3]);
-	auto min_cost_data = FlatVector::GetData<double>(output.data[4]);
+	auto node_index_data = FlatVector::GetDataMutable<int64_t>(output.data[0]);
+	auto trait_data = FlatVector::GetDataMutable<string_t>(output.data[1]);
+	auto state_data = FlatVector::GetDataMutable<string_t>(output.data[2]);
+	auto in_mpr_data = FlatVector::GetDataMutable<bool>(output.data[3]);
+	auto min_cost_data = FlatVector::GetDataMutable<double>(output.data[4]);
 
 	for (size_t k = 0; k < count; k++) {
 		const auto &row = gstate.rows[gstate.current_row_idx + k];
@@ -284,7 +286,7 @@ void PhyloAncestralParsimonyTableFunction::Execute(ClientContext &context, Table
 	}
 
 	gstate.current_row_idx += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 void PhyloAncestralParsimonyTableFunction::Register(ExtensionLoader &loader) {

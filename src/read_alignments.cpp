@@ -10,12 +10,13 @@
 #include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/vector_size.hpp"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
 unique_ptr<FunctionData> ReadAlignmentsTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                            vector<LogicalType> &return_types,
-                                                           vector<std::string> &names) {
+                                                           vector<Identifier> &names) {
 	FileSystem &fs = FileSystem::GetFileSystem(context);
 
 	std::vector<std::string> sam_paths;
@@ -78,9 +79,9 @@ unique_ptr<FunctionData> ReadAlignmentsTableFunction::Bind(ClientContext &contex
 		RejectCTERelationName(input, reference_lengths_table.value());
 
 		// Validate table or view exists (use TABLE_ENTRY lookup which returns either)
-		EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, reference_lengths_table.value(), QueryErrorContext());
-		auto entry =
-		    Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
+		EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY,
+		                            QualifiedName(Identifier(reference_lengths_table.value())), QueryErrorContext());
+		auto entry = Catalog::GetEntry(context, lookup_info, OnEntryNotFound::RETURN_NULL);
 		if (!entry) {
 			throw InvalidInputException("Table or view '%s' does not exist", reference_lengths_table.value());
 		}
@@ -197,7 +198,7 @@ void ReadAlignmentsTableFunction::Execute(ClientContext &context, TableFunctionI
 
 				// Check if all files exhausted
 				if (global_state.next_file_idx >= global_state.filepaths.size()) {
-					output.SetCardinality(0);
+					output.SetChildCardinality(0);
 					return;
 				}
 
@@ -261,14 +262,14 @@ void ReadAlignmentsTableFunction::Execute(ClientContext &context, TableFunctionI
 		SetResultVectorFilepath(output.data[field_idx++], current_filepath);
 	}
 
-	output.SetCardinality(batch.size());
+	output.SetChildCardinality(batch.size());
 }
 
 TableFunction ReadAlignmentsTableFunction::GetFunction() {
 	auto tf = TableFunction("read_alignments", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
-	tf.named_parameters["reference_lengths"] = LogicalType::ANY;
-	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
-	tf.named_parameters["include_seq_qual"] = LogicalType::BOOLEAN;
+	AddNamedParameter(tf, "reference_lengths", LogicalType::ANY);
+	AddNamedParameter(tf, "include_filepath", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "include_seq_qual", LogicalType::BOOLEAN);
 	return tf;
 }
 
@@ -278,9 +279,9 @@ void ReadAlignmentsTableFunction::Register(ExtensionLoader &loader) {
 
 	// Register backward compatibility alias
 	auto read_sam_alias = TableFunction("read_sam", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
-	read_sam_alias.named_parameters["reference_lengths"] = LogicalType::ANY;
-	read_sam_alias.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
-	read_sam_alias.named_parameters["include_seq_qual"] = LogicalType::BOOLEAN;
+	AddNamedParameter(read_sam_alias, "reference_lengths", LogicalType::ANY);
+	AddNamedParameter(read_sam_alias, "include_filepath", LogicalType::BOOLEAN);
+	AddNamedParameter(read_sam_alias, "include_seq_qual", LogicalType::BOOLEAN);
 	loader.RegisterFunction(read_sam_alias);
 }
 

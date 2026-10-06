@@ -34,7 +34,7 @@ CREATE TABLE rt_input AS
 statement ok
 CREATE TABLE rt_result AS
   SELECT * FROM ena_upload_reads(relation := 'rt_input',
-                                 target_url := 'file://__TEST_DIR__/rt/');
+                                 target_url := 'file://{TEST_DIR}/rt/');
 
 # sampleA single-end → 1 file; sampleB paired → 2 files.
 query I
@@ -44,7 +44,7 @@ SELECT count(*) FROM rt_result;
 
 # Single-end round-trip: decoded == input as a multiset of (read_id, sequence1, qual1).
 query I
-WITH decoded AS (SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/rt/sampleA.fastq.gz'))
+WITH decoded AS (SELECT read_id, sequence1, qual1 FROM read_fastx('{TEST_DIR}/rt/sampleA.fastq.gz'))
 SELECT count(*) FROM (
   (SELECT * FROM decoded EXCEPT ALL SELECT read_id, sequence1, qual1 FROM in_single)
   UNION ALL
@@ -54,7 +54,7 @@ SELECT count(*) FROM (
 
 # Paired R1 file round-trips against (read_id, sequence1, qual1).
 query I
-WITH d1 AS (SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/rt/sampleB_1.fastq.gz'))
+WITH d1 AS (SELECT read_id, sequence1, qual1 FROM read_fastx('{TEST_DIR}/rt/sampleB_1.fastq.gz'))
 SELECT count(*) FROM (
   (SELECT * FROM d1 EXCEPT ALL SELECT read_id, sequence1, qual1 FROM in_paired)
   UNION ALL
@@ -67,7 +67,7 @@ SELECT count(*) FROM (
 # same input row, emitted in one streaming pass), so this checks per-mate content
 # fidelity rather than ordering.
 query I
-WITH d2 AS (SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/rt/sampleB_2.fastq.gz'))
+WITH d2 AS (SELECT read_id, sequence1, qual1 FROM read_fastx('{TEST_DIR}/rt/sampleB_2.fastq.gz'))
 SELECT count(*) FROM (
   (SELECT * FROM d2 EXCEPT ALL SELECT read_id, sequence2, qual2 FROM in_paired)
   UNION ALL
@@ -81,11 +81,11 @@ SELECT count(*) FROM (
 statement ok
 CREATE TABLE ri_result AS
   SELECT * FROM ena_upload_reads(relation := 'in_paired',
-                                 target_url := 'file://__TEST_DIR__/ri/',
+                                 target_url := 'file://{TEST_DIR}/ri/',
                                  layout := 'paired_interleaved');
 
 query I
-WITH decoded AS (SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/ri/sampleB.fastq.gz')),
+WITH decoded AS (SELECT read_id, sequence1, qual1 FROM read_fastx('{TEST_DIR}/ri/sampleB.fastq.gz')),
      expanded AS (
        SELECT read_id, sequence1, qual1 FROM in_paired
        UNION ALL
@@ -115,7 +115,7 @@ CREATE TABLE in_big AS
 statement ok
 CREATE TABLE big_result AS
   SELECT * FROM ena_upload_reads(relation := 'in_big',
-                                 target_url := 'file://__TEST_DIR__/big/');
+                                 target_url := 'file://{TEST_DIR}/big/');
 
 # Three single-end files, one per sample.
 query II
@@ -126,9 +126,9 @@ SELECT count(*), count(DISTINCT layout) FROM big_result;
 # Every read round-trips, across all three samples and all chunk boundaries.
 query I
 WITH decoded AS (
-  SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/big/bigS0.fastq.gz')
-  UNION ALL SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/big/bigS1.fastq.gz')
-  UNION ALL SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/big/bigS2.fastq.gz'))
+  SELECT read_id, sequence1, qual1 FROM read_fastx('{TEST_DIR}/big/bigS0.fastq.gz')
+  UNION ALL SELECT read_id, sequence1, qual1 FROM read_fastx('{TEST_DIR}/big/bigS1.fastq.gz')
+  UNION ALL SELECT read_id, sequence1, qual1 FROM read_fastx('{TEST_DIR}/big/bigS2.fastq.gz'))
 SELECT count(*) FROM (
   (SELECT * FROM decoded EXCEPT ALL SELECT read_id, sequence1, qual1 FROM in_big)
   UNION ALL
@@ -140,17 +140,17 @@ SELECT count(*) FROM (
 # read_fastx is a table function and doesn't take correlated args, so spell out
 # one count per file (2500 each: i in [1,7500] split by i%3).
 query I
-SELECT count(*) FROM read_fastx('__TEST_DIR__/big/bigS0.fastq.gz');
+SELECT count(*) FROM read_fastx('{TEST_DIR}/big/bigS0.fastq.gz');
 ----
 2500
 
 query I
-SELECT count(*) FROM read_fastx('__TEST_DIR__/big/bigS1.fastq.gz');
+SELECT count(*) FROM read_fastx('{TEST_DIR}/big/bigS1.fastq.gz');
 ----
 2500
 
 query I
-SELECT count(*) FROM read_fastx('__TEST_DIR__/big/bigS2.fastq.gz');
+SELECT count(*) FROM read_fastx('{TEST_DIR}/big/bigS2.fastq.gz');
 ----
 2500
 
@@ -167,7 +167,7 @@ CREATE TABLE in_partial_r2 AS
 
 statement error
 SELECT * FROM ena_upload_reads(relation := 'in_partial_r2',
-                               target_url := 'file://__TEST_DIR__/perr/');
+                               target_url := 'file://{TEST_DIR}/perr/');
 ----
 qual2
 
@@ -179,7 +179,7 @@ CREATE TABLE in_r1only AS
 
 statement error
 SELECT * FROM ena_upload_reads(relation := 'in_r1only',
-                               target_url := 'file://__TEST_DIR__/perr2/',
+                               target_url := 'file://{TEST_DIR}/perr2/',
                                layout := 'paired');
 ----
 layout=paired
@@ -195,7 +195,7 @@ CREATE TABLE in_noR2 AS
 statement ok
 CREATE TABLE noR2_result AS
   SELECT * FROM ena_upload_reads(relation := 'in_noR2',
-                                 target_url := 'file://__TEST_DIR__/nor2/');
+                                 target_url := 'file://{TEST_DIR}/nor2/');
 
 query II
 SELECT layout, bytes_written > 0 FROM noR2_result;
@@ -203,7 +203,7 @@ SELECT layout, bytes_written > 0 FROM noR2_result;
 single	true
 
 query I
-WITH decoded AS (SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/nor2/sN.fastq.gz'))
+WITH decoded AS (SELECT read_id, sequence1, qual1 FROM read_fastx('{TEST_DIR}/nor2/sN.fastq.gz'))
 SELECT count(*) FROM (
   (SELECT * FROM decoded EXCEPT ALL SELECT read_id, sequence1, qual1 FROM in_noR2)
   UNION ALL
@@ -219,6 +219,6 @@ CREATE TABLE in_dot AS
 
 statement error
 SELECT * FROM ena_upload_reads(relation := 'in_dot',
-                               target_url := 'file://__TEST_DIR__/derr/');
+                               target_url := 'file://{TEST_DIR}/derr/');
 ----
 path-traversal

@@ -80,10 +80,10 @@ statement ok
 COPY (
     SELECT node_index, parent_index, name, branch_length, edge_id
     FROM phylogeny_fasttree('tiny', seed := 42, threads := 1, seq_type := 'nucleotide')
-) TO '__TEST_DIR__/phylogeny_fasttree_tiny.nwk' (FORMAT 'newick');
+) TO '{TEST_DIR}/phylogeny_fasttree_tiny.nwk' (FORMAT 'newick');
 
 query I
 SELECT length(content) > 0 AND content LIKE '(%'
-FROM (SELECT content FROM read_text('__TEST_DIR__/phylogeny_fasttree_tiny.nwk'));
+FROM (SELECT content FROM read_text('{TEST_DIR}/phylogeny_fasttree_tiny.nwk'));
 ----
 true

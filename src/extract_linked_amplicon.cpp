@@ -10,6 +10,10 @@
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
 
 #include <cmath>
 #include <cstring>
@@ -252,22 +256,22 @@ static void Execute(DataChunk &args, ExpressionState &state, Vector &result) {
 	const idx_t row_count = args.size();
 
 	UnifiedVectorFormat seq_data, qual_data, a5_data, a3_data;
-	args.data[0].ToUnifiedFormat(row_count, seq_data);
-	args.data[1].ToUnifiedFormat(row_count, qual_data);
-	args.data[2].ToUnifiedFormat(row_count, a5_data);
-	args.data[3].ToUnifiedFormat(row_count, a3_data);
+	args.data[0].ToUnifiedFormat(seq_data);
+	args.data[1].ToUnifiedFormat(qual_data);
+	args.data[2].ToUnifiedFormat(a5_data);
+	args.data[3].ToUnifiedFormat(a3_data);
 
 	auto seq_ptr = UnifiedVectorFormat::GetData<string_t>(seq_data);
 	auto a5_ptr = UnifiedVectorFormat::GetData<string_t>(a5_data);
 	auto a3_ptr = UnifiedVectorFormat::GetData<string_t>(a3_data);
 
 	auto &entries = StructVector::GetEntries(result);
-	auto &seq_out_vec = *entries[0];
-	auto &qual_out_vec = *entries[1];
-	auto start_data = FlatVector::GetData<int32_t>(*entries[2]);
-	auto stop_data = FlatVector::GetData<int32_t>(*entries[3]);
+	auto &seq_out_vec = entries[0];
+	auto &qual_out_vec = entries[1];
+	auto start_data = FlatVector::GetDataMutable<int32_t>(entries[2]);
+	auto stop_data = FlatVector::GetDataMutable<int32_t>(entries[3]);
 
-	auto qual_out_entries = FlatVector::GetData<list_entry_t>(qual_out_vec);
+	auto qual_out_entries = FlatVector::GetDataMutable<list_entry_t>(qual_out_vec);
 	idx_t qual_child_offset = ListVector::GetListSize(qual_out_vec);
 	// Worst case: every output row keeps the full input qual list.
 	ListVector::Reserve(qual_out_vec, qual_child_offset + ListVector::GetListSize(args.data[1]));
@@ -402,12 +406,12 @@ static void Execute(DataChunk &args, ExpressionState &state, Vector &result) {
 		}
 
 		// Write extracted sequence
-		FlatVector::GetData<string_t>(seq_out_vec)[i] =
+		FlatVector::GetDataMutable<string_t>(seq_out_vec)[i] =
 		    StringVector::AddString(seq_out_vec, seq.GetData() + global_start, extracted_len);
 
 		// Write extracted qual list
-		auto &qual_child = ListVector::GetEntry(qual_out_vec);
-		auto qual_child_data = FlatVector::GetData<uint8_t>(qual_child);
+		auto &qual_child = ListVector::GetChildMutable(qual_out_vec);
+		auto qual_child_data = FlatVector::GetDataMutable<uint8_t>(qual_child);
 		if (extracted_len > 0) {
 			std::memcpy(qual_child_data + qual_child_offset, qptr + global_start, extracted_len);
 		}
@@ -425,16 +429,14 @@ static void Execute(DataChunk &args, ExpressionState &state, Vector &result) {
 // Bind: 4-arg (all defaults), 7-arg (min_len/max_len/error_rate), 8-arg
 // (also min_overlap). All explicit params must be foldable constants.
 // ---------------------------------------------------------------------------
-static unique_ptr<FunctionData> Bind4Arg(ClientContext &ctx, ScalarFunction &fn, vector<unique_ptr<Expression>> &args) {
-	(void)ctx;
-	(void)fn;
-	(void)args;
+static unique_ptr<FunctionData> Bind4Arg(BindScalarFunctionInput &input) {
 	LinkedAmpliconBindData::Validate(DEFAULT_MIN_LEN, DEFAULT_MAX_LEN, DEFAULT_ERROR_RATE, DEFAULT_MIN_OVERLAP);
 	return make_uniq<LinkedAmpliconBindData>(DEFAULT_MIN_LEN, DEFAULT_MAX_LEN, DEFAULT_ERROR_RATE, DEFAULT_MIN_OVERLAP);
 }
 
-static unique_ptr<FunctionData> Bind7Arg(ClientContext &ctx, ScalarFunction &fn, vector<unique_ptr<Expression>> &args) {
-	(void)fn;
+static unique_ptr<FunctionData> Bind7Arg(BindScalarFunctionInput &input) {
+	auto &ctx = input.GetClientContext();
+	auto &args = input.GetArguments();
 	for (idx_t i = 4; i < 7; ++i) {
 		if (!args[i]->IsFoldable()) {
 			throw InvalidInputException(
@@ -448,8 +450,9 @@ static unique_ptr<FunctionData> Bind7Arg(ClientContext &ctx, ScalarFunction &fn,
 	return make_uniq<LinkedAmpliconBindData>(min_len, max_len, error_rate, DEFAULT_MIN_OVERLAP);
 }
 
-static unique_ptr<FunctionData> Bind8Arg(ClientContext &ctx, ScalarFunction &fn, vector<unique_ptr<Expression>> &args) {
-	(void)fn;
+static unique_ptr<FunctionData> Bind8Arg(BindScalarFunctionInput &input) {
+	auto &ctx = input.GetClientContext();
+	auto &args = input.GetArguments();
 	for (idx_t i = 4; i < 8; ++i) {
 		if (!args[i]->IsFoldable()) {
 			throw InvalidInputException("extract_linked_amplicon: min_len, max_len, error_rate, min_overlap must be "
@@ -476,26 +479,27 @@ void ExtractLinkedAmpliconFunction::Register(ExtensionLoader &loader) {
 	// 4-arg: seq, qual, anchor5, anchor3
 	ScalarFunction four({LogicalType::VARCHAR, qual_t, LogicalType::VARCHAR, LogicalType::VARCHAR}, ret_t, Execute,
 	                    Bind4Arg);
-	four.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	four.init_local_state = InitLocalState;
+	four.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	four.SetInitStateCallback(InitLocalState);
 	set.AddFunction(four);
 
 	// 7-arg: seq, qual, anchor5, anchor3, min_len, max_len, error_rate
 	ScalarFunction seven({LogicalType::VARCHAR, qual_t, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BIGINT,
 	                      LogicalType::BIGINT, LogicalType::DOUBLE},
 	                     ret_t, Execute, Bind7Arg);
-	seven.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	seven.init_local_state = InitLocalState;
+	seven.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	seven.SetInitStateCallback(InitLocalState);
 	set.AddFunction(seven);
 
 	// 8-arg: seq, qual, anchor5, anchor3, min_len, max_len, error_rate, min_overlap
 	ScalarFunction eight({LogicalType::VARCHAR, qual_t, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::BIGINT,
 	                      LogicalType::BIGINT, LogicalType::DOUBLE, LogicalType::BIGINT},
 	                     ret_t, Execute, Bind8Arg);
-	eight.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	eight.init_local_state = InitLocalState;
+	eight.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	eight.SetInitStateCallback(InitLocalState);
 	set.AddFunction(eight);
 
+	set.SetFallible();
 	loader.RegisterFunction(set);
 }
 

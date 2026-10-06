@@ -8,11 +8,13 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
 
 #include <algorithm>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -50,7 +52,7 @@ struct CommunityDistGlobalState : public GlobalTableFunctionState {
 };
 
 unique_ptr<FunctionData> CommunityDistBind(ClientContext &context, TableFunctionBindInput &input,
-                                           vector<LogicalType> &return_types, vector<string> &names) {
+                                           vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<CommunityDistBindData>();
 	data->table_name = input.inputs[0].GetValue<string>();
 	RejectCTERelationName(input, data->table_name);
@@ -62,7 +64,7 @@ unique_ptr<FunctionData> CommunityDistBind(ClientContext &context, TableFunction
 
 	int32_t threads = 0; // 0 = follow DuckDB's TaskScheduler::NumberOfThreads()
 	for (const auto &kv : input.named_parameters) {
-		if (StringUtil::Lower(kv.first) == "threads") {
+		if (kv.first == "threads") {
 			threads = kv.second.GetValue<int32_t>();
 		}
 	}
@@ -174,7 +176,7 @@ void CommunityDistExecute(ClientContext &, TableFunctionInput &data_p, DataChunk
 
 	auto &va = output.data[0];
 	auto &vb = output.data[1];
-	auto dd = FlatVector::GetData<double>(output.data[2]);
+	auto dd = FlatVector::GetDataMutable<double>(output.data[2]);
 
 	for (idx_t r = 0; r < count; ++r) {
 		const idx_t k = g.cursor + r;
@@ -183,7 +185,7 @@ void CommunityDistExecute(ClientContext &, TableFunctionInput &data_p, DataChunk
 		dd[r] = g.dist[k];
 	}
 	g.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 } // namespace
@@ -194,7 +196,7 @@ void RegisterCommunityDistances(ExtensionLoader &loader) {
 	// Threads for the internal pair-loop parallelism (0 = follow DuckDB). The
 	// distances are computed up front in InitGlobal; row emission stays
 	// single-threaded (MaxThreads() == 1), so this only scales the compute.
-	fn.named_parameters["threads"] = LogicalType::INTEGER;
+	AddNamedParameter(fn, "threads", LogicalType::INTEGER);
 	fn.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(fn);
 }

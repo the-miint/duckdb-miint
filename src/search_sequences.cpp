@@ -8,8 +8,10 @@
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
 
 #include <algorithm>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -39,7 +41,7 @@ static idx_t OutputSearchResults(DataChunk &output, const std::vector<miint::Sea
                                  idx_t count, const LogicalType &query_id_type, const LogicalType &target_id_type) {
 	idx_t actual = std::min(count, static_cast<idx_t>(results.size()) - offset);
 	if (actual == 0) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return 0;
 	}
 
@@ -55,54 +57,54 @@ static idx_t OutputSearchResults(DataChunk &output, const std::vector<miint::Sea
 		EmitIdCell(target_vec, i, results[offset + i].target_id, target_id_type);
 	}
 
-	auto identity_data = FlatVector::GetData<double>(output.data[col++]);
+	auto identity_data = FlatVector::GetDataMutable<double>(output.data[col++]);
 	for (idx_t i = 0; i < actual; i++) {
 		identity_data[i] = results[offset + i].identity;
 	}
 
-	auto matches_data = FlatVector::GetData<int32_t>(output.data[col++]);
+	auto matches_data = FlatVector::GetDataMutable<int32_t>(output.data[col++]);
 	for (idx_t i = 0; i < actual; i++) {
 		matches_data[i] = results[offset + i].matches;
 	}
 
-	auto mismatches_data = FlatVector::GetData<int32_t>(output.data[col++]);
+	auto mismatches_data = FlatVector::GetDataMutable<int32_t>(output.data[col++]);
 	for (idx_t i = 0; i < actual; i++) {
 		mismatches_data[i] = results[offset + i].mismatches;
 	}
 
-	auto gaps_data = FlatVector::GetData<int32_t>(output.data[col++]);
+	auto gaps_data = FlatVector::GetDataMutable<int32_t>(output.data[col++]);
 	for (idx_t i = 0; i < actual; i++) {
 		gaps_data[i] = results[offset + i].gaps;
 	}
 
-	auto alnlen_data = FlatVector::GetData<int32_t>(output.data[col++]);
+	auto alnlen_data = FlatVector::GetDataMutable<int32_t>(output.data[col++]);
 	for (idx_t i = 0; i < actual; i++) {
 		alnlen_data[i] = results[offset + i].alignment_length;
 	}
 
-	auto qlen_data = FlatVector::GetData<int32_t>(output.data[col++]);
+	auto qlen_data = FlatVector::GetDataMutable<int32_t>(output.data[col++]);
 	for (idx_t i = 0; i < actual; i++) {
 		qlen_data[i] = results[offset + i].query_length;
 	}
 
-	auto tlen_data = FlatVector::GetData<int32_t>(output.data[col++]);
+	auto tlen_data = FlatVector::GetDataMutable<int32_t>(output.data[col++]);
 	for (idx_t i = 0; i < actual; i++) {
 		tlen_data[i] = results[offset + i].target_length;
 	}
 
-	auto accepted_data = FlatVector::GetData<bool>(output.data[col++]);
+	auto accepted_data = FlatVector::GetDataMutable<bool>(output.data[col++]);
 	for (idx_t i = 0; i < actual; i++) {
 		accepted_data[i] = results[offset + i].accepted;
 	}
 
 	D_ASSERT(col == output.ColumnCount());
-	output.SetCardinality(actual);
+	output.SetChildCardinality(actual);
 	return actual;
 }
 
 unique_ptr<FunctionData> SearchSequencesTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                             vector<LogicalType> &return_types,
-                                                            vector<std::string> &names) {
+                                                            vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 
 	data->query_table = input.inputs[0].GetValue<std::string>();
@@ -132,7 +134,7 @@ unique_ptr<FunctionData> SearchSequencesTableFunction::Bind(ClientContext &conte
 	data->ref_schema = ValidateSequenceTableSchema(context, data->ref_table, /*allow_bigint=*/true);
 
 	auto get_int = [&](const std::string &name, int &out, int min_val, int max_val, const char *constraint) {
-		auto it = input.named_parameters.find(name);
+		auto it = input.named_parameters.find(Identifier(name));
 		if (it != input.named_parameters.end()) {
 			out = it->second.GetValue<int>();
 			if (out < min_val || out > max_val) {
@@ -153,7 +155,7 @@ unique_ptr<FunctionData> SearchSequencesTableFunction::Bind(ClientContext &conte
 	data->names = GetSearchOutputNames();
 	data->types = GetSearchOutputTypes(data->query_schema.id_type, data->ref_schema.id_type);
 	for (auto &n : data->names) {
-		names.push_back(n);
+		names.emplace_back(n);
 	}
 	for (auto &t : data->types) {
 		return_types.push_back(t);
@@ -200,7 +202,7 @@ void SearchSequencesTableFunction::Execute(ClientContext &context, TableFunction
 
 		auto query_batch = gstate.query_stream->FetchSubBatch();
 		if (query_batch.empty()) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 
@@ -212,11 +214,11 @@ void SearchSequencesTableFunction::Execute(ClientContext &context, TableFunction
 TableFunction SearchSequencesTableFunction::GetFunction() {
 	auto tf = TableFunction("search_sequences_vsearch", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal);
 
-	tf.named_parameters["db"] = LogicalType::VARCHAR;
-	tf.named_parameters["id"] = LogicalType::DOUBLE;
-	tf.named_parameters["maxaccepts"] = LogicalType::INTEGER;
-	tf.named_parameters["maxrejects"] = LogicalType::INTEGER;
-	tf.named_parameters["threads"] = LogicalType::INTEGER;
+	AddNamedParameter(tf, "db", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "id", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "maxaccepts", LogicalType::INTEGER);
+	AddNamedParameter(tf, "maxrejects", LogicalType::INTEGER);
+	AddNamedParameter(tf, "threads", LogicalType::INTEGER);
 
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 

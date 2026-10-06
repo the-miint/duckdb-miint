@@ -24,11 +24,11 @@ SELECT repeat('(', 199999) || 't0,t1' || string_agg('),t' || i, '' ORDER BY i) |
 FROM generate_series(2, 199999) AS s(i);
 
 statement ok
-COPY deep_newick TO '__TEST_DIR__/deep_caterpillar.nwk' (FORMAT csv, HEADER false, DELIMITER E'\t');
+COPY deep_newick TO '{TEST_DIR}/deep_caterpillar.nwk' (FORMAT csv, HEADER false, DELIMITER E'\t');
 
 # Reading it must succeed, not crash. 2n - 1 nodes for a caterpillar of n tips.
 query II
-SELECT COUNT(*), COUNT(*) FILTER (WHERE is_tip) FROM read_newick('__TEST_DIR__/deep_caterpillar.nwk');
+SELECT COUNT(*), COUNT(*) FILTER (WHERE is_tip) FROM read_newick('{TEST_DIR}/deep_caterpillar.nwk');
 ----
 399999	200000
 
@@ -36,13 +36,13 @@ SELECT COUNT(*), COUNT(*) FILTER (WHERE is_tip) FROM read_newick('__TEST_DIR__/d
 # was linked up, not just that the row count came out right.
 query II
 SELECT COUNT(*) FILTER (WHERE parent_index IS NULL), COUNT(*) FILTER (WHERE parent_index IS NOT NULL)
-FROM read_newick('__TEST_DIR__/deep_caterpillar.nwk');
+FROM read_newick('{TEST_DIR}/deep_caterpillar.nwk');
 ----
 1	399998
 
 # The deepest tips are the first two, and the ladder ends at the last tip.
 query T
-SELECT name FROM read_newick('__TEST_DIR__/deep_caterpillar.nwk')
+SELECT name FROM read_newick('{TEST_DIR}/deep_caterpillar.nwk')
 WHERE name IN ('t0', 't1', 't199999') ORDER BY name;
 ----
 t0
@@ -52,13 +52,13 @@ t199999
 # COPY ... (FORMAT NEWICK) then re-reading is the other path through the parser
 # (serialization was already iterative; this guards the pair of them).
 statement ok
-CREATE TABLE deep_tree AS SELECT * FROM read_newick('__TEST_DIR__/deep_caterpillar.nwk');
+CREATE TABLE deep_tree AS SELECT * FROM read_newick('{TEST_DIR}/deep_caterpillar.nwk');
 
 statement ok
-COPY deep_tree TO '__TEST_DIR__/deep_roundtrip.nwk' (FORMAT NEWICK);
+COPY deep_tree TO '{TEST_DIR}/deep_roundtrip.nwk' (FORMAT NEWICK);
 
 query II
-SELECT COUNT(*), COUNT(*) FILTER (WHERE is_tip) FROM read_newick('__TEST_DIR__/deep_roundtrip.nwk');
+SELECT COUNT(*), COUNT(*) FILTER (WHERE is_tip) FROM read_newick('{TEST_DIR}/deep_roundtrip.nwk');
 ----
 399999	200000
 

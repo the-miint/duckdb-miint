@@ -155,15 +155,16 @@ struct SAMCopyBindData : public FunctionData {
 // Bind
 //===--------------------------------------------------------------------===//
 static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, CopyFunctionBindInput &input,
-                                                    const vector<string> &names, const vector<LogicalType> &sql_types,
+                                                    const vector<Identifier> &names,
+                                                    const vector<LogicalType> &sql_types,
                                                     SAMOutputFormat default_format) {
 	auto result = make_uniq<SAMCopyBindData>();
 	result->file_path = input.info.file_path;
-	result->names = names;
+	result->names = IdentifiersToStrings(names);
 	result->format = default_format;
 
 	// Detect and cache column indices
-	result->indices.FindIndices(names);
+	result->indices.FindIndices(IdentifiersToStrings(names));
 	auto &indices = result->indices;
 
 	// Validate required columns exist
@@ -232,9 +233,9 @@ static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, Copy
 	// Parse options
 	bool compression_specified = false;
 	for (auto &option : input.info.options) {
-		if (StringUtil::CIEquals(option.first, "include_header")) {
+		if (option.first == "include_header") {
 			result->include_header = option.second[0].GetValue<bool>();
-		} else if (StringUtil::CIEquals(option.first, "compression")) {
+		} else if (option.first == "compression") {
 			compression_specified = true;
 			auto comp_value = option.second[0].ToString();
 			if (StringUtil::CIEquals(comp_value, "gzip") || StringUtil::CIEquals(comp_value, "gz")) {
@@ -245,12 +246,12 @@ static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, Copy
 				throw BinderException("Unknown compression type for COPY FORMAT SAM: %s (supported: gzip, none)",
 				                      comp_value);
 			}
-		} else if (StringUtil::CIEquals(option.first, "compression_level")) {
+		} else if (option.first == "compression_level") {
 			result->compression_level = option.second[0].GetValue<int32_t>();
 			if (result->compression_level < 0 || result->compression_level > 9) {
 				throw BinderException("COMPRESSION_LEVEL must be between 0 and 9, got %d", result->compression_level);
 			}
-		} else if (StringUtil::CIEquals(option.first, "reference_lengths")) {
+		} else if (option.first == "reference_lengths") {
 			const auto &table_value = option.second[0];
 			if (table_value.type().id() != LogicalTypeId::VARCHAR) {
 				throw BinderException("reference_lengths must be a VARCHAR (table or view name)");
@@ -259,17 +260,17 @@ static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, Copy
 			result->reference_lengths_table = table_value.ToString();
 
 			// Validate table or view exists (use TABLE_ENTRY lookup which returns either)
-			EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, result->reference_lengths_table.value(),
+			EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY,
+			                            QualifiedName(Identifier(result->reference_lengths_table.value())),
 			                            QueryErrorContext());
-			auto entry =
-			    Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
+			auto entry = Catalog::GetEntry(context, lookup_info, OnEntryNotFound::RETURN_NULL);
 			if (!entry) {
 				throw BinderException("Table or view '%s' does not exist", result->reference_lengths_table.value());
 			}
 			if (entry->type != CatalogType::TABLE_ENTRY && entry->type != CatalogType::VIEW_ENTRY) {
 				throw BinderException("'%s' is not a table or view", result->reference_lengths_table.value());
 			}
-		} else if (StringUtil::CIEquals(option.first, "sequence_data")) {
+		} else if (option.first == "sequence_data") {
 			const auto &table_value = option.second[0];
 			if (table_value.type().id() != LogicalTypeId::VARCHAR) {
 				throw BinderException("SEQUENCE_DATA must be a VARCHAR (table or view name)");
@@ -278,10 +279,10 @@ static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, Copy
 			result->sequence_data_table = table_value.ToString();
 
 			// Validate table or view exists
-			EntryLookupInfo sd_lookup(CatalogType::TABLE_ENTRY, result->sequence_data_table.value(),
+			EntryLookupInfo sd_lookup(CatalogType::TABLE_ENTRY,
+			                          QualifiedName(Identifier(result->sequence_data_table.value())),
 			                          QueryErrorContext());
-			auto sd_entry =
-			    Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, sd_lookup, OnEntryNotFound::RETURN_NULL);
+			auto sd_entry = Catalog::GetEntry(context, sd_lookup, OnEntryNotFound::RETURN_NULL);
 			if (!sd_entry) {
 				throw BinderException("Table or view '%s' does not exist", result->sequence_data_table.value());
 			}
@@ -289,7 +290,7 @@ static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, Copy
 				throw BinderException("'%s' is not a table or view", result->sequence_data_table.value());
 			}
 		} else {
-			throw BinderException("Unknown option for COPY FORMAT SAM: %s", option.first);
+			throw BinderException("Unknown option for COPY FORMAT SAM: %s", option.first.GetIdentifierName());
 		}
 	}
 
@@ -328,13 +329,13 @@ static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, Copy
 
 // Bind function for SAM format
 static unique_ptr<FunctionData> SAMCopyBind(ClientContext &context, CopyFunctionBindInput &input,
-                                            const vector<string> &names, const vector<LogicalType> &sql_types) {
+                                            const vector<Identifier> &names, const vector<LogicalType> &sql_types) {
 	return SAMCopyBindInternal(context, input, names, sql_types, SAMOutputFormat::SAM);
 }
 
 // Bind function for BAM format
 static unique_ptr<FunctionData> BAMCopyBind(ClientContext &context, CopyFunctionBindInput &input,
-                                            const vector<string> &names, const vector<LogicalType> &sql_types) {
+                                            const vector<Identifier> &names, const vector<LogicalType> &sql_types) {
 	return SAMCopyBindInternal(context, input, names, sql_types, SAMOutputFormat::BAM);
 }
 
@@ -718,48 +719,48 @@ static void SAMCopySink(ExecutionContext &context, FunctionData &bind_data, Glob
 	    tag_nm_data;
 	UnifiedVectorFormat tag_yt_data, tag_md_data, tag_sa_data;
 
-	input.data[indices.read_id_idx].ToUnifiedFormat(input.size(), read_id_data);
-	input.data[indices.flags_idx].ToUnifiedFormat(input.size(), flags_data);
-	input.data[indices.reference_idx].ToUnifiedFormat(input.size(), reference_data);
-	input.data[indices.position_idx].ToUnifiedFormat(input.size(), position_data);
-	input.data[indices.mapq_idx].ToUnifiedFormat(input.size(), mapq_data);
-	input.data[indices.cigar_idx].ToUnifiedFormat(input.size(), cigar_data);
-	input.data[indices.mate_reference_idx].ToUnifiedFormat(input.size(), mate_reference_data);
-	input.data[indices.mate_position_idx].ToUnifiedFormat(input.size(), mate_position_data);
-	input.data[indices.template_length_idx].ToUnifiedFormat(input.size(), template_length_data);
+	input.data[indices.read_id_idx].ToUnifiedFormat(read_id_data);
+	input.data[indices.flags_idx].ToUnifiedFormat(flags_data);
+	input.data[indices.reference_idx].ToUnifiedFormat(reference_data);
+	input.data[indices.position_idx].ToUnifiedFormat(position_data);
+	input.data[indices.mapq_idx].ToUnifiedFormat(mapq_data);
+	input.data[indices.cigar_idx].ToUnifiedFormat(cigar_data);
+	input.data[indices.mate_reference_idx].ToUnifiedFormat(mate_reference_data);
+	input.data[indices.mate_position_idx].ToUnifiedFormat(mate_position_data);
+	input.data[indices.template_length_idx].ToUnifiedFormat(template_length_data);
 
 	if (indices.tag_as_idx != DConstants::INVALID_INDEX) {
-		input.data[indices.tag_as_idx].ToUnifiedFormat(input.size(), tag_as_data);
+		input.data[indices.tag_as_idx].ToUnifiedFormat(tag_as_data);
 	}
 	if (indices.tag_xs_idx != DConstants::INVALID_INDEX) {
-		input.data[indices.tag_xs_idx].ToUnifiedFormat(input.size(), tag_xs_data);
+		input.data[indices.tag_xs_idx].ToUnifiedFormat(tag_xs_data);
 	}
 	if (indices.tag_ys_idx != DConstants::INVALID_INDEX) {
-		input.data[indices.tag_ys_idx].ToUnifiedFormat(input.size(), tag_ys_data);
+		input.data[indices.tag_ys_idx].ToUnifiedFormat(tag_ys_data);
 	}
 	if (indices.tag_xn_idx != DConstants::INVALID_INDEX) {
-		input.data[indices.tag_xn_idx].ToUnifiedFormat(input.size(), tag_xn_data);
+		input.data[indices.tag_xn_idx].ToUnifiedFormat(tag_xn_data);
 	}
 	if (indices.tag_xm_idx != DConstants::INVALID_INDEX) {
-		input.data[indices.tag_xm_idx].ToUnifiedFormat(input.size(), tag_xm_data);
+		input.data[indices.tag_xm_idx].ToUnifiedFormat(tag_xm_data);
 	}
 	if (indices.tag_xo_idx != DConstants::INVALID_INDEX) {
-		input.data[indices.tag_xo_idx].ToUnifiedFormat(input.size(), tag_xo_data);
+		input.data[indices.tag_xo_idx].ToUnifiedFormat(tag_xo_data);
 	}
 	if (indices.tag_xg_idx != DConstants::INVALID_INDEX) {
-		input.data[indices.tag_xg_idx].ToUnifiedFormat(input.size(), tag_xg_data);
+		input.data[indices.tag_xg_idx].ToUnifiedFormat(tag_xg_data);
 	}
 	if (indices.tag_nm_idx != DConstants::INVALID_INDEX) {
-		input.data[indices.tag_nm_idx].ToUnifiedFormat(input.size(), tag_nm_data);
+		input.data[indices.tag_nm_idx].ToUnifiedFormat(tag_nm_data);
 	}
 	if (indices.tag_yt_idx != DConstants::INVALID_INDEX) {
-		input.data[indices.tag_yt_idx].ToUnifiedFormat(input.size(), tag_yt_data);
+		input.data[indices.tag_yt_idx].ToUnifiedFormat(tag_yt_data);
 	}
 	if (indices.tag_md_idx != DConstants::INVALID_INDEX) {
-		input.data[indices.tag_md_idx].ToUnifiedFormat(input.size(), tag_md_data);
+		input.data[indices.tag_md_idx].ToUnifiedFormat(tag_md_data);
 	}
 	if (indices.tag_sa_idx != DConstants::INVALID_INDEX) {
-		input.data[indices.tag_sa_idx].ToUnifiedFormat(input.size(), tag_sa_data);
+		input.data[indices.tag_sa_idx].ToUnifiedFormat(tag_sa_data);
 	}
 
 	// read_id, reference, mate_reference dispatch on bind-captured types

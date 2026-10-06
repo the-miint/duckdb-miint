@@ -2,6 +2,9 @@
 #include "alignment_functions_internal.hpp"
 #include "table_function_common.hpp"
 #include "duckdb/common/types/vector.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
 
 namespace duckdb {
 
@@ -74,22 +77,22 @@ void KsTwoSampleScalarFunction(DataChunk &args, ExpressionState &state, Vector &
 
 	UnifiedVectorFormat a_fmt;
 	UnifiedVectorFormat b_fmt;
-	args.data[0].ToUnifiedFormat(count, a_fmt);
-	args.data[1].ToUnifiedFormat(count, b_fmt);
+	args.data[0].ToUnifiedFormat(a_fmt);
+	args.data[1].ToUnifiedFormat(b_fmt);
 
 	UnifiedVectorFormat a_child_fmt;
 	UnifiedVectorFormat b_child_fmt;
-	ListVector::GetEntry(args.data[0]).ToUnifiedFormat(ListVector::GetListSize(args.data[0]), a_child_fmt);
-	ListVector::GetEntry(args.data[1]).ToUnifiedFormat(ListVector::GetListSize(args.data[1]), b_child_fmt);
+	ListVector::GetChildMutable(args.data[0]).ToUnifiedFormat(a_child_fmt);
+	ListVector::GetChildMutable(args.data[1]).ToUnifiedFormat(b_child_fmt);
 
 	UnifiedVectorFormat method_fmt;
 	if (has_method) {
-		args.data[2].ToUnifiedFormat(count, method_fmt);
+		args.data[2].ToUnifiedFormat(method_fmt);
 	}
 
 	auto &entries = StructVector::GetEntries(result);
-	auto statistic_data = FlatVector::GetData<double>(*entries[0]);
-	auto pvalue_data = FlatVector::GetData<double>(*entries[1]);
+	auto statistic_data = FlatVector::GetDataMutable<double>(entries[0]);
+	auto pvalue_data = FlatVector::GetDataMutable<double>(entries[1]);
 
 	// Hoisted: the payload pointer does not change per row.
 	auto method_values = has_method ? UnifiedVectorFormat::GetData<string_t>(method_fmt) : nullptr;
@@ -155,6 +158,7 @@ void KsTwoSampleFunction::Register(ExtensionLoader &loader) {
 	ScalarFunctionSet function_set("ks_2samp");
 	function_set.AddFunction(two_arg);
 	function_set.AddFunction(three_arg);
+	function_set.SetFallible();
 	loader.RegisterFunction(function_set);
 }
 

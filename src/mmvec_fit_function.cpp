@@ -10,11 +10,14 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -78,7 +81,7 @@ LogicalType ResolveFeatureIdType(ClientContext &context, const std::string &tabl
 }
 
 unique_ptr<FunctionData> MmvecFitBind(ClientContext &context, TableFunctionBindInput &input,
-                                      vector<LogicalType> &return_types, vector<string> &names) {
+                                      vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<MmvecFitBindData>();
 	data->x_table = input.inputs[0].GetValue<string>();
 	data->y_table = input.inputs[1].GetValue<string>();
@@ -89,7 +92,7 @@ unique_ptr<FunctionData> MmvecFitBind(ClientContext &context, TableFunctionBindI
 	std::string optimizer = "lbfgs";
 	int64_t seed = 0;
 	for (const auto &kv : input.named_parameters) {
-		const auto key = StringUtil::Lower(kv.first);
+		const auto key = StringUtil::Lower(kv.first.GetIdentifierName());
 		if (kv.second.IsNull()) {
 			throw BinderException("mmvec_fit: parameter '%s' cannot be NULL", key);
 		}
@@ -318,16 +321,16 @@ void MmvecFitExecute(ClientContext &, TableFunctionInput &data_p, DataChunk &out
 	auto &v_modality = output.data[0];
 	auto &v_x = output.data[1];
 	auto &v_y = output.data[2];
-	auto axis = FlatVector::GetData<int32_t>(output.data[3]);
-	auto value = FlatVector::GetData<double>(output.data[4]);
-	auto converged = FlatVector::GetData<bool>(output.data[5]);
-	auto n_iter = FlatVector::GetData<int64_t>(output.data[6]);
-	auto final_loss = FlatVector::GetData<double>(output.data[7]);
-	auto max_abs_grad = FlatVector::GetData<double>(output.data[8]);
+	auto axis = FlatVector::GetDataMutable<int32_t>(output.data[3]);
+	auto value = FlatVector::GetDataMutable<double>(output.data[4]);
+	auto converged = FlatVector::GetDataMutable<bool>(output.data[5]);
+	auto n_iter = FlatVector::GetDataMutable<int64_t>(output.data[6]);
+	auto final_loss = FlatVector::GetDataMutable<double>(output.data[7]);
+	auto max_abs_grad = FlatVector::GetDataMutable<double>(output.data[8]);
 	auto &v_message = output.data[9];
 
-	auto modality_data = FlatVector::GetData<string_t>(v_modality);
-	auto message_data = FlatVector::GetData<string_t>(v_message);
+	auto modality_data = FlatVector::GetDataMutable<string_t>(v_modality);
+	auto message_data = FlatVector::GetDataMutable<string_t>(v_message);
 
 	for (idx_t r = 0; r < count; ++r) {
 		const auto &row = g.rows[g.cursor + r];
@@ -341,19 +344,19 @@ void MmvecFitExecute(ClientContext &, TableFunctionInput &data_p, DataChunk &out
 			modality_data[r] =
 			    StringVector::AddString(v_modality, miint::mmvec::ModalityName(miint::mmvec::ModelRow::Kind::X));
 			EmitIdCell(v_x, r, g.x_feature_ids[id], g.x_type);
-			FlatVector::Validity(v_y).SetInvalid(r);
+			FlatVector::ValidityMutable(v_y).SetInvalid(r);
 			break;
 		case miint::mmvec::ModelRow::Kind::Y:
 			modality_data[r] =
 			    StringVector::AddString(v_modality, miint::mmvec::ModalityName(miint::mmvec::ModelRow::Kind::Y));
-			FlatVector::Validity(v_x).SetInvalid(r);
+			FlatVector::ValidityMutable(v_x).SetInvalid(r);
 			EmitIdCell(v_y, r, g.y_feature_ids[id], g.y_type);
 			break;
 		case miint::mmvec::ModelRow::Kind::Loss:
 			modality_data[r] =
 			    StringVector::AddString(v_modality, miint::mmvec::ModalityName(miint::mmvec::ModelRow::Kind::Loss));
-			FlatVector::Validity(v_x).SetInvalid(r);
-			FlatVector::Validity(v_y).SetInvalid(r);
+			FlatVector::ValidityMutable(v_x).SetInvalid(r);
+			FlatVector::ValidityMutable(v_y).SetInvalid(r);
 			break;
 		}
 
@@ -367,7 +370,7 @@ void MmvecFitExecute(ClientContext &, TableFunctionInput &data_p, DataChunk &out
 	}
 
 	g.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 } // namespace
@@ -381,20 +384,20 @@ void RegisterMmvecFit(ExtensionLoader &loader) {
 	// is why there is no separate `epochs` parameter. There is deliberately no
 	// `threads` parameter either: the core is single-threaded and the fit pins
 	// Eigen to one thread, so a seeded fit is bit-reproducible.
-	fn.named_parameters["dimensions"] = LogicalType::INTEGER;
-	fn.named_parameters["optimizer"] = LogicalType::VARCHAR;
-	fn.named_parameters["max_iter"] = LogicalType::BIGINT;
-	fn.named_parameters["x_prior_mean"] = LogicalType::DOUBLE;
-	fn.named_parameters["x_prior_scale"] = LogicalType::DOUBLE;
-	fn.named_parameters["y_prior_mean"] = LogicalType::DOUBLE;
-	fn.named_parameters["y_prior_scale"] = LogicalType::DOUBLE;
-	fn.named_parameters["learning_rate"] = LogicalType::DOUBLE;
-	fn.named_parameters["batch_size"] = LogicalType::BIGINT;
-	fn.named_parameters["beta_1"] = LogicalType::DOUBLE;
-	fn.named_parameters["beta_2"] = LogicalType::DOUBLE;
-	fn.named_parameters["clipnorm"] = LogicalType::DOUBLE;
-	fn.named_parameters["batch_norm"] = LogicalType::VARCHAR;
-	fn.named_parameters["seed"] = LogicalType::BIGINT;
+	AddNamedParameter(fn, "dimensions", LogicalType::INTEGER);
+	AddNamedParameter(fn, "optimizer", LogicalType::VARCHAR);
+	AddNamedParameter(fn, "max_iter", LogicalType::BIGINT);
+	AddNamedParameter(fn, "x_prior_mean", LogicalType::DOUBLE);
+	AddNamedParameter(fn, "x_prior_scale", LogicalType::DOUBLE);
+	AddNamedParameter(fn, "y_prior_mean", LogicalType::DOUBLE);
+	AddNamedParameter(fn, "y_prior_scale", LogicalType::DOUBLE);
+	AddNamedParameter(fn, "learning_rate", LogicalType::DOUBLE);
+	AddNamedParameter(fn, "batch_size", LogicalType::BIGINT);
+	AddNamedParameter(fn, "beta_1", LogicalType::DOUBLE);
+	AddNamedParameter(fn, "beta_2", LogicalType::DOUBLE);
+	AddNamedParameter(fn, "clipnorm", LogicalType::DOUBLE);
+	AddNamedParameter(fn, "batch_norm", LogicalType::VARCHAR);
+	AddNamedParameter(fn, "seed", LogicalType::BIGINT);
 
 	fn.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(fn);

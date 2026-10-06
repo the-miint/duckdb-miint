@@ -8,10 +8,12 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
 
 #include <algorithm>
 #include <functional>
 #include <stdexcept>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -19,7 +21,7 @@ namespace {
 
 // Reads an optional named parameter, leaving `target` alone when absent.
 template <typename T>
-void ReadOptional(const named_parameter_map_t &params, const char *key, T &target,
+void ReadOptional(const named_argument_map_t &params, const char *key, T &target,
                   const std::function<T(const Value &)> &convert) {
 	auto it = params.find(key);
 	if (it != params.end() && !it->second.IsNull()) {
@@ -30,7 +32,7 @@ void ReadOptional(const named_parameter_map_t &params, const char *key, T &targe
 } // namespace
 
 unique_ptr<FunctionData> PlaceKreppTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                       vector<LogicalType> &return_types, vector<std::string> &names) {
+                                                       vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 
 	auto query_param = input.named_parameters.find("query_table");
@@ -108,7 +110,7 @@ unique_ptr<FunctionData> PlaceKreppTableFunction::Bind(ClientContext &context, T
 	data->types[0] = data->schema.id_type;
 
 	return_types = data->types;
-	names = data->names;
+	names = StringsToIdentifiers(data->names);
 	return std::move(data);
 }
 
@@ -178,7 +180,7 @@ void PlaceKreppTableFunction::Execute(ClientContext &context, TableFunctionInput
 	while (lstate.emitted >= lstate.pending.size()) {
 		auto batch = gstate.stream->FetchSubBatch();
 		if (batch.size() == 0) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		std::vector<miint::KreppQuery> queries;
@@ -218,12 +220,12 @@ void PlaceKreppTableFunction::Execute(ClientContext &context, TableFunctionInput
 	// boxes every cell into a Value first. EmitIdCell is the shared id codec, so
 	// a BIGINT or UUID fragment is written the same way align_minimap2 writes it.
 	auto &fragment_out = output.data[0];
-	auto edge_num_out = FlatVector::GetData<int64_t>(output.data[1]);
-	auto likelihood_out = FlatVector::GetData<double>(output.data[2]);
-	auto lwr_out = FlatVector::GetData<double>(output.data[3]);
-	auto distal_out = FlatVector::GetData<double>(output.data[4]);
-	auto pendant_out = FlatVector::GetData<double>(output.data[5]);
-	auto distance_out = FlatVector::GetData<double>(output.data[6]);
+	auto edge_num_out = FlatVector::GetDataMutable<int64_t>(output.data[1]);
+	auto likelihood_out = FlatVector::GetDataMutable<double>(output.data[2]);
+	auto lwr_out = FlatVector::GetDataMutable<double>(output.data[3]);
+	auto distal_out = FlatVector::GetDataMutable<double>(output.data[4]);
+	auto pendant_out = FlatVector::GetDataMutable<double>(output.data[5]);
+	auto distance_out = FlatVector::GetDataMutable<double>(output.data[6]);
 	for (idx_t row = 0; row < count; ++row) {
 		const auto &placement = lstate.pending[lstate.emitted + row];
 		EmitIdCell(fragment_out, row, placement.fragment, bind_data.schema.id_type);
@@ -235,19 +237,19 @@ void PlaceKreppTableFunction::Execute(ClientContext &context, TableFunctionInput
 		distance_out[row] = placement.distance;
 	}
 	lstate.emitted += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 void PlaceKreppTableFunction::Register(ExtensionLoader &loader) {
 	TableFunction place("place_krepp", {}, Execute, Bind, InitGlobal, InitLocal);
-	place.named_parameters["query_table"] = LogicalType::VARCHAR;
-	place.named_parameters["index_path"] = LogicalType::VARCHAR;
-	place.named_parameters["newick_path"] = LogicalType::VARCHAR;
-	place.named_parameters["hdist_th"] = LogicalType::UINTEGER;
-	place.named_parameters["tau"] = LogicalType::UINTEGER;
-	place.named_parameters["chisq"] = LogicalType::DOUBLE;
-	place.named_parameters["multi"] = LogicalType::BOOLEAN;
-	place.named_parameters["filter"] = LogicalType::BOOLEAN;
+	AddNamedParameter(place, "query_table", LogicalType::VARCHAR);
+	AddNamedParameter(place, "index_path", LogicalType::VARCHAR);
+	AddNamedParameter(place, "newick_path", LogicalType::VARCHAR);
+	AddNamedParameter(place, "hdist_th", LogicalType::UINTEGER);
+	AddNamedParameter(place, "tau", LogicalType::UINTEGER);
+	AddNamedParameter(place, "chisq", LogicalType::DOUBLE);
+	AddNamedParameter(place, "multi", LogicalType::BOOLEAN);
+	AddNamedParameter(place, "filter", LogicalType::BOOLEAN);
 	loader.RegisterFunction(place);
 }
 

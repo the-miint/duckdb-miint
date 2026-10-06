@@ -1,3 +1,4 @@
+#include "miint_named_parameter.hpp"
 // =============================================================================
 // sylph_profile() — DuckDB table function for FracMinHash relative-abundance
 // profiling of shotgun metagenomic reads.
@@ -98,8 +99,7 @@ SylphProfileTableFunction::LocalState::~LocalState() {
 // Bind
 // =============================================================================
 unique_ptr<FunctionData> SylphProfileTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                         vector<LogicalType> &return_types,
-                                                         vector<std::string> &names) {
+                                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 	data->source_table = input.inputs[0].GetValue<std::string>();
 	RejectCTERelationName(input, data->source_table);
@@ -124,7 +124,7 @@ unique_ptr<FunctionData> SylphProfileTableFunction::Bind(ClientContext &context,
 	// param was passed, std::nullopt otherwise — so we only touch FFI fields
 	// the caller explicitly asked to change.
 	auto get_double = [&](const std::string &param, double lo, double hi) -> std::optional<double> {
-		auto it = input.named_parameters.find(param);
+		auto it = input.named_parameters.find(Identifier(param));
 		if (it == input.named_parameters.end())
 			return std::nullopt;
 		double v = it->second.GetValue<double>();
@@ -134,7 +134,7 @@ unique_ptr<FunctionData> SylphProfileTableFunction::Bind(ClientContext &context,
 		return v;
 	};
 	auto get_uint = [&](const std::string &param) -> std::optional<uint32_t> {
-		auto it = input.named_parameters.find(param);
+		auto it = input.named_parameters.find(Identifier(param));
 		if (it == input.named_parameters.end())
 			return std::nullopt;
 		auto v = it->second.GetValue<int64_t>();
@@ -144,7 +144,7 @@ unique_ptr<FunctionData> SylphProfileTableFunction::Bind(ClientContext &context,
 		return static_cast<uint32_t>(v);
 	};
 	auto get_bool = [&](const std::string &param) -> std::optional<bool> {
-		auto it = input.named_parameters.find(param);
+		auto it = input.named_parameters.find(Identifier(param));
 		if (it == input.named_parameters.end())
 			return std::nullopt;
 		return it->second.GetValue<bool>();
@@ -204,7 +204,7 @@ unique_ptr<FunctionData> SylphProfileTableFunction::Bind(ClientContext &context,
 		data->output_types = std::move(out_types);
 	}
 
-	names = data->output_names;
+	names = StringsToIdentifiers(data->output_names);
 	return_types = data->output_types;
 	return std::move(data);
 }
@@ -442,7 +442,7 @@ void SylphProfileTableFunction::Execute(ClientContext &context, TableFunctionInp
 			gstate.profile_done = true;
 		}
 		idx_t emitted = EmitFromArrow(gstate.arrow, output, /*start_col=*/0, context);
-		output.SetCardinality(emitted);
+		output.SetChildCardinality(emitted);
 		return;
 	}
 
@@ -458,14 +458,14 @@ void SylphProfileTableFunction::Execute(ClientContext &context, TableFunctionInp
 	while (true) {
 		idx_t emitted = EmitFromArrow(lstate.arrow, output, /*start_col=*/1, context);
 		if (emitted > 0) {
-			output.data[0].Reference(lstate.sample_value);
-			output.SetCardinality(emitted);
+			output.data[0].Reference(lstate.sample_value, count_t(emitted));
+			output.SetChildCardinality(emitted);
 			return;
 		}
 
 		idx_t sample_idx = 0;
 		if (!ClaimNextSample(gstate, num_samples, sample_idx)) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		lstate.sample_value = data.sample_info.sample_values[sample_idx];
@@ -474,8 +474,8 @@ void SylphProfileTableFunction::Execute(ClientContext &context, TableFunctionInp
 		// matches uchime_ref's per-sample path. The view name is fixed because
 		// each LocalState owns its own connection — TEMP VIEWs are scoped to the
 		// connection, so concurrent threads don't collide.
-		auto src = KeywordHelper::WriteOptionallyQuoted(data.source_table);
-		auto col = KeywordHelper::WriteOptionallyQuoted(data.sample_info.sample_id_col);
+		auto src = SQLIdentifier::ToString(data.source_table);
+		auto col = SQLIdentifier::ToString(data.sample_info.sample_id_col);
 		auto sample_lit = lstate.sample_value.ToSQLString();
 		auto view_sql = "CREATE OR REPLACE TEMP VIEW __sylph_per_sample AS SELECT * FROM " + src + " WHERE CAST(" +
 		                col + " AS VARCHAR) = CAST(" + sample_lit + " AS VARCHAR)";
@@ -505,16 +505,16 @@ TableFunction SylphProfileTableFunction::GetFunction() {
 	auto tf = TableFunction("sylph_profile", {LogicalType::VARCHAR, LogicalType::VARCHAR}, Execute, Bind, InitGlobal,
 	                        InitLocal);
 
-	tf.named_parameters["sample_id"] = LogicalType::VARCHAR;
-	tf.named_parameters["min_ani"] = LogicalType::DOUBLE;
-	tf.named_parameters["min_number_kmers"] = LogicalType::UINTEGER;
-	tf.named_parameters["min_count_correct"] = LogicalType::DOUBLE;
-	tf.named_parameters["min_contain"] = LogicalType::UINTEGER;
-	tf.named_parameters["screen_ani"] = LogicalType::DOUBLE;
-	tf.named_parameters["estimate_unknown"] = LogicalType::BOOLEAN;
-	tf.named_parameters["dedup_paired_reads"] = LogicalType::BOOLEAN;
-	tf.named_parameters["dedup_fpr"] = LogicalType::DOUBLE;
-	tf.named_parameters["threads"] = LogicalType::UINTEGER;
+	AddNamedParameter(tf, "sample_id", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "min_ani", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "min_number_kmers", LogicalType::UINTEGER);
+	AddNamedParameter(tf, "min_count_correct", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "min_contain", LogicalType::UINTEGER);
+	AddNamedParameter(tf, "screen_ani", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "estimate_unknown", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "dedup_paired_reads", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "dedup_fpr", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "threads", LogicalType::UINTEGER);
 
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return tf;

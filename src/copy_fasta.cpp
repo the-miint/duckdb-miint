@@ -47,13 +47,13 @@ struct FastaCopyBindData : public SequenceCopyBindData {
 // Bind
 //===--------------------------------------------------------------------===//
 static unique_ptr<FunctionData> FastaCopyBind(ClientContext &context, CopyFunctionBindInput &input,
-                                              const vector<string> &names, const vector<LogicalType> &sql_types) {
+                                              const vector<Identifier> &names, const vector<LogicalType> &sql_types) {
 	auto result = make_uniq<FastaCopyBindData>();
 	result->file_path = input.info.file_path;
-	result->names = names;
+	result->names = IdentifiersToStrings(names);
 
 	// Detect and store column indices (computed once at bind time)
-	result->indices.FindIndices(names);
+	result->indices.FindIndices(IdentifiersToStrings(names));
 
 	bool has_sequence1 = result->indices.sequence1_idx != DConstants::INVALID_INDEX;
 	bool has_sequence2 = result->indices.sequence2_idx != DConstants::INVALID_INDEX;
@@ -78,11 +78,9 @@ static unique_ptr<FunctionData> FastaCopyBind(ClientContext &context, CopyFuncti
 	CommonCopyParameters common_params;
 
 	for (auto &option : input.info.options) {
-		if (!StringUtil::CIEquals(option.first, "interleave") &&
-		    !StringUtil::CIEquals(option.first, "id_as_sequence_index") &&
-		    !StringUtil::CIEquals(option.first, "include_comment") &&
-		    !StringUtil::CIEquals(option.first, "compression")) {
-			throw BinderException("Unknown option for COPY FORMAT FASTA: %s", option.first);
+		if (!(option.first == "interleave") && !(option.first == "id_as_sequence_index") &&
+		    !(option.first == "include_comment") && !(option.first == "compression")) {
+			throw BinderException("Unknown option for COPY FORMAT FASTA: %s", option.first.GetIdentifierName());
 		}
 	}
 
@@ -170,24 +168,24 @@ static void FastaCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 	// read_id is dispatched per-row on its bind-captured type (VARCHAR / BIGINT /
 	// UUID) via ResolveSequenceRecordId -- do NOT read it as string_t here, that
 	// is exactly the crash a BIGINT read_id triggered (#145).
-	input.data[indices.read_id_idx].ToUnifiedFormat(input.size(), read_id_data);
+	input.data[indices.read_id_idx].ToUnifiedFormat(read_id_data);
 
 	if (fdata.id_as_sequence_index) {
-		input.data[indices.sequence_index_idx].ToUnifiedFormat(input.size(), sequence_index_data);
+		input.data[indices.sequence_index_idx].ToUnifiedFormat(sequence_index_data);
 	}
 
 	if (fdata.include_comment && indices.comment_idx != DConstants::INVALID_INDEX) {
-		input.data[indices.comment_idx].ToUnifiedFormat(input.size(), comment_data);
+		input.data[indices.comment_idx].ToUnifiedFormat(comment_data);
 	}
 
-	input.data[indices.sequence1_idx].ToUnifiedFormat(input.size(), seq1_data);
+	input.data[indices.sequence1_idx].ToUnifiedFormat(seq1_data);
 	auto seq1_strings = UnifiedVectorFormat::GetData<string_t>(seq1_data);
 
 	// The schema may carry a sequence2 column even for single-end data (read_fastx always emits it
 	// as NULL). Whether a given row is paired is decided per-row below from sequence2 NULL-ness.
 	bool has_r2 = fdata.has_r2_columns;
 	if (has_r2) {
-		input.data[indices.sequence2_idx].ToUnifiedFormat(input.size(), seq2_data);
+		input.data[indices.sequence2_idx].ToUnifiedFormat(seq2_data);
 	}
 
 	// Get references to local buffers

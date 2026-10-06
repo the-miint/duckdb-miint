@@ -5,6 +5,8 @@
 #include "NewickTree.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 #include <string>
 #include <vector>
 
@@ -19,7 +21,7 @@ PhyloAncestralStatesTableFunction::Data::Data(std::string tree_table, std::strin
 
 unique_ptr<FunctionData> PhyloAncestralStatesTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                                  vector<LogicalType> &return_types,
-                                                                 vector<std::string> &names) {
+                                                                 vector<Identifier> &names) {
 	auto tree_table_name = input.inputs[0].ToString();
 	auto traits_table_name = input.inputs[1].ToString();
 	RejectCTERelationName(input, tree_table_name);
@@ -96,18 +98,18 @@ void PhyloAncestralStatesTableFunction::Execute(ClientContext &context, TableFun
 	auto &gstate = data_p.global_state->Cast<GlobalState>();
 
 	if (gstate.current_row_idx >= gstate.rows.size()) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
 	size_t count = std::min<size_t>(STANDARD_VECTOR_SIZE, gstate.rows.size() - gstate.current_row_idx);
 
-	auto node_index_data = FlatVector::GetData<int64_t>(output.data[0]);
-	auto trait_data = FlatVector::GetData<string_t>(output.data[1]);
-	auto estimate_data = FlatVector::GetData<double>(output.data[2]);
-	auto variance_data = FlatVector::GetData<double>(output.data[3]);
-	auto ci_low_data = FlatVector::GetData<double>(output.data[4]);
-	auto ci_high_data = FlatVector::GetData<double>(output.data[5]);
+	auto node_index_data = FlatVector::GetDataMutable<int64_t>(output.data[0]);
+	auto trait_data = FlatVector::GetDataMutable<string_t>(output.data[1]);
+	auto estimate_data = FlatVector::GetDataMutable<double>(output.data[2]);
+	auto variance_data = FlatVector::GetDataMutable<double>(output.data[3]);
+	auto ci_low_data = FlatVector::GetDataMutable<double>(output.data[4]);
+	auto ci_high_data = FlatVector::GetDataMutable<double>(output.data[5]);
 
 	for (size_t k = 0; k < count; k++) {
 		const auto &row = gstate.rows[gstate.current_row_idx + k];
@@ -120,7 +122,7 @@ void PhyloAncestralStatesTableFunction::Execute(ClientContext &context, TableFun
 	}
 
 	gstate.current_row_idx += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 TableFunction PhyloAncestralStatesTableFunction::GetFunction() {

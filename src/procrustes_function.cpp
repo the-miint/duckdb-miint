@@ -24,6 +24,9 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 namespace {
@@ -69,7 +72,7 @@ OrdinationTable ReadOrdinationTable(ClientContext &context, const std::string &t
 		throw BinderException("%s: %s ordination-table name must not be empty", caller_name, role);
 	}
 	auto conn = MakeReadOnlyHelperConnection(context);
-	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
+	const auto qname = SQLIdentifier::ToString(table_name);
 	const std::string select = "SELECT sample_id::VARCHAR, axis::INTEGER, coordinate::DOUBLE FROM " + qname;
 
 	// LIMIT 0 probe — surface a missing column / bad cast as a bind-time error
@@ -106,16 +109,16 @@ OrdinationTable ReadOrdinationTable(ClientContext &context, const std::string &t
 	};
 	std::vector<Entry> entries;
 	std::vector<std::string> ids_raw;
-	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto &materialized = *result;
 	while (auto chunk = materialized.Fetch()) {
 		const idx_t rn = chunk->size();
 		if (rn == 0) {
 			break;
 		}
 		UnifiedVectorFormat id_u, ax_u, co_u;
-		chunk->data[0].ToUnifiedFormat(rn, id_u);
-		chunk->data[1].ToUnifiedFormat(rn, ax_u);
-		chunk->data[2].ToUnifiedFormat(rn, co_u);
+		chunk->data[0].ToUnifiedFormat(id_u);
+		chunk->data[1].ToUnifiedFormat(ax_u);
+		chunk->data[2].ToUnifiedFormat(co_u);
 		auto id_data = UnifiedVectorFormat::GetData<string_t>(id_u);
 		auto ax_data = UnifiedVectorFormat::GetData<int32_t>(ax_u);
 		auto co_data = UnifiedVectorFormat::GetData<double>(co_u);
@@ -212,7 +215,7 @@ OrdinationTable ReadOrdinationTable(ClientContext &context, const std::string &t
 std::vector<std::pair<std::string, std::string>> ReadPairing(ClientContext &context, const std::string &table_name,
                                                              const std::string &caller_name) {
 	auto conn = MakeReadOnlyHelperConnection(context);
-	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
+	const auto qname = SQLIdentifier::ToString(table_name);
 	const std::string select = "SELECT reference_id::VARCHAR, other_id::VARCHAR FROM " + qname;
 
 	auto probe = conn.Query(select + " LIMIT 0");
@@ -227,15 +230,15 @@ std::vector<std::pair<std::string, std::string>> ReadPairing(ClientContext &cont
 	}
 
 	std::vector<std::pair<std::string, std::string>> pairs;
-	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto &materialized = *result;
 	while (auto chunk = materialized.Fetch()) {
 		const idx_t rn = chunk->size();
 		if (rn == 0) {
 			break;
 		}
 		UnifiedVectorFormat r_u, o_u;
-		chunk->data[0].ToUnifiedFormat(rn, r_u);
-		chunk->data[1].ToUnifiedFormat(rn, o_u);
+		chunk->data[0].ToUnifiedFormat(r_u);
+		chunk->data[1].ToUnifiedFormat(o_u);
 		auto r_data = UnifiedVectorFormat::GetData<string_t>(r_u);
 		auto o_data = UnifiedVectorFormat::GetData<string_t>(o_u);
 		for (idx_t i = 0; i < rn; ++i) {
@@ -295,7 +298,7 @@ struct ProcrustesGlobalState : public GlobalTableFunctionState {
 };
 
 void DeclareProcrustesOutputSchema(const LogicalType &sample_id_type, vector<LogicalType> &return_types,
-                                   vector<string> &names) {
+                                   vector<Identifier> &names) {
 	names.emplace_back("matrix");
 	return_types.emplace_back(LogicalType::VARCHAR);
 	names.emplace_back("sample_id");
@@ -335,7 +338,7 @@ uint64_t ResolveSeed(int32_t seed_param) {
 }
 
 unique_ptr<FunctionData> ProcrustesBind(ClientContext &context, TableFunctionBindInput &input,
-                                        vector<LogicalType> &return_types, vector<string> &names) {
+                                        vector<LogicalType> &return_types, vector<Identifier> &names) {
 	const std::string ref_name = input.inputs[0].GetValue<string>();
 	const std::string other_name = input.inputs[1].GetValue<string>();
 	RejectCTERelationName(input, ref_name);
@@ -346,7 +349,7 @@ unique_ptr<FunctionData> ProcrustesBind(ClientContext &context, TableFunctionBin
 	int32_t permutations = 999;
 	int32_t seed_param = -1; // <0 = nondeterministic (mirrors pcoa's seed convention)
 	for (const auto &kv : input.named_parameters) {
-		const auto key = StringUtil::Lower(kv.first);
+		const auto key = StringUtil::Lower(kv.first.GetIdentifierName());
 		if (key == "pairing") {
 			pairing_name = kv.second.GetValue<string>();
 			RejectCTERelationName(input, pairing_name);
@@ -520,13 +523,13 @@ void ProcrustesExecute(ClientContext &, TableFunctionInput &data_p, DataChunk &o
 	const size_t total = gstate.rows.size();
 	const idx_t n = MinValue<idx_t>(STANDARD_VECTOR_SIZE, total - gstate.cursor);
 
-	auto matrix_data = FlatVector::GetData<string_t>(output.data[0]);
+	auto matrix_data = FlatVector::GetDataMutable<string_t>(output.data[0]);
 	auto &sample_id_vec = output.data[1];
-	auto axis_data = FlatVector::GetData<int32_t>(output.data[2]);
-	auto coord_data = FlatVector::GetData<double>(output.data[3]);
-	auto m2_data = FlatVector::GetData<double>(output.data[4]);
-	auto pvalue_data = FlatVector::GetData<double>(output.data[5]);
-	auto &pvalue_validity = FlatVector::Validity(output.data[5]);
+	auto axis_data = FlatVector::GetDataMutable<int32_t>(output.data[2]);
+	auto coord_data = FlatVector::GetDataMutable<double>(output.data[3]);
+	auto m2_data = FlatVector::GetDataMutable<double>(output.data[4]);
+	auto pvalue_data = FlatVector::GetDataMutable<double>(output.data[5]);
+	auto &pvalue_validity = FlatVector::ValidityMutable(output.data[5]);
 	const bool pvalue_is_null = std::isnan(gstate.pvalue);
 
 	for (idx_t i = 0; i < n; ++i) {
@@ -544,7 +547,7 @@ void ProcrustesExecute(ClientContext &, TableFunctionInput &data_p, DataChunk &o
 		}
 	}
 	gstate.cursor += n;
-	output.SetCardinality(n);
+	output.SetChildCardinality(n);
 }
 
 } // namespace
@@ -552,10 +555,10 @@ void ProcrustesExecute(ClientContext &, TableFunctionInput &data_p, DataChunk &o
 void RegisterProcrustes(ExtensionLoader &loader) {
 	TableFunction fn("procrustes", {LogicalType::VARCHAR, LogicalType::VARCHAR}, ProcrustesExecute, ProcrustesBind,
 	                 ProcrustesInitGlobal);
-	fn.named_parameters["pairing"] = LogicalType::VARCHAR;
-	fn.named_parameters["n_dims"] = LogicalType::INTEGER;
-	fn.named_parameters["permutations"] = LogicalType::INTEGER;
-	fn.named_parameters["seed"] = LogicalType::INTEGER;
+	AddNamedParameter(fn, "pairing", LogicalType::VARCHAR);
+	AddNamedParameter(fn, "n_dims", LogicalType::INTEGER);
+	AddNamedParameter(fn, "permutations", LogicalType::INTEGER);
+	AddNamedParameter(fn, "seed", LogicalType::INTEGER);
 	loader.RegisterFunction(fn);
 }
 

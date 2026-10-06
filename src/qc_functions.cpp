@@ -3,6 +3,11 @@
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/function/scalar_function.hpp"
+#include "duckdb/common/vector/constant_vector.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
 
 #include "qc_algorithms.hpp"
 #include "sequence_utils.hpp"
@@ -74,11 +79,11 @@ static void WriteTrimRow(idx_t i, const string_t &seq, const uint8_t *qptr, idx_
                          Vector &seq_out_vec, Vector &qual_out_vec, list_entry_t *qual_out_entries,
                          idx_t &qual_child_offset, uint32_t *trimmed_5p_data, uint32_t *trimmed_3p_data) {
 	const idx_t kept_len = tr.end - tr.start;
-	FlatVector::GetData<string_t>(seq_out_vec)[i] =
+	FlatVector::GetDataMutable<string_t>(seq_out_vec)[i] =
 	    StringVector::AddString(seq_out_vec, seq.GetData() + tr.start, kept_len);
 
-	auto &qual_child = ListVector::GetEntry(qual_out_vec);
-	auto qual_child_data = FlatVector::GetData<uint8_t>(qual_child);
+	auto &qual_child = ListVector::GetChildMutable(qual_out_vec);
+	auto qual_child_data = FlatVector::GetDataMutable<uint8_t>(qual_child);
 	std::memcpy(qual_child_data + qual_child_offset, qptr + tr.start, kept_len);
 	qual_out_entries[i].offset = qual_child_offset;
 	qual_out_entries[i].length = kept_len;
@@ -106,14 +111,14 @@ static void TrimExecuteImpl(DataChunk &args, Vector &result, idx_t n_optional, c
 	D_ASSERT(n_optional <= 3);
 
 	UnifiedVectorFormat seq_data, qual_data;
-	args.data[0].ToUnifiedFormat(row_count, seq_data);
-	args.data[1].ToUnifiedFormat(row_count, qual_data);
+	args.data[0].ToUnifiedFormat(seq_data);
+	args.data[1].ToUnifiedFormat(qual_data);
 
 	UnifiedVectorFormat opt_data[3];
 	const int32_t *opt_ptr[3] = {nullptr, nullptr, nullptr};
 	if (has_explicit_params) {
 		for (idx_t k = 0; k < n_optional; k++) {
-			args.data[2 + k].ToUnifiedFormat(row_count, opt_data[k]);
+			args.data[2 + k].ToUnifiedFormat(opt_data[k]);
 			opt_ptr[k] = UnifiedVectorFormat::GetData<int32_t>(opt_data[k]);
 		}
 	}
@@ -121,12 +126,12 @@ static void TrimExecuteImpl(DataChunk &args, Vector &result, idx_t n_optional, c
 	auto seq_ptr = UnifiedVectorFormat::GetData<string_t>(seq_data);
 
 	auto &entries = StructVector::GetEntries(result);
-	auto &seq_out_vec = *entries[0];
-	auto &qual_out_vec = *entries[1];
-	auto trimmed_5p_data = FlatVector::GetData<uint32_t>(*entries[2]);
-	auto trimmed_3p_data = FlatVector::GetData<uint32_t>(*entries[3]);
+	auto &seq_out_vec = entries[0];
+	auto &qual_out_vec = entries[1];
+	auto trimmed_5p_data = FlatVector::GetDataMutable<uint32_t>(entries[2]);
+	auto trimmed_3p_data = FlatVector::GetDataMutable<uint32_t>(entries[3]);
 
-	auto qual_out_entries = FlatVector::GetData<list_entry_t>(qual_out_vec);
+	auto qual_out_entries = FlatVector::GetDataMutable<list_entry_t>(qual_out_vec);
 	idx_t qual_child_offset = ListVector::GetListSize(qual_out_vec);
 	ReserveTrimOutputChildBuffer(args, qual_out_vec, qual_child_offset);
 
@@ -370,21 +375,21 @@ static void TrimAdaptersExecuteImpl(DataChunk &args, Vector &result, bool adapte
 	const bool has_explicit_params = args.ColumnCount() == 6;
 
 	UnifiedVectorFormat seq_data, qual_data, adapter_data, revcomp_data, minmatch_data, prestart_data;
-	args.data[0].ToUnifiedFormat(row_count, seq_data);
-	args.data[1].ToUnifiedFormat(row_count, qual_data);
-	args.data[2].ToUnifiedFormat(row_count, adapter_data);
+	args.data[0].ToUnifiedFormat(seq_data);
+	args.data[1].ToUnifiedFormat(qual_data);
+	args.data[2].ToUnifiedFormat(adapter_data);
 	if (has_explicit_params) {
-		args.data[3].ToUnifiedFormat(row_count, revcomp_data);
-		args.data[4].ToUnifiedFormat(row_count, minmatch_data);
-		args.data[5].ToUnifiedFormat(row_count, prestart_data);
+		args.data[3].ToUnifiedFormat(revcomp_data);
+		args.data[4].ToUnifiedFormat(minmatch_data);
+		args.data[5].ToUnifiedFormat(prestart_data);
 	}
 
 	// The LIST(VARCHAR) child vector is independent of row — unify it once
 	// per chunk, not per row.
 	UnifiedVectorFormat list_child_data;
 	if (adapter_is_list) {
-		auto &child = ListVector::GetEntry(args.data[2]);
-		child.ToUnifiedFormat(ListVector::GetListSize(args.data[2]), list_child_data);
+		auto &child = ListVector::GetChildMutable(args.data[2]);
+		child.ToUnifiedFormat(list_child_data);
 	}
 
 	auto seq_ptr = UnifiedVectorFormat::GetData<string_t>(seq_data);
@@ -393,12 +398,12 @@ static void TrimAdaptersExecuteImpl(DataChunk &args, Vector &result, bool adapte
 	auto prestart_ptr = has_explicit_params ? UnifiedVectorFormat::GetData<bool>(prestart_data) : nullptr;
 
 	auto &entries = StructVector::GetEntries(result);
-	auto &seq_out_vec = *entries[0];
-	auto &qual_out_vec = *entries[1];
-	auto trimmed_5p_data = FlatVector::GetData<uint32_t>(*entries[2]);
-	auto trimmed_3p_data = FlatVector::GetData<uint32_t>(*entries[3]);
+	auto &seq_out_vec = entries[0];
+	auto &qual_out_vec = entries[1];
+	auto trimmed_5p_data = FlatVector::GetDataMutable<uint32_t>(entries[2]);
+	auto trimmed_3p_data = FlatVector::GetDataMutable<uint32_t>(entries[3]);
 
-	auto qual_out_entries = FlatVector::GetData<list_entry_t>(qual_out_vec);
+	auto qual_out_entries = FlatVector::GetDataMutable<list_entry_t>(qual_out_vec);
 	idx_t qual_child_offset = ListVector::GetListSize(qual_out_vec);
 	ReserveTrimOutputChildBuffer(args, qual_out_vec, qual_child_offset);
 
@@ -602,7 +607,8 @@ static LogicalType TrimAdaptersPeResultStructType() {
 static void WritePeMate(idx_t i, const string_t &seq, const uint8_t *qptr, idx_t keep_len, Vector &seq_out_vec,
                         Vector &qual_out_vec, list_entry_t *qual_entries, uint8_t *qual_child,
                         idx_t &qual_child_offset) {
-	FlatVector::GetData<string_t>(seq_out_vec)[i] = StringVector::AddString(seq_out_vec, seq.GetData(), keep_len);
+	FlatVector::GetDataMutable<string_t>(seq_out_vec)[i] =
+	    StringVector::AddString(seq_out_vec, seq.GetData(), keep_len);
 	std::memcpy(qual_child + qual_child_offset, qptr, keep_len);
 	qual_entries[i].offset = qual_child_offset;
 	qual_entries[i].length = keep_len;
@@ -611,11 +617,7 @@ static void WritePeMate(idx_t i, const string_t &seq, const uint8_t *qptr, idx_t
 }
 
 // 4-arg form: overlap-only with fastp defaults; no adapter-by-sequence fallback.
-static unique_ptr<FunctionData> TrimAdaptersPeBind4(ClientContext &ctx, ScalarFunction &fn,
-                                                    vector<unique_ptr<Expression>> &arguments) {
-	(void)ctx;
-	(void)fn;
-	(void)arguments;
+static unique_ptr<FunctionData> TrimAdaptersPeBind4(BindScalarFunctionInput &input) {
 	return make_uniq<TrimAdaptersPeBindData>(); // all defaults; candidates empty
 }
 
@@ -624,9 +626,9 @@ static unique_ptr<FunctionData> TrimAdaptersPeBind4(ClientContext &ctx, ScalarFu
 // allow_pre_start). The adapter list + tuning params must be constant; they are
 // evaluated once here and the fallback candidate set (RC-expanded, deduped) is
 // built with min_match fixed from the pre-dedup count.
-static unique_ptr<FunctionData> TrimAdaptersPeBind11(ClientContext &ctx, ScalarFunction &fn,
-                                                     vector<unique_ptr<Expression>> &arguments) {
-	(void)fn;
+static unique_ptr<FunctionData> TrimAdaptersPeBind11(BindScalarFunctionInput &input) {
+	auto &ctx = input.GetClientContext();
+	auto &arguments = input.GetArguments();
 	for (idx_t k = 4; k < 11; k++) {
 		if (!arguments[k]->IsFoldable()) {
 			throw InvalidInputException("trim_adapters_pe: the adapter list and tuning parameters must be constant "
@@ -709,26 +711,26 @@ static void TrimAdaptersPeExecute(DataChunk &args, ExpressionState &state, Vecto
 	const idx_t row_count = args.size();
 
 	UnifiedVectorFormat seq1_data, qual1_data, seq2_data, qual2_data;
-	args.data[0].ToUnifiedFormat(row_count, seq1_data);
-	args.data[1].ToUnifiedFormat(row_count, qual1_data);
-	args.data[2].ToUnifiedFormat(row_count, seq2_data);
-	args.data[3].ToUnifiedFormat(row_count, qual2_data);
+	args.data[0].ToUnifiedFormat(seq1_data);
+	args.data[1].ToUnifiedFormat(qual1_data);
+	args.data[2].ToUnifiedFormat(seq2_data);
+	args.data[3].ToUnifiedFormat(qual2_data);
 
 	auto seq1_ptr = UnifiedVectorFormat::GetData<string_t>(seq1_data);
 	auto seq2_ptr = UnifiedVectorFormat::GetData<string_t>(seq2_data);
 
 	auto &entries = StructVector::GetEntries(result);
-	auto &seq1_out = *entries[0];
-	auto &qual1_out = *entries[1];
-	auto &seq2_out = *entries[2];
-	auto &qual2_out = *entries[3];
-	auto overlap_len_data = FlatVector::GetData<int32_t>(*entries[4]);
-	auto adapter_trimmed_data = FlatVector::GetData<bool>(*entries[5]);
-	auto trimmed1_data = FlatVector::GetData<uint32_t>(*entries[6]);
-	auto trimmed2_data = FlatVector::GetData<uint32_t>(*entries[7]);
+	auto &seq1_out = entries[0];
+	auto &qual1_out = entries[1];
+	auto &seq2_out = entries[2];
+	auto &qual2_out = entries[3];
+	auto overlap_len_data = FlatVector::GetDataMutable<int32_t>(entries[4]);
+	auto adapter_trimmed_data = FlatVector::GetDataMutable<bool>(entries[5]);
+	auto trimmed1_data = FlatVector::GetDataMutable<uint32_t>(entries[6]);
+	auto trimmed2_data = FlatVector::GetDataMutable<uint32_t>(entries[7]);
 
-	auto qual1_entries = FlatVector::GetData<list_entry_t>(qual1_out);
-	auto qual2_entries = FlatVector::GetData<list_entry_t>(qual2_out);
+	auto qual1_entries = FlatVector::GetDataMutable<list_entry_t>(qual1_out);
+	auto qual2_entries = FlatVector::GetDataMutable<list_entry_t>(qual2_out);
 	idx_t qual1_off = ListVector::GetListSize(qual1_out);
 	idx_t qual2_off = ListVector::GetListSize(qual2_out);
 	// Trimmed output is at most as long as the input quality, so one reserve per
@@ -738,8 +740,8 @@ static void TrimAdaptersPeExecute(DataChunk &args, ExpressionState &state, Vecto
 	// Both Reserves happen before either child pointer is taken, and no Reserve
 	// runs inside the row loop (WritePeMate only SetListSize, which never
 	// reallocates), so these cached child pointers stay valid for the whole chunk.
-	auto qual1_child = FlatVector::GetData<uint8_t>(ListVector::GetEntry(qual1_out));
-	auto qual2_child = FlatVector::GetData<uint8_t>(ListVector::GetEntry(qual2_out));
+	auto qual1_child = FlatVector::GetDataMutable<uint8_t>(ListVector::GetChildMutable(qual1_out));
+	auto qual2_child = FlatVector::GetDataMutable<uint8_t>(ListVector::GetChildMutable(qual2_out));
 
 	for (idx_t i = 0; i < row_count; i++) {
 		auto s1i = seq1_data.sel->get_index(i);
@@ -847,15 +849,15 @@ static void FilterReadExecute(DataChunk &args, ExpressionState &state, Vector &r
 	const bool has_explicit_params = args.ColumnCount() == 8;
 
 	UnifiedVectorFormat seq_data, qual_data, p1_data, p2_data, p3_data, p4_data, p5_data, p6_data;
-	args.data[0].ToUnifiedFormat(row_count, seq_data);
-	args.data[1].ToUnifiedFormat(row_count, qual_data);
+	args.data[0].ToUnifiedFormat(seq_data);
+	args.data[1].ToUnifiedFormat(qual_data);
 	if (has_explicit_params) {
-		args.data[2].ToUnifiedFormat(row_count, p1_data);
-		args.data[3].ToUnifiedFormat(row_count, p2_data);
-		args.data[4].ToUnifiedFormat(row_count, p3_data);
-		args.data[5].ToUnifiedFormat(row_count, p4_data);
-		args.data[6].ToUnifiedFormat(row_count, p5_data);
-		args.data[7].ToUnifiedFormat(row_count, p6_data);
+		args.data[2].ToUnifiedFormat(p1_data);
+		args.data[3].ToUnifiedFormat(p2_data);
+		args.data[4].ToUnifiedFormat(p3_data);
+		args.data[5].ToUnifiedFormat(p4_data);
+		args.data[6].ToUnifiedFormat(p5_data);
+		args.data[7].ToUnifiedFormat(p6_data);
 	}
 
 	auto seq_ptr = UnifiedVectorFormat::GetData<string_t>(seq_data);
@@ -867,13 +869,13 @@ static void FilterReadExecute(DataChunk &args, ExpressionState &state, Vector &r
 	auto p6_ptr = has_explicit_params ? UnifiedVectorFormat::GetData<int32_t>(p6_data) : nullptr;
 
 	auto &entries = StructVector::GetEntries(result);
-	auto passed_data = FlatVector::GetData<bool>(*entries[0]);
-	auto &fail_reason_vec = *entries[1];
-	auto length_data = FlatVector::GetData<uint32_t>(*entries[2]);
-	auto n_bases_data = FlatVector::GetData<uint32_t>(*entries[3]);
-	auto low_qual_data = FlatVector::GetData<uint32_t>(*entries[4]);
-	auto mean_q_data = FlatVector::GetData<float>(*entries[5]);
-	auto &fail_reason_validity = FlatVector::Validity(fail_reason_vec);
+	auto passed_data = FlatVector::GetDataMutable<bool>(entries[0]);
+	auto &fail_reason_vec = entries[1];
+	auto length_data = FlatVector::GetDataMutable<uint32_t>(entries[2]);
+	auto n_bases_data = FlatVector::GetDataMutable<uint32_t>(entries[3]);
+	auto low_qual_data = FlatVector::GetDataMutable<uint32_t>(entries[4]);
+	auto mean_q_data = FlatVector::GetDataMutable<float>(entries[5]);
+	auto &fail_reason_validity = FlatVector::ValidityMutable(fail_reason_vec);
 
 	for (idx_t i = 0; i < row_count; i++) {
 		auto si = seq_data.sel->get_index(i);
@@ -929,7 +931,7 @@ static void FilterReadExecute(DataChunk &args, ExpressionState &state, Vector &r
 		// reached only when qlen is also 0.)
 		if (seq.GetSize() == 0) {
 			passed_data[i] = false;
-			FlatVector::GetData<string_t>(fail_reason_vec)[i] =
+			FlatVector::GetDataMutable<string_t>(fail_reason_vec)[i] =
 			    StringVector::AddString(fail_reason_vec, FAIL_REASON_LENGTH);
 			length_data[i] = 0;
 			n_bases_data[i] = 0;
@@ -962,7 +964,8 @@ static void FilterReadExecute(DataChunk &args, ExpressionState &state, Vector &r
 
 		passed_data[i] = (fail_reason == nullptr);
 		if (fail_reason != nullptr) {
-			FlatVector::GetData<string_t>(fail_reason_vec)[i] = StringVector::AddString(fail_reason_vec, fail_reason);
+			FlatVector::GetDataMutable<string_t>(fail_reason_vec)[i] =
+			    StringVector::AddString(fail_reason_vec, fail_reason);
 		} else {
 			fail_reason_validity.SetInvalid(i);
 		}
@@ -976,20 +979,21 @@ static void FilterReadExecute(DataChunk &args, ExpressionState &state, Vector &r
 // Register a trim_quality_* function with both the 2-arg (defaults) and 4-arg
 // (explicit window_size + mean_quality) overloads.
 static void RegisterTrimQualityFamily(ExtensionLoader &loader, const std::string &name, scalar_function_t fn) {
-	ScalarFunctionSet set(name);
+	ScalarFunctionSet set {Identifier(name)};
 
-	ScalarFunction two_arg(name, {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT)},
+	ScalarFunction two_arg(Identifier(name), {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT)},
 	                       TrimResultStructType(), fn);
-	two_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	two_arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	set.AddFunction(two_arg);
 
 	ScalarFunction four_arg(
-	    name,
+	    Identifier(name),
 	    {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT), LogicalType::INTEGER, LogicalType::INTEGER},
 	    TrimResultStructType(), fn);
-	four_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	four_arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	set.AddFunction(four_arg);
 
+	set.SetFallible();
 	loader.RegisterFunction(set);
 }
 
@@ -1009,15 +1013,16 @@ void QcFunctions::Register(ExtensionLoader &loader) {
 		ScalarFunctionSet set("trim_polyg");
 		ScalarFunction two_arg("trim_polyg", {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT)},
 		                       TrimResultStructType(), TrimPolygExecute);
-		two_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		two_arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 		set.AddFunction(two_arg);
 
 		ScalarFunction five_arg("trim_polyg",
 		                        {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT), LogicalType::INTEGER,
 		                         LogicalType::INTEGER, LogicalType::INTEGER},
 		                        TrimResultStructType(), TrimPolygExecute);
-		five_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		five_arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 		set.AddFunction(five_arg);
+		set.SetFallible();
 		loader.RegisterFunction(set);
 	}
 
@@ -1026,15 +1031,16 @@ void QcFunctions::Register(ExtensionLoader &loader) {
 		ScalarFunctionSet set("trim_polyx");
 		ScalarFunction two_arg("trim_polyx", {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT)},
 		                       TrimResultStructType(), TrimPolyxExecute);
-		two_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		two_arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 		set.AddFunction(two_arg);
 
 		ScalarFunction four_arg("trim_polyx",
 		                        {LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT), LogicalType::INTEGER,
 		                         LogicalType::INTEGER},
 		                        TrimResultStructType(), TrimPolyxExecute);
-		four_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		four_arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 		set.AddFunction(four_arg);
+		set.SetFallible();
 		loader.RegisterFunction(set);
 	}
 
@@ -1047,14 +1053,15 @@ void QcFunctions::Register(ExtensionLoader &loader) {
 
 		ScalarFunction two_arg("filter_read", {LogicalType::VARCHAR, qual_t}, FilterResultStructType(),
 		                       FilterReadExecute);
-		two_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		two_arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 		set.AddFunction(two_arg);
 
 		ScalarFunction eight_arg("filter_read", {LogicalType::VARCHAR, qual_t, i, i, i, i, i, i},
 		                         FilterResultStructType(), FilterReadExecute);
-		eight_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		eight_arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 		set.AddFunction(eight_arg);
 
+		set.SetFallible();
 		loader.RegisterFunction(set);
 	}
 
@@ -1067,28 +1074,29 @@ void QcFunctions::Register(ExtensionLoader &loader) {
 
 		ScalarFunction varchar_3arg("trim_adapters", {LogicalType::VARCHAR, qual_t, LogicalType::VARCHAR},
 		                            TrimResultStructType(), TrimAdaptersVarcharExecute);
-		varchar_3arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		varchar_3arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 		set.AddFunction(varchar_3arg);
 
 		ScalarFunction list_3arg("trim_adapters", {LogicalType::VARCHAR, qual_t, adapter_list_t},
 		                         TrimResultStructType(), TrimAdaptersListExecute);
-		list_3arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		list_3arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 		set.AddFunction(list_3arg);
 
 		ScalarFunction varchar_6arg("trim_adapters",
 		                            {LogicalType::VARCHAR, qual_t, LogicalType::VARCHAR, LogicalType::BOOLEAN,
 		                             LogicalType::INTEGER, LogicalType::BOOLEAN},
 		                            TrimResultStructType(), TrimAdaptersVarcharExecute);
-		varchar_6arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		varchar_6arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 		set.AddFunction(varchar_6arg);
 
 		ScalarFunction list_6arg("trim_adapters",
 		                         {LogicalType::VARCHAR, qual_t, adapter_list_t, LogicalType::BOOLEAN,
 		                          LogicalType::INTEGER, LogicalType::BOOLEAN},
 		                         TrimResultStructType(), TrimAdaptersListExecute);
-		list_6arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+		list_6arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 		set.AddFunction(list_6arg);
 
+		set.SetFallible();
 		loader.RegisterFunction(set);
 	}
 
@@ -1104,18 +1112,19 @@ void QcFunctions::Register(ExtensionLoader &loader) {
 
 		ScalarFunction four_arg("trim_adapters_pe", {LogicalType::VARCHAR, qual_t, LogicalType::VARCHAR, qual_t},
 		                        TrimAdaptersPeResultStructType(), TrimAdaptersPeExecute, TrimAdaptersPeBind4);
-		four_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-		four_arg.init_local_state = TrimAdaptersPeInitLocalState;
+		four_arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+		four_arg.SetInitStateCallback(TrimAdaptersPeInitLocalState);
 		set.AddFunction(four_arg);
 
 		ScalarFunction eleven_arg(
 		    "trim_adapters_pe",
 		    {LogicalType::VARCHAR, qual_t, LogicalType::VARCHAR, qual_t, adapter_list_t, i, i, i, b, i, b},
 		    TrimAdaptersPeResultStructType(), TrimAdaptersPeExecute, TrimAdaptersPeBind11);
-		eleven_arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-		eleven_arg.init_local_state = TrimAdaptersPeInitLocalState;
+		eleven_arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+		eleven_arg.SetInitStateCallback(TrimAdaptersPeInitLocalState);
 		set.AddFunction(eleven_arg);
 
+		set.SetFallible();
 		loader.RegisterFunction(set);
 	}
 }

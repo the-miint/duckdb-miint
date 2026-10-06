@@ -20,7 +20,7 @@ require-env ENA_WEBIN_TEST_AVAILABLE
 statement ok
 CREATE SECRET test_ena_live (
     TYPE ENA,
-    USER '${ENA_WEBIN_TEST_USER}',
+    USER '{ENA_WEBIN_TEST_USER}',
     PASSWORD_ENV 'ENA_WEBIN_TEST_PASSWORD',
     ENDPOINT 'test'
 );

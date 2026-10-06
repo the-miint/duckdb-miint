@@ -51,10 +51,10 @@ struct BiomCopyBindData : public FunctionData {
 // Bind
 //===--------------------------------------------------------------------===//
 static unique_ptr<FunctionData> BiomCopyBind(ClientContext &context, CopyFunctionBindInput &input,
-                                             const vector<string> &names, const vector<LogicalType> &sql_types) {
+                                             const vector<Identifier> &names, const vector<LogicalType> &sql_types) {
 	auto result = make_uniq<BiomCopyBindData>();
 	result->file_path = input.info.file_path;
-	result->names = names;
+	result->names = IdentifiersToStrings(names);
 
 	// Check if file already exists - fail early before any computation
 	auto &fs = FileSystem::GetFileSystem(context);
@@ -102,7 +102,7 @@ static unique_ptr<FunctionData> BiomCopyBind(ClientContext &context, CopyFunctio
 		auto &key = option.first;
 		auto &values = option.second;
 
-		if (StringUtil::CIEquals(key, "compression")) {
+		if (key == "compression") {
 			string comp_str = StringUtil::Lower(values[0].ToString());
 			if (comp_str == "gzip" || comp_str == "gz") {
 				result->use_compression = true;
@@ -111,12 +111,12 @@ static unique_ptr<FunctionData> BiomCopyBind(ClientContext &context, CopyFunctio
 			} else {
 				throw InvalidInputException("COPY FORMAT BIOM: compression must be 'gzip', 'gz', or 'none'");
 			}
-		} else if (StringUtil::CIEquals(key, "id")) {
+		} else if (key == "id") {
 			result->id = values[0].ToString();
-		} else if (StringUtil::CIEquals(key, "generated_by")) {
+		} else if (key == "generated_by") {
 			result->generated_by = values[0].ToString();
 		} else {
-			throw BinderException("Unknown option for COPY FORMAT BIOM: %s", key);
+			throw BinderException("Unknown option for COPY FORMAT BIOM: %s", key.GetIdentifierName());
 		}
 	}
 
@@ -172,9 +172,9 @@ static void BiomCopySink(ExecutionContext &context, FunctionData &bind_data, Glo
 	// Process each row
 	UnifiedVectorFormat feature_data, sample_data, value_data;
 
-	input.data[fdata.feature_id_idx].ToUnifiedFormat(input.size(), feature_data);
-	input.data[fdata.sample_id_idx].ToUnifiedFormat(input.size(), sample_data);
-	input.data[fdata.value_idx].ToUnifiedFormat(input.size(), value_data);
+	input.data[fdata.feature_id_idx].ToUnifiedFormat(feature_data);
+	input.data[fdata.sample_id_idx].ToUnifiedFormat(sample_data);
+	input.data[fdata.value_idx].ToUnifiedFormat(value_data);
 
 	auto feature_strings = UnifiedVectorFormat::GetData<string_t>(feature_data);
 	auto sample_strings = UnifiedVectorFormat::GetData<string_t>(sample_data);

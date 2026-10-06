@@ -9,7 +9,10 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 #include <unordered_set>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -73,7 +76,7 @@ static void ValidateAndAlignInto(const std::string &sample_literal, LoadedSingle
 }
 
 static unique_ptr<FunctionData> AlignAbpoaBind(ClientContext &context, TableFunctionBindInput &input,
-                                               vector<LogicalType> &return_types, vector<string> &names) {
+                                               vector<LogicalType> &return_types, vector<Identifier> &names) {
 	if (input.inputs.empty() || input.inputs[0].IsNull()) {
 		throw BinderException("align_abpoa requires a sequence table name argument");
 	}
@@ -100,7 +103,7 @@ static unique_ptr<FunctionData> AlignAbpoaBind(ClientContext &context, TableFunc
 		DiscoverSamples(conn, data->table_name, data->sample_info.sample_id_col,
 		                {"sequence_index", "read_id", "aligned_sequence", "original_length", "aligned_length"},
 		                "align_abpoa", data->sample_info);
-		names.push_back(data->sample_info.sample_id_col);
+		names.emplace_back(data->sample_info.sample_id_col);
 		return_types.push_back(data->sample_info.sample_id_type);
 	}
 
@@ -156,18 +159,18 @@ static void EmitRows(const AlignAbpoaData &data, AlignAbpoaLocalState &lstate, c
 
 	idx_t col = 0;
 	if (data.has_sample_id) {
-		output.data[col++].Reference(lstate.sample_value);
+		output.data[col++].Reference(lstate.sample_value, count_t(count));
 	}
 	auto &sequence_index_vec = output.data[col++];
 	auto &read_id_vec = output.data[col++];
 	auto &aligned_seq_vec = output.data[col++];
 	auto &original_length_vec = output.data[col++];
 	auto &aligned_length_vec = output.data[col++];
-	auto sequence_index_data = FlatVector::GetData<int64_t>(sequence_index_vec);
-	auto read_id_data = FlatVector::GetData<string_t>(read_id_vec);
-	auto aligned_seq_data = FlatVector::GetData<string_t>(aligned_seq_vec);
-	auto original_length_data = FlatVector::GetData<int32_t>(original_length_vec);
-	auto aligned_length_data = FlatVector::GetData<int32_t>(aligned_length_vec);
+	auto sequence_index_data = FlatVector::GetDataMutable<int64_t>(sequence_index_vec);
+	auto read_id_data = FlatVector::GetDataMutable<string_t>(read_id_vec);
+	auto aligned_seq_data = FlatVector::GetDataMutable<string_t>(aligned_seq_vec);
+	auto original_length_data = FlatVector::GetDataMutable<int32_t>(original_length_vec);
+	auto aligned_length_data = FlatVector::GetDataMutable<int32_t>(aligned_length_vec);
 	for (idx_t i = 0; i < count; i++) {
 		idx_t row = lstate.current_row + i;
 		sequence_index_data[i] = static_cast<int64_t>(row);
@@ -178,7 +181,7 @@ static void EmitRows(const AlignAbpoaData &data, AlignAbpoaLocalState &lstate, c
 	}
 
 	lstate.current_row += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 static void AlignAbpoaExecute(ClientContext & /*context*/, TableFunctionInput &data_p, DataChunk &output) {
@@ -188,7 +191,7 @@ static void AlignAbpoaExecute(ClientContext & /*context*/, TableFunctionInput &d
 
 	if (!data.has_sample_id) {
 		if (lstate.current_row >= gstate.names.size()) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		EmitRows(data, lstate, gstate.names, gstate.sequences, gstate.original_lengths, gstate.aligned_length, output);
@@ -203,12 +206,12 @@ static void AlignAbpoaExecute(ClientContext & /*context*/, TableFunctionInput &d
 		}
 		idx_t sample_idx;
 		if (!ClaimNextSample(gstate, data.sample_info.sample_values.size(), sample_idx)) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		lstate.sample_value = data.sample_info.sample_values[sample_idx];
 		auto sample_literal = lstate.sample_value.ToSQLString();
-		auto q_col = KeywordHelper::WriteOptionallyQuoted(data.sample_info.sample_id_col);
+		auto q_col = SQLIdentifier::ToString(data.sample_info.sample_id_col);
 		auto where_sql = "CAST(" + q_col + " AS VARCHAR) = CAST(" + sample_literal + " AS VARCHAR)";
 		auto loaded = LoadSingleEndSequences(*lstate.conn, data.table_name, "align_abpoa", /*strict=*/true, where_sql);
 		ValidateAndAlignInto(sample_literal, loaded, lstate.names, lstate.sequences, lstate.original_lengths,
@@ -220,22 +223,22 @@ static void AlignAbpoaExecute(ClientContext & /*context*/, TableFunctionInput &d
 TableFunction AlignAbpoaTableFunction::GetFunction() {
 	auto tf = TableFunction("align_abpoa", {LogicalType::VARCHAR}, AlignAbpoaExecute, AlignAbpoaBind,
 	                        AlignAbpoaInitGlobal, AlignAbpoaInitLocal);
-	tf.named_parameters["sample_id"] = LogicalType::VARCHAR;
-	tf.named_parameters["match"] = LogicalType::INTEGER;
-	tf.named_parameters["mismatch"] = LogicalType::INTEGER;
-	tf.named_parameters["gap_open1"] = LogicalType::INTEGER;
-	tf.named_parameters["gap_open2"] = LogicalType::INTEGER;
-	tf.named_parameters["gap_ext1"] = LogicalType::INTEGER;
-	tf.named_parameters["gap_ext2"] = LogicalType::INTEGER;
-	tf.named_parameters["align_mode"] = LogicalType::VARCHAR;
-	tf.named_parameters["progressive"] = LogicalType::BOOLEAN;
-	tf.named_parameters["disable_seeding"] = LogicalType::BOOLEAN;
-	tf.named_parameters["amb_strand"] = LogicalType::BOOLEAN;
-	tf.named_parameters["k"] = LogicalType::INTEGER;
-	tf.named_parameters["w"] = LogicalType::INTEGER;
-	tf.named_parameters["min_w"] = LogicalType::INTEGER;
-	tf.named_parameters["bandwidth"] = LogicalType::INTEGER;
-	tf.named_parameters["bandwidth_frac"] = LogicalType::FLOAT;
+	AddNamedParameter(tf, "sample_id", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "match", LogicalType::INTEGER);
+	AddNamedParameter(tf, "mismatch", LogicalType::INTEGER);
+	AddNamedParameter(tf, "gap_open1", LogicalType::INTEGER);
+	AddNamedParameter(tf, "gap_open2", LogicalType::INTEGER);
+	AddNamedParameter(tf, "gap_ext1", LogicalType::INTEGER);
+	AddNamedParameter(tf, "gap_ext2", LogicalType::INTEGER);
+	AddNamedParameter(tf, "align_mode", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "progressive", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "disable_seeding", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "amb_strand", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "k", LogicalType::INTEGER);
+	AddNamedParameter(tf, "w", LogicalType::INTEGER);
+	AddNamedParameter(tf, "min_w", LogicalType::INTEGER);
+	AddNamedParameter(tf, "bandwidth", LogicalType::INTEGER);
+	AddNamedParameter(tf, "bandwidth_frac", LogicalType::FLOAT);
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return tf;
 }

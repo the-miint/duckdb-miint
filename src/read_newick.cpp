@@ -1,13 +1,17 @@
 #include "read_newick.hpp"
+#include <iostream>
 #include "remote_file_helper.hpp"
 #include "table_function_common.hpp"
 #include "duckdb/common/file_open_flags.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 #include <zlib.h>
 #include <memory>
 #include <sstream>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -143,7 +147,7 @@ std::vector<ReadNewickTableFunction::NodeRow> ReadNewickTableFunction::TreeToRow
 }
 
 unique_ptr<FunctionData> ReadNewickTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                       vector<LogicalType> &return_types, vector<std::string> &names) {
+                                                       vector<LogicalType> &return_types, vector<Identifier> &names) {
 	FileSystem &fs = FileSystem::GetFileSystem(context);
 
 	std::vector<std::string> file_paths;
@@ -229,43 +233,43 @@ void ReadNewickTableFunction::EmitNodeRows(const std::vector<NodeRow> &rows, siz
 		const auto &row = rows[start_idx + i];
 
 		// node_index
-		FlatVector::GetData<int64_t>(output.data[0])[output_offset + i] = row.node_index;
+		FlatVector::GetDataMutable<int64_t>(output.data[0])[output_offset + i] = row.node_index;
 
 		// name (empty string if not specified, never NULL)
 		auto &name_vec = output.data[1];
-		FlatVector::GetData<string_t>(name_vec)[output_offset + i] = StringVector::AddString(name_vec, row.name);
+		FlatVector::GetDataMutable<string_t>(name_vec)[output_offset + i] = StringVector::AddString(name_vec, row.name);
 
 		// branch_length (nullable - NaN becomes NULL)
 		auto &bl_vec = output.data[2];
 		if (std::isnan(row.branch_length)) {
-			FlatVector::Validity(bl_vec).SetInvalid(output_offset + i);
+			FlatVector::ValidityMutable(bl_vec).SetInvalid(output_offset + i);
 		} else {
-			FlatVector::GetData<double>(bl_vec)[output_offset + i] = row.branch_length;
+			FlatVector::GetDataMutable<double>(bl_vec)[output_offset + i] = row.branch_length;
 		}
 
 		// edge_id (nullable)
 		auto &edge_vec = output.data[3];
 		if (row.edge_id.has_value()) {
-			FlatVector::GetData<int64_t>(edge_vec)[output_offset + i] = row.edge_id.value();
+			FlatVector::GetDataMutable<int64_t>(edge_vec)[output_offset + i] = row.edge_id.value();
 		} else {
-			FlatVector::Validity(edge_vec).SetInvalid(output_offset + i);
+			FlatVector::ValidityMutable(edge_vec).SetInvalid(output_offset + i);
 		}
 
 		// parent_index (nullable)
 		auto &parent_vec = output.data[4];
 		if (row.parent_index.has_value()) {
-			FlatVector::GetData<int64_t>(parent_vec)[output_offset + i] = row.parent_index.value();
+			FlatVector::GetDataMutable<int64_t>(parent_vec)[output_offset + i] = row.parent_index.value();
 		} else {
-			FlatVector::Validity(parent_vec).SetInvalid(output_offset + i);
+			FlatVector::ValidityMutable(parent_vec).SetInvalid(output_offset + i);
 		}
 
 		// is_tip
-		FlatVector::GetData<bool>(output.data[5])[output_offset + i] = row.is_tip;
+		FlatVector::GetDataMutable<bool>(output.data[5])[output_offset + i] = row.is_tip;
 
 		// filepath (if included)
 		if (include_filepath) {
 			auto &fp_vec = output.data[6];
-			FlatVector::GetData<string_t>(fp_vec)[output_offset + i] = StringVector::AddString(fp_vec, filepath);
+			FlatVector::GetDataMutable<string_t>(fp_vec)[output_offset + i] = StringVector::AddString(fp_vec, filepath);
 		}
 	}
 }
@@ -321,12 +325,12 @@ void ReadNewickTableFunction::Execute(ClientContext &context, TableFunctionInput
 		local_state.has_file = false; // Ready to claim next file when done
 	}
 
-	output.SetCardinality(output_idx);
+	output.SetChildCardinality(output_idx);
 }
 
 TableFunction ReadNewickTableFunction::GetFunction() {
 	auto tf = TableFunction("read_newick", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
-	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
+	AddNamedParameter(tf, "include_filepath", LogicalType::BOOLEAN);
 	return tf;
 }
 

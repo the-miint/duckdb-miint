@@ -23,6 +23,8 @@
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 namespace {
@@ -110,7 +112,7 @@ void LoadIteration(const UnifracDistancesData &data, UnifracDistancesGlobalState
 }
 
 unique_ptr<FunctionData> UnifracDistancesBind(ClientContext &context, TableFunctionBindInput &input,
-                                              vector<LogicalType> &return_types, vector<string> &names) {
+                                              vector<LogicalType> &return_types, vector<Identifier> &names) {
 	const std::string table_name = input.inputs[0].GetValue<string>();
 	const std::string tree_name = input.inputs[1].GetValue<string>();
 	RejectCTERelationName(input, table_name);
@@ -135,7 +137,7 @@ unique_ptr<FunctionData> UnifracDistancesBind(ClientContext &context, TableFunct
 	int32_t seed = -1;
 	int32_t threads = 0; // 0 = follow DuckDB's TaskScheduler::NumberOfThreads()
 	for (const auto &kv : input.named_parameters) {
-		const auto key = StringUtil::Lower(kv.first);
+		const auto key = StringUtil::Lower(kv.first.GetIdentifierName());
 		if (key == "variant") {
 			variant = kv.second.GetValue<string>();
 		} else if (key == "variance_adjust") {
@@ -248,14 +250,14 @@ void UnifracDistancesExecute(ClientContext &, TableFunctionInput &input, DataChu
 	auto &gstate = input.global_state->Cast<UnifracDistancesGlobalState>();
 
 	if (gstate.finished) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
-	auto iter_data = FlatVector::GetData<int32_t>(output.data[0]);
+	auto iter_data = FlatVector::GetDataMutable<int32_t>(output.data[0]);
 	auto &sample_a_vec = output.data[1];
 	auto &sample_b_vec = output.data[2];
-	auto dist_data = FlatVector::GetData<double>(output.data[3]);
+	auto dist_data = FlatVector::GetDataMutable<double>(output.data[3]);
 	const LogicalType &id_type = data.sample_id_out_type;
 
 	idx_t out_n = 0;
@@ -298,7 +300,7 @@ void UnifracDistancesExecute(ClientContext &, TableFunctionInput &input, DataChu
 		}
 	}
 
-	output.SetCardinality(out_n);
+	output.SetChildCardinality(out_n);
 }
 
 } // namespace
@@ -306,16 +308,16 @@ void UnifracDistancesExecute(ClientContext &, TableFunctionInput &input, DataChu
 void RegisterUnifracDistances(ExtensionLoader &loader) {
 	TableFunction fn("unifrac_distances", {LogicalType::VARCHAR, LogicalType::VARCHAR}, UnifracDistancesExecute,
 	                 UnifracDistancesBind, UnifracDistancesInitGlobal);
-	fn.named_parameters["variant"] = LogicalType::VARCHAR;
-	fn.named_parameters["variance_adjust"] = LogicalType::BOOLEAN;
-	fn.named_parameters["alpha"] = LogicalType::DOUBLE;
-	fn.named_parameters["bypass_tips"] = LogicalType::BOOLEAN;
-	fn.named_parameters["normalize_sample_counts"] = LogicalType::BOOLEAN;
-	fn.named_parameters["subsample_depth"] = LogicalType::INTEGER;
-	fn.named_parameters["subsample_with_replacement"] = LogicalType::BOOLEAN;
-	fn.named_parameters["n_subsamples"] = LogicalType::INTEGER;
-	fn.named_parameters["seed"] = LogicalType::INTEGER;
-	fn.named_parameters["threads"] = LogicalType::INTEGER;
+	AddNamedParameter(fn, "variant", LogicalType::VARCHAR);
+	AddNamedParameter(fn, "variance_adjust", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "alpha", LogicalType::DOUBLE);
+	AddNamedParameter(fn, "bypass_tips", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "normalize_sample_counts", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "subsample_depth", LogicalType::INTEGER);
+	AddNamedParameter(fn, "subsample_with_replacement", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "n_subsamples", LogicalType::INTEGER);
+	AddNamedParameter(fn, "seed", LogicalType::INTEGER);
+	AddNamedParameter(fn, "threads", LogicalType::INTEGER);
 	fn.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(fn);
 }

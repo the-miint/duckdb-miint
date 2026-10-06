@@ -62,7 +62,7 @@ Three steps.
 ### 1. Named parameter + bind-time discovery
 
 ```cpp
-tf.named_parameters["sample_id"] = LogicalType::VARCHAR;
+AddNamedParameter(tf, "sample_id", LogicalType::VARCHAR);  // miint_named_parameter.hpp
 ```
 
 ```cpp
@@ -79,7 +79,7 @@ if (data->has_sample_id) {
                     /*reserved=*/ {/* lowercase output column names */},
                     "<fn_name>", data->sample_info);
 
-    names.push_back(data->sample_info.sample_id_col);
+    names.emplace_back(data->sample_info.sample_id_col);
     return_types.push_back(data->sample_info.sample_id_type);
 }
 ```
@@ -114,7 +114,7 @@ while (true) {
     }
     idx_t sample_idx;
     if (!ClaimNextSample(gstate, data.sample_info.sample_values.size(), sample_idx)) {
-        output.SetCardinality(0);
+        output.SetChildCardinality(0);
         return;
     }
     lstate.sample_value = data.sample_info.sample_values[sample_idx];

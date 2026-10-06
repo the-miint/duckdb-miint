@@ -7,6 +7,8 @@
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/vector_operations/generic_executor.hpp"
 #include "duckdb/function/copy_function.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
 #include <sstream>
 
 namespace duckdb {
@@ -50,13 +52,13 @@ struct FastqCopyBindData : public SequenceCopyBindData {
 // Bind
 //===--------------------------------------------------------------------===//
 static unique_ptr<FunctionData> FastqCopyBind(ClientContext &context, CopyFunctionBindInput &input,
-                                              const vector<string> &names, const vector<LogicalType> &sql_types) {
+                                              const vector<Identifier> &names, const vector<LogicalType> &sql_types) {
 	auto result = make_uniq<FastqCopyBindData>();
 	result->file_path = input.info.file_path;
-	result->names = names;
+	result->names = IdentifiersToStrings(names);
 
 	// Detect and store column indices (computed once at bind time)
-	result->indices.FindIndices(names);
+	result->indices.FindIndices(IdentifiersToStrings(names));
 
 	bool has_sequence1 = result->indices.sequence1_idx != DConstants::INVALID_INDEX;
 	bool has_sequence2 = result->indices.sequence2_idx != DConstants::INVALID_INDEX;
@@ -88,13 +90,11 @@ static unique_ptr<FunctionData> FastqCopyBind(ClientContext &context, CopyFuncti
 	Value qual_offset_param;
 
 	for (auto &option : input.info.options) {
-		if (StringUtil::CIEquals(option.first, "qual_offset")) {
+		if (option.first == "qual_offset") {
 			qual_offset_param = option.second[0];
-		} else if (!StringUtil::CIEquals(option.first, "interleave") &&
-		           !StringUtil::CIEquals(option.first, "id_as_sequence_index") &&
-		           !StringUtil::CIEquals(option.first, "include_comment") &&
-		           !StringUtil::CIEquals(option.first, "compression")) {
-			throw BinderException("Unknown option for COPY FORMAT FASTQ: %s", option.first);
+		} else if (!(option.first == "interleave") && !(option.first == "id_as_sequence_index") &&
+		           !(option.first == "include_comment") && !(option.first == "compression")) {
+			throw BinderException("Unknown option for COPY FORMAT FASTQ: %s", option.first.GetIdentifierName());
 		}
 	}
 
@@ -175,27 +175,27 @@ static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 	// read_id is dispatched per-row on its bind-captured type (VARCHAR / BIGINT /
 	// UUID) via ResolveSequenceRecordId -- do NOT read it as string_t here, that
 	// is exactly the crash a BIGINT read_id triggered (#145).
-	input.data[indices.read_id_idx].ToUnifiedFormat(input.size(), read_id_data);
+	input.data[indices.read_id_idx].ToUnifiedFormat(read_id_data);
 
 	if (fdata.id_as_sequence_index) {
-		input.data[indices.sequence_index_idx].ToUnifiedFormat(input.size(), sequence_index_data);
+		input.data[indices.sequence_index_idx].ToUnifiedFormat(sequence_index_data);
 	}
 
 	if (fdata.include_comment && indices.comment_idx != DConstants::INVALID_INDEX) {
-		input.data[indices.comment_idx].ToUnifiedFormat(input.size(), comment_data);
+		input.data[indices.comment_idx].ToUnifiedFormat(comment_data);
 	}
 
-	input.data[indices.sequence1_idx].ToUnifiedFormat(input.size(), seq1_data);
+	input.data[indices.sequence1_idx].ToUnifiedFormat(seq1_data);
 	auto seq1_strings = UnifiedVectorFormat::GetData<string_t>(seq1_data);
 
-	input.data[indices.qual1_idx].ToUnifiedFormat(input.size(), qual1_data);
+	input.data[indices.qual1_idx].ToUnifiedFormat(qual1_data);
 
 	// The schema may carry R2 columns even for single-end data (read_fastx always emits them as
 	// NULL). Whether a given row is paired is decided per-row below from R2 NULL-ness.
 	bool has_r2 = fdata.has_r2_columns;
 	if (has_r2) {
-		input.data[indices.sequence2_idx].ToUnifiedFormat(input.size(), seq2_data);
-		input.data[indices.qual2_idx].ToUnifiedFormat(input.size(), qual2_data);
+		input.data[indices.sequence2_idx].ToUnifiedFormat(seq2_data);
+		input.data[indices.qual2_idx].ToUnifiedFormat(qual2_data);
 	}
 
 	// Get references to local buffers
@@ -254,7 +254,7 @@ static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 		if (!qual1_data.validity.RowIsValid(qual1_row)) {
 			throw InvalidInputException("NULL value in qual1 column (row %llu)", row);
 		}
-		auto qual1_list = ListVector::GetEntry(input.data[indices.qual1_idx]);
+		auto &qual1_list = ListVector::GetChildMutable(input.data[indices.qual1_idx]);
 		auto qual1_list_data = FlatVector::GetData<uint8_t>(qual1_list);
 		auto qual1_entries = UnifiedVectorFormat::GetData<list_entry_t>(qual1_data);
 		idx_t qual1_length = qual1_entries[qual1_row].length;
@@ -297,7 +297,7 @@ static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 				const char *seq2_ptr = seq2_strings[seq2_row].GetData();
 				idx_t seq2_size = seq2_strings[seq2_row].GetSize();
 
-				auto qual2_list = ListVector::GetEntry(input.data[indices.qual2_idx]);
+				auto &qual2_list = ListVector::GetChildMutable(input.data[indices.qual2_idx]);
 				auto qual2_list_data = FlatVector::GetData<uint8_t>(qual2_list);
 				auto qual2_entries = UnifiedVectorFormat::GetData<list_entry_t>(qual2_data);
 				idx_t qual2_length = qual2_entries[qual2_row].length;

@@ -25,6 +25,8 @@
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 namespace {
@@ -126,7 +128,7 @@ void RunFaithPd(const miint::unifrac::UnifracSupportBiomView &biom_view,
 }
 
 unique_ptr<FunctionData> UnifracFaithPdBind(ClientContext &context, TableFunctionBindInput &input,
-                                            vector<LogicalType> &return_types, vector<string> &names) {
+                                            vector<LogicalType> &return_types, vector<Identifier> &names) {
 	const std::string table_name = input.inputs[0].GetValue<string>();
 	const std::string tree_name = input.inputs[1].GetValue<string>();
 	RejectCTERelationName(input, table_name);
@@ -145,7 +147,7 @@ unique_ptr<FunctionData> UnifracFaithPdBind(ClientContext &context, TableFunctio
 	int32_t seed = -1;
 	int32_t threads = 0; // 0 = follow DuckDB's TaskScheduler::NumberOfThreads()
 	for (const auto &kv : input.named_parameters) {
-		const auto key = StringUtil::Lower(kv.first);
+		const auto key = StringUtil::Lower(kv.first.GetIdentifierName());
 		if (key == "subsample_depth") {
 			subsample_depth = kv.second.GetValue<int32_t>();
 		} else if (key == "subsample_with_replacement") {
@@ -254,15 +256,15 @@ void UnifracFaithPdExecute(ClientContext &, TableFunctionInput &input, DataChunk
 	auto &gstate = input.global_state->Cast<UnifracFaithPdGlobalState>();
 	const idx_t total = gstate.rows.size();
 	if (gstate.cursor >= total) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 	const idx_t remaining = total - gstate.cursor;
 	const idx_t n = std::min<idx_t>(STANDARD_VECTOR_SIZE, remaining);
 
-	auto iter_data = FlatVector::GetData<int32_t>(output.data[0]);
+	auto iter_data = FlatVector::GetDataMutable<int32_t>(output.data[0]);
 	auto &sample_id_vec = output.data[1];
-	auto faith_pd_data = FlatVector::GetData<double>(output.data[2]);
+	auto faith_pd_data = FlatVector::GetDataMutable<double>(output.data[2]);
 
 	for (idx_t i = 0; i < n; ++i) {
 		const auto &r = gstate.rows[gstate.cursor + i];
@@ -273,7 +275,7 @@ void UnifracFaithPdExecute(ClientContext &, TableFunctionInput &input, DataChunk
 		faith_pd_data[i] = r.faith_pd;
 	}
 	gstate.cursor += n;
-	output.SetCardinality(n);
+	output.SetChildCardinality(n);
 }
 
 } // namespace
@@ -281,11 +283,11 @@ void UnifracFaithPdExecute(ClientContext &, TableFunctionInput &input, DataChunk
 void RegisterUnifracFaithPD(ExtensionLoader &loader) {
 	TableFunction fn("unifrac_faith_pd", {LogicalType::VARCHAR, LogicalType::VARCHAR}, UnifracFaithPdExecute,
 	                 UnifracFaithPdBind, UnifracFaithPdInitGlobal);
-	fn.named_parameters["subsample_depth"] = LogicalType::INTEGER;
-	fn.named_parameters["subsample_with_replacement"] = LogicalType::BOOLEAN;
-	fn.named_parameters["n_subsamples"] = LogicalType::INTEGER;
-	fn.named_parameters["seed"] = LogicalType::INTEGER;
-	fn.named_parameters["threads"] = LogicalType::INTEGER;
+	AddNamedParameter(fn, "subsample_depth", LogicalType::INTEGER);
+	AddNamedParameter(fn, "subsample_with_replacement", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "n_subsamples", LogicalType::INTEGER);
+	AddNamedParameter(fn, "seed", LogicalType::INTEGER);
+	AddNamedParameter(fn, "threads", LogicalType::INTEGER);
 	fn.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(fn);
 }

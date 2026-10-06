@@ -26,11 +26,11 @@ namespace duckdb {
 static std::atomic<uint64_t> peak_pair_invocation_counter {0};
 
 struct MzmlPeakPairData : public TableFunctionData {
-	unique_ptr<MaterializedQueryResult> result;
+	unique_ptr<QueryResult> result;
 };
 
 struct MzmlPeakPairGlobalState : public GlobalTableFunctionState {
-	unique_ptr<MaterializedQueryResult> result;
+	unique_ptr<QueryResult> result;
 	idx_t MaxThreads() const override {
 		return 1;
 	}
@@ -40,22 +40,22 @@ struct MzmlPeakPairLocalState : public LocalTableFunctionState {
 	unique_ptr<DataChunk> current_chunk;
 };
 
-static void ExtractSchema(MaterializedQueryResult &result, vector<LogicalType> &return_types, vector<string> &names) {
+static void ExtractSchema(QueryResult &result, vector<LogicalType> &return_types, vector<Identifier> &names) {
 	for (idx_t i = 0; i < result.ColumnCount(); i++) {
 		names.push_back(result.ColumnName(i));
-		return_types.push_back(result.types[i]);
+		return_types.push_back(result.GetTypes()[i]);
 	}
 }
 
 static unique_ptr<FunctionData> PeakPairBind(ClientContext &context, TableFunctionBindInput &input,
-                                             vector<LogicalType> &return_types, vector<string> &names) {
+                                             vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<MzmlPeakPairData>();
 
 	auto relation = input.inputs[0].GetValue<string>();
 	RejectCTERelationName(input, relation);
 	auto formula_str = input.inputs[1].GetValue<string>();
 
-	auto quoted_relation = KeywordHelper::WriteOptionallyQuoted(relation);
+	auto quoted_relation = SQLIdentifier::ToString(relation);
 
 	// Compute formula mass in C++ — avoids embedding user input into SQL.
 	double formula_mass;
@@ -143,7 +143,7 @@ static unique_ptr<FunctionData> PeakPairBind(ClientContext &context, TableFuncti
 		throw InvalidInputException("mzml_peak_pair: query failed: %s", query_result->GetError());
 	}
 
-	data->result = unique_ptr_cast<QueryResult, MaterializedQueryResult>(std::move(query_result));
+	data->result = std::move(query_result);
 	ExtractSchema(*data->result, return_types, names);
 
 	return data;
@@ -170,7 +170,7 @@ static void PeakPairExecute(ClientContext &context, TableFunctionInput &input, D
 		output.Reference(*lstate.current_chunk);
 		return;
 	}
-	output.SetCardinality(0);
+	output.SetChildCardinality(0);
 }
 
 void MzmlPeakPairFunction::Register(ExtensionLoader &loader) {

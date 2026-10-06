@@ -11,11 +11,14 @@
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/function/function_set.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <thread>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -92,7 +95,7 @@ std::string ReadArchiveBytes(ClientContext &context, FileSystem &fs, const std::
 	return ReadWholeFile(fs, source);
 }
 
-bool ParseRefreshParam(const named_parameter_map_t &params) {
+bool ParseRefreshParam(const named_argument_map_t &params) {
 	auto it = params.find("refresh");
 	if (it != params.end() && !it->second.IsNull()) {
 		return it->second.GetValue<bool>();
@@ -239,7 +242,7 @@ miint::TaxdumpFiles LoadTaxdumpFiles(ClientContext &context, const std::string &
 
 unique_ptr<FunctionData> ReadNCBITaxdumpTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                             vector<LogicalType> &return_types,
-                                                            vector<std::string> &names) {
+                                                            vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 	data->source = ParseSourceParam(input, "read_ncbi_taxdump");
 	data->refresh = ParseRefreshParam(input.named_parameters);
@@ -276,12 +279,12 @@ void ReadNCBITaxdumpTableFunction::Execute(ClientContext &, TableFunctionInput &
 
 	idx_t count = std::min<idx_t>(STANDARD_VECTOR_SIZE, gstate.nodes.size() - gstate.cursor);
 
-	auto node_index = FlatVector::GetData<int64_t>(output.data[0]);
+	auto node_index = FlatVector::GetDataMutable<int64_t>(output.data[0]);
 	auto &parent_vec = output.data[1];
-	auto parent_index = FlatVector::GetData<int64_t>(parent_vec);
+	auto parent_index = FlatVector::GetDataMutable<int64_t>(parent_vec);
 	auto &name_vec = output.data[2];
 	auto &rank_vec = output.data[3];
-	auto is_tip = FlatVector::GetData<bool>(output.data[4]);
+	auto is_tip = FlatVector::GetDataMutable<bool>(output.data[4]);
 
 	for (idx_t i = 0; i < count; ++i) {
 		const auto &node = gstate.nodes[gstate.cursor + i];
@@ -289,15 +292,15 @@ void ReadNCBITaxdumpTableFunction::Execute(ClientContext &, TableFunctionInput &
 		if (node.parent_taxid.has_value()) {
 			parent_index[i] = node.parent_taxid.value();
 		} else {
-			FlatVector::Validity(parent_vec).SetInvalid(i);
+			FlatVector::ValidityMutable(parent_vec).SetInvalid(i);
 		}
-		FlatVector::GetData<string_t>(name_vec)[i] = StringVector::AddString(name_vec, node.name);
-		FlatVector::GetData<string_t>(rank_vec)[i] = StringVector::AddString(rank_vec, node.rank);
+		FlatVector::GetDataMutable<string_t>(name_vec)[i] = StringVector::AddString(name_vec, node.name);
+		FlatVector::GetDataMutable<string_t>(rank_vec)[i] = StringVector::AddString(rank_vec, node.rank);
 		is_tip[i] = node.is_tip;
 	}
 
 	gstate.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 void ReadNCBITaxdumpTableFunction::Register(ExtensionLoader &loader) {
@@ -305,7 +308,7 @@ void ReadNCBITaxdumpTableFunction::Register(ExtensionLoader &loader) {
 	// read_ncbi_taxdump() -> default remote taxdump; read_ncbi_taxdump('path'|'url') -> explicit source.
 	for (const auto &args : {vector<LogicalType> {}, vector<LogicalType> {LogicalType::VARCHAR}}) {
 		TableFunction tf("read_ncbi_taxdump", args, Execute, Bind, InitGlobal, InitLocal);
-		tf.named_parameters["refresh"] = LogicalType::BOOLEAN;
+		AddNamedParameter(tf, "refresh", LogicalType::BOOLEAN);
 		set.AddFunction(tf);
 	}
 	loader.RegisterFunction(set);
@@ -315,7 +318,7 @@ void ReadNCBITaxdumpTableFunction::Register(ExtensionLoader &loader) {
 
 unique_ptr<FunctionData> ReadNCBITaxdumpMergedTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                                   vector<LogicalType> &return_types,
-                                                                  vector<std::string> &names) {
+                                                                  vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 	data->source = ParseSourceParam(input, "read_ncbi_taxdump_merged");
 	data->refresh = ParseRefreshParam(input.named_parameters);
@@ -349,8 +352,8 @@ void ReadNCBITaxdumpMergedTableFunction::Execute(ClientContext &, TableFunctionI
 
 	idx_t count = std::min<idx_t>(STANDARD_VECTOR_SIZE, gstate.merged.size() - gstate.cursor);
 
-	auto old_taxid = FlatVector::GetData<int64_t>(output.data[0]);
-	auto new_taxid = FlatVector::GetData<int64_t>(output.data[1]);
+	auto old_taxid = FlatVector::GetDataMutable<int64_t>(output.data[0]);
+	auto new_taxid = FlatVector::GetDataMutable<int64_t>(output.data[1]);
 	for (idx_t i = 0; i < count; ++i) {
 		const auto &m = gstate.merged[gstate.cursor + i];
 		old_taxid[i] = m.old_taxid;
@@ -358,14 +361,14 @@ void ReadNCBITaxdumpMergedTableFunction::Execute(ClientContext &, TableFunctionI
 	}
 
 	gstate.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 void ReadNCBITaxdumpMergedTableFunction::Register(ExtensionLoader &loader) {
 	TableFunctionSet set("read_ncbi_taxdump_merged");
 	for (const auto &args : {vector<LogicalType> {}, vector<LogicalType> {LogicalType::VARCHAR}}) {
 		TableFunction tf("read_ncbi_taxdump_merged", args, Execute, Bind, InitGlobal, InitLocal);
-		tf.named_parameters["refresh"] = LogicalType::BOOLEAN;
+		AddNamedParameter(tf, "refresh", LogicalType::BOOLEAN);
 		set.AddFunction(tf);
 	}
 	loader.RegisterFunction(set);
@@ -375,7 +378,7 @@ void ReadNCBITaxdumpMergedTableFunction::Register(ExtensionLoader &loader) {
 
 unique_ptr<FunctionData> ReadNCBITaxdumpNamesTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                                  vector<LogicalType> &return_types,
-                                                                 vector<std::string> &names) {
+                                                                 vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 	data->source = ParseSourceParam(input, "read_ncbi_taxdump_names");
 	data->refresh = ParseRefreshParam(input.named_parameters);
@@ -408,27 +411,28 @@ void ReadNCBITaxdumpNamesTableFunction::Execute(ClientContext &, TableFunctionIn
 
 	idx_t count = std::min<idx_t>(STANDARD_VECTOR_SIZE, gstate.names.size() - gstate.cursor);
 
-	auto taxid = FlatVector::GetData<int64_t>(output.data[0]);
+	auto taxid = FlatVector::GetDataMutable<int64_t>(output.data[0]);
 	auto &name_vec = output.data[1];
 	auto &unique_name_vec = output.data[2];
 	auto &name_class_vec = output.data[3];
 	for (idx_t i = 0; i < count; ++i) {
 		const auto &n = gstate.names[gstate.cursor + i];
 		taxid[i] = n.taxid;
-		FlatVector::GetData<string_t>(name_vec)[i] = StringVector::AddString(name_vec, n.name);
-		FlatVector::GetData<string_t>(unique_name_vec)[i] = StringVector::AddString(unique_name_vec, n.unique_name);
-		FlatVector::GetData<string_t>(name_class_vec)[i] = StringVector::AddString(name_class_vec, n.name_class);
+		FlatVector::GetDataMutable<string_t>(name_vec)[i] = StringVector::AddString(name_vec, n.name);
+		FlatVector::GetDataMutable<string_t>(unique_name_vec)[i] =
+		    StringVector::AddString(unique_name_vec, n.unique_name);
+		FlatVector::GetDataMutable<string_t>(name_class_vec)[i] = StringVector::AddString(name_class_vec, n.name_class);
 	}
 
 	gstate.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 void ReadNCBITaxdumpNamesTableFunction::Register(ExtensionLoader &loader) {
 	TableFunctionSet set("read_ncbi_taxdump_names");
 	for (const auto &args : {vector<LogicalType> {}, vector<LogicalType> {LogicalType::VARCHAR}}) {
 		TableFunction tf("read_ncbi_taxdump_names", args, Execute, Bind, InitGlobal, InitLocal);
-		tf.named_parameters["refresh"] = LogicalType::BOOLEAN;
+		AddNamedParameter(tf, "refresh", LogicalType::BOOLEAN);
 		set.AddFunction(tf);
 	}
 	loader.RegisterFunction(set);
@@ -439,7 +443,7 @@ void ReadNCBITaxdumpNamesTableFunction::Register(ExtensionLoader &loader) {
 unique_ptr<FunctionData> ReadNCBITaxdumpDeletedTableFunction::Bind(ClientContext &context,
                                                                    TableFunctionBindInput &input,
                                                                    vector<LogicalType> &return_types,
-                                                                   vector<std::string> &names) {
+                                                                   vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 	data->source = ParseSourceParam(input, "read_ncbi_taxdump_deleted");
 	data->refresh = ParseRefreshParam(input.named_parameters);
@@ -473,20 +477,20 @@ void ReadNCBITaxdumpDeletedTableFunction::Execute(ClientContext &, TableFunction
 
 	idx_t count = std::min<idx_t>(STANDARD_VECTOR_SIZE, gstate.deleted.size() - gstate.cursor);
 
-	auto taxid = FlatVector::GetData<int64_t>(output.data[0]);
+	auto taxid = FlatVector::GetDataMutable<int64_t>(output.data[0]);
 	for (idx_t i = 0; i < count; ++i) {
 		taxid[i] = gstate.deleted[gstate.cursor + i];
 	}
 
 	gstate.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 void ReadNCBITaxdumpDeletedTableFunction::Register(ExtensionLoader &loader) {
 	TableFunctionSet set("read_ncbi_taxdump_deleted");
 	for (const auto &args : {vector<LogicalType> {}, vector<LogicalType> {LogicalType::VARCHAR}}) {
 		TableFunction tf("read_ncbi_taxdump_deleted", args, Execute, Bind, InitGlobal, InitLocal);
-		tf.named_parameters["refresh"] = LogicalType::BOOLEAN;
+		AddNamedParameter(tf, "refresh", LogicalType::BOOLEAN);
 		set.AddFunction(tf);
 	}
 	loader.RegisterFunction(set);

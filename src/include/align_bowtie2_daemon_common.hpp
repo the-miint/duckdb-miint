@@ -106,7 +106,7 @@ void DecodeListQualToPhred33(const Value &v, const char *col_name, const std::st
 
 // Drain `to_emit` rows starting at `row_start` from a decoded daemon Arrow
 // batch into a DuckDB DataChunk. Assumes `output` has 21 columns matching
-// PopulateOutputSchema's types. Caller is responsible for SetCardinality
+// PopulateOutputSchema's types. Caller is responsible for SetChildCardinality
 // before calling (we just write into the vectors).
 //
 // Tag widening (Int32 → BIGINT) and nullable-Utf8 decoding match the
@@ -186,7 +186,7 @@ extern const std::unordered_set<std::string> kCommonAlignParams;
 //   - `max_secondary` → daemon `k`.
 //   - `local` → daemon `local_align`.
 // Everything else uses the daemon's wire-name verbatim.
-void AppendBowtie2AlignParams(ConfigJsonBuilder &cfg, const named_parameter_map_t &named_params, const char *caller);
+void AppendBowtie2AlignParams(ConfigJsonBuilder &cfg, const named_argument_map_t &named_params, const char *caller);
 
 // Apply LogicalType declarations for the bowtie2-align typed parameters to a
 // `TableFunction::named_parameters` map. Both align_bowtie2 and
@@ -300,7 +300,7 @@ inline std::vector<size_t> ComputeSubjectBatchRowCounts(const std::vector<std::s
 // `db_threads` (DuckDB's configured thread count). Shared by save_bowtie2_index
 // and align_bowtie2 so the "explicit wins, else use the query's thread budget"
 // contract lives in one place; delegates the decision to ResolveBowtie2Nthreads.
-int64_t ResolveNthreadsFromParams(const named_parameter_map_t &named_params, int64_t db_threads, const char *caller);
+int64_t ResolveNthreadsFromParams(const named_argument_map_t &named_params, int64_t db_threads, const char *caller);
 
 // Parse bowtie2-build's `result.index_files` JSON array into a vector of paths.
 // Throws IOException on malformed JSON or a missing array.

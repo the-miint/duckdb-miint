@@ -318,11 +318,11 @@ public:
 
 		if (!return_chunk) {
 			if (source_state.finished) {
-				chunk.SetCardinality(0);
+				chunk.SetChildCardinality(0);
 				return SourceResultType::FINISHED;
 			}
-			chunk.SetCardinality(1);
-			chunk.SetValue(0, 0, Value::BIGINT(NumericCast<int64_t>(gstate.insert_count)));
+			chunk.SetChildCardinality(1);
+			chunk.data[0].SetValue(0, Value::BIGINT(NumericCast<int64_t>(gstate.insert_count)));
 			source_state.finished = true;
 			return SourceResultType::FINISHED;
 		}

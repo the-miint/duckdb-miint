@@ -188,10 +188,10 @@ read3	NNNNNN
 # --- COPY pipeline: read_sequences_sam → COPY FORMAT FASTQ → read_fastx round-trip ---
 
 statement ok
-COPY (SELECT sequence_index, read_id, comment, sequence1, qual1 FROM read_sequences_sam('data/sam/ubam_no_sq.sam')) TO '__TEST_DIR__/roundtrip.fastq' (FORMAT FASTQ);
+COPY (SELECT sequence_index, read_id, comment, sequence1, qual1 FROM read_sequences_sam('data/sam/ubam_no_sq.sam')) TO '{TEST_DIR}/roundtrip.fastq' (FORMAT FASTQ);
 
 query II
-SELECT read_id, sequence1 FROM read_fastx('__TEST_DIR__/roundtrip.fastq') ORDER BY sequence_index;
+SELECT read_id, sequence1 FROM read_fastx('{TEST_DIR}/roundtrip.fastq') ORDER BY sequence_index;
 ----
 read1	ACGTACGTACGTACGT
 read2	TGCATGCATGCA
@@ -199,6 +199,6 @@ read3	NNNNNN
 
 # Quality scores survive round-trip
 query II
-SELECT read_id, qual1 FROM read_fastx('__TEST_DIR__/roundtrip.fastq') WHERE read_id = 'read1';
+SELECT read_id, qual1 FROM read_fastx('{TEST_DIR}/roundtrip.fastq') WHERE read_id = 'read1';
 ----
 read1	[40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40]

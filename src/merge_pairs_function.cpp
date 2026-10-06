@@ -8,6 +8,10 @@
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
 
 #include "table_function_common.hpp"
 #include "vsearch_api.h"
@@ -199,28 +203,28 @@ static void MergePairsExecute(DataChunk &args, ExpressionState &state, Vector &r
 
 	// Input vectors (first 4 args only)
 	UnifiedVectorFormat fwd_seq_data, fwd_qual_data, rev_seq_data, rev_qual_data;
-	args.data[0].ToUnifiedFormat(args.size(), fwd_seq_data);
-	args.data[1].ToUnifiedFormat(args.size(), fwd_qual_data);
-	args.data[2].ToUnifiedFormat(args.size(), rev_seq_data);
-	args.data[3].ToUnifiedFormat(args.size(), rev_qual_data);
+	args.data[0].ToUnifiedFormat(fwd_seq_data);
+	args.data[1].ToUnifiedFormat(fwd_qual_data);
+	args.data[2].ToUnifiedFormat(rev_seq_data);
+	args.data[3].ToUnifiedFormat(rev_qual_data);
 
 	auto fwd_seq_ptr = UnifiedVectorFormat::GetData<string_t>(fwd_seq_data);
 	auto rev_seq_ptr = UnifiedVectorFormat::GetData<string_t>(rev_seq_data);
 
 	// Output struct entries
 	auto &entries = StructVector::GetEntries(result);
-	auto merged_data = FlatVector::GetData<bool>(*entries[0]);
-	auto &seq_vec = *entries[1];
-	auto &qual_list_vec = *entries[2]; // LIST(UTINYINT)
-	auto ee_merged_data = FlatVector::GetData<double>(*entries[3]);
-	auto ee_fwd_data = FlatVector::GetData<double>(*entries[4]);
-	auto ee_rev_data = FlatVector::GetData<double>(*entries[5]);
-	auto fwd_errors_data = FlatVector::GetData<int32_t>(*entries[6]);
-	auto rev_errors_data = FlatVector::GetData<int32_t>(*entries[7]);
-	auto overlap_data = FlatVector::GetData<int32_t>(*entries[8]);
+	auto merged_data = FlatVector::GetDataMutable<bool>(entries[0]);
+	auto &seq_vec = entries[1];
+	auto &qual_list_vec = entries[2]; // LIST(UTINYINT)
+	auto ee_merged_data = FlatVector::GetDataMutable<double>(entries[3]);
+	auto ee_fwd_data = FlatVector::GetDataMutable<double>(entries[4]);
+	auto ee_rev_data = FlatVector::GetDataMutable<double>(entries[5]);
+	auto fwd_errors_data = FlatVector::GetDataMutable<int32_t>(entries[6]);
+	auto rev_errors_data = FlatVector::GetDataMutable<int32_t>(entries[7]);
+	auto overlap_data = FlatVector::GetDataMutable<int32_t>(entries[8]);
 
 	// Quality output: LIST(UTINYINT) managed via ListVector
-	auto qual_list_entries = FlatVector::GetData<list_entry_t>(qual_list_vec);
+	auto qual_list_entries = FlatVector::GetDataMutable<list_entry_t>(qual_list_vec);
 	idx_t qual_child_offset = ListVector::GetListSize(qual_list_vec);
 
 	// Reusable buffers
@@ -271,13 +275,13 @@ static void MergePairsExecute(DataChunk &args, ExpressionState &state, Vector &r
 
 		merged_data[i] = mr.merged;
 		if (mr.merged) {
-			FlatVector::GetData<string_t>(seq_vec)[i] =
+			FlatVector::GetDataMutable<string_t>(seq_vec)[i] =
 			    StringVector::AddString(seq_vec, mr.merged_sequence, mr.merged_length);
 
 			// Write merged quality as LIST(UTINYINT) using QualScore::write_decoded
 			ListVector::Reserve(qual_list_vec, qual_child_offset + mr.merged_length);
-			auto &qual_child = ListVector::GetEntry(qual_list_vec);
-			auto qual_child_data = FlatVector::GetData<uint8_t>(qual_child);
+			auto &qual_child = ListVector::GetChildMutable(qual_list_vec);
+			auto qual_child_data = FlatVector::GetDataMutable<uint8_t>(qual_child);
 			qual_list_entries[i].offset = qual_child_offset;
 			qual_list_entries[i].length = mr.merged_length;
 			miint::QualScore merged_qual(std::string(mr.merged_quality, mr.merged_length));
@@ -292,7 +296,7 @@ static void MergePairsExecute(DataChunk &args, ExpressionState &state, Vector &r
 			rev_errors_data[i] = mr.rev_errors;
 			overlap_data[i] = mr.overlap_length;
 		} else {
-			FlatVector::GetData<string_t>(seq_vec)[i] = StringVector::AddString(seq_vec, "", 0);
+			FlatVector::GetDataMutable<string_t>(seq_vec)[i] = StringVector::AddString(seq_vec, "", 0);
 			qual_list_entries[i].offset = qual_child_offset;
 			qual_list_entries[i].length = 0;
 			ee_merged_data[i] = 0.0;
@@ -313,25 +317,30 @@ void MergePairsFunction::Register(ExtensionLoader &loader) {
 
 	// 4-arg: merge_pairs(fwd_seq, fwd_qual, rev_seq, rev_qual)
 	ScalarFunction merge_4arg("merge_pairs_vsearch", FourArgTypes(), MergePairsReturnType(), MergePairsExecute);
-	merge_4arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	merge_4arg.bind = [](ClientContext &ctx, ScalarFunction &fn, vector<unique_ptr<Expression>> &args) {
-		fn.return_type = MergePairsReturnType();
+	merge_4arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	merge_4arg.SetBindCallback([](BindScalarFunctionInput &input) {
+		auto &fn = input.GetBoundFunction();
+		fn.SetReturnType(MergePairsReturnType());
 		return unique_ptr<FunctionData>(MergePairsBindData::Defaults().release());
-	};
-	merge_4arg.init_local_state = MergePairsInitLocalState;
+	});
+	merge_4arg.SetInitStateCallback(MergePairsInitLocalState);
 	function_set.AddFunction(merge_4arg);
 
 	// 10-arg: merge_pairs(fwd_seq, fwd_qual, rev_seq, rev_qual,
 	//                      minovlen, maxdiffs, maxdiffpct, maxee, minlen, maxlen)
 	ScalarFunction merge_10arg("merge_pairs_vsearch", TenArgTypes(), MergePairsReturnType(), MergePairsExecute);
-	merge_10arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	merge_10arg.bind = [](ClientContext &ctx, ScalarFunction &fn, vector<unique_ptr<Expression>> &args) {
-		fn.return_type = MergePairsReturnType();
+	merge_10arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	merge_10arg.SetBindCallback([](BindScalarFunctionInput &input) {
+		auto &ctx = input.GetClientContext();
+		auto &fn = input.GetBoundFunction();
+		auto &args = input.GetArguments();
+		fn.SetReturnType(MergePairsReturnType());
 		return unique_ptr<FunctionData>(MergePairsBindData::FromArgs10(ctx, args).release());
-	};
-	merge_10arg.init_local_state = MergePairsInitLocalState;
+	});
+	merge_10arg.SetInitStateCallback(MergePairsInitLocalState);
 	function_set.AddFunction(merge_10arg);
 
+	function_set.SetFallible();
 	loader.RegisterFunction(function_set);
 }
 

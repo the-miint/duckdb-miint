@@ -23,6 +23,7 @@
 #include "duckdb/main/query_result.hpp"
 #include "duckdb/main/settings.hpp"
 #include "duckdb/storage/block_allocator.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
 #include <cstdlib>
 #include <functional>
 #include <string>
@@ -137,7 +138,7 @@ inline void ParseOccFilterSpec(const std::string &spec, miint::Minimap2Config &c
 
 // Parse minimap2 config parameters from named_parameters map
 // Set warn_prebuilt_index=true to warn when k/w are specified but will be ignored
-inline void ParseMinimap2ConfigParams(const named_parameter_map_t &params, miint::Minimap2Config &config,
+inline void ParseMinimap2ConfigParams(const named_argument_map_t &params, miint::Minimap2Config &config,
                                       bool warn_prebuilt_index = false) {
 	auto preset_param = params.find("preset");
 	if (preset_param != params.end() && !preset_param->second.IsNull()) {
@@ -266,7 +267,7 @@ inline idx_t OutputSAMRecordBatch(DataChunk &output, const miint::SAMRecordBatch
 		}
 	}
 
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 	return count;
 }
 
@@ -383,8 +384,8 @@ inline void FilterMappedOnly(miint::SAMRecordBatch &batch) {
 //     implicit casts.
 inline void ValidateReadToShardSchema(ClientContext &context, const std::string &table_name,
                                       const LogicalType &expected_read_id_type = LogicalType(LogicalTypeId::INVALID)) {
-	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, table_name, QueryErrorContext());
-	auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
+	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, QualifiedName(Identifier(table_name)), QueryErrorContext());
+	auto entry = Catalog::GetEntry(context, lookup_info, OnEntryNotFound::RETURN_NULL);
 
 	if (!entry) {
 		throw BinderException("Table or view '%s' does not exist", table_name);
@@ -398,14 +399,14 @@ inline void ValidateReadToShardSchema(ClientContext &context, const std::string 
 		auto &columns = table.GetColumns();
 		for (idx_t i = 0; i < columns.LogicalColumnCount(); i++) {
 			auto &col = columns.GetColumn(LogicalIndex(i));
-			col_names.push_back(col.Name());
+			col_names.push_back(col.Name().GetIdentifierName());
 			col_types.push_back(col.Type());
 		}
 	} else if (entry->type == CatalogType::VIEW_ENTRY) {
 		auto &view = entry->Cast<ViewCatalogEntry>();
 		view.BindView(context);
 		auto col_info = view.GetColumnInfo();
-		col_names = col_info->names;
+		col_names = IdentifiersToStrings(col_info->names);
 		col_types = col_info->types;
 	} else {
 		throw BinderException("'%s' is not a table or view", table_name);
@@ -468,9 +469,9 @@ inline std::vector<ShardNameCount> ReadShardNameCounts(ClientContext &context, c
 	auto conn = MakeReadOnlyHelperConnection(context);
 
 	// Query shard counts ordered by count descending (largest first)
-	std::string from = KeywordHelper::WriteOptionallyQuoted(table_name) + " rts";
+	std::string from = SQLIdentifier::ToString(table_name) + " rts";
 	if (!join_query_table.empty()) {
-		from += " JOIN " + KeywordHelper::WriteOptionallyQuoted(join_query_table) + " q ON q.read_id = rts.read_id";
+		from += " JOIN " + SQLIdentifier::ToString(join_query_table) + " q ON q.read_id = rts.read_id";
 	}
 	std::string query = "SELECT rts.shard_name AS shard_name, COUNT(*) as cnt FROM " + from +
 	                    " GROUP BY rts.shard_name ORDER BY cnt DESC";
@@ -481,7 +482,7 @@ inline std::vector<ShardNameCount> ReadShardNameCounts(ClientContext &context, c
 	}
 
 	std::vector<ShardNameCount> shards;
-	auto &materialized = query_result->Cast<MaterializedQueryResult>();
+	auto &materialized = *query_result;
 
 	while (true) {
 		auto chunk = materialized.Fetch();
@@ -493,8 +494,8 @@ inline std::vector<ShardNameCount> ReadShardNameCounts(ClientContext &context, c
 		auto &count_vec = chunk->data[1];
 
 		UnifiedVectorFormat shard_data, count_data;
-		shard_name_vec.ToUnifiedFormat(chunk->size(), shard_data);
-		count_vec.ToUnifiedFormat(chunk->size(), count_data);
+		shard_name_vec.ToUnifiedFormat(shard_data);
+		count_vec.ToUnifiedFormat(count_data);
 
 		auto shard_names = UnifiedVectorFormat::GetData<string_t>(shard_data);
 		auto counts = UnifiedVectorFormat::GetData<int64_t>(count_data);

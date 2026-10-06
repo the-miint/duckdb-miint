@@ -119,6 +119,9 @@
 #include <duckdb/parser/parsed_data/create_scalar_function_info.hpp>
 #include <duckdb/main/config.hpp>
 #include <duckdb/storage/storage_extension.hpp>
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
 #include <htslib-1.22.1/htslib/hts.h>
 #include <kseq++/config.hpp>
 #include <zlib.h>
@@ -168,9 +171,9 @@ void SetupSignalHandling() {
 
 static void MiintVersionFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 #ifdef EXT_VERSION_MIINT
-	result.Reference(Value(EXT_VERSION_MIINT));
+	result.Reference(Value(EXT_VERSION_MIINT), count_t(args.size()));
 #else
-	result.Reference(Value("unversioned"));
+	result.Reference(Value("unversioned"), count_t(args.size()));
 #endif
 }
 
@@ -180,7 +183,7 @@ struct MiintVersionsData : public TableFunctionData {
 };
 
 static unique_ptr<FunctionData> MiintVersionsBind(ClientContext &context, TableFunctionBindInput &input,
-                                                  vector<LogicalType> &return_types, vector<string> &names) {
+                                                  vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<MiintVersionsData>();
 	names = {"library", "version"};
 	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR};
@@ -247,17 +250,17 @@ static unique_ptr<FunctionData> MiintVersionsBind(ClientContext &context, TableF
 static void MiintVersionsExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &data = data_p.bind_data->CastNoConst<MiintVersionsData>();
 	if (data.done) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 	idx_t count = data.versions.size();
 	for (idx_t i = 0; i < count; i++) {
-		FlatVector::GetData<string_t>(output.data[0])[i] =
+		FlatVector::GetDataMutable<string_t>(output.data[0])[i] =
 		    StringVector::AddString(output.data[0], data.versions[i].first);
-		FlatVector::GetData<string_t>(output.data[1])[i] =
+		FlatVector::GetDataMutable<string_t>(output.data[1])[i] =
 		    StringVector::AddString(output.data[1], data.versions[i].second);
 	}
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 	data.done = true;
 }
 
@@ -332,9 +335,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// subsystem is compiled out (e.g., on WASM/Windows). The table functions
 	// (align_bowtie2 / align_bowtie2_sharded) are also unavailable in that
 	// case — the daemon is the only path.
-	ScalarFunction bowtie2_stub(
-	    "bowtie2_available", {}, LogicalType::BOOLEAN,
-	    [](DataChunk &args, ExpressionState &state, Vector &result) { result.Reference(Value::BOOLEAN(false)); });
+	ScalarFunction bowtie2_stub("bowtie2_available", {}, LogicalType::BOOLEAN,
+	                            [](DataChunk &args, ExpressionState &state, Vector &result) {
+		                            result.Reference(Value::BOOLEAN(false), count_t(args.size()));
+	                            });
 	loader.RegisterFunction(bowtie2_stub);
 #endif
 	ReadNCBIFastaTableFunction::Register(loader);
@@ -438,9 +442,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 #else
 	// Stub: phylogeny_fasttree_available() always returns false when gpl-boundary
 	// support is compiled out (e.g., on WASM/Windows).
-	ScalarFunction phylogeny_fasttree_stub(
-	    "phylogeny_fasttree_available", {}, LogicalType::BOOLEAN,
-	    [](DataChunk &args, ExpressionState &state, Vector &result) { result.Reference(Value::BOOLEAN(false)); });
+	ScalarFunction phylogeny_fasttree_stub("phylogeny_fasttree_available", {}, LogicalType::BOOLEAN,
+	                                       [](DataChunk &args, ExpressionState &state, Vector &result) {
+		                                       result.Reference(Value::BOOLEAN(false), count_t(args.size()));
+	                                       });
 	loader.RegisterFunction(phylogeny_fasttree_stub);
 
 	// Stub: install_gpl_boundary() reports the platform doesn't support
@@ -451,19 +456,19 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                                                 {"message", LogicalType::VARCHAR}});
 	const auto install_stub_exec = [](DataChunk &args, ExpressionState &state, Vector &result) {
 		auto &entries = StructVector::GetEntries(result);
-		auto installed_data = FlatVector::GetData<bool>(*entries[0]);
-		auto &path_vec = *entries[1];
-		auto &version_vec = *entries[2];
-		auto &message_vec = *entries[3];
+		auto installed_data = FlatVector::GetDataMutable<bool>(entries[0]);
+		auto &path_vec = entries[1];
+		auto &version_vec = entries[2];
+		auto &message_vec = entries[3];
 		const idx_t n = args.size();
 		const string msg = "install_gpl_boundary: this miint build was compiled without "
 		                   "MIINT_ENABLE_GPL_BOUNDARY (typically WASM or Windows). gpl-boundary "
 		                   "is not supported on this platform.";
 		for (idx_t i = 0; i < n; i++) {
 			installed_data[i] = false;
-			FlatVector::GetData<string_t>(path_vec)[i] = StringVector::AddString(path_vec, "");
-			FlatVector::GetData<string_t>(version_vec)[i] = StringVector::AddString(version_vec, "");
-			FlatVector::GetData<string_t>(message_vec)[i] = StringVector::AddString(message_vec, msg);
+			FlatVector::GetDataMutable<string_t>(path_vec)[i] = StringVector::AddString(path_vec, "");
+			FlatVector::GetDataMutable<string_t>(version_vec)[i] = StringVector::AddString(version_vec, "");
+			FlatVector::GetDataMutable<string_t>(message_vec)[i] = StringVector::AddString(message_vec, msg);
 		}
 		result.SetVectorType(VectorType::CONSTANT_VECTOR);
 	};
@@ -518,8 +523,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 		if (!instance.ExtensionIsLoaded(dep)) {
 			ExtensionHelper::TryAutoLoadExtension(instance, dep);
 		}
-#ifndef DUCKDB_BUILD_LOADABLE_EXTENSION
+#ifdef DUCKDB_BUILD_LIBRARY
 		// LoadExtension links against symbols not available in loadable extension builds
+		// (DuckDB v2.0 undefines DUCKDB_BUILD_LIBRARY for loadable targets).
 		if (!instance.ExtensionIsLoaded(dep)) {
 			DuckDB db_wrapper(instance);
 			ExtensionHelper::LoadExtension(db_wrapper, dep);

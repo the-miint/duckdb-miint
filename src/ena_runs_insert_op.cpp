@@ -146,7 +146,7 @@ void ENARunsInsert::AppendReturningRows(ColumnDataCollection &return_collection,
 		chunk.data[COL_FILES].SetValue(idx, Value(return_types[COL_FILES]));
 		chunk.data[COL_ERR_ACCESSION].SetValue(idx, row.err_accession.empty() ? Value(LogicalType::VARCHAR)
 		                                                                      : Value(row.err_accession));
-		chunk.SetCardinality(idx + 1);
+		chunk.SetChildCardinality(idx + 1);
 		if (chunk.size() == STANDARD_VECTOR_SIZE) {
 			return_collection.Append(chunk);
 			chunk.Reset();

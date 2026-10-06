@@ -54,12 +54,12 @@ Binder Error
 # handed a separate Newick, so an index built that way would be a trap.
 
 statement error
-SELECT * FROM krepp_index_create('refs', '__TEST_DIR__/idx_no_tree');
+SELECT * FROM krepp_index_create('refs', '{TEST_DIR}/idx_no_tree');
 ----
 requires exactly one of tree_table or newick_path
 
 statement error
-SELECT * FROM krepp_index_create('refs', '__TEST_DIR__/idx_both_trees',
+SELECT * FROM krepp_index_create('refs', '{TEST_DIR}/idx_both_trees',
                                  tree_table := 'backbone', newick_path := 'ext/krepp/test/tree_toy.nwk');
 ----
 requires exactly one of tree_table or newick_path
@@ -69,7 +69,7 @@ requires exactly one of tree_table or newick_path
 # status row calls correct.
 
 statement error
-SELECT * FROM krepp_index_create('refs', '__TEST_DIR__/idx_k_wide',
+SELECT * FROM krepp_index_create('refs', '{TEST_DIR}/idx_k_wide',
                                  tree_table := 'backbone', k := 285);
 ----
 k must be between 0 and 255
@@ -79,13 +79,13 @@ k must be between 0 and 255
 # matters as much as the text is that the next statement still runs.
 
 statement error
-SELECT * FROM krepp_index_create('refs', '__TEST_DIR__/idx_k_small',
+SELECT * FROM krepp_index_create('refs', '{TEST_DIR}/idx_k_small',
                                  tree_table := 'backbone', k := 18, h := 11);
 ----
 The minimum allowed k-mer length (-k) is 19
 
 statement error
-SELECT * FROM krepp_index_create('refs', '__TEST_DIR__/idx_h_big',
+SELECT * FROM krepp_index_create('refs', '{TEST_DIR}/idx_h_big',
                                  tree_table := 'backbone', k := 27, h := 16);
 ----
 The maximum number of LSH positions (-h) is 15
@@ -106,7 +106,7 @@ CREATE TABLE refs_extra AS SELECT * FROM refs
 UNION ALL SELECT 'C', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT';
 
 statement error
-SELECT * FROM krepp_index_create('refs_extra', '__TEST_DIR__/idx_unmatched',
+SELECT * FROM krepp_index_create('refs_extra', '{TEST_DIR}/idx_unmatched',
                                  tree_table := 'backbone', k := 27, h := 11);
 ----
 are not tips of
@@ -121,7 +121,7 @@ CREATE TABLE refs_spaced AS SELECT * FROM (VALUES
 ) AS t(read_id, sequence1);
 
 statement error
-SELECT * FROM krepp_index_create('refs_spaced', '__TEST_DIR__/idx_quoted',
+SELECT * FROM krepp_index_create('refs_spaced', '{TEST_DIR}/idx_quoted',
                                  tree_table := 'backbone', k := 27, h := 11);
 ----
 contains a character Newick has to quote
@@ -138,7 +138,7 @@ CREATE TABLE refs_utf8 AS SELECT * FROM (VALUES
 ) AS t(read_id, sequence1);
 
 statement error
-SELECT * FROM krepp_index_create('refs_utf8', '__TEST_DIR__/idx_utf8',
+SELECT * FROM krepp_index_create('refs_utf8', '{TEST_DIR}/idx_utf8',
                                  tree_table := 'backbone', k := 27, h := 11);
 ----
 is not a nucleotide code
@@ -155,7 +155,7 @@ CREATE TABLE refs_injected AS SELECT * FROM (VALUES
 ) AS t(read_id, sequence1);
 
 statement error
-SELECT * FROM krepp_index_create('refs_injected', '__TEST_DIR__/idx_injected',
+SELECT * FROM krepp_index_create('refs_injected', '{TEST_DIR}/idx_injected',
                                  tree_table := 'backbone', k := 27, h := 11);
 ----
 is not a nucleotide code
@@ -169,7 +169,7 @@ CREATE TABLE refs_paired AS SELECT * FROM (VALUES
 ) AS t(read_id, sequence1, sequence2);
 
 statement error
-SELECT * FROM krepp_index_create('refs_paired', '__TEST_DIR__/idx_paired', tree_table := 'backbone');
+SELECT * FROM krepp_index_create('refs_paired', '{TEST_DIR}/idx_paired', tree_table := 'backbone');
 ----
 non-NULL sequence2
 
@@ -185,7 +185,7 @@ CREATE TABLE refs_seq2_null AS SELECT * FROM (VALUES
 
 query II
 SELECT num_references, status
-FROM krepp_index_create('refs_seq2_null', '__TEST_DIR__/idx_seq2_null',
+FROM krepp_index_create('refs_seq2_null', '{TEST_DIR}/idx_seq2_null',
                         tree_table := 'backbone', k := 25, w := 25, h := 9);
 ----
 2	ok
@@ -198,7 +198,7 @@ SET streaming_buffer_size = '7MB';
 
 query I
 SELECT status
-FROM krepp_index_create('refs_seq2_null', '__TEST_DIR__/idx_stream_buffer',
+FROM krepp_index_create('refs_seq2_null', '{TEST_DIR}/idx_stream_buffer',
                         tree_table := 'backbone', k := 25, w := 25, h := 9);
 ----
 ok
@@ -219,7 +219,7 @@ statement ok
 CREATE VIEW helper_buffer AS SELECT current_setting('streaming_buffer_size') AS read_id, 'ACGT' AS sequence1;
 
 statement error
-SELECT * FROM krepp_index_create('helper_buffer', '__TEST_DIR__/idx_helper_buffer', tree_table := 'backbone');
+SELECT * FROM krepp_index_create('helper_buffer', '{TEST_DIR}/idx_helper_buffer', tree_table := 'backbone');
 ----
 reference name '1000 bytes'
 
@@ -232,14 +232,14 @@ reference name '1000 bytes'
 # PARTITION_BY is used only because it is the one COPY form that creates its
 # own directory; a plain COPY to a path under a missing directory fails.
 statement ok
-COPY (SELECT 1 AS part, 2 AS payload) TO '__TEST_DIR__/debris' (FORMAT CSV, PARTITION_BY (part));
+COPY (SELECT 1 AS part, 2 AS payload) TO '{TEST_DIR}/debris' (FORMAT CSV, PARTITION_BY (part));
 
 # This pointed at the repository's own test/sql until a reviewer weakened the
 # guard and krepp wrote 16 MB of index files into the source tree, leaving the
 # file permanently unrunnable in that checkout. The assertion needs a directory
 # that holds unrelated files - it does not need that directory to be tracked.
 statement error
-SELECT * FROM krepp_index_create('refs', '__TEST_DIR__/debris', tree_table := 'backbone', k := 27, h := 11);
+SELECT * FROM krepp_index_create('refs', '{TEST_DIR}/debris', tree_table := 'backbone', k := 27, h := 11);
 ----
 does not hold one complete krepp index
 
@@ -250,14 +250,14 @@ statement ok
 CREATE TABLE wrong_shape AS SELECT 1 AS id, 'ACGT' AS seq;
 
 statement error
-SELECT * FROM krepp_index_create('wrong_shape', '__TEST_DIR__/idx_shape', tree_table := 'backbone');
+SELECT * FROM krepp_index_create('wrong_shape', '{TEST_DIR}/idx_shape', tree_table := 'backbone');
 ----
 read_id
 
 # So does the tree relation.
 
 statement error
-SELECT * FROM krepp_index_create('refs', '__TEST_DIR__/idx_tree_shape', tree_table := 'wrong_shape');
+SELECT * FROM krepp_index_create('refs', '{TEST_DIR}/idx_tree_shape', tree_table := 'wrong_shape');
 ----
 node_index
 
@@ -269,7 +269,7 @@ statement ok
 CREATE TABLE refs_null_id AS SELECT * FROM (VALUES (NULL::VARCHAR, 'ACGTACGTACGTACGTACGTACGTACGT')) AS t(read_id, sequence1);
 
 statement error
-SELECT * FROM krepp_index_create('refs_null_id', '__TEST_DIR__/idx_null_id', tree_table := 'backbone');
+SELECT * FROM krepp_index_create('refs_null_id', '{TEST_DIR}/idx_null_id', tree_table := 'backbone');
 ----
 NULL read_id or sequence1
 
@@ -277,7 +277,7 @@ statement ok
 CREATE TABLE refs_null_seq AS SELECT * FROM (VALUES ('A', NULL::VARCHAR)) AS t(read_id, sequence1);
 
 statement error
-SELECT * FROM krepp_index_create('refs_null_seq', '__TEST_DIR__/idx_null_seq', tree_table := 'backbone');
+SELECT * FROM krepp_index_create('refs_null_seq', '{TEST_DIR}/idx_null_seq', tree_table := 'backbone');
 ----
 NULL read_id or sequence1
 
@@ -285,7 +285,7 @@ statement ok
 CREATE TABLE refs_empty_id AS SELECT * FROM (VALUES ('', 'ACGTACGTACGTACGTACGTACGTACGT')) AS t(read_id, sequence1);
 
 statement error
-SELECT * FROM krepp_index_create('refs_empty_id', '__TEST_DIR__/idx_empty_id', tree_table := 'backbone');
+SELECT * FROM krepp_index_create('refs_empty_id', '{TEST_DIR}/idx_empty_id', tree_table := 'backbone');
 ----
 empty read_id
 
@@ -293,7 +293,7 @@ statement ok
 CREATE TABLE refs_empty_seq AS SELECT * FROM (VALUES ('A', '')) AS t(read_id, sequence1);
 
 statement error
-SELECT * FROM krepp_index_create('refs_empty_seq', '__TEST_DIR__/idx_empty_seq', tree_table := 'backbone');
+SELECT * FROM krepp_index_create('refs_empty_seq', '{TEST_DIR}/idx_empty_seq', tree_table := 'backbone');
 ----
 empty sequence1
 
@@ -304,7 +304,7 @@ statement ok
 CREATE TABLE refs_none AS SELECT * FROM refs WHERE false;
 
 statement error
-SELECT * FROM krepp_index_create('refs_none', '__TEST_DIR__/idx_none', tree_table := 'backbone');
+SELECT * FROM krepp_index_create('refs_none', '{TEST_DIR}/idx_none', tree_table := 'backbone');
 ----
 produced no sequences
 
@@ -319,7 +319,7 @@ CREATE TABLE refs_gt AS SELECT * FROM (VALUES
 ) AS t(read_id, sequence1);
 
 statement error
-SELECT * FROM krepp_index_create('refs_gt', '__TEST_DIR__/idx_gt', tree_table := 'backbone');
+SELECT * FROM krepp_index_create('refs_gt', '{TEST_DIR}/idx_gt', tree_table := 'backbone');
 ----
 starts with '>' or '@'
 
@@ -327,7 +327,7 @@ starts with '>' or '@'
 # would wrap rather than be refused.
 
 statement error
-SELECT * FROM krepp_index_create('refs', '__TEST_DIR__/idx_neg_m', tree_table := 'backbone', m := -1);
+SELECT * FROM krepp_index_create('refs', '{TEST_DIR}/idx_neg_m', tree_table := 'backbone', m := -1);
 ----
 m must not be negative
 
@@ -339,7 +339,7 @@ m must not be negative
 # is something a SQL caller should be able to reach.
 
 statement error
-SELECT * FROM krepp_index_create('refs', '__TEST_DIR__/idx_zero_m', tree_table := 'backbone', m := 0);
+SELECT * FROM krepp_index_create('refs', '{TEST_DIR}/idx_zero_m', tree_table := 'backbone', m := 0);
 ----
 m must be at least 1
 
@@ -349,12 +349,12 @@ m must be at least 1
 # learns the number was wrong instead of silently getting a different one.
 
 statement error
-SELECT * FROM krepp_index_create('refs', '__TEST_DIR__/idx_zero_threads', tree_table := 'backbone', threads := 0);
+SELECT * FROM krepp_index_create('refs', '{TEST_DIR}/idx_zero_threads', tree_table := 'backbone', threads := 0);
 ----
 threads must be at least 1
 
 statement error
-SELECT * FROM krepp_index_create('refs', '__TEST_DIR__/idx_neg_threads', tree_table := 'backbone', threads := -1);
+SELECT * FROM krepp_index_create('refs', '{TEST_DIR}/idx_neg_threads', tree_table := 'backbone', threads := -1);
 ----
 threads must not be negative
 
@@ -365,12 +365,12 @@ threads must not be negative
 # no SQL error. 257 is the first value the cap rejects; 256 is accepted and is
 # covered by reaching a later check in krepp_index_create_threads.test.
 statement error
-SELECT * FROM krepp_index_create('refs', '__TEST_DIR__/idx_over_threads', tree_table := 'backbone', threads := 257);
+SELECT * FROM krepp_index_create('refs', '{TEST_DIR}/idx_over_threads', tree_table := 'backbone', threads := 257);
 ----
 threads must be at most 256
 
 statement error
-SELECT * FROM krepp_index_create('refs', '__TEST_DIR__/idx_huge_threads', tree_table := 'backbone', threads := 100000);
+SELECT * FROM krepp_index_create('refs', '{TEST_DIR}/idx_huge_threads', tree_table := 'backbone', threads := 100000);
 ----
 threads must be at most 256
 
@@ -384,14 +384,14 @@ CREATE TABLE refs_at AS SELECT * FROM (VALUES
 ) AS t(read_id, sequence1);
 
 statement error
-SELECT * FROM krepp_index_create('refs_at', '__TEST_DIR__/idx_at', tree_table := 'backbone');
+SELECT * FROM krepp_index_create('refs_at', '{TEST_DIR}/idx_at', tree_table := 'backbone');
 ----
 starts with '>' or '@'
 
 # A newick_path that does not exist is a plain read failure, not a krepp exit.
 
 statement error
-SELECT * FROM krepp_index_create('refs', '__TEST_DIR__/idx_no_nwk',
+SELECT * FROM krepp_index_create('refs', '{TEST_DIR}/idx_no_nwk',
                                  newick_path := 'data/no_such_tree.nwk');
 ----
 cannot read newick_path
@@ -417,13 +417,13 @@ CREATE TABLE refs_ab AS SELECT * FROM (VALUES
 # references either way, so only the reopen-as-append path distinguishes them.
 query II
 SELECT num_references, status
-FROM krepp_index_create('refs_ab', '__TEST_DIR__/idx_interleaved',
+FROM krepp_index_create('refs_ab', '{TEST_DIR}/idx_interleaved',
                         tree_table := 'backbone', k := 25, w := 25, h := 9);
 ----
 2	ok
 
 query I
-SELECT count(*) FROM glob('__TEST_DIR__/idx_interleaved/*') WHERE file LIKE '%-m4r1-frac';
+SELECT count(*) FROM glob('{TEST_DIR}/idx_interleaved/*') WHERE file LIKE '%-m4r1-frac';
 ----
 6
 
@@ -446,14 +446,14 @@ WHERE NOT (read_id = 'A' AND sequence1 LIKE 'ACGTTGCAAGG%');
 
 query I
 SELECT status
-FROM krepp_index_create('refs_ab_last_only', '__TEST_DIR__/idx_last_only',
+FROM krepp_index_create('refs_ab_last_only', '{TEST_DIR}/idx_last_only',
                         tree_table := 'backbone', k := 25, w := 25, h := 9);
 ----
 ok
 
 query I
-SELECT (SELECT octet_length(content) FROM read_blob('__TEST_DIR__/idx_interleaved/cmer-m4r1-frac'))
-     > (SELECT octet_length(content) FROM read_blob('__TEST_DIR__/idx_last_only/cmer-m4r1-frac'));
+SELECT (SELECT octet_length(content) FROM read_blob('{TEST_DIR}/idx_interleaved/cmer-m4r1-frac'))
+     > (SELECT octet_length(content) FROM read_blob('{TEST_DIR}/idx_last_only/cmer-m4r1-frac'));
 ----
 true
 
@@ -463,14 +463,14 @@ true
 # (r := options.m, say) would be invisible to every test and every caller.
 query I
 SELECT status
-FROM krepp_index_create('refs_ab', '__TEST_DIR__/idx_knobs',
+FROM krepp_index_create('refs_ab', '{TEST_DIR}/idx_knobs',
                         tree_table := 'backbone', k := 25, w := 25, h := 9,
                         m := 2, r := 0, frac := false, sdust_t := 20, sdust_w := 64);
 ----
 ok
 
 query I
-SELECT count(*) FROM glob('__TEST_DIR__/idx_knobs/*') WHERE file LIKE '%-m2r0-no_frac';
+SELECT count(*) FROM glob('{TEST_DIR}/idx_knobs/*') WHERE file LIKE '%-m2r0-no_frac';
 ----
 6
 
@@ -479,7 +479,7 @@ SELECT count(*) FROM glob('__TEST_DIR__/idx_knobs/*') WHERE file LIKE '%-m2r0-no
 query II
 SELECT content LIKE '%' || chr(10) || 'sdust-t: 20' || chr(10) || '%',
        content LIKE '%' || chr(10) || 'sdust-w: 64' || chr(10) || '%'
-FROM read_text('__TEST_DIR__/idx_knobs/metadata-m2r0-no_frac.txt');
+FROM read_text('{TEST_DIR}/idx_knobs/metadata-m2r0-no_frac.txt');
 ----
 true	true
 
@@ -490,7 +490,7 @@ CREATE TABLE refs_a_only AS SELECT * FROM refs_ab WHERE read_id = 'A';
 
 query II
 SELECT num_references, status
-FROM krepp_index_create('refs_a_only', '__TEST_DIR__/idx_one_of_two',
+FROM krepp_index_create('refs_a_only', '{TEST_DIR}/idx_one_of_two',
                         tree_table := 'backbone', k := 25, w := 25, h := 9);
 ----
 1	ok

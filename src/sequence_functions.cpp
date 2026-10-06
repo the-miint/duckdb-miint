@@ -6,6 +6,10 @@
 #include "duckdb/common/vector_operations/unary_executor.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
 #include <array>
 
 namespace duckdb {
@@ -120,13 +124,15 @@ static constexpr const char RNA_TYPE[] = "RNA";
 // Templated reverse complement operator - works for both DNA and RNA
 template <const std::array<char, 256> &COMPLEMENT_TABLE, const char *MOLECULE_TYPE>
 struct ReverseComplementOperator {
+	// Kept out of line: inlined into DuckDB v2.0's ScalarExecutor loop, the per-string path compiles ~40% slower
+	// than on v1.5 (15M 150 bp rows: 1290 vs 917 ms); out of line it matches v1.5 (937 ms).
 	template <class INPUT_TYPE, class RESULT_TYPE>
-	static RESULT_TYPE Operation(INPUT_TYPE input, Vector &result) {
+	[[gnu::noinline]] static RESULT_TYPE Operation(INPUT_TYPE input, StringHeap &heap) {
 		auto input_data = input.GetData();
 		auto input_len = input.GetSize();
 
 		// Pre-allocate result string for performance
-		auto result_str = StringVector::EmptyString(result, input_len);
+		auto result_str = heap.EmptyString(input_len);
 		auto result_data = result_str.GetDataWriteable();
 
 		// Reverse complement: iterate input in reverse, compute complement
@@ -151,7 +157,7 @@ struct ReverseComplementOperator {
 template <const std::array<const char *, 256> &REGEXP_TABLE, const char *MOLECULE_TYPE>
 struct AsRegexpOperator {
 	template <class INPUT_TYPE, class RESULT_TYPE>
-	static RESULT_TYPE Operation(INPUT_TYPE input, Vector &result) {
+	static RESULT_TYPE Operation(INPUT_TYPE input, StringHeap &heap) {
 		auto input_data = input.GetData();
 		auto input_len = input.GetSize();
 
@@ -175,7 +181,7 @@ struct AsRegexpOperator {
 		}
 
 		// Allocate result string with exact size
-		auto result_str = StringVector::EmptyString(result, output_len);
+		auto result_str = heap.EmptyString(output_len);
 		auto result_data = result_str.GetDataWriteable();
 
 		// Second pass: build the regexp string
@@ -241,13 +247,13 @@ static void SequenceSplitFunction(DataChunk &args, ExpressionState &state, Vecto
 	const idx_t count = args.size();
 
 	UnifiedVectorFormat seq_fmt, cs_fmt;
-	args.data[0].ToUnifiedFormat(count, seq_fmt);
-	args.data[1].ToUnifiedFormat(count, cs_fmt);
+	args.data[0].ToUnifiedFormat(seq_fmt);
+	args.data[1].ToUnifiedFormat(cs_fmt);
 	const auto seq_data = UnifiedVectorFormat::GetData<string_t>(seq_fmt);
 	const auto cs_data = UnifiedVectorFormat::GetData<int32_t>(cs_fmt);
 
-	auto list_entries = FlatVector::GetData<list_entry_t>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto list_entries = FlatVector::GetDataMutable<list_entry_t>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 
 	// Pass 1: validate, NULL-propagate, and lay out per-row [offset, length) into the child.
 	idx_t total_chunks = 0;
@@ -282,11 +288,11 @@ static void SequenceSplitFunction(DataChunk &args, ExpressionState &state, Vecto
 	// Reserve the flat child once (no per-row realloc), then fill.
 	ListVector::Reserve(result, total_chunks);
 	ListVector::SetListSize(result, total_chunks);
-	auto &struct_vec = ListVector::GetEntry(result);
+	auto &struct_vec = ListVector::GetChildMutable(result);
 	auto &struct_children = StructVector::GetEntries(struct_vec);
-	auto idx_data = FlatVector::GetData<int32_t>(*struct_children[0]); // chunk_index
-	auto &data_vec = *struct_children[1];                              // chunk_data VARCHAR
-	auto chunk_str = FlatVector::GetData<string_t>(data_vec);
+	auto idx_data = FlatVector::GetDataMutable<int32_t>(struct_children[0]); // chunk_index
+	auto &data_vec = struct_children[1];                                     // chunk_data VARCHAR
+	auto chunk_str = FlatVector::GetDataMutable<string_t>(data_vec);
 
 	// Pass 2: slice. chunk_data is a copy into the result heap (must outlive the input).
 	for (idx_t row = 0; row < count; row++) {
@@ -314,23 +320,28 @@ static void SequenceSplitFunction(DataChunk &args, ExpressionState &state, Vecto
 void SequenceFunctions::Register(ExtensionLoader &loader) {
 	ScalarFunction sequence_dna_reverse_complement("sequence_dna_reverse_complement", {LogicalType::VARCHAR},
 	                                               LogicalType::VARCHAR, SequenceDnaReverseComplementFunction);
+	sequence_dna_reverse_complement.SetFallible();
 	loader.RegisterFunction(sequence_dna_reverse_complement);
 
 	ScalarFunction sequence_rna_reverse_complement("sequence_rna_reverse_complement", {LogicalType::VARCHAR},
 	                                               LogicalType::VARCHAR, SequenceRnaReverseComplementFunction);
+	sequence_rna_reverse_complement.SetFallible();
 	loader.RegisterFunction(sequence_rna_reverse_complement);
 
 	ScalarFunction sequence_dna_as_regexp("sequence_dna_as_regexp", {LogicalType::VARCHAR}, LogicalType::VARCHAR,
 	                                      SequenceDnaAsRegexpFunction);
+	sequence_dna_as_regexp.SetFallible();
 	loader.RegisterFunction(sequence_dna_as_regexp);
 
 	ScalarFunction sequence_rna_as_regexp("sequence_rna_as_regexp", {LogicalType::VARCHAR}, LogicalType::VARCHAR,
 	                                      SequenceRnaAsRegexpFunction);
+	sequence_rna_as_regexp.SetFallible();
 	loader.RegisterFunction(sequence_rna_as_regexp);
 
 	ScalarFunction sequence_split("sequence_split", {LogicalType::VARCHAR, LogicalType::INTEGER},
 	                              SequenceSplitReturnType(), SequenceSplitFunction);
-	sequence_split.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	sequence_split.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	sequence_split.SetFallible();
 	loader.RegisterFunction(sequence_split);
 }
 

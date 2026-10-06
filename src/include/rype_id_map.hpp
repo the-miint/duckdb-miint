@@ -30,6 +30,8 @@
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/types/uuid.hpp"
 #include "duckdb/common/types/vector.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 
 #include <string>
 #include <vector>
@@ -99,20 +101,20 @@ public:
 	//! type must be the id type this map was constructed with.
 	void Emit(Vector &out, idx_t row, idx_t idx) const {
 		D_ASSERT(idx < count);
-		auto &validity = FlatVector::Validity(out);
+		auto &validity = FlatVector::ValidityMutable(out);
 		switch (id_type.id()) {
 		case LogicalTypeId::BIGINT:
-			FlatVector::GetData<int64_t>(out)[row] = i64_values[idx];
+			FlatVector::GetDataMutable<int64_t>(out)[row] = i64_values[idx];
 			validity.Set(row, !nulls[idx]);
 			return;
 		case LogicalTypeId::UUID:
-			FlatVector::GetData<hugeint_t>(out)[row] = i128_values[idx];
+			FlatVector::GetDataMutable<hugeint_t>(out)[row] = i128_values[idx];
 			validity.Set(row, !nulls[idx]);
 			return;
 		default: { // VARCHAR: a NULL id stored zero bytes, so it emits '' and stays valid
 			const auto begin = varchar_offsets[idx];
 			const auto length = varchar_offsets[idx + 1] - begin;
-			FlatVector::GetData<string_t>(out)[row] =
+			FlatVector::GetDataMutable<string_t>(out)[row] =
 			    StringVector::AddString(out, varchar_arena.data() + begin, length);
 			validity.SetValid(row);
 			return;

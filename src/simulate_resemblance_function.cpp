@@ -6,9 +6,11 @@
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
 
 #include <cmath>
 #include <stdexcept>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -63,7 +65,7 @@ struct SimGlobalState : public GlobalTableFunctionState {
 };
 
 unique_ptr<FunctionData> SimGradientBind(ClientContext &context, TableFunctionBindInput &input,
-                                         vector<LogicalType> &return_types, vector<string> &names) {
+                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<SimGradientBindData>();
 
 	// Positional: abundances LIST(DOUBLE), num_samples INTEGER, seqs_per_sample BIGINT.
@@ -80,7 +82,7 @@ unique_ptr<FunctionData> SimGradientBind(ClientContext &context, TableFunctionBi
 	}
 
 	for (auto &kv : input.named_parameters) {
-		auto key = StringUtil::Lower(kv.first);
+		auto key = StringUtil::Lower(kv.first.GetIdentifierName());
 		if (key == "sp_width") {
 			data->sp_width = kv.second.GetValue<double>();
 		} else if (key == "noise") {
@@ -149,10 +151,10 @@ void SimGradientExecute(ClientContext &context, TableFunctionInput &data_p, Data
 	const idx_t total = coo.size();
 	const idx_t count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, total - gstate.cursor);
 
-	auto sample_id = FlatVector::GetData<int32_t>(output.data[0]);
-	auto otu_id = FlatVector::GetData<int32_t>(output.data[1]);
-	auto counts = FlatVector::GetData<int64_t>(output.data[2]);
-	auto position = FlatVector::GetData<double>(output.data[3]);
+	auto sample_id = FlatVector::GetDataMutable<int32_t>(output.data[0]);
+	auto otu_id = FlatVector::GetDataMutable<int32_t>(output.data[1]);
+	auto counts = FlatVector::GetDataMutable<int64_t>(output.data[2]);
+	auto position = FlatVector::GetDataMutable<double>(output.data[3]);
 
 	for (idx_t i = 0; i < count; i++) {
 		const idx_t j = gstate.cursor + i;
@@ -162,7 +164,7 @@ void SimGradientExecute(ClientContext &context, TableFunctionInput &data_p, Data
 		position[i] = coo.ground_truth[j];
 	}
 	gstate.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 unique_ptr<LocalTableFunctionState> SimInitLocal(ExecutionContext &, TableFunctionInitInput &,
@@ -186,7 +188,7 @@ struct SimClusterBindData : public TableFunctionData {
 };
 
 unique_ptr<FunctionData> SimClusterBind(ClientContext &context, TableFunctionBindInput &input,
-                                        vector<LogicalType> &return_types, vector<string> &names) {
+                                        vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<SimClusterBindData>();
 
 	// Positional: abundances LIST(DOUBLE), seqs_per_sample BIGINT.
@@ -199,7 +201,7 @@ unique_ptr<FunctionData> SimClusterBind(ClientContext &context, TableFunctionBin
 	}
 
 	for (auto &kv : input.named_parameters) {
-		auto key = StringUtil::Lower(kv.first);
+		auto key = StringUtil::Lower(kv.first.GetIdentifierName());
 		if (key == "cluster_sizes") {
 			auto sizes = ListValue::GetChildren(kv.second);
 			if (sizes.empty()) {
@@ -274,10 +276,10 @@ void SimClusterExecute(ClientContext &context, TableFunctionInput &data_p, DataC
 	const idx_t total = coo.size();
 	const idx_t count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, total - gstate.cursor);
 
-	auto sample_id = FlatVector::GetData<int32_t>(output.data[0]);
-	auto otu_id = FlatVector::GetData<int32_t>(output.data[1]);
-	auto counts = FlatVector::GetData<int64_t>(output.data[2]);
-	auto cluster_id = FlatVector::GetData<int32_t>(output.data[3]);
+	auto sample_id = FlatVector::GetDataMutable<int32_t>(output.data[0]);
+	auto otu_id = FlatVector::GetDataMutable<int32_t>(output.data[1]);
+	auto counts = FlatVector::GetDataMutable<int64_t>(output.data[2]);
+	auto cluster_id = FlatVector::GetDataMutable<int32_t>(output.data[3]);
 
 	for (idx_t i = 0; i < count; i++) {
 		const idx_t j = gstate.cursor + i;
@@ -287,7 +289,7 @@ void SimClusterExecute(ClientContext &context, TableFunctionInput &data_p, DataC
 		cluster_id[i] = static_cast<int32_t>(coo.ground_truth[j]);
 	}
 	gstate.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 } // namespace
@@ -296,23 +298,23 @@ void RegisterSimulateResemblance(ExtensionLoader &loader) {
 	TableFunction gradient("simulate_gradient_otus",
 	                       {LogicalType::LIST(LogicalType::DOUBLE), LogicalType::INTEGER, LogicalType::BIGINT},
 	                       SimGradientExecute, SimGradientBind, SimGradientInitGlobal, SimInitLocal);
-	gradient.named_parameters["sp_width"] = LogicalType::DOUBLE;
-	gradient.named_parameters["noise"] = LogicalType::DOUBLE;
-	gradient.named_parameters["noise_type"] = LogicalType::VARCHAR;
-	gradient.named_parameters["range_lo"] = LogicalType::DOUBLE;
-	gradient.named_parameters["range_hi"] = LogicalType::DOUBLE;
-	gradient.named_parameters["seed"] = LogicalType::BIGINT;
+	AddNamedParameter(gradient, "sp_width", LogicalType::DOUBLE);
+	AddNamedParameter(gradient, "noise", LogicalType::DOUBLE);
+	AddNamedParameter(gradient, "noise_type", LogicalType::VARCHAR);
+	AddNamedParameter(gradient, "range_lo", LogicalType::DOUBLE);
+	AddNamedParameter(gradient, "range_hi", LogicalType::DOUBLE);
+	AddNamedParameter(gradient, "seed", LogicalType::BIGINT);
 	gradient.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(gradient);
 
 	TableFunction cluster("simulate_cluster_otus", {LogicalType::LIST(LogicalType::DOUBLE), LogicalType::BIGINT},
 	                      SimClusterExecute, SimClusterBind, SimClusterInitGlobal, SimInitLocal);
-	cluster.named_parameters["cluster_sizes"] = LogicalType::LIST(LogicalType::INTEGER);
-	cluster.named_parameters["cluster_spacing"] = LogicalType::DOUBLE;
-	cluster.named_parameters["sample_spacing"] = LogicalType::DOUBLE;
-	cluster.named_parameters["noise_type"] = LogicalType::VARCHAR;
-	cluster.named_parameters["normalization"] = LogicalType::VARCHAR;
-	cluster.named_parameters["seed"] = LogicalType::BIGINT;
+	AddNamedParameter(cluster, "cluster_sizes", LogicalType::LIST(LogicalType::INTEGER));
+	AddNamedParameter(cluster, "cluster_spacing", LogicalType::DOUBLE);
+	AddNamedParameter(cluster, "sample_spacing", LogicalType::DOUBLE);
+	AddNamedParameter(cluster, "noise_type", LogicalType::VARCHAR);
+	AddNamedParameter(cluster, "normalization", LogicalType::VARCHAR);
+	AddNamedParameter(cluster, "seed", LogicalType::BIGINT);
 	cluster.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(cluster);
 }

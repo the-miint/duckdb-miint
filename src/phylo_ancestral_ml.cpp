@@ -5,6 +5,8 @@
 #include "NewickTree.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 #include <cctype>
 #include <cmath>
 #include <map>
@@ -13,6 +15,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -36,7 +39,7 @@ PhyloAncestralMLTableFunction::Data::Data(std::string tree_table, std::string tr
 
 unique_ptr<FunctionData> PhyloAncestralMLTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                              vector<LogicalType> &return_types,
-                                                             vector<std::string> &names) {
+                                                             vector<Identifier> &names) {
 	auto tree_table_name = input.inputs[0].ToString();
 	auto traits_table_name = input.inputs[1].ToString();
 	RejectCTERelationName(input, tree_table_name);
@@ -185,18 +188,18 @@ void PhyloAncestralMLTableFunction::Execute(ClientContext &context, TableFunctio
 	auto &gstate = data_p.global_state->Cast<GlobalState>();
 
 	if (gstate.current_row_idx >= gstate.rows.size()) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
 	size_t count = std::min<size_t>(STANDARD_VECTOR_SIZE, gstate.rows.size() - gstate.current_row_idx);
 
-	auto node_index_data = FlatVector::GetData<int64_t>(output.data[0]);
-	auto trait_data = FlatVector::GetData<string_t>(output.data[1]);
-	auto state_data = FlatVector::GetData<string_t>(output.data[2]);
-	auto prob_data = FlatVector::GetData<double>(output.data[3]);
-	auto rate_data = FlatVector::GetData<double>(output.data[4]);
-	auto logl_data = FlatVector::GetData<double>(output.data[5]);
+	auto node_index_data = FlatVector::GetDataMutable<int64_t>(output.data[0]);
+	auto trait_data = FlatVector::GetDataMutable<string_t>(output.data[1]);
+	auto state_data = FlatVector::GetDataMutable<string_t>(output.data[2]);
+	auto prob_data = FlatVector::GetDataMutable<double>(output.data[3]);
+	auto rate_data = FlatVector::GetDataMutable<double>(output.data[4]);
+	auto logl_data = FlatVector::GetDataMutable<double>(output.data[5]);
 
 	for (size_t k = 0; k < count; k++) {
 		const auto &row = gstate.rows[gstate.current_row_idx + k];
@@ -212,13 +215,13 @@ void PhyloAncestralMLTableFunction::Execute(ClientContext &context, TableFunctio
 	}
 
 	gstate.current_row_idx += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 TableFunction PhyloAncestralMLTableFunction::GetFunction() {
 	TableFunction tf("phylo_ancestral_ml", {LogicalType::VARCHAR, LogicalType::VARCHAR}, Execute, Bind, InitGlobal);
-	tf.named_parameters["model"] = LogicalType::VARCHAR;
-	tf.named_parameters["rate"] = LogicalType::DOUBLE;
+	AddNamedParameter(tf, "model", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "rate", LogicalType::DOUBLE);
 	return tf;
 }
 

@@ -111,6 +111,8 @@ if ! $HARNESS_ONLY; then
             -DWASM_LOADABLE_EXTENSIONS=1 \
             -DCMAKE_CXX_FLAGS="-fwasm-exceptions -DWEBDB_FAST_EXCEPTIONS=1" \
             -DDUCKDB_EXPLICIT_PLATFORM=wasm_eh \
+            -DDUCKDB_CAPABILITIES=loadable_extensions \
+            -DSTATICALLY_LINK_EXTENSIONS="parquet core_functions" \
             -S duckdb -B "$DUCKDB_BUILD" 2>&1 | tail -5
 
         emmake make -j$(nproc) -C "$DUCKDB_BUILD" duckdb 2>&1 | tail -5
@@ -129,8 +131,8 @@ fi
 echo "=== Compiling test harness ==="
 emcc scripts/test_wasm_extension.c \
     -I duckdb/src/include \
-    "$DUCKDB_BUILD/src/libduckdb_static.a" \
-    "$DUCKDB_BUILD/extension/libduckdb_generated_extension_loader.a" \
+    "$DUCKDB_BUILD/src/libduckdb.a" \
+    "$DUCKDB_BUILD/src/main/extension/libduckdb_loadable_extensions.a" \
     "$DUCKDB_BUILD/extension/parquet/libparquet_extension.a" \
     "$DUCKDB_BUILD/extension/core_functions/libcore_functions_extension.a" \
     "$DUCKDB_BUILD/vcpkg_installed/wasm32-emscripten/lib/libz.a" \

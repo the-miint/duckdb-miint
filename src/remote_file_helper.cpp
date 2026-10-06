@@ -63,7 +63,7 @@ ResolvedFile RemoteFileHelper::ResolveToLocal(const std::string &path) {
 
 #ifdef MIINT_STATIC_BUILD
 
-static constexpr idx_t DOWNLOAD_BUFFER_SIZE = 1048576; // 1MB — matches DuckDB httpfs chunk size
+static constexpr duckdb::idx_t DOWNLOAD_BUFFER_SIZE = 1048576; // 1MB — matches DuckDB httpfs chunk size
 
 std::string RemoteFileHelper::GetTempDirectory(duckdb::ClientContext &context) {
 	auto &buffer_manager = duckdb::BufferManager::GetBufferManager(context);

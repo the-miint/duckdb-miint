@@ -1,7 +1,13 @@
 #include "read_ncbi_annotation.hpp"
 #include "catalog_utils.hpp"
 #include "duckdb/common/vector_size.hpp"
+#include "duckdb/common/vector/constant_vector.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/common/vector/map_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 #include <sstream>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -61,7 +67,7 @@ bool ReadNCBIAnnotationTableFunction::GlobalState::FetchNextAccession() {
 
 unique_ptr<FunctionData> ReadNCBIAnnotationTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                                vector<LogicalType> &return_types,
-                                                               vector<std::string> &names) {
+                                                               vector<Identifier> &names) {
 	// Parse accession(s) - can be VARCHAR or VARCHAR[]
 	std::vector<std::string> accessions;
 
@@ -144,7 +150,7 @@ void ReadNCBIAnnotationTableFunction::Execute(ClientContext &context, TableFunct
 	while (global_state.current_batch.empty() || global_state.batch_offset >= global_state.current_batch.size()) {
 		if (!global_state.FetchNextAccession()) {
 			// No more accessions
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 	}
@@ -176,16 +182,16 @@ void ReadNCBIAnnotationTableFunction::Execute(ClientContext &context, TableFunct
 		const auto &feat = features[offset + i];
 
 		// seqid (column 0)
-		FlatVector::GetData<string_t>(output.data[0])[i] = StringVector::AddString(output.data[0], feat.seqid);
+		FlatVector::GetDataMutable<string_t>(output.data[0])[i] = StringVector::AddString(output.data[0], feat.seqid);
 
 		// source (column 1)
-		FlatVector::GetData<string_t>(output.data[1])[i] = StringVector::AddString(output.data[1], feat.source);
+		FlatVector::GetDataMutable<string_t>(output.data[1])[i] = StringVector::AddString(output.data[1], feat.source);
 
 		// type (column 2)
-		FlatVector::GetData<string_t>(output.data[2])[i] = StringVector::AddString(output.data[2], feat.type);
+		FlatVector::GetDataMutable<string_t>(output.data[2])[i] = StringVector::AddString(output.data[2], feat.type);
 
 		// position (column 3) - cast from int64_t to int32_t for schema compatibility
-		FlatVector::GetData<int32_t>(output.data[3])[i] = static_cast<int32_t>(feat.position);
+		FlatVector::GetDataMutable<int32_t>(output.data[3])[i] = static_cast<int32_t>(feat.position);
 
 		// stop_position (column 4) - cast from int64_t to int32_t for schema compatibility.
 		// NCBI's annotation `end` is 1-based CLOSED; normalize to miint's project-wide
@@ -195,38 +201,38 @@ void ReadNCBIAnnotationTableFunction::Execute(ClientContext &context, TableFunct
 		// the raw NCBI `end` is recoverable as stop_position - 1.
 		// Add in 64-bit, then narrow -- narrowing first and adding in int32 would be UB at
 		// INT32_MAX rather than merely truncating like the pre-existing cast does.
-		FlatVector::GetData<int32_t>(output.data[4])[i] = static_cast<int32_t>(feat.stop_position + 1);
+		FlatVector::GetDataMutable<int32_t>(output.data[4])[i] = static_cast<int32_t>(feat.stop_position + 1);
 
 		// score (column 5) - may be NULL
 		if (feat.has_score) {
-			FlatVector::GetData<double>(output.data[5])[i] = feat.score;
+			FlatVector::GetDataMutable<double>(output.data[5])[i] = feat.score;
 		} else {
-			FlatVector::Validity(output.data[5]).SetInvalid(i);
+			FlatVector::ValidityMutable(output.data[5]).SetInvalid(i);
 		}
 
 		// strand (column 6)
-		FlatVector::GetData<string_t>(output.data[6])[i] = StringVector::AddString(output.data[6], feat.strand);
+		FlatVector::GetDataMutable<string_t>(output.data[6])[i] = StringVector::AddString(output.data[6], feat.strand);
 
 		// phase (column 7) - may be NULL
 		if (feat.phase >= 0) {
-			FlatVector::GetData<int32_t>(output.data[7])[i] = feat.phase;
+			FlatVector::GetDataMutable<int32_t>(output.data[7])[i] = feat.phase;
 		} else {
-			FlatVector::Validity(output.data[7]).SetInvalid(i);
+			FlatVector::ValidityMutable(output.data[7]).SetInvalid(i);
 		}
 
 		// attributes (column 8) - MAP(VARCHAR, VARCHAR)
 		auto list_size = feat.attrs.size();
 
 		// Set up list entry for this row
-		auto entry_data = FlatVector::GetData<list_entry_t>(map_vec);
+		auto entry_data = FlatVector::GetDataMutable<list_entry_t>(map_vec);
 		entry_data[i].offset = attr_offset;
 		entry_data[i].length = list_size;
 
 		// Add key-value pairs
 		for (size_t j = 0; j < list_size; j++) {
-			FlatVector::GetData<string_t>(map_keys)[attr_offset + j] =
+			FlatVector::GetDataMutable<string_t>(map_keys)[attr_offset + j] =
 			    StringVector::AddString(map_keys, feat.attrs[j].first);
-			FlatVector::GetData<string_t>(map_values)[attr_offset + j] =
+			FlatVector::GetDataMutable<string_t>(map_values)[attr_offset + j] =
 			    StringVector::AddString(map_values, feat.attrs[j].second);
 		}
 
@@ -248,13 +254,13 @@ void ReadNCBIAnnotationTableFunction::Execute(ClientContext &context, TableFunct
 	}
 
 	global_state.batch_offset += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 TableFunction ReadNCBIAnnotationTableFunction::GetFunction() {
 	auto tf = TableFunction("read_ncbi_annotation", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
-	tf.named_parameters["api_key"] = LogicalType::VARCHAR;
-	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
+	AddNamedParameter(tf, "api_key", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "include_filepath", LogicalType::BOOLEAN);
 	return tf;
 }
 

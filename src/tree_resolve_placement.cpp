@@ -14,7 +14,7 @@ TreeResolvePlacementTableFunction::Data::Data(std::string tree_table, std::strin
 
 unique_ptr<FunctionData> TreeResolvePlacementTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                                  vector<LogicalType> &return_types,
-                                                                 vector<std::string> &names) {
+                                                                 vector<Identifier> &names) {
 	auto tree_table_name = input.inputs[0].ToString();
 	auto placements_table_name = input.inputs[1].ToString();
 	RejectCTERelationName(input, tree_table_name);
@@ -70,7 +70,7 @@ void TreeResolvePlacementTableFunction::Execute(ClientContext &context, TableFun
 	auto &global_state = data_p.global_state->Cast<GlobalState>();
 
 	if (global_state.current_row_idx >= global_state.rows.size()) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
@@ -81,7 +81,7 @@ void TreeResolvePlacementTableFunction::Execute(ClientContext &context, TableFun
 	                                      false, "");
 
 	global_state.current_row_idx += rows_to_output;
-	output.SetCardinality(rows_to_output);
+	output.SetChildCardinality(rows_to_output);
 }
 
 TableFunction TreeResolvePlacementTableFunction::GetFunction() {

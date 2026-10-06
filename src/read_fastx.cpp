@@ -7,14 +7,16 @@
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/storage/statistics/node_statistics.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
 #include <filesystem>
 #include <read_fastx.hpp>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
 unique_ptr<FunctionData> ReadFastxTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                       vector<duckdb::LogicalType> &return_types,
-                                                      vector<std::string> &names) {
+                                                      vector<Identifier> &names) {
 	FileSystem &fs = FileSystem::GetFileSystem(context);
 
 	std::vector<std::string> sequence1_paths;
@@ -217,7 +219,7 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 
 				// Check if all files exhausted
 				if (global_state.next_file_idx >= global_state.sequence1_filepaths.size()) {
-					output.SetCardinality(0);
+					output.SetChildCardinality(0);
 					return;
 				}
 
@@ -269,7 +271,7 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 
 	// Set sequence_index column (first column, index 0)
 	auto &sequence_index_vector = output.data[0];
-	auto sequence_index_data = FlatVector::GetData<int64_t>(sequence_index_vector);
+	auto sequence_index_data = FlatVector::GetDataMutable<int64_t>(sequence_index_vector);
 	for (idx_t j = 0; j < batch.size(); j++) {
 		sequence_index_data[j] = static_cast<int64_t>(start_sequence_index + j);
 	}
@@ -305,7 +307,7 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 		SetResultVectorFilepath(output.data[field_idx++], current_filepath);
 	}
 
-	output.SetCardinality(batch.size());
+	output.SetChildCardinality(batch.size());
 }
 
 // Cardinality estimate so the query optimizer knows roughly how big the scan is. Without
@@ -374,10 +376,10 @@ static unique_ptr<NodeStatistics> ReadFastxCardinality(ClientContext &context, c
 
 TableFunction ReadFastxTableFunction::GetFunction() {
 	auto tf = TableFunction("read_fastx", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
-	tf.named_parameters["sequence2"] = LogicalType::ANY;
-	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
-	tf.named_parameters["qual_offset"] = LogicalType::BIGINT;
-	tf.named_parameters["max_batch_bytes"] = LogicalType::VARCHAR;
+	AddNamedParameter(tf, "sequence2", LogicalType::ANY);
+	AddNamedParameter(tf, "include_filepath", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "qual_offset", LogicalType::BIGINT);
+	AddNamedParameter(tf, "max_batch_bytes", LogicalType::VARCHAR);
 	tf.cardinality = ReadFastxCardinality;
 	return tf;
 }

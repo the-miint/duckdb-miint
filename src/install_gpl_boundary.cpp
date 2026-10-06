@@ -12,6 +12,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <vector>
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
 
 namespace duckdb {
 
@@ -330,7 +333,7 @@ bool ResolveForceArg(DataChunk &args) {
 		return false;
 	}
 	UnifiedVectorFormat fmt;
-	args.data[0].ToUnifiedFormat(args.size(), fmt);
+	args.data[0].ToUnifiedFormat(fmt);
 	const auto idx = fmt.sel->get_index(0);
 	if (!fmt.validity.RowIsValid(idx)) {
 		return false;
@@ -348,10 +351,10 @@ void InstallGplBoundaryExecute(DataChunk &args, ExpressionState &state, Vector &
 	InstallReport report = install_impl(force);
 
 	auto &entries = StructVector::GetEntries(result);
-	FlatVector::GetData<bool>(*entries[0])[0] = report.installed;
-	FlatVector::GetData<string_t>(*entries[1])[0] = StringVector::AddString(*entries[1], report.path);
-	FlatVector::GetData<string_t>(*entries[2])[0] = StringVector::AddString(*entries[2], report.version);
-	FlatVector::GetData<string_t>(*entries[3])[0] = StringVector::AddString(*entries[3], report.message);
+	FlatVector::GetDataMutable<bool>(entries[0])[0] = report.installed;
+	FlatVector::GetDataMutable<string_t>(entries[1])[0] = StringVector::AddString(entries[1], report.path);
+	FlatVector::GetDataMutable<string_t>(entries[2])[0] = StringVector::AddString(entries[2], report.version);
+	FlatVector::GetDataMutable<string_t>(entries[3])[0] = StringVector::AddString(entries[3], report.message);
 	result.SetVectorType(VectorType::CONSTANT_VECTOR);
 }
 

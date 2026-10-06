@@ -3,6 +3,9 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/string_type.hpp"
 #include "duckdb/function/scalar_function.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
 #include <string>
 
 namespace duckdb {
@@ -16,18 +19,18 @@ static void AlignmentSeqIdentityScalarFunction(DataChunk &args, ExpressionState 
 
 	// Manually handle 4 arguments since DuckDB doesn't have QuaternaryExecutor
 	UnifiedVectorFormat cigar_data, nm_data, md_data, type_data;
-	cigar_vector.ToUnifiedFormat(args.size(), cigar_data);
-	nm_vector.ToUnifiedFormat(args.size(), nm_data);
-	md_vector.ToUnifiedFormat(args.size(), md_data);
-	type_vector.ToUnifiedFormat(args.size(), type_data);
+	cigar_vector.ToUnifiedFormat(cigar_data);
+	nm_vector.ToUnifiedFormat(nm_data);
+	md_vector.ToUnifiedFormat(md_data);
+	type_vector.ToUnifiedFormat(type_data);
 
 	auto cigar_ptr = UnifiedVectorFormat::GetData<string_t>(cigar_data);
 	auto nm_ptr = UnifiedVectorFormat::GetData<int64_t>(nm_data);
 	auto md_ptr = UnifiedVectorFormat::GetData<string_t>(md_data);
 	auto type_ptr = UnifiedVectorFormat::GetData<string_t>(type_data);
 
-	auto result_data = FlatVector::GetData<double>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<double>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 
 	for (idx_t i = 0; i < args.size(); i++) {
 		auto cigar_idx = cigar_data.sel->get_index(i);
@@ -181,17 +184,15 @@ ScalarFunction AlignmentSeqIdentityFunction::GetFunction() {
 	                    LogicalType::DOUBLE, AlignmentSeqIdentityScalarFunction);
 
 	// Allow NULL values for optional parameters (nm and md)
-	func.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-
-	// Set default value for type parameter
-	func.arguments[3] = LogicalType::VARCHAR;
-	func.varargs = LogicalType::INVALID;
+	func.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 
 	return func;
 }
 
 void AlignmentSeqIdentityFunction::Register(ExtensionLoader &loader) {
-	loader.RegisterFunction(GetFunction());
+	auto function = GetFunction();
+	function.SetFallible();
+	loader.RegisterFunction(function);
 }
 
 // cigar_sequence_identity(cigar) — one-arg convenience over the type='cigar'
@@ -202,12 +203,12 @@ static void CigarSequenceIdentityScalarFunction(DataChunk &args, ExpressionState
 	auto &cigar_vector = args.data[0];
 
 	UnifiedVectorFormat cigar_data;
-	cigar_vector.ToUnifiedFormat(args.size(), cigar_data);
+	cigar_vector.ToUnifiedFormat(cigar_data);
 	auto cigar_ptr = UnifiedVectorFormat::GetData<string_t>(cigar_data);
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto result_data = FlatVector::GetData<double>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto result_data = FlatVector::GetDataMutable<double>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 
 	for (idx_t i = 0; i < args.size(); i++) {
 		auto cigar_idx = cigar_data.sel->get_index(i);
@@ -242,12 +243,14 @@ static void CigarSequenceIdentityScalarFunction(DataChunk &args, ExpressionState
 ScalarFunction CigarSequenceIdentityFunction::GetFunction() {
 	ScalarFunction func("cigar_sequence_identity", {LogicalType::VARCHAR}, LogicalType::DOUBLE,
 	                    CigarSequenceIdentityScalarFunction);
-	func.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	func.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	return func;
 }
 
 void CigarSequenceIdentityFunction::Register(ExtensionLoader &loader) {
-	loader.RegisterFunction(GetFunction());
+	auto function = GetFunction();
+	function.SetFallible();
+	loader.RegisterFunction(function);
 }
 
 // cigar_query_length implementation
@@ -280,11 +283,7 @@ ScalarFunction CigarQueryLengthFunction::GetFunction() {
 	                    CigarQueryLengthScalarFunction);
 
 	// Allow NULL CIGAR (returns NULL)
-	func.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-
-	// Set default value for include_hard_clips parameter (defaults to true)
-	func.arguments[1] = LogicalType::BOOLEAN;
-	func.varargs = LogicalType::INVALID;
+	func.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 
 	return func;
 }
@@ -316,12 +315,13 @@ void CigarQueryLengthFunction::Register(ExtensionLoader &loader) {
 			    }
 		    });
 	    });
-	func_one_param.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	func_one_param.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 
 	// Register both overloads as a function set
 	ScalarFunctionSet function_set("cigar_query_length");
 	function_set.AddFunction(func_one_param);
 	function_set.AddFunction(func_two_params);
+	function_set.SetFallible();
 	loader.RegisterFunction(function_set);
 }
 
@@ -359,11 +359,7 @@ ScalarFunction CigarQueryCoverageFunction::GetFunction() {
 	                    CigarQueryCoverageScalarFunction);
 
 	// Allow NULL values (returns NULL for NULL CIGAR, error for invalid type)
-	func.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-
-	// Set default value for type parameter (defaults to 'aligned')
-	func.arguments[1] = LogicalType::VARCHAR;
-	func.varargs = LogicalType::INVALID;
+	func.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 
 	return func;
 }
@@ -395,12 +391,13 @@ void CigarQueryCoverageFunction::Register(ExtensionLoader &loader) {
 			    }
 		    });
 	    });
-	func_one_param.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	func_one_param.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 
 	// Register both overloads as a function set
 	ScalarFunctionSet function_set("cigar_query_coverage");
 	function_set.AddFunction(func_one_param);
 	function_set.AddFunction(func_two_params);
+	function_set.SetFallible();
 	loader.RegisterFunction(function_set);
 }
 
@@ -427,18 +424,18 @@ static void CigarQueryIntervalsScalarFunction(DataChunk &args, ExpressionState &
 	const bool has_type = args.ColumnCount() > 2;
 
 	UnifiedVectorFormat cigar_fmt, flags_fmt, type_fmt;
-	args.data[0].ToUnifiedFormat(count, cigar_fmt);
-	args.data[1].ToUnifiedFormat(count, flags_fmt);
+	args.data[0].ToUnifiedFormat(cigar_fmt);
+	args.data[1].ToUnifiedFormat(flags_fmt);
 	if (has_type) {
-		args.data[2].ToUnifiedFormat(count, type_fmt);
+		args.data[2].ToUnifiedFormat(type_fmt);
 	}
 	const auto cigar_data = UnifiedVectorFormat::GetData<string_t>(cigar_fmt);
 	const auto flags_data = UnifiedVectorFormat::GetData<uint16_t>(flags_fmt);
 	const auto type_data = has_type ? UnifiedVectorFormat::GetData<string_t>(type_fmt) : nullptr;
 
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-	auto list_entries = FlatVector::GetData<list_entry_t>(result);
-	auto &result_validity = FlatVector::Validity(result);
+	auto list_entries = FlatVector::GetDataMutable<list_entry_t>(result);
+	auto &result_validity = FlatVector::ValidityMutable(result);
 
 	// The interval count is only known by computing the intervals, so there is no cheap
 	// sizing pass as in sequence_split. Rather than buffer the whole chunk and copy it in
@@ -477,9 +474,9 @@ static void CigarQueryIntervalsScalarFunction(DataChunk &args, ExpressionState &
 			}
 			// Reserve may reallocate the child, so re-fetch its data pointers each time.
 			ListVector::Reserve(result, total + intervals.size());
-			auto &struct_children = StructVector::GetEntries(ListVector::GetEntry(result));
-			auto start_data = FlatVector::GetData<int64_t>(*struct_children[0]);
-			auto stop_data = FlatVector::GetData<int64_t>(*struct_children[1]);
+			auto &struct_children = StructVector::GetEntries(ListVector::GetChildMutable(result));
+			auto start_data = FlatVector::GetDataMutable<int64_t>(struct_children[0]);
+			auto stop_data = FlatVector::GetDataMutable<int64_t>(struct_children[1]);
 			for (idx_t i = 0; i < intervals.size(); i++) {
 				start_data[total + i] = intervals[i].start;
 				stop_data[total + i] = intervals[i].stop;
@@ -497,7 +494,7 @@ static void CigarQueryIntervalsScalarFunction(DataChunk &args, ExpressionState &
 ScalarFunction CigarQueryIntervalsFunction::GetFunction() {
 	ScalarFunction func("cigar_query_intervals", {LogicalType::VARCHAR, LogicalType::USMALLINT, LogicalType::VARCHAR},
 	                    CigarQueryIntervalsReturnType(), CigarQueryIntervalsScalarFunction);
-	func.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	func.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	return func;
 }
 
@@ -505,11 +502,12 @@ void CigarQueryIntervalsFunction::Register(ExtensionLoader &loader) {
 	// Two-argument overload; type defaults to 'aligned' inside the shared body.
 	ScalarFunction func_two_args("cigar_query_intervals", {LogicalType::VARCHAR, LogicalType::USMALLINT},
 	                             CigarQueryIntervalsReturnType(), CigarQueryIntervalsScalarFunction);
-	func_two_args.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	func_two_args.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 
 	ScalarFunctionSet function_set("cigar_query_intervals");
 	function_set.AddFunction(func_two_args);
 	function_set.AddFunction(GetFunction());
+	function_set.SetFallible();
 	loader.RegisterFunction(function_set);
 }
 

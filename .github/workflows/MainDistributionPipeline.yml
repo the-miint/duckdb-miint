@@ -4,7 +4,9 @@
 name: Main Extension Distribution Pipeline
 on:
   push:
-    branches: [main, v1.5-variegata]
+    # extension-ci-tools v2.0 builds only linux_amd64 for pull_request (reduced_ci_mode
+    # auto), so v2.0-cyanoptera's other platforms build here, on merge, or on workflow_dispatch.
+    branches: [main, v1.5-variegata, v2.0-cyanoptera]
     tags: ['v[0-9]+*']
     paths-ignore:
       - 'docs/**'
@@ -30,12 +32,22 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # PRE-RELEASE (DuckDB v2.0 has no release tag yet): build against the commit the
+  # duckdb submodule is pinned at, resolved by extension-ci-tools' own helper, instead
+  # of a literal duckdb_version. On release day put literal `duckdb_version: v2.0.0`
+  # back into both jobs below and drop this job (scripts/bump-duckdb-version.sh and
+  # scripts/check-duckdb-version.sh, and the published artifact names, expect them).
+  duckdb-submodule-version:
+    name: Resolve duckdb submodule pin
+    uses: duckdb/extension-ci-tools/.github/workflows/_submodule_version.yml@v2.0-cyanoptera
+
   duckdb-stable-build:
     name: Build extension binaries
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v1.5-variegata
+    needs: duckdb-submodule-version
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@v2.0-cyanoptera
     with:
-      duckdb_version: v1.5.5
-      ci_tools_version: v1.5-variegata
+      duckdb_version: ${{ needs.duckdb-submodule-version.outputs.version }}
+      ci_tools_version: v2.0-cyanoptera
       extension_name: miint
       extra_toolchains: 'rust;omp'
       # mmvec compiles its objective once per instruction set and picks the widest
@@ -52,13 +64,13 @@ jobs:
       # or tag. The reusable workflow keys each arch's ccache with a timestamp,
       # so saving on PRs writes up to 3 fresh ~1G caches per run into the
       # shared 10G repo budget, LRU-evicting the good caches seeded by
-      # main/v1.5-variegata. PRs now ride the base-branch cache read-only.
+      # the tracked branches. PRs now ride the base-branch cache read-only.
       save_cache: ${{ github.event_name != 'pull_request' }}
       # Always exclude: windows MSVC (broken), windows_amd64_rtools (broken),
       # osx_amd64 (Intel mac, sunsetting), wasm_mvp + wasm_threads (we only
       # ship wasm_eh).
       # On pull_request also exclude windows_amd64_mingw and wasm_eh — Windows
-      # and WASM build/verify only on push to main/v1.5-variegata/tags so
+      # and WASM build/verify only on push to a tracked branch or tag so
       # release candidates still cover them, while PRs only pay for Linux + macOS.
       # WASM (wasm_eh) is an expensive build, so it runs ONLY on tag pushes —
       # excluded on branch pushes and PRs. Windows (all variants) + osx_amd64 +
@@ -183,7 +195,22 @@ jobs:
         shell: bash -el {0}
         run: bash run_tests.sh
 
+      # The tutorials load the extension from the duckdb Python package, which must be
+      # the exact DuckDB the extension was built against. A development build (e.g.
+      # 2.0.0-dev86580, before DuckDB v2.0 is tagged) has no matching wheel on PyPI,
+      # so the tutorial tests are skipped -- with a warning, not silently -- until the
+      # duckdb submodule is on a release tag.
+      - name: Resolve DuckDB version for tutorial tests
+        id: duckdb_py
+        run: |
+          v=$(./build/release/duckdb -csv -noheader -c "SELECT ltrim(version(), 'v');")
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          case "$v" in
+            *-dev*) echo "::warning::Tutorial tests skipped: DuckDB $v is a development build with no matching duckdb wheel on PyPI." ;;
+          esac
+
       - name: Install tutorial test dependencies
+        if: ${{ !contains(steps.duckdb_py.outputs.version, '-dev') }}
         shell: bash -el {0}
         # Pin BOTH install and runtime to `/usr/bin/python3` (system Python
         # 3.12). Under `shell: bash -el {0}`, conda-incubator/setup-miniconda
@@ -198,6 +225,7 @@ jobs:
         run: /usr/bin/python3 -m pip install --user duckdb==$(./build/release/duckdb -csv -noheader -c "SELECT ltrim(version(), 'v');") pyarrow pandas matplotlib
 
       - name: Run tutorial tests
+        if: ${{ !contains(steps.duckdb_py.outputs.version, '-dev') }}
         shell: bash -el {0}
         run: PYTHON=/usr/bin/python3 bash onboarding-tutorials/run_tutorial_tests.sh ./build/release/duckdb
 
@@ -352,10 +380,11 @@ jobs:
 
   code-quality-check:
     name: Code Quality Check
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@v1.5-variegata
+    needs: duckdb-submodule-version
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@v2.0-cyanoptera
     with:
-      duckdb_version: v1.5.5
-      ci_tools_version: v1.5-variegata
+      duckdb_version: ${{ needs.duckdb-submodule-version.outputs.version }}
+      ci_tools_version: v2.0-cyanoptera
       extension_name: miint
       format_checks: 'format;tidy'
 

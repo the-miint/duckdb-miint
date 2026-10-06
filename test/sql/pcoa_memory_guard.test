@@ -19,7 +19,7 @@ FROM range(1000) a(i) JOIN range(1000) b(i) ON a.i < b.i;
 # would fail before the guard was ever reached. A temp directory makes those pages
 # spillable, leaving the limit to be spent on the guard's subject: the dense matrix.
 statement ok
-SET temp_directory='__TEST_DIR__/pcoa_guard_spill';
+SET temp_directory='{TEST_DIR}/pcoa_guard_spill';
 
 # threads=1 keeps the id-enumeration pass's own (buffer-manager tracked) working
 # set small rather than per-thread scan buffers.

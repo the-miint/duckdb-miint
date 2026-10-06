@@ -66,6 +66,7 @@ public:
 	unique_ptr<BaseStatistics> GetStatistics(ClientContext &context, column_t column_id) override;
 	TableFunction GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) override;
 	TableStorageInfo GetStorageInfo(ClientContext &context) override;
+	const ColumnList &GetColumns() const override;
 	// Submittable ENA tables (the four object kinds + analyses) expose no
 	// row identifier — DELETE dispatches through PlanDelete by inspecting
 	// the WHERE predicate directly. The default `[ROW_ID]` would project
@@ -86,6 +87,7 @@ public:
 
 private:
 	ENATableKind kind;
+	ColumnList columns;
 };
 
 class ENASchemaEntry : public SchemaCatalogEntry {
@@ -201,10 +203,6 @@ public:
 	string GetCatalogType() override {
 		return "ena";
 	}
-	string GetDefaultSchema() const override {
-		return "main";
-	}
-
 	optional_ptr<CatalogEntry> CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) override;
 	optional_ptr<SchemaCatalogEntry> LookupSchema(CatalogTransaction transaction, const EntryLookupInfo &schema_lookup,
 	                                              OnEntryNotFound if_not_found) override;
@@ -220,6 +218,10 @@ public:
 	// to physical. Routes the delete into the ENA lifecycle CANCEL path
 	// without ever materialising the LogicalGet child.
 	PhysicalOperator &PlanDelete(ClientContext &context, PhysicalPlanGenerator &planner, LogicalDelete &op) override;
+	// DuckDB v2.0 plans MERGE INTO / INSERT ... ON CONFLICT through PlanInsert/PlanDelete by default; ENA tables
+	// cannot be scanned to match rows, so keep v1.5's plan-time rejection, verbatim.
+	PhysicalOperator &PlanMergeInto(ClientContext &context, PhysicalPlanGenerator &planner, LogicalMergeInto &op,
+	                                PhysicalOperator &plan) override;
 	PhysicalOperator &PlanUpdate(ClientContext &context, PhysicalPlanGenerator &planner, LogicalUpdate &op,
 	                             PhysicalOperator &plan) override;
 

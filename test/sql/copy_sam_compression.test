@@ -25,7 +25,7 @@ CREATE TABLE ref_table_single AS SELECT 'G1234' AS name, 20 AS length;
 ## Test 1: zstd compression with .zst extension (auto-detect) - TEMPORARILY DISABLED
 ## TODO: Re-enable when zstd support is fixed
 #statement error
-#COPY sam_test TO '__TEST_DIR__/output_zstd.sam.zst' 
+#COPY sam_test TO '{TEST_DIR}/output_zstd.sam.zst' 
 #(FORMAT SAM, REFERENCE_LENGTHS MAP{'G1234': 20, 'G000144735': 90});
 #----
 #zstd compression
@@ -33,7 +33,7 @@ CREATE TABLE ref_table_single AS SELECT 'G1234' AS name, 20 AS length;
 ## Test 2: Explicit COMPRESSION='zstd' - TEMPORARILY DISABLED
 ## TODO: Re-enable when zstd support is fixed
 #statement error
-#COPY sam_test TO '__TEST_DIR__/output_explicit_zstd.sam' 
+#COPY sam_test TO '{TEST_DIR}/output_explicit_zstd.sam' 
 #(FORMAT SAM, COMPRESSION 'zstd', REFERENCE_LENGTHS MAP{'G1234': 20, 'G000144735': 90});
 #----
 #zstd compression
@@ -41,24 +41,24 @@ CREATE TABLE ref_table_single AS SELECT 'G1234' AS name, 20 AS length;
 ## Test 3: Explicit COMPRESSION='zst' (alternative name) - TEMPORARILY DISABLED
 ## TODO: Re-enable when zstd support is fixed
 #statement error
-#COPY sam_test TO '__TEST_DIR__/output_zst.sam' 
+#COPY sam_test TO '{TEST_DIR}/output_zst.sam' 
 #(FORMAT SAM, COMPRESSION 'zst', REFERENCE_LENGTHS MAP{'G1234': 20, 'G000144735': 90});
 #----
 #zstd compression
 
 # Test 4: Explicit COMPRESSION='gzip'
 statement ok
-COPY sam_test TO '__TEST_DIR__/output_explicit_gzip.sam' 
+COPY sam_test TO '{TEST_DIR}/output_explicit_gzip.sam' 
 (FORMAT SAM, COMPRESSION 'gzip', REFERENCE_LENGTHS 'ref_table');
 
 query I
-SELECT COUNT(*) FROM read_sam('__TEST_DIR__/output_explicit_gzip.sam');
+SELECT COUNT(*) FROM read_sam('{TEST_DIR}/output_explicit_gzip.sam');
 ----
 4
 
 query IIIII
 SELECT read_id, flags, reference, position, mapq 
-FROM read_sam('__TEST_DIR__/output_explicit_gzip.sam') ORDER BY read_id, position;
+FROM read_sam('{TEST_DIR}/output_explicit_gzip.sam') ORDER BY read_id, position;
 ----
 foo-1	0	G1234	2	60
 foo-2	0	G1234	2	60
@@ -67,12 +67,12 @@ foo-3	147	G000144735	76146	1
 
 # Test 5: Explicit COMPRESSION='gz' (alternative name)
 statement ok
-COPY sam_test TO '__TEST_DIR__/output_gz.sam' 
+COPY sam_test TO '{TEST_DIR}/output_gz.sam' 
 (FORMAT SAM, COMPRESSION 'gz', REFERENCE_LENGTHS 'ref_table');
 
 query IIIII
 SELECT read_id, flags, reference, position, mapq 
-FROM read_sam('__TEST_DIR__/output_gz.sam') ORDER BY read_id, position;
+FROM read_sam('{TEST_DIR}/output_gz.sam') ORDER BY read_id, position;
 ----
 foo-1	0	G1234	2	60
 foo-2	0	G1234	2	60
@@ -81,18 +81,18 @@ foo-3	147	G000144735	76146	1
 
 # Test 6: Explicit COMPRESSION='none' (overrides .gz extension)
 statement ok
-COPY sam_test TO '__TEST_DIR__/output_uncompressed.sam.gz' 
+COPY sam_test TO '{TEST_DIR}/output_uncompressed.sam.gz' 
 (FORMAT SAM, COMPRESSION 'none', REFERENCE_LENGTHS 'ref_table');
 
 query I
-SELECT COUNT(*) FROM read_sam('__TEST_DIR__/output_uncompressed.sam.gz');
+SELECT COUNT(*) FROM read_sam('{TEST_DIR}/output_uncompressed.sam.gz');
 ----
 4
 
 ## Test 7: zstd with INCLUDE_HEADER=false - TEMPORARILY DISABLED
 ## TODO: Re-enable when zstd support is fixed
 #statement error
-#COPY sam_test TO '__TEST_DIR__/no_header_zstd.sam.zst' 
+#COPY sam_test TO '{TEST_DIR}/no_header_zstd.sam.zst' 
 #(FORMAT SAM, INCLUDE_HEADER false);
 #----
 #zstd compression
@@ -100,7 +100,7 @@ SELECT COUNT(*) FROM read_sam('__TEST_DIR__/output_uncompressed.sam.gz');
 ## Test 8: zstd with tags preserved - TEMPORARILY DISABLED
 ## TODO: Re-enable when zstd support is fixed
 #statement error
-#COPY sam_tags_test TO '__TEST_DIR__/with_tags_zstd.sam.zst' 
+#COPY sam_tags_test TO '{TEST_DIR}/with_tags_zstd.sam.zst' 
 #(FORMAT SAM, REFERENCE_LENGTHS MAP{'G1234': 1000, 'G000144735': 100000});
 #----
 #zstd compression
@@ -108,7 +108,7 @@ SELECT COUNT(*) FROM read_sam('__TEST_DIR__/output_uncompressed.sam.gz');
 ## Test 9: Case-insensitive compression option - TEMPORARILY DISABLED
 ## TODO: Re-enable when zstd support is fixed
 #statement error
-#COPY sam_test TO '__TEST_DIR__/output_case.sam' 
+#COPY sam_test TO '{TEST_DIR}/output_case.sam' 
 #(FORMAT SAM, COMPRESSION 'ZSTD', REFERENCE_LENGTHS MAP{'G1234': 20, 'G000144735': 90});
 #----
 #zstd compression
@@ -116,31 +116,31 @@ SELECT COUNT(*) FROM read_sam('__TEST_DIR__/output_uncompressed.sam.gz');
 ## Test 10: Verify header preservation with compression - TEMPORARILY DISABLED
 ## TODO: Re-enable when zstd support is fixed
 #statement error
-#COPY sam_test TO '__TEST_DIR__/header_check.sam.zst' 
+#COPY sam_test TO '{TEST_DIR}/header_check.sam.zst' 
 #(FORMAT SAM, INCLUDE_HEADER true, REFERENCE_LENGTHS MAP{'G1234': 20, 'G000144735': 90});
 #----
 #zstd compression
 
 # Test 12: Error - invalid compression type
 statement error
-COPY sam_test TO '__TEST_DIR__/error.sam' 
+COPY sam_test TO '{TEST_DIR}/error.sam' 
 (FORMAT SAM, COMPRESSION 'invalid', REFERENCE_LENGTHS 'ref_table_single');
 ----
 Binder Error: Unknown compression type for COPY FORMAT SAM: invalid (supported: gzip, none)
 
 # Test 13: Verify gzip backward compatibility (existing .gz auto-detect still works)
 statement ok
-COPY sam_test TO '__TEST_DIR__/backward_compat.sam.gz' 
+COPY sam_test TO '{TEST_DIR}/backward_compat.sam.gz' 
 (FORMAT SAM, REFERENCE_LENGTHS 'ref_table');
 
 query I
-SELECT COUNT(*) FROM read_sam('__TEST_DIR__/backward_compat.sam.gz');
+SELECT COUNT(*) FROM read_sam('{TEST_DIR}/backward_compat.sam.gz');
 ----
 4
 
 query IIIII
 SELECT read_id, flags, reference, position, mapq 
-FROM read_sam('__TEST_DIR__/backward_compat.sam.gz') ORDER BY read_id, position;
+FROM read_sam('{TEST_DIR}/backward_compat.sam.gz') ORDER BY read_id, position;
 ----
 foo-1	0	G1234	2	60
 foo-2	0	G1234	2	60

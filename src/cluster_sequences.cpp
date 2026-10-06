@@ -6,8 +6,11 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 
 #include <algorithm>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -32,7 +35,7 @@ static idx_t OutputClusterResults(DataChunk &output, const std::vector<miint::Cl
                                   idx_t count, const LogicalType &id_type) {
 	idx_t actual = std::min(count, static_cast<idx_t>(results.size()) - offset);
 	if (actual == 0) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return 0;
 	}
 
@@ -43,12 +46,12 @@ static idx_t OutputClusterResults(DataChunk &output, const std::vector<miint::Cl
 		EmitIdCell(read_id_vec, i, results[offset + i].read_id, id_type);
 	}
 
-	auto is_centroid_data = FlatVector::GetData<bool>(output.data[col++]);
+	auto is_centroid_data = FlatVector::GetDataMutable<bool>(output.data[col++]);
 	for (idx_t i = 0; i < actual; i++) {
 		is_centroid_data[i] = results[offset + i].is_centroid;
 	}
 
-	auto cluster_id_data = FlatVector::GetData<int32_t>(output.data[col++]);
+	auto cluster_id_data = FlatVector::GetDataMutable<int32_t>(output.data[col++]);
 	for (idx_t i = 0; i < actual; i++) {
 		cluster_id_data[i] = results[offset + i].cluster_id;
 	}
@@ -58,29 +61,30 @@ static idx_t OutputClusterResults(DataChunk &output, const std::vector<miint::Cl
 		EmitIdCell(centroid_id_vec, i, results[offset + i].centroid_id, id_type);
 	}
 
-	auto identity_data = FlatVector::GetData<double>(output.data[col++]);
+	auto identity_data = FlatVector::GetDataMutable<double>(output.data[col++]);
 	for (idx_t i = 0; i < actual; i++) {
 		identity_data[i] = results[offset + i].identity;
 	}
 
 	auto &cigar_vec = output.data[col++];
 	for (idx_t i = 0; i < actual; i++) {
-		FlatVector::GetData<string_t>(cigar_vec)[i] = StringVector::AddString(cigar_vec, results[offset + i].cigar);
+		FlatVector::GetDataMutable<string_t>(cigar_vec)[i] =
+		    StringVector::AddString(cigar_vec, results[offset + i].cigar);
 	}
 
-	auto cigar_trunc_data = FlatVector::GetData<bool>(output.data[col++]);
+	auto cigar_trunc_data = FlatVector::GetDataMutable<bool>(output.data[col++]);
 	for (idx_t i = 0; i < actual; i++) {
 		cigar_trunc_data[i] = results[offset + i].cigar_truncated;
 	}
 
 	D_ASSERT(col == output.ColumnCount());
-	output.SetCardinality(actual);
+	output.SetChildCardinality(actual);
 	return actual;
 }
 
 unique_ptr<FunctionData> ClusterSequencesTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                              vector<LogicalType> &return_types,
-                                                             vector<std::string> &names) {
+                                                             vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 
 	data->input_table = input.inputs[0].GetValue<std::string>();
@@ -117,7 +121,7 @@ unique_ptr<FunctionData> ClusterSequencesTableFunction::Bind(ClientContext &cont
 	}
 
 	auto get_int = [&](const std::string &name, int &out, int min_val, int max_val, const char *constraint) {
-		auto it = input.named_parameters.find(name);
+		auto it = input.named_parameters.find(Identifier(name));
 		if (it != input.named_parameters.end()) {
 			out = it->second.GetValue<int>();
 			if (out < min_val || out > max_val) {
@@ -136,7 +140,7 @@ unique_ptr<FunctionData> ClusterSequencesTableFunction::Bind(ClientContext &cont
 	data->names = GetClusterOutputNames();
 	data->types = GetClusterOutputTypes(data->id_type);
 	for (auto &n : data->names) {
-		names.push_back(n);
+		names.emplace_back(n);
 	}
 	for (auto &t : data->types) {
 		return_types.push_back(t);
@@ -168,7 +172,7 @@ void ClusterSequencesTableFunction::Execute(ClientContext &context, TableFunctio
 	auto &gstate = data_p.global_state->Cast<GlobalState>();
 
 	if (gstate.result_offset >= gstate.results.size()) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
@@ -181,9 +185,9 @@ void ClusterSequencesTableFunction::Execute(ClientContext &context, TableFunctio
 TableFunction ClusterSequencesTableFunction::GetFunction() {
 	auto tf = TableFunction("cluster_sequences_vsearch", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal);
 
-	tf.named_parameters["id"] = LogicalType::DOUBLE;
-	tf.named_parameters["strand"] = LogicalType::VARCHAR;
-	tf.named_parameters["threads"] = LogicalType::INTEGER;
+	AddNamedParameter(tf, "id", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "strand", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "threads", LogicalType::INTEGER);
 
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 

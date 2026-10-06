@@ -9,40 +9,40 @@ statement ok
 CREATE TABLE test_single AS SELECT * FROM read_fastx('data/fastq/small_a.fq');
 
 statement ok
-COPY (SELECT read_id, comment, sequence1, qual1 FROM test_single ORDER BY sequence_index) TO '__TEST_DIR__/output1.fq' (FORMAT FASTQ, QUAL_OFFSET 33);
+COPY (SELECT read_id, comment, sequence1, qual1 FROM test_single ORDER BY sequence_index) TO '{TEST_DIR}/output1.fq' (FORMAT FASTQ, QUAL_OFFSET 33);
 
 query IIIII
-SELECT sequence_index, read_id, sequence1, qual1, comment FROM read_fastx('__TEST_DIR__/output1.fq') ORDER BY sequence_index;
+SELECT sequence_index, read_id, sequence1, qual1, comment FROM read_fastx('{TEST_DIR}/output1.fq') ORDER BY sequence_index;
 ----
 1	read_a1	AAAA	[40, 40, 40, 40]	NULL
 2	read_a2	TTTT	[39, 39, 39, 39]	NULL
 
 # Test 2: Single-end with ID_AS_SEQUENCE_INDEX
 statement ok
-COPY (SELECT sequence_index, read_id, comment, sequence1, qual1 FROM test_single ORDER BY sequence_index) TO '__TEST_DIR__/output2.fq' (FORMAT FASTQ, ID_AS_SEQUENCE_INDEX true, QUAL_OFFSET 33);
+COPY (SELECT sequence_index, read_id, comment, sequence1, qual1 FROM test_single ORDER BY sequence_index) TO '{TEST_DIR}/output2.fq' (FORMAT FASTQ, ID_AS_SEQUENCE_INDEX true, QUAL_OFFSET 33);
 
 query IIIII
-SELECT sequence_index, read_id, sequence1, qual1, comment FROM read_fastx('__TEST_DIR__/output2.fq') ORDER BY sequence_index;
+SELECT sequence_index, read_id, sequence1, qual1, comment FROM read_fastx('{TEST_DIR}/output2.fq') ORDER BY sequence_index;
 ----
 1	1	AAAA	[40, 40, 40, 40]	NULL
 2	2	TTTT	[39, 39, 39, 39]	NULL
 
 # Test 3: Single-end with QUAL_OFFSET 64
 statement ok
-COPY (SELECT read_id, comment, sequence1, qual1 FROM test_single ORDER BY sequence_index) TO '__TEST_DIR__/output3.fq' (FORMAT FASTQ, QUAL_OFFSET 64);
+COPY (SELECT read_id, comment, sequence1, qual1 FROM test_single ORDER BY sequence_index) TO '{TEST_DIR}/output3.fq' (FORMAT FASTQ, QUAL_OFFSET 64);
 
 query IIIII
-SELECT sequence_index, read_id, sequence1, qual1, comment FROM read_fastx('__TEST_DIR__/output3.fq', qual_offset=64) ORDER BY sequence_index;
+SELECT sequence_index, read_id, sequence1, qual1, comment FROM read_fastx('{TEST_DIR}/output3.fq', qual_offset=64) ORDER BY sequence_index;
 ----
 1	read_a1	AAAA	[40, 40, 40, 40]	NULL
 2	read_a2	TTTT	[39, 39, 39, 39]	NULL
 
 # Test 4: Single-end with compression
 statement ok
-COPY (SELECT read_id, comment, sequence1, qual1 FROM test_single ORDER BY sequence_index) TO '__TEST_DIR__/output4.fq.gz' (FORMAT FASTQ);
+COPY (SELECT read_id, comment, sequence1, qual1 FROM test_single ORDER BY sequence_index) TO '{TEST_DIR}/output4.fq.gz' (FORMAT FASTQ);
 
 query IIIII
-SELECT sequence_index, read_id, sequence1, qual1, comment FROM read_fastx('__TEST_DIR__/output4.fq.gz') ORDER BY sequence_index;
+SELECT sequence_index, read_id, sequence1, qual1, comment FROM read_fastx('{TEST_DIR}/output4.fq.gz') ORDER BY sequence_index;
 ----
 1	read_a1	AAAA	[40, 40, 40, 40]	NULL
 2	read_a2	TTTT	[39, 39, 39, 39]	NULL
@@ -52,30 +52,30 @@ statement ok
 CREATE TABLE test_paired AS SELECT * FROM read_fastx('data/fastq/small_a_r1.fq', sequence2='data/fastq/small_a_r2.fq');
 
 statement ok
-COPY (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM test_paired ORDER BY sequence_index) TO '__TEST_DIR__/output5.fq' (FORMAT FASTQ, INTERLEAVE true);
+COPY (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM test_paired ORDER BY sequence_index) TO '{TEST_DIR}/output5.fq' (FORMAT FASTQ, INTERLEAVE true);
 
 # Interleaved format means both R1 and R2 are in the same file, so we read as single-end and should get 2 records
 query III
-SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/output5.fq') ORDER BY sequence_index;
+SELECT read_id, sequence1, qual1 FROM read_fastx('{TEST_DIR}/output5.fq') ORDER BY sequence_index;
 ----
 pair_a1	AAAA	[40, 40, 40, 40]
 pair_a1	TTTT	[39, 39, 39, 39]
 
 # Test 6: Paired-end split (R1/R2)
 statement ok
-COPY (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM test_paired ORDER BY sequence_index) TO '__TEST_DIR__/output6.{ORIENTATION}.fq' (FORMAT FASTQ, INTERLEAVE false);
+COPY (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM test_paired ORDER BY sequence_index) TO '{TEST_DIR}/output6.{ORIENTATION}.fq' (FORMAT FASTQ, INTERLEAVE false);
 
 query IIIIIII
-SELECT sequence_index, read_id, sequence1, sequence2, qual1, qual2, comment FROM read_fastx('__TEST_DIR__/output6.R1.fq', sequence2='__TEST_DIR__/output6.R2.fq') ORDER BY sequence_index;
+SELECT sequence_index, read_id, sequence1, sequence2, qual1, qual2, comment FROM read_fastx('{TEST_DIR}/output6.R1.fq', sequence2='{TEST_DIR}/output6.R2.fq') ORDER BY sequence_index;
 ----
 1	pair_a1	AAAA	TTTT	[40, 40, 40, 40]	[39, 39, 39, 39]	NULL
 
 # Test 7: Paired-end split with compression
 statement ok
-COPY (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM test_paired ORDER BY sequence_index) TO '__TEST_DIR__/output7.{ORIENTATION}.fq.gz' (FORMAT FASTQ, INTERLEAVE false, COMPRESSION gzip);
+COPY (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM test_paired ORDER BY sequence_index) TO '{TEST_DIR}/output7.{ORIENTATION}.fq.gz' (FORMAT FASTQ, INTERLEAVE false, COMPRESSION gzip);
 
 query IIIIIII
-SELECT sequence_index, read_id, sequence1, sequence2, qual1, qual2, comment FROM read_fastx('__TEST_DIR__/output7.R1.fq.gz', sequence2='__TEST_DIR__/output7.R2.fq.gz') ORDER BY sequence_index;
+SELECT sequence_index, read_id, sequence1, sequence2, qual1, qual2, comment FROM read_fastx('{TEST_DIR}/output7.R1.fq.gz', sequence2='{TEST_DIR}/output7.R2.fq.gz') ORDER BY sequence_index;
 ----
 1	pair_a1	AAAA	TTTT	[40, 40, 40, 40]	[39, 39, 39, 39]	NULL
 
@@ -84,64 +84,64 @@ statement ok
 CREATE TABLE test_with_comment AS SELECT sequence_index, read_id, 'test comment' as comment, sequence1, qual1 FROM test_single WHERE sequence_index = 1;
 
 statement ok
-COPY (SELECT read_id, comment, sequence1, qual1 FROM test_with_comment) TO '__TEST_DIR__/output8.fq' (FORMAT FASTQ, INCLUDE_COMMENT true);
+COPY (SELECT read_id, comment, sequence1, qual1 FROM test_with_comment) TO '{TEST_DIR}/output8.fq' (FORMAT FASTQ, INCLUDE_COMMENT true);
 
 query IIIII
-SELECT sequence_index, read_id, sequence1, qual1, comment FROM read_fastx('__TEST_DIR__/output8.fq') ORDER BY sequence_index;
+SELECT sequence_index, read_id, sequence1, qual1, comment FROM read_fastx('{TEST_DIR}/output8.fq') ORDER BY sequence_index;
 ----
 1	read_a1	AAAA	[40, 40, 40, 40]	test comment
 
 # Test 9: Error - missing required column (read_id)
 statement error
-COPY (SELECT sequence1, qual1 FROM test_single) TO '__TEST_DIR__/error1.fq' (FORMAT FASTQ);
+COPY (SELECT sequence1, qual1 FROM test_single) TO '{TEST_DIR}/error1.fq' (FORMAT FASTQ);
 ----
 COPY FORMAT FASTQ requires 'read_id' column
 
 # Test 10: Error - missing required column (sequence1)
 statement error
-COPY (SELECT read_id, qual1 FROM test_single) TO '__TEST_DIR__/error2.fq' (FORMAT FASTQ);
+COPY (SELECT read_id, qual1 FROM test_single) TO '{TEST_DIR}/error2.fq' (FORMAT FASTQ);
 ----
 COPY FORMAT FASTQ requires 'sequence1' column
 
 # Test 11: Error - missing required column (qual1)
 statement error
-COPY (SELECT read_id, sequence1 FROM test_single) TO '__TEST_DIR__/error3.fq' (FORMAT FASTQ);
+COPY (SELECT read_id, sequence1 FROM test_single) TO '{TEST_DIR}/error3.fq' (FORMAT FASTQ);
 ----
 COPY FORMAT FASTQ requires 'qual1' column
 
 # Test 12: Error - genuinely paired data sent to a single-file path
 # (no {ORIENTATION} to split into, INTERLEAVE not requested) -> fail loud with guidance
 statement error
-COPY (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM test_paired) TO '__TEST_DIR__/error4.fq' (FORMAT FASTQ);
+COPY (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM test_paired) TO '{TEST_DIR}/error4.fq' (FORMAT FASTQ);
 ----
 Use the {ORIENTATION} placeholder
 
 # Test 13: Error - explicit INTERLEAVE=false but no {ORIENTATION} for genuinely paired data.
 # INTERLEAVE=false is the default (single file); split output needs an {ORIENTATION} target.
 statement error
-COPY (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM test_paired) TO '__TEST_DIR__/error5.fq' (FORMAT FASTQ, INTERLEAVE false);
+COPY (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM test_paired) TO '{TEST_DIR}/error5.fq' (FORMAT FASTQ, INTERLEAVE false);
 ----
 Use the {ORIENTATION} placeholder
 
 # Test 14: Single-end data (no sequence2/qual2 columns) + {ORIENTATION} now writes the R1 file only.
 statement ok
-COPY (SELECT read_id, comment, sequence1, qual1 FROM test_single ORDER BY sequence_index) TO '__TEST_DIR__/output14.{ORIENTATION}.fq' (FORMAT FASTQ);
+COPY (SELECT read_id, comment, sequence1, qual1 FROM test_single ORDER BY sequence_index) TO '{TEST_DIR}/output14.{ORIENTATION}.fq' (FORMAT FASTQ);
 
 query III
-SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/output14.R1.fq') ORDER BY sequence_index;
+SELECT read_id, sequence1, qual1 FROM read_fastx('{TEST_DIR}/output14.R1.fq') ORDER BY sequence_index;
 ----
 read_a1	AAAA	[40, 40, 40, 40]
 read_a2	TTTT	[39, 39, 39, 39]
 
 # Test 15: Error - ID_AS_SEQUENCE_INDEX without sequence_index column
 statement error
-COPY (SELECT read_id, comment, sequence1, qual1 FROM test_single) TO '__TEST_DIR__/error7.fq' (FORMAT FASTQ, ID_AS_SEQUENCE_INDEX true);
+COPY (SELECT read_id, comment, sequence1, qual1 FROM test_single) TO '{TEST_DIR}/error7.fq' (FORMAT FASTQ, ID_AS_SEQUENCE_INDEX true);
 ----
 ID_AS_SEQUENCE_INDEX=true requires 'sequence_index' column
 
 # Test 16: Error - invalid QUAL_OFFSET
 statement error
-COPY (SELECT read_id, comment, sequence1, qual1 FROM test_single) TO '__TEST_DIR__/error8.fq' (FORMAT FASTQ, QUAL_OFFSET 100);
+COPY (SELECT read_id, comment, sequence1, qual1 FROM test_single) TO '{TEST_DIR}/error8.fq' (FORMAT FASTQ, QUAL_OFFSET 100);
 ----
 QUAL_OFFSET must be 33 or 64
 
@@ -151,15 +151,15 @@ statement ok
 CREATE TABLE test_multi AS SELECT * FROM read_fastx(['data/fastq/small_a.fq', 'data/fastq/small_b.fq'], include_filepath=true);
 
 statement ok
-COPY (SELECT read_id, comment, sequence1, qual1 FROM test_multi ORDER BY filepath, sequence_index) TO '__TEST_DIR__/output_multi.fq' (FORMAT FASTQ);
+COPY (SELECT read_id, comment, sequence1, qual1 FROM test_multi ORDER BY filepath, sequence_index) TO '{TEST_DIR}/output_multi.fq' (FORMAT FASTQ);
 
 query I
-SELECT COUNT(*) FROM read_fastx('__TEST_DIR__/output_multi.fq');
+SELECT COUNT(*) FROM read_fastx('{TEST_DIR}/output_multi.fq');
 ----
 4
 
 query III
-SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/output_multi.fq') ORDER BY sequence_index;
+SELECT read_id, sequence1, qual1 FROM read_fastx('{TEST_DIR}/output_multi.fq') ORDER BY sequence_index;
 ----
 read_a1	AAAA	[40, 40, 40, 40]
 read_a2	TTTT	[39, 39, 39, 39]
@@ -169,42 +169,42 @@ read_b2	CCCC	[37, 37, 37, 37]
 # Test 18: Problem #1 - SELECT * from single-end read_fastx carries sequence2/qual2 columns
 # (filled with NULL). Writing to a plain path must produce a single-end file, not error.
 statement ok
-COPY (SELECT * FROM test_single ORDER BY sequence_index) TO '__TEST_DIR__/p1_single.fastq' (FORMAT FASTQ);
+COPY (SELECT * FROM test_single ORDER BY sequence_index) TO '{TEST_DIR}/p1_single.fastq' (FORMAT FASTQ);
 
 query III
-SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/p1_single.fastq') ORDER BY sequence_index;
+SELECT read_id, sequence1, qual1 FROM read_fastx('{TEST_DIR}/p1_single.fastq') ORDER BY sequence_index;
 ----
 read_a1	AAAA	[40, 40, 40, 40]
 read_a2	TTTT	[39, 39, 39, 39]
 
 # Test 19: Problem #2 - paired data + {ORIENTATION} with NO INTERLEAVE parameter -> split R1/R2.
 statement ok
-COPY (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM test_paired ORDER BY sequence_index) TO '__TEST_DIR__/p2.{ORIENTATION}.fq' (FORMAT FASTQ);
+COPY (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM test_paired ORDER BY sequence_index) TO '{TEST_DIR}/p2.{ORIENTATION}.fq' (FORMAT FASTQ);
 
 query IIIIII
-SELECT sequence_index, read_id, sequence1, sequence2, qual1, qual2 FROM read_fastx('__TEST_DIR__/p2.R1.fq', sequence2='__TEST_DIR__/p2.R2.fq') ORDER BY sequence_index;
+SELECT sequence_index, read_id, sequence1, sequence2, qual1, qual2 FROM read_fastx('{TEST_DIR}/p2.R1.fq', sequence2='{TEST_DIR}/p2.R2.fq') ORDER BY sequence_index;
 ----
 1	pair_a1	AAAA	TTTT	[40, 40, 40, 40]	[39, 39, 39, 39]
 
 # Test 20: Headline example - SELECT * from single-end (NULL sequence2/qual2) + {ORIENTATION} + gzip.
 # Must write a single R1 file and NOT create an R2 file.
 statement ok
-COPY (SELECT * FROM test_single ORDER BY sequence_index) TO '__TEST_DIR__/headline.{ORIENTATION}.fastq.gz' (FORMAT FASTQ, COMPRESSION gzip);
+COPY (SELECT * FROM test_single ORDER BY sequence_index) TO '{TEST_DIR}/headline.{ORIENTATION}.fastq.gz' (FORMAT FASTQ, COMPRESSION gzip);
 
 query III
-SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/headline.R1.fastq.gz') ORDER BY sequence_index;
+SELECT read_id, sequence1, qual1 FROM read_fastx('{TEST_DIR}/headline.R1.fastq.gz') ORDER BY sequence_index;
 ----
 read_a1	AAAA	[40, 40, 40, 40]
 read_a2	TTTT	[39, 39, 39, 39]
 
 # The R2 file must not have been created (single-end data).
 statement error
-SELECT * FROM read_fastx('__TEST_DIR__/headline.R2.fastq.gz');
+SELECT * FROM read_fastx('{TEST_DIR}/headline.R2.fastq.gz');
 ----
 
 # Test 21: Contradiction - {ORIENTATION} placeholder combined with INTERLEAVE=true.
 statement error
-COPY (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM test_paired) TO '__TEST_DIR__/contradiction.{ORIENTATION}.fq' (FORMAT FASTQ, INTERLEAVE true);
+COPY (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM test_paired) TO '{TEST_DIR}/contradiction.{ORIENTATION}.fq' (FORMAT FASTQ, INTERLEAVE true);
 ----
 Cannot combine the {ORIENTATION} placeholder with INTERLEAVE=true
 
@@ -214,7 +214,7 @@ COPY (
   SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM test_paired
   UNION ALL
   SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM test_single
-) TO '__TEST_DIR__/mixed.{ORIENTATION}.fq' (FORMAT FASTQ);
+) TO '{TEST_DIR}/mixed.{ORIENTATION}.fq' (FORMAT FASTQ);
 ----
 Inconsistent paired-end data
 
@@ -223,7 +223,7 @@ statement error
 COPY (
   SELECT read_id, comment, sequence1, 'TTTT'::VARCHAR AS sequence2, qual1, NULL::UTINYINT[] AS qual2
   FROM test_single WHERE sequence_index = 1
-) TO '__TEST_DIR__/xor.{ORIENTATION}.fq' (FORMAT FASTQ);
+) TO '{TEST_DIR}/xor.{ORIENTATION}.fq' (FORMAT FASTQ);
 ----
 must both be set
 
@@ -252,7 +252,7 @@ SELECT typeof(qual1) FROM qual_int_list;
 INTEGER[]
 
 statement error
-COPY qual_int_list TO '__TEST_DIR__/qual_int.fq' (FORMAT FASTQ);
+COPY qual_int_list TO '{TEST_DIR}/qual_int.fq' (FORMAT FASTQ);
 ----
 qual1
 
@@ -272,7 +272,7 @@ SELECT 'r1' AS read_id, 'ACGTACGT' AS sequence1,
        'ACGTACGT' AS sequence2, [40 for _ in range(8)] AS qual2;
 
 statement error
-COPY qual2_int_list TO '__TEST_DIR__/qual2_int.{ORIENTATION}.fq' (FORMAT FASTQ);
+COPY qual2_int_list TO '{TEST_DIR}/qual2_int.{ORIENTATION}.fq' (FORMAT FASTQ);
 ----
 qual2
 
@@ -288,7 +288,7 @@ CREATE TABLE bad_seq1 AS
 SELECT 'r1' AS read_id, 12345678 AS sequence1, [40 for _ in range(8)]::UTINYINT[] AS qual1;
 
 statement error
-COPY bad_seq1 TO '__TEST_DIR__/bad_seq1.fq' (FORMAT FASTQ);
+COPY bad_seq1 TO '{TEST_DIR}/bad_seq1.fq' (FORMAT FASTQ);
 ----
 sequence1
 
@@ -307,7 +307,7 @@ DROP TABLE bad_seq1;
 statement error
 COPY (
   SELECT 'r1' AS read_id, 'ACGT' AS sequence1, [40,40,40,40]::UTINYINT[4] AS qual1
-) TO '__TEST_DIR__/qual_array.fq' (FORMAT FASTQ);
+) TO '{TEST_DIR}/qual_array.fq' (FORMAT FASTQ);
 ----
 qual1
 
@@ -326,7 +326,7 @@ statement error
 COPY (
   SELECT 'r1' AS read_id, 'ACGT' AS sequence1, [40,40,40,40]::UTINYINT[] AS qual1,
          7::INTEGER AS sequence_index
-) TO '__TEST_DIR__/si_used.fq' (FORMAT FASTQ, ID_AS_SEQUENCE_INDEX true);
+) TO '{TEST_DIR}/si_used.fq' (FORMAT FASTQ, ID_AS_SEQUENCE_INDEX true);
 ----
 sequence_index
 
@@ -335,13 +335,13 @@ statement ok
 COPY (
   SELECT 'r1' AS read_id, 'ACGT' AS sequence1, [40,40,40,40]::UTINYINT[] AS qual1,
          7::INTEGER AS sequence_index
-) TO '__TEST_DIR__/si_unused.fq' (FORMAT FASTQ);
+) TO '{TEST_DIR}/si_unused.fq' (FORMAT FASTQ);
 
 statement error
 COPY (
   SELECT 'r1' AS read_id, 'ACGT' AS sequence1, [40,40,40,40]::UTINYINT[] AS qual1,
          99::INTEGER AS comment
-) TO '__TEST_DIR__/cm_used.fq' (FORMAT FASTQ, INCLUDE_COMMENT true);
+) TO '{TEST_DIR}/cm_used.fq' (FORMAT FASTQ, INCLUDE_COMMENT true);
 ----
 comment
 
@@ -350,15 +350,15 @@ statement ok
 COPY (
   SELECT 'r1' AS read_id, 'ACGT' AS sequence1, [40,40,40,40]::UTINYINT[] AS qual1,
          99::INTEGER AS comment
-) TO '__TEST_DIR__/cm_unused.fq' (FORMAT FASTQ);
+) TO '{TEST_DIR}/cm_unused.fq' (FORMAT FASTQ);
 
 # The correct types still write cleanly, and round-trip.
 statement ok
 COPY (SELECT read_id, sequence1, qual1::UTINYINT[] AS qual1 FROM qual_int_list)
-TO '__TEST_DIR__/qual_cast.fq' (FORMAT FASTQ);
+TO '{TEST_DIR}/qual_cast.fq' (FORMAT FASTQ);
 
 query III
-SELECT read_id, sequence1, qual1 FROM read_fastx('__TEST_DIR__/qual_cast.fq');
+SELECT read_id, sequence1, qual1 FROM read_fastx('{TEST_DIR}/qual_cast.fq');
 ----
 r1	ACGTACGT	[40, 40, 40, 40, 40, 40, 40, 40]
 

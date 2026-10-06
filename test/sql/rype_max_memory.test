@@ -188,11 +188,11 @@ CREATE TABLE refs AS SELECT 0::BIGINT AS feature_idx, 0 AS chunk_index,
     repeat('ACGTACGTTGCA', 200) AS chunk_data;
 
 statement ok
-SELECT * FROM rype_index_create('refs', '__TEST_DIR__/mismatched.ryxdi', k := 16, w := 12);
+SELECT * FROM rype_index_create('refs', '{TEST_DIR}/mismatched.ryxdi', k := 16, w := 12);
 
 statement error
 SELECT * FROM rype_classify('data/rype/test.ryxdi', 'seqs',
-                            negative_index := '__TEST_DIR__/mismatched.ryxdi');
+                            negative_index := '{TEST_DIR}/mismatched.ryxdi');
 ----
 do not match
 

@@ -13,6 +13,7 @@
 #include "duckdb/main/database.hpp"
 
 #include <algorithm>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -25,8 +26,8 @@ namespace duckdb {
 static LogicalType ValidateDenovoTableSchema(ClientContext &context, const std::string &table_name,
                                              const std::string &id_col, const std::string &sequence_col,
                                              const std::string &count_col) {
-	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, table_name, QueryErrorContext());
-	auto entry = Catalog::GetEntry(context, INVALID_CATALOG, INVALID_SCHEMA, lookup_info, OnEntryNotFound::RETURN_NULL);
+	EntryLookupInfo lookup_info(CatalogType::TABLE_ENTRY, QualifiedName(Identifier(table_name)), QueryErrorContext());
+	auto entry = Catalog::GetEntry(context, lookup_info, OnEntryNotFound::RETURN_NULL);
 	if (!entry) {
 		throw BinderException("Table or view '%s' does not exist", table_name);
 	}
@@ -38,14 +39,14 @@ static LogicalType ValidateDenovoTableSchema(ClientContext &context, const std::
 		auto &columns = table.GetColumns();
 		for (idx_t i = 0; i < columns.LogicalColumnCount(); i++) {
 			auto &c = columns.GetColumn(LogicalIndex(i));
-			col_names.push_back(c.Name());
+			col_names.push_back(c.Name().GetIdentifierName());
 			col_types.push_back(c.Type());
 		}
 	} else if (entry->type == CatalogType::VIEW_ENTRY) {
 		auto &view = entry->Cast<ViewCatalogEntry>();
 		view.BindView(context);
 		auto col_info = view.GetColumnInfo();
-		col_names = col_info->names;
+		col_names = IdentifiersToStrings(col_info->names);
 		col_types = col_info->types;
 	} else {
 		throw BinderException("'%s' is not a table or view", table_name);
@@ -97,11 +98,10 @@ static void LoadDenovoSequences(Connection &conn, const std::string &table_name,
                                 const std::string &sequence_col, const std::string &count_col,
                                 const std::string &where_sql, std::vector<std::string> &out_labels,
                                 std::vector<std::string> &out_sequences, std::vector<int64_t> &out_sizes) {
-	auto q_id = KeywordHelper::WriteOptionallyQuoted(id_col);
-	auto q_seq = KeywordHelper::WriteOptionallyQuoted(sequence_col);
-	auto q_count = KeywordHelper::WriteOptionallyQuoted(count_col);
-	auto sql =
-	    "SELECT " + q_id + ", " + q_seq + ", " + q_count + " FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
+	auto q_id = SQLIdentifier::ToString(id_col);
+	auto q_seq = SQLIdentifier::ToString(sequence_col);
+	auto q_count = SQLIdentifier::ToString(count_col);
+	auto sql = "SELECT " + q_id + ", " + q_seq + ", " + q_count + " FROM " + SQLIdentifier::ToString(table_name);
 	if (!where_sql.empty()) {
 		sql += " WHERE " + where_sql;
 	}
@@ -111,7 +111,7 @@ static void LoadDenovoSequences(Connection &conn, const std::string &table_name,
 		throw InvalidInputException("Failed to read table '%s': %s", table_name, result->GetError());
 	}
 
-	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto &materialized = *result;
 	while (auto chunk = materialized.Fetch()) {
 		for (idx_t i = 0; i < chunk->size(); i++) {
 			auto read_id_val = chunk->GetValue(0, i);
@@ -164,15 +164,14 @@ static std::vector<miint::UchimeResult> RunDenovoForSet(const miint::UchimeParam
 }
 
 unique_ptr<FunctionData> UchimeDenovoTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                         vector<LogicalType> &return_types,
-                                                         vector<std::string> &names) {
+                                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 
 	data->input_table = input.inputs[0].GetValue<std::string>();
 	RejectCTERelationName(input, data->input_table);
 
 	auto get_col_override = [&](const std::string &param_name, std::string &out) {
-		auto it = input.named_parameters.find(param_name);
+		auto it = input.named_parameters.find(Identifier(param_name));
 		if (it != input.named_parameters.end()) {
 			auto val = it->second.GetValue<std::string>();
 			if (val.empty()) {
@@ -189,7 +188,7 @@ unique_ptr<FunctionData> UchimeDenovoTableFunction::Bind(ClientContext &context,
 	    ValidateDenovoTableSchema(context, data->input_table, data->id_col, data->sequence_col, data->count_col);
 
 	auto get_double = [&](const std::string &name, double &out, double min_val, const char *constraint) {
-		auto it = input.named_parameters.find(name);
+		auto it = input.named_parameters.find(Identifier(name));
 		if (it != input.named_parameters.end()) {
 			out = it->second.GetValue<double>();
 			if (out < min_val) {
@@ -199,7 +198,7 @@ unique_ptr<FunctionData> UchimeDenovoTableFunction::Bind(ClientContext &context,
 		}
 	};
 	auto get_int = [&](const std::string &name, int &out, int min_val, const char *constraint) {
-		auto it = input.named_parameters.find(name);
+		auto it = input.named_parameters.find(Identifier(name));
 		if (it != input.named_parameters.end()) {
 			out = it->second.GetValue<int>();
 			if (out < min_val) {
@@ -233,12 +232,12 @@ unique_ptr<FunctionData> UchimeDenovoTableFunction::Bind(ClientContext &context,
 		DiscoverSamples(conn, data->input_table, data->sample_info.sample_id_col, data->names,
 		                "detect_chimera_uchime_denovo", data->sample_info);
 
-		names.push_back(data->sample_info.sample_id_col);
+		names.emplace_back(data->sample_info.sample_id_col);
 		return_types.push_back(data->sample_info.sample_id_type);
 	}
 
 	for (auto &n : data->names) {
-		names.push_back(n);
+		names.emplace_back(n);
 	}
 	for (auto &t : data->types) {
 		return_types.push_back(t);
@@ -334,7 +333,7 @@ void UchimeDenovoTableFunction::Execute(ClientContext & /*context*/, TableFuncti
 		}
 
 		if (gstate.results.empty()) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 
@@ -350,7 +349,7 @@ void UchimeDenovoTableFunction::Execute(ClientContext & /*context*/, TableFuncti
 		if (lstate.result_offset < lstate.results.size()) {
 			idx_t remaining = lstate.results.size() - lstate.result_offset;
 			idx_t count = std::min(remaining, static_cast<idx_t>(STANDARD_VECTOR_SIZE));
-			output.data[0].Reference(lstate.sample_value);
+			output.data[0].Reference(lstate.sample_value, count_t(count));
 			OutputUchimeResults(output, lstate.results, lstate.result_offset, count, data.id_type, data.id_type,
 			                    /*start_col=*/1);
 			lstate.result_offset += count;
@@ -359,12 +358,12 @@ void UchimeDenovoTableFunction::Execute(ClientContext & /*context*/, TableFuncti
 
 		idx_t sample_idx;
 		if (!ClaimNextSample(gstate, data.sample_info.sample_values.size(), sample_idx)) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		lstate.sample_value = data.sample_info.sample_values[sample_idx];
 		auto sample_literal = lstate.sample_value.ToSQLString();
-		auto q_col = KeywordHelper::WriteOptionallyQuoted(data.sample_info.sample_id_col);
+		auto q_col = SQLIdentifier::ToString(data.sample_info.sample_id_col);
 		// CAST-as-VARCHAR equality: see note in deblur_table_function.cpp re: DECIMAL.
 		auto where_sql = "CAST(" + q_col + " AS VARCHAR) = CAST(" + sample_literal + " AS VARCHAR)";
 
@@ -384,16 +383,16 @@ TableFunction UchimeDenovoTableFunction::GetFunction() {
 	auto tf =
 	    TableFunction("detect_chimera_uchime_denovo", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal, InitLocal);
 
-	tf.named_parameters["minh"] = LogicalType::DOUBLE;
-	tf.named_parameters["xn"] = LogicalType::DOUBLE;
-	tf.named_parameters["dn"] = LogicalType::DOUBLE;
-	tf.named_parameters["mindiv"] = LogicalType::DOUBLE;
-	tf.named_parameters["mindiffs"] = LogicalType::INTEGER;
-	tf.named_parameters["abskew"] = LogicalType::DOUBLE;
-	tf.named_parameters["sample_id"] = LogicalType::VARCHAR;
-	tf.named_parameters["id_col"] = LogicalType::VARCHAR;
-	tf.named_parameters["sequence_col"] = LogicalType::VARCHAR;
-	tf.named_parameters["count_col"] = LogicalType::VARCHAR;
+	AddNamedParameter(tf, "minh", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "xn", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "dn", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "mindiv", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "mindiffs", LogicalType::INTEGER);
+	AddNamedParameter(tf, "abskew", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "sample_id", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "id_col", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "sequence_col", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "count_col", LogicalType::VARCHAR);
 
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 

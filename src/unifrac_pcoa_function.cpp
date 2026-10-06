@@ -41,9 +41,11 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/query_result.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
 
 // scikit-bio-binaries — randomized PCoA on a libssu fp32 distance matrix.
 #include "ordination.h"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 namespace {
@@ -193,7 +195,7 @@ void RunPcoaOnMatrix(float *mat, uint32_t n, const std::vector<std::string> &ids
 // columns positionally identical to pcoa's, so `SELECT sample_id, axis,
 // coordinate` and column-name-based consumers work across all four functions.
 void DeclarePcoaOutputSchema(const LogicalType &sample_id_type, vector<LogicalType> &return_types,
-                             vector<string> &names, bool with_batch_diagnostics = false) {
+                             vector<Identifier> &names, bool with_batch_diagnostics = false) {
 	names.emplace_back("iteration");
 	return_types.emplace_back(LogicalType::INTEGER);
 	names.emplace_back("sample_id");
@@ -244,7 +246,7 @@ void ComputeOneIteration(const miint::unifrac::UnifracSupportBiomView &biom_view
 }
 
 unique_ptr<FunctionData> UnifracPcoaBind(ClientContext &context, TableFunctionBindInput &input,
-                                         vector<LogicalType> &return_types, vector<string> &names) {
+                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
 	const std::string table_name = input.inputs[0].GetValue<string>();
 	const std::string tree_name = input.inputs[1].GetValue<string>();
 	RejectCTERelationName(input, table_name);
@@ -271,7 +273,7 @@ unique_ptr<FunctionData> UnifracPcoaBind(ClientContext &context, TableFunctionBi
 	int32_t seed = -1;
 	int32_t threads = 0; // 0 = follow DuckDB's TaskScheduler::NumberOfThreads()
 	for (const auto &kv : input.named_parameters) {
-		const auto key = StringUtil::Lower(kv.first);
+		const auto key = StringUtil::Lower(kv.first.GetIdentifierName());
 		if (key == "variant") {
 			variant = kv.second.GetValue<string>();
 		} else if (key == "n_dims") {
@@ -452,17 +454,17 @@ void EmitPcoaChunk(const std::vector<PcoaRow> &rows, size_t &cursor, const Logic
 	const idx_t remaining = rows.size() - cursor;
 	const idx_t n = std::min<idx_t>(STANDARD_VECTOR_SIZE, remaining);
 
-	auto iter_data = FlatVector::GetData<int32_t>(output.data[0]);
+	auto iter_data = FlatVector::GetDataMutable<int32_t>(output.data[0]);
 	auto &sample_id_vec = output.data[1];
-	auto axis_data = FlatVector::GetData<int32_t>(output.data[2]);
-	auto coord_data = FlatVector::GetData<double>(output.data[3]);
-	auto eig_data = FlatVector::GetData<double>(output.data[4]);
-	auto pe_data = FlatVector::GetData<double>(output.data[5]);
+	auto axis_data = FlatVector::GetDataMutable<int32_t>(output.data[2]);
+	auto coord_data = FlatVector::GetDataMutable<double>(output.data[3]);
+	auto eig_data = FlatVector::GetDataMutable<double>(output.data[4]);
+	auto pe_data = FlatVector::GetDataMutable<double>(output.data[5]);
 	int32_t *batch_data = nullptr;
 	double *m2_data = nullptr;
 	if (with_batch_diagnostics) {
-		batch_data = FlatVector::GetData<int32_t>(output.data[6]);
-		m2_data = FlatVector::GetData<double>(output.data[7]);
+		batch_data = FlatVector::GetDataMutable<int32_t>(output.data[6]);
+		m2_data = FlatVector::GetDataMutable<double>(output.data[7]);
 	}
 
 	for (idx_t i = 0; i < n; ++i) {
@@ -490,13 +492,13 @@ void EmitPcoaChunk(const std::vector<PcoaRow> &rows, size_t &cursor, const Logic
 	}
 
 	cursor += n;
-	output.SetCardinality(n);
+	output.SetChildCardinality(n);
 }
 
 void UnifracPcoaExecute(ClientContext &, TableFunctionInput &input, DataChunk &output) {
 	auto &gstate = input.global_state->Cast<UnifracPcoaGlobalState>();
 	if (gstate.cursor >= gstate.rows.size()) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 	EmitPcoaChunk(gstate.rows, gstate.cursor, gstate.sample_id_type, /*with_batch_diagnostics=*/false, output);
@@ -512,7 +514,7 @@ void UnifracPcoaExecute(ClientContext &, TableFunctionInput &input, DataChunk &o
 // always 0 (kept for schema parity), and there is no subsampling (a distance
 // table is a fixed matrix).
 unique_ptr<FunctionData> PcoaFromDistancesBind(ClientContext &context, TableFunctionBindInput &input,
-                                               vector<LogicalType> &return_types, vector<string> &names) {
+                                               vector<LogicalType> &return_types, vector<Identifier> &names) {
 	const std::string table_name = input.inputs[0].GetValue<string>();
 	RejectCTERelationName(input, table_name);
 	if (table_name.empty()) {
@@ -523,7 +525,7 @@ unique_ptr<FunctionData> PcoaFromDistancesBind(ClientContext &context, TableFunc
 	int32_t seed = -1;
 	int32_t threads = 0; // 0 = follow DuckDB's TaskScheduler::NumberOfThreads()
 	for (const auto &kv : input.named_parameters) {
-		const auto key = StringUtil::Lower(kv.first);
+		const auto key = StringUtil::Lower(kv.first.GetIdentifierName());
 		if (key == "n_dims") {
 			n_dims = kv.second.GetValue<int32_t>();
 		} else if (key == "seed") {
@@ -790,8 +792,8 @@ public:
 	                        StringUtil::Replace(UUID::ToString(UUID::GenerateRandomUUID()), "-", "")),
 	      wave_anchor_table_("_miint_wave_anchor_" +
 	                         StringUtil::Replace(UUID::ToString(UUID::GenerateRandomUUID()), "-", "")),
-	      wave_batch_quoted_(KeywordHelper::WriteOptionallyQuoted(wave_batch_table_)),
-	      wave_anchor_quoted_(KeywordHelper::WriteOptionallyQuoted(wave_anchor_table_)) {
+	      wave_batch_quoted_(SQLIdentifier::ToString(wave_batch_table_)),
+	      wave_anchor_quoted_(SQLIdentifier::ToString(wave_anchor_table_)) {
 	}
 
 	// Fill the wave's blocks in one scan. `requests` are exactly the requests the
@@ -954,7 +956,7 @@ private:
 			                            create->GetError());
 		}
 		{
-			Appender appender(conn, wave_batch_table_);
+			Appender appender(conn, Identifier(wave_batch_table_));
 			for (size_t k = 0; k < requests.size(); ++k) {
 				for (uint32_t p = 0; p < batch_len_[k]; ++p) {
 					appender.AppendRow(MapId(requests[k][p]), Value::INTEGER(static_cast<int32_t>(k)),
@@ -964,7 +966,7 @@ private:
 			appender.Close();
 		}
 		{
-			Appender appender(conn, wave_anchor_table_);
+			Appender appender(conn, Identifier(wave_anchor_table_));
 			for (uint32_t j = 0; j < anchors_.size(); ++j) {
 				appender.AppendRow(MapId(anchors_[j]), Value::INTEGER(static_cast<int32_t>(j)));
 			}
@@ -978,7 +980,7 @@ private:
 	// class. A streaming result advances only when the fetching thread executes a
 	// task (duckdb executor.cpp: `Executor::ExecuteTask` runs it inline) and may
 	// only run ~`streaming_buffer_size` (1 MB by default) ahead of the consumer — so
-	// scanning 316 M rows through `SendQuery` ran the joins essentially
+	// on DuckDB 1.5, where this was measured, scanning 316 M rows through `SendQuery` ran the joins essentially
 	// single-threaded: 28 s wall for 2.7 s of work. Materializing lets DuckDB
 	// execute the whole pipeline across all cores first (25 batches: 28.1 s → 6.0 s;
 	// 121 batches: 15.2 s → 4.7 s). The per-batch provider always did this — via
@@ -993,14 +995,8 @@ private:
 	// counted and spillable instead: the same run under `memory_limit='2GB'`
 	// completes at 1.97 GB peak rather than dying.
 	static unique_ptr<QueryResult> RunWaveQuery(Connection &conn, const std::string &sql, const char *what) {
-		PendingQueryParameters params;
-		params.query_parameters.output_type = QueryResultOutputType::FORCE_MATERIALIZED;
-		params.query_parameters.memory_type = QueryResultMemoryType::BUFFER_MANAGED;
-		auto pending = conn.PendingQuery(sql, params);
-		if (pending->HasError()) {
-			throw InvalidInputException("progressive_pcoa_from_distances: %s failed: %s", what, pending->GetError());
-		}
-		auto res = pending->Execute();
+		// v2.0: Query() is blocking and fully materializes; the chunk format picks the buffer-managed collection.
+		auto res = conn.Query(sql, ChunkFormat::BufferManaged());
 		if (res->HasError()) {
 			throw InvalidInputException("progressive_pcoa_from_distances: %s failed: %s", what, res->GetError());
 		}
@@ -1020,10 +1016,10 @@ private:
 					break;
 				}
 				UnifiedVectorFormat blk_u, pa_u, pb_u, d_u;
-				chunk->data[0].ToUnifiedFormat(rn, blk_u);
-				chunk->data[1].ToUnifiedFormat(rn, pa_u);
-				chunk->data[2].ToUnifiedFormat(rn, pb_u);
-				chunk->data[3].ToUnifiedFormat(rn, d_u);
+				chunk->data[0].ToUnifiedFormat(blk_u);
+				chunk->data[1].ToUnifiedFormat(pa_u);
+				chunk->data[2].ToUnifiedFormat(pb_u);
+				chunk->data[3].ToUnifiedFormat(d_u);
 				auto blk_data = UnifiedVectorFormat::GetData<int32_t>(blk_u);
 				auto pa_data = UnifiedVectorFormat::GetData<int32_t>(pa_u);
 				auto pb_data = UnifiedVectorFormat::GetData<int32_t>(pb_u);
@@ -1066,9 +1062,9 @@ private:
 				break;
 			}
 			UnifiedVectorFormat oa_u, ob_u, d_u;
-			chunk->data[0].ToUnifiedFormat(rn, oa_u);
-			chunk->data[1].ToUnifiedFormat(rn, ob_u);
-			chunk->data[2].ToUnifiedFormat(rn, d_u);
+			chunk->data[0].ToUnifiedFormat(oa_u);
+			chunk->data[1].ToUnifiedFormat(ob_u);
+			chunk->data[2].ToUnifiedFormat(d_u);
 			auto oa_data = UnifiedVectorFormat::GetData<int32_t>(oa_u);
 			auto ob_data = UnifiedVectorFormat::GetData<int32_t>(ob_u);
 			auto d_data = UnifiedVectorFormat::GetData<double>(d_u);
@@ -1138,16 +1134,16 @@ miint::progressive::DistanceBlock QueryDistanceBlock(ClientContext &context, con
 	// mirroring ReadDistanceTable. Self-rows are kept so BuildDenseDistanceMatrix
 	// can reject a nonzero self-distance.
 	std::vector<miint::unifrac::DistanceEntry> entries;
-	auto &mat = res->Cast<MaterializedQueryResult>();
+	auto &mat = *res;
 	while (auto chunk = mat.Fetch()) {
 		const idx_t rn = chunk->size();
 		if (rn == 0) {
 			break;
 		}
 		UnifiedVectorFormat a_u, b_u, d_u;
-		chunk->data[0].ToUnifiedFormat(rn, a_u);
-		chunk->data[1].ToUnifiedFormat(rn, b_u);
-		chunk->data[2].ToUnifiedFormat(rn, d_u);
+		chunk->data[0].ToUnifiedFormat(a_u);
+		chunk->data[1].ToUnifiedFormat(b_u);
+		chunk->data[2].ToUnifiedFormat(d_u);
 		auto a_data = UnifiedVectorFormat::GetData<string_t>(a_u);
 		auto b_data = UnifiedVectorFormat::GetData<string_t>(b_u);
 		auto d_data = UnifiedVectorFormat::GetData<double>(d_u);
@@ -1177,7 +1173,8 @@ miint::progressive::DistanceBlock QueryDistanceBlock(ClientContext &context, con
 }
 
 unique_ptr<FunctionData> ProgressivePcoaFromDistancesBind(ClientContext &context, TableFunctionBindInput &input,
-                                                          vector<LogicalType> &return_types, vector<string> &names) {
+                                                          vector<LogicalType> &return_types,
+                                                          vector<Identifier> &names) {
 	const std::string table_name = input.inputs[0].GetValue<string>();
 	RejectCTERelationName(input, table_name);
 	if (table_name.empty()) {
@@ -1192,7 +1189,7 @@ unique_ptr<FunctionData> ProgressivePcoaFromDistancesBind(ClientContext &context
 	bool global_rotation = true;     // see ProgressivePcoaData::global_rotation
 	vector<string> explicit_anchors; // if non-empty: override seeded random anchor selection
 	for (const auto &kv : input.named_parameters) {
-		const auto key = StringUtil::Lower(kv.first);
+		const auto key = StringUtil::Lower(kv.first.GetIdentifierName());
 		if (key == "n_dims") {
 			n_dims = kv.second.GetValue<int32_t>();
 		} else if (key == "n_anchors") {
@@ -1269,7 +1266,7 @@ unique_ptr<FunctionData> ProgressivePcoaFromDistancesBind(ClientContext &context
 	data->source = ProgressivePcoaData::Source::DISTANCES;
 	data->sample_id_type = ids.sample_id_type;
 	data->sample_id_predicate_type = ids.sample_id_predicate_type;
-	data->qname = KeywordHelper::WriteOptionallyQuoted(table_name);
+	data->qname = SQLIdentifier::ToString(table_name);
 	data->part = std::move(part);
 	data->n_dims = static_cast<uint32_t>(n_dims);
 	data->batch_size = static_cast<uint32_t>(batch_size);
@@ -1313,14 +1310,14 @@ struct FeatureTableIds {
 
 std::vector<std::string> CollectStringColumn(QueryResult &result) {
 	std::vector<std::string> out;
-	auto &mat = result.Cast<MaterializedQueryResult>();
+	auto &mat = result;
 	while (auto chunk = mat.Fetch()) {
 		const idx_t rn = chunk->size();
 		if (rn == 0) {
 			break;
 		}
 		UnifiedVectorFormat u;
-		chunk->data[0].ToUnifiedFormat(rn, u);
+		chunk->data[0].ToUnifiedFormat(u);
 		auto data = UnifiedVectorFormat::GetData<string_t>(u);
 		for (idx_t i = 0; i < rn; ++i) {
 			const auto ii = u.sel->get_index(i);
@@ -1335,7 +1332,7 @@ std::vector<std::string> CollectStringColumn(QueryResult &result) {
 FeatureTableIds EnumerateFeatureTableIds(ClientContext &context, const std::string &table_name,
                                          const std::string &caller) {
 	auto conn = MakeReadOnlyHelperConnection(context);
-	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
+	const auto qname = SQLIdentifier::ToString(table_name);
 	auto probe = conn.Query("SELECT sample_id::VARCHAR, feature_id::VARCHAR, value::DOUBLE FROM " + qname + " LIMIT 0");
 	if (probe->HasError()) {
 		throw InvalidInputException("%s: feature-table '%s' must expose (sample_id, feature_id, value DOUBLE): %s",
@@ -1452,7 +1449,7 @@ void WarnIfFeatureTableUnsorted(ClientContext &context, const char *caller, cons
 		                   caller, table_name, res->GetError());
 		return;
 	}
-	auto &mat = res->Cast<MaterializedQueryResult>();
+	auto &mat = *res;
 	auto chunk = mat.Fetch();
 	if (!chunk || chunk->size() == 0) {
 		return;
@@ -1493,16 +1490,16 @@ std::vector<miint::unifrac::CooRow> QueryFeatureRows(ClientContext &context, con
 		throw InvalidInputException("%s: feature slice query failed: %s", caller, res->GetError());
 	}
 	std::vector<miint::unifrac::CooRow> rows;
-	auto &mat = res->Cast<MaterializedQueryResult>();
+	auto &mat = *res;
 	while (auto chunk = mat.Fetch()) {
 		const idx_t rn = chunk->size();
 		if (rn == 0) {
 			break;
 		}
 		UnifiedVectorFormat sid_u, fid_u, val_u;
-		chunk->data[0].ToUnifiedFormat(rn, sid_u);
-		chunk->data[1].ToUnifiedFormat(rn, fid_u);
-		chunk->data[2].ToUnifiedFormat(rn, val_u);
+		chunk->data[0].ToUnifiedFormat(sid_u);
+		chunk->data[1].ToUnifiedFormat(fid_u);
+		chunk->data[2].ToUnifiedFormat(val_u);
 		auto sid_data = UnifiedVectorFormat::GetData<string_t>(sid_u);
 		auto fid_data = UnifiedVectorFormat::GetData<string_t>(fid_u);
 		auto val_data = UnifiedVectorFormat::GetData<double>(val_u);
@@ -1932,7 +1929,7 @@ ComputeCommunityBlock(ClientContext &context, const std::string &qname, const st
 }
 
 unique_ptr<FunctionData> ProgressivePcoaFromUnifracBind(ClientContext &context, TableFunctionBindInput &input,
-                                                        vector<LogicalType> &return_types, vector<string> &names) {
+                                                        vector<LogicalType> &return_types, vector<Identifier> &names) {
 	const std::string table_name = input.inputs[0].GetValue<string>();
 	const std::string tree_name = input.inputs[1].GetValue<string>();
 	RejectCTERelationName(input, table_name);
@@ -1957,7 +1954,7 @@ unique_ptr<FunctionData> ProgressivePcoaFromUnifracBind(ClientContext &context, 
 	bool global_rotation = true;     // see ProgressivePcoaData::global_rotation
 	vector<string> explicit_anchors; // if non-empty: override seeded random anchor selection
 	for (const auto &kv : input.named_parameters) {
-		const auto key = StringUtil::Lower(kv.first);
+		const auto key = StringUtil::Lower(kv.first.GetIdentifierName());
 		if (key == "variant") {
 			variant = kv.second.GetValue<string>();
 		} else if (key == "n_dims") {
@@ -2094,7 +2091,7 @@ unique_ptr<FunctionData> ProgressivePcoaFromUnifracBind(ClientContext &context, 
 	    (part.remaining.size() + static_cast<size_t>(batch_size) - 1) / static_cast<size_t>(batch_size);
 	const auto concurrency = ResolveBlockConcurrency(n_threads, n_batches);
 
-	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
+	const auto qname = SQLIdentifier::ToString(table_name);
 	// Only worth probing — and only worth telling the user about — when there is more
 	// than one batch: a single batch reads the table once whatever its order, so
 	// sorting it would save nothing and the warning would be noise.
@@ -2145,7 +2142,7 @@ unique_ptr<FunctionData> ProgressivePcoaFromUnifracBind(ClientContext &context, 
 // classification itself lives with the metric definitions
 // (IsPairwiseLocalCommunityMetric), where a future metric's author will meet it.
 unique_ptr<FunctionData> ProgressivePcoaFromFeaturesBind(ClientContext &context, TableFunctionBindInput &input,
-                                                         vector<LogicalType> &return_types, vector<string> &names) {
+                                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
 	const std::string table_name = input.inputs[0].GetValue<string>();
 	RejectCTERelationName(input, table_name);
 	const std::string metric = StringUtil::Lower(input.inputs[1].GetValue<string>());
@@ -2178,7 +2175,7 @@ unique_ptr<FunctionData> ProgressivePcoaFromFeaturesBind(ClientContext &context,
 	bool global_rotation = true;     // see ProgressivePcoaData::global_rotation
 	vector<string> explicit_anchors; // if non-empty: override seeded random anchor selection
 	for (const auto &kv : input.named_parameters) {
-		const auto key = StringUtil::Lower(kv.first);
+		const auto key = StringUtil::Lower(kv.first.GetIdentifierName());
 		if (key == "n_dims") {
 			n_dims = kv.second.GetValue<int32_t>();
 		} else if (key == "n_anchors") {
@@ -2254,7 +2251,7 @@ unique_ptr<FunctionData> ProgressivePcoaFromFeaturesBind(ClientContext &context,
 	    (part.remaining.size() + static_cast<size_t>(batch_size) - 1) / static_cast<size_t>(batch_size);
 	const auto concurrency = ResolveBlockConcurrency(n_threads, n_batches);
 
-	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
+	const auto qname = SQLIdentifier::ToString(table_name);
 	// Only worth warning about with more than one batch: a single batch reads the
 	// table once whatever its order.
 	if (n_batches > 1) {
@@ -2397,10 +2394,10 @@ unique_ptr<miint::progressive::ProgressivePcoaRun> MakeProgressiveRun(ClientCont
                                                                       const ProgressivePcoaData &data) {
 	// Cooperative cancellation. The core polls this before every batch, which is the
 	// only thing standing between a user and an uninterruptible multi-hour query:
-	// Ctrl-C sets context.interrupted and, until now, nothing on this path ever read
+	// Ctrl-C sets the context's interrupt flag and, until now, nothing on this path ever read
 	// it. Polled from worker threads too, hence the atomic read.
 	const miint::progressive::InterruptCheck interrupt = [&context]() {
-		if (context.interrupted) {
+		if (context.IsInterrupted()) {
 			throw InterruptException();
 		}
 	};
@@ -2625,13 +2622,13 @@ void StageWave(const ProgressivePcoaData &data, ProgressivePcoaGlobalState &gsta
 		}
 		const idx_t row = append_chunk.size();
 		const auto &first = gstate.rows[r];
-		append_chunk.SetValue(0, row, Value(first.sample_id));
+		append_chunk.data[0].SetValue(row, Value(first.sample_id));
 		if (first.batch < 0) {
-			append_chunk.SetValue(1, row, Value(LogicalType::INTEGER));
-			append_chunk.SetValue(2, row, Value(LogicalType::DOUBLE));
+			append_chunk.data[1].SetValue(row, Value(LogicalType::INTEGER));
+			append_chunk.data[2].SetValue(row, Value(LogicalType::DOUBLE));
 		} else {
-			append_chunk.SetValue(1, row, Value::INTEGER(first.batch));
-			append_chunk.SetValue(2, row, Value::DOUBLE(first.batch_anchor_m2));
+			append_chunk.data[1].SetValue(row, Value::INTEGER(first.batch));
+			append_chunk.data[2].SetValue(row, Value::DOUBLE(first.batch_anchor_m2));
 		}
 		for (uint32_t a = 0; a < d; ++a) {
 			const auto &pr = gstate.rows[r + a];
@@ -2640,9 +2637,9 @@ void StageWave(const ProgressivePcoaData &data, ProgressivePcoaGlobalState &gsta
 				                        first.sample_id.c_str());
 			}
 			coords[a] = pr.coordinate;
-			append_chunk.SetValue(3 + a, row, Value::DOUBLE(pr.coordinate));
+			append_chunk.data[3 + a].SetValue(row, Value::DOUBLE(pr.coordinate));
 		}
-		append_chunk.SetCardinality(row + 1);
+		append_chunk.SetChildCardinality(row + 1);
 		axes.Add(coords.data(), 1);
 	}
 }
@@ -2662,7 +2659,7 @@ void StageRotatedRun(ClientContext &context, const ProgressivePcoaData &data, Pr
 	append_chunk.Initialize(Allocator::Get(context), types);
 
 	while (AdvanceProgressiveRun(context, data, gstate)) {
-		if (context.interrupted) {
+		if (context.IsInterrupted()) {
 			throw InterruptException();
 		}
 		StageWave(data, gstate, append_chunk, axes);
@@ -2759,7 +2756,7 @@ void ProgressivePcoaExecute(ClientContext &context, TableFunctionInput &input, D
 		// Polled here as well as inside the run: a cancellation arriving while DuckDB
 		// drains the rows already produced is noticed on the next refill rather than
 		// after another wave's worth of work.
-		if (context.interrupted) {
+		if (context.IsInterrupted()) {
 			throw InterruptException();
 		}
 		// Same contract either way — "false" means there is nothing left to emit. Only
@@ -2768,7 +2765,7 @@ void ProgressivePcoaExecute(ClientContext &context, TableFunctionInput &input, D
 		const bool refilled =
 		    data.global_rotation ? RefillFromStaged(data, gstate) : AdvanceProgressiveRun(context, data, gstate);
 		if (!refilled) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 	}
@@ -2780,25 +2777,25 @@ void ProgressivePcoaExecute(ClientContext &context, TableFunctionInput &input, D
 void RegisterUnifracPcoa(ExtensionLoader &loader) {
 	TableFunction fn("unifrac_pcoa", {LogicalType::VARCHAR, LogicalType::VARCHAR}, UnifracPcoaExecute, UnifracPcoaBind,
 	                 UnifracPcoaInitGlobal);
-	fn.named_parameters["variant"] = LogicalType::VARCHAR;
-	fn.named_parameters["n_dims"] = LogicalType::INTEGER;
-	fn.named_parameters["variance_adjust"] = LogicalType::BOOLEAN;
-	fn.named_parameters["alpha"] = LogicalType::DOUBLE;
-	fn.named_parameters["bypass_tips"] = LogicalType::BOOLEAN;
-	fn.named_parameters["normalize_sample_counts"] = LogicalType::BOOLEAN;
-	fn.named_parameters["subsample_depth"] = LogicalType::INTEGER;
-	fn.named_parameters["subsample_with_replacement"] = LogicalType::BOOLEAN;
-	fn.named_parameters["n_subsamples"] = LogicalType::INTEGER;
-	fn.named_parameters["seed"] = LogicalType::INTEGER;
-	fn.named_parameters["threads"] = LogicalType::INTEGER;
+	AddNamedParameter(fn, "variant", LogicalType::VARCHAR);
+	AddNamedParameter(fn, "n_dims", LogicalType::INTEGER);
+	AddNamedParameter(fn, "variance_adjust", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "alpha", LogicalType::DOUBLE);
+	AddNamedParameter(fn, "bypass_tips", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "normalize_sample_counts", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "subsample_depth", LogicalType::INTEGER);
+	AddNamedParameter(fn, "subsample_with_replacement", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "n_subsamples", LogicalType::INTEGER);
+	AddNamedParameter(fn, "seed", LogicalType::INTEGER);
+	AddNamedParameter(fn, "threads", LogicalType::INTEGER);
 	loader.RegisterFunction(fn);
 }
 
 void RegisterPcoaFromDistances(ExtensionLoader &loader) {
 	TableFunction fn("pcoa", {LogicalType::VARCHAR}, UnifracPcoaExecute, PcoaFromDistancesBind, UnifracPcoaInitGlobal);
-	fn.named_parameters["n_dims"] = LogicalType::INTEGER;
-	fn.named_parameters["seed"] = LogicalType::INTEGER;
-	fn.named_parameters["threads"] = LogicalType::INTEGER;
+	AddNamedParameter(fn, "n_dims", LogicalType::INTEGER);
+	AddNamedParameter(fn, "seed", LogicalType::INTEGER);
+	AddNamedParameter(fn, "threads", LogicalType::INTEGER);
 	fn.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(fn);
 }
@@ -2806,44 +2803,44 @@ void RegisterPcoaFromDistances(ExtensionLoader &loader) {
 void RegisterProgressivePcoaFromDistances(ExtensionLoader &loader) {
 	TableFunction fn("progressive_pcoa_from_distances", {LogicalType::VARCHAR}, ProgressivePcoaExecute,
 	                 ProgressivePcoaFromDistancesBind, ProgressivePcoaInitGlobal);
-	fn.named_parameters["n_dims"] = LogicalType::INTEGER;
-	fn.named_parameters["n_anchors"] = LogicalType::INTEGER;
-	fn.named_parameters["batch_size"] = LogicalType::INTEGER;
-	fn.named_parameters["seed"] = LogicalType::INTEGER;
-	fn.named_parameters["threads"] = LogicalType::INTEGER;
-	fn.named_parameters["anchors"] = LogicalType::LIST(LogicalType::VARCHAR);
-	fn.named_parameters["global_rotation"] = LogicalType::BOOLEAN;
+	AddNamedParameter(fn, "n_dims", LogicalType::INTEGER);
+	AddNamedParameter(fn, "n_anchors", LogicalType::INTEGER);
+	AddNamedParameter(fn, "batch_size", LogicalType::INTEGER);
+	AddNamedParameter(fn, "seed", LogicalType::INTEGER);
+	AddNamedParameter(fn, "threads", LogicalType::INTEGER);
+	AddNamedParameter(fn, "anchors", LogicalType::LIST(LogicalType::VARCHAR));
+	AddNamedParameter(fn, "global_rotation", LogicalType::BOOLEAN);
 	loader.RegisterFunction(fn);
 }
 
 void RegisterProgressivePcoaFromFeatures(ExtensionLoader &loader) {
 	TableFunction fn("progressive_pcoa_from_features", {LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                 ProgressivePcoaExecute, ProgressivePcoaFromFeaturesBind, ProgressivePcoaInitGlobal);
-	fn.named_parameters["n_dims"] = LogicalType::INTEGER;
-	fn.named_parameters["n_anchors"] = LogicalType::INTEGER;
-	fn.named_parameters["batch_size"] = LogicalType::INTEGER;
-	fn.named_parameters["seed"] = LogicalType::INTEGER;
-	fn.named_parameters["threads"] = LogicalType::INTEGER;
-	fn.named_parameters["anchors"] = LogicalType::LIST(LogicalType::VARCHAR);
-	fn.named_parameters["global_rotation"] = LogicalType::BOOLEAN;
+	AddNamedParameter(fn, "n_dims", LogicalType::INTEGER);
+	AddNamedParameter(fn, "n_anchors", LogicalType::INTEGER);
+	AddNamedParameter(fn, "batch_size", LogicalType::INTEGER);
+	AddNamedParameter(fn, "seed", LogicalType::INTEGER);
+	AddNamedParameter(fn, "threads", LogicalType::INTEGER);
+	AddNamedParameter(fn, "anchors", LogicalType::LIST(LogicalType::VARCHAR));
+	AddNamedParameter(fn, "global_rotation", LogicalType::BOOLEAN);
 	loader.RegisterFunction(fn);
 }
 
 void RegisterProgressivePcoaFromUnifrac(ExtensionLoader &loader) {
 	TableFunction fn("progressive_pcoa_from_unifrac", {LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                 ProgressivePcoaExecute, ProgressivePcoaFromUnifracBind, ProgressivePcoaInitGlobal);
-	fn.named_parameters["variant"] = LogicalType::VARCHAR;
-	fn.named_parameters["n_dims"] = LogicalType::INTEGER;
-	fn.named_parameters["n_anchors"] = LogicalType::INTEGER;
-	fn.named_parameters["batch_size"] = LogicalType::INTEGER;
-	fn.named_parameters["seed"] = LogicalType::INTEGER;
-	fn.named_parameters["threads"] = LogicalType::INTEGER;
-	fn.named_parameters["variance_adjust"] = LogicalType::BOOLEAN;
-	fn.named_parameters["alpha"] = LogicalType::DOUBLE;
-	fn.named_parameters["bypass_tips"] = LogicalType::BOOLEAN;
-	fn.named_parameters["normalize_sample_counts"] = LogicalType::BOOLEAN;
-	fn.named_parameters["anchors"] = LogicalType::LIST(LogicalType::VARCHAR);
-	fn.named_parameters["global_rotation"] = LogicalType::BOOLEAN;
+	AddNamedParameter(fn, "variant", LogicalType::VARCHAR);
+	AddNamedParameter(fn, "n_dims", LogicalType::INTEGER);
+	AddNamedParameter(fn, "n_anchors", LogicalType::INTEGER);
+	AddNamedParameter(fn, "batch_size", LogicalType::INTEGER);
+	AddNamedParameter(fn, "seed", LogicalType::INTEGER);
+	AddNamedParameter(fn, "threads", LogicalType::INTEGER);
+	AddNamedParameter(fn, "variance_adjust", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "alpha", LogicalType::DOUBLE);
+	AddNamedParameter(fn, "bypass_tips", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "normalize_sample_counts", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "anchors", LogicalType::LIST(LogicalType::VARCHAR));
+	AddNamedParameter(fn, "global_rotation", LogicalType::BOOLEAN);
 	loader.RegisterFunction(fn);
 }
 

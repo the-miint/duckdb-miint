@@ -31,14 +31,15 @@ HTTP_SERVER_PID=""
 if [ -z "$MIINT_HTTPS_TEST_URL" ]; then
     # Find a free port: bind to port 0, read assigned port, close immediately
     HTTPS_TEST_PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
-    python3 -m http.server "$HTTPS_TEST_PORT" --directory data/ > /dev/null 2>&1 &
+    # Not `python3 -m http.server`: it ignores Range headers, see the script.
+    python3 test/scripts/range_http_server.py "$HTTPS_TEST_PORT" data/ > /dev/null 2>&1 &
     HTTP_SERVER_PID=$!
     trap "kill $HTTP_SERVER_PID 2>/dev/null || true" EXIT
 
     # Wait for server to be ready (up to 3 seconds)
     HTTP_SERVER_READY=0
     for i in $(seq 1 15); do
-        if curl -s "http://localhost:$HTTPS_TEST_PORT/" > /dev/null 2>&1; then
+        if curl -s "http://127.0.0.1:$HTTPS_TEST_PORT/" > /dev/null 2>&1; then
             HTTP_SERVER_READY=1
             break
         fi
@@ -50,7 +51,7 @@ if [ -z "$MIINT_HTTPS_TEST_URL" ]; then
         exit 1
     fi
 
-    export MIINT_HTTPS_TEST_URL="http://localhost:$HTTPS_TEST_PORT"
+    export MIINT_HTTPS_TEST_URL="http://127.0.0.1:$HTTPS_TEST_PORT"
 fi
 
 # Detect optional external tools

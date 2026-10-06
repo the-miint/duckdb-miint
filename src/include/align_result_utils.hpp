@@ -5,6 +5,8 @@
  */
 
 #include "duckdb/common/types/vector.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -14,7 +16,7 @@ namespace duckdb {
 // Set a VARCHAR vector from a string vector slice
 inline void SetAlignResultString(Vector &result_vector, const std::vector<std::string> &values, idx_t offset,
                                  idx_t count) {
-	auto result_data = FlatVector::GetData<string_t>(result_vector);
+	auto result_data = FlatVector::GetDataMutable<string_t>(result_vector);
 	for (idx_t j = 0; j < count; j++) {
 		result_data[j] = StringVector::AddString(result_vector, values[offset + j]);
 	}
@@ -23,8 +25,8 @@ inline void SetAlignResultString(Vector &result_vector, const std::vector<std::s
 // Set a VARCHAR vector from a string vector slice, with empty strings as NULL
 inline void SetAlignResultStringNullable(Vector &result_vector, const std::vector<std::string> &values, idx_t offset,
                                          idx_t count) {
-	auto result_data = FlatVector::GetData<string_t>(result_vector);
-	auto &validity = FlatVector::Validity(result_vector);
+	auto result_data = FlatVector::GetDataMutable<string_t>(result_vector);
+	auto &validity = FlatVector::ValidityMutable(result_vector);
 	validity.SetAllInvalid(count);
 
 	for (idx_t j = 0; j < count; j++) {
@@ -37,7 +39,7 @@ inline void SetAlignResultStringNullable(Vector &result_vector, const std::vecto
 
 // Set a UTINYINT vector from a uint8_t vector slice
 inline void SetAlignResultUInt8(Vector &result_vector, const std::vector<uint8_t> &values, idx_t offset, idx_t count) {
-	auto result_data = FlatVector::GetData<uint8_t>(result_vector);
+	auto result_data = FlatVector::GetDataMutable<uint8_t>(result_vector);
 	for (idx_t j = 0; j < count; j++) {
 		result_data[j] = values[offset + j];
 	}
@@ -46,7 +48,7 @@ inline void SetAlignResultUInt8(Vector &result_vector, const std::vector<uint8_t
 // Set a USMALLINT vector from a uint16_t vector slice
 inline void SetAlignResultUInt16(Vector &result_vector, const std::vector<uint16_t> &values, idx_t offset,
                                  idx_t count) {
-	auto result_data = FlatVector::GetData<uint16_t>(result_vector);
+	auto result_data = FlatVector::GetDataMutable<uint16_t>(result_vector);
 	for (idx_t j = 0; j < count; j++) {
 		result_data[j] = values[offset + j];
 	}
@@ -54,7 +56,7 @@ inline void SetAlignResultUInt16(Vector &result_vector, const std::vector<uint16
 
 // Set a BIGINT vector from an int64_t vector slice
 inline void SetAlignResultInt64(Vector &result_vector, const std::vector<int64_t> &values, idx_t offset, idx_t count) {
-	auto result_data = FlatVector::GetData<int64_t>(result_vector);
+	auto result_data = FlatVector::GetDataMutable<int64_t>(result_vector);
 	for (idx_t j = 0; j < count; j++) {
 		result_data[j] = values[offset + j];
 	}
@@ -62,7 +64,7 @@ inline void SetAlignResultInt64(Vector &result_vector, const std::vector<int64_t
 
 // Set an INTEGER vector from an int32_t vector slice
 inline void SetAlignResultInt32(Vector &result_vector, const std::vector<int32_t> &values, idx_t offset, idx_t count) {
-	auto result_data = FlatVector::GetData<int32_t>(result_vector);
+	auto result_data = FlatVector::GetDataMutable<int32_t>(result_vector);
 	for (idx_t j = 0; j < count; j++) {
 		result_data[j] = values[offset + j];
 	}
@@ -70,7 +72,7 @@ inline void SetAlignResultInt32(Vector &result_vector, const std::vector<int32_t
 
 // Set a DOUBLE vector from a double vector slice
 inline void SetAlignResultDouble(Vector &result_vector, const std::vector<double> &values, idx_t offset, idx_t count) {
-	auto result_data = FlatVector::GetData<double>(result_vector);
+	auto result_data = FlatVector::GetDataMutable<double>(result_vector);
 	for (idx_t j = 0; j < count; j++) {
 		result_data[j] = values[offset + j];
 	}
@@ -79,8 +81,8 @@ inline void SetAlignResultDouble(Vector &result_vector, const std::vector<double
 // Set a BIGINT vector from an int64_t vector slice, with -1 as NULL (for SAM tags)
 inline void SetAlignResultInt64Nullable(Vector &result_vector, const std::vector<int64_t> &values, idx_t offset,
                                         idx_t count) {
-	auto result_data = FlatVector::GetData<int64_t>(result_vector);
-	auto &validity = FlatVector::Validity(result_vector);
+	auto result_data = FlatVector::GetDataMutable<int64_t>(result_vector);
+	auto &validity = FlatVector::ValidityMutable(result_vector);
 	validity.SetAllInvalid(count);
 
 	for (idx_t j = 0; j < count; j++) {

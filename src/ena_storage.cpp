@@ -18,6 +18,8 @@
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/parser/expression/constant_expression.hpp"
+#include "duckdb/parser/expression/function_expression.hpp"
 #include "duckdb/parser/parsed_data/attach_info.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
@@ -25,6 +27,9 @@
 #include "duckdb/planner/operator/logical_insert.hpp"
 #include "duckdb/storage/database_size.hpp"
 #include "duckdb/storage/table_storage_info.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 
 namespace duckdb {
 
@@ -85,11 +90,24 @@ unique_ptr<CreateTableInfo> BuildENATableInfo(SchemaCatalogEntry &schema, ENATab
 	auto add = [&](const char *name, LogicalType type) {
 		info->columns.AddColumn(ColumnDefinition(name, std::move(type)));
 	};
+	// DuckDB v2.0 no longer tells the catalog which INSERT columns were listed (LogicalInsert::column_index_map is
+	// empty); omitted columns are filled from their DEFAULT. A required column's DEFAULT therefore raises the
+	// "requires the 'X' column" error the insert operators used to raise.
+	auto add_required = [&](const char *name, LogicalType type, const string &message) {
+		ColumnDefinition column(name, std::move(type));
+		vector<unique_ptr<ParsedExpression>> args;
+		args.push_back(make_uniq<ConstantExpression>(Literal::String(message)));
+		column.SetDefaultValue(make_uniq<FunctionExpression>(Identifier("error"), std::move(args)));
+		info->columns.AddColumn(std::move(column));
+	};
+	const string experiments_library =
+	    "INSERT INTO ena.experiments requires library_strategy, library_source, library_selection, "
+	    "library_layout, platform, and instrument_model";
 
 	switch (kind) {
 	case ENATableKind::PROJECTS:
-		info->table = "projects";
-		add("alias", LogicalType::VARCHAR);
+		info->SetTableName("projects");
+		add_required("alias", LogicalType::VARCHAR, R"(INSERT INTO ena.projects requires the 'alias' column)");
 		add("title", LogicalType::VARCHAR);
 		add("description", LogicalType::VARCHAR);
 		add("project_type", LogicalType::VARCHAR);
@@ -100,13 +118,13 @@ unique_ptr<CreateTableInfo> BuildENATableInfo(SchemaCatalogEntry &schema, ENATab
 		add("hold_until_date", LogicalType::DATE);
 		break;
 	case ENATableKind::SAMPLES:
-		info->table = "samples";
+		info->SetTableName("samples");
 		// Column order matters — BuildFromBuffer uses positional COL_*
 		// constants in src/ena_samples_insert_op.cpp.
-		add("alias", LogicalType::VARCHAR);
+		add_required("alias", LogicalType::VARCHAR, R"(INSERT INTO ena.samples requires the 'alias' column)");
 		add("title", LogicalType::VARCHAR);
 		add("description", LogicalType::VARCHAR);
-		add("taxon_id", LogicalType::INTEGER);
+		add_required("taxon_id", LogicalType::INTEGER, R"(INSERT INTO ena.samples requires the 'taxon_id' column)");
 		add("scientific_name", LogicalType::VARCHAR);
 		add("checklist", LogicalType::VARCHAR);
 		add("attributes", LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR));
@@ -119,47 +137,52 @@ unique_ptr<CreateTableInfo> BuildENATableInfo(SchemaCatalogEntry &schema, ENATab
 		add("samea_accession", LogicalType::VARCHAR);
 		break;
 	case ENATableKind::EXPERIMENTS:
-		info->table = "experiments";
+		info->SetTableName("experiments");
 		// Column order matters — BuildFromBuffer uses positional COL_*
 		// constants in src/ena_experiments_insert_op.cpp.
-		add("alias", LogicalType::VARCHAR);
+		add_required("alias", LogicalType::VARCHAR, R"(INSERT INTO ena.experiments requires the 'alias' column)");
 		add("title", LogicalType::VARCHAR);
-		add("study_ref", LogicalType::VARCHAR);
-		add("sample_descriptor", LogicalType::VARCHAR);
+		add_required("study_ref", LogicalType::VARCHAR,
+		             R"(INSERT INTO ena.experiments requires the 'study_ref' column)");
+		add_required("sample_descriptor", LogicalType::VARCHAR,
+		             R"(INSERT INTO ena.experiments requires the 'sample_descriptor' column)");
 		add("design_description", LogicalType::VARCHAR);
 		add("library_name", LogicalType::VARCHAR);
-		add("library_strategy", LogicalType::VARCHAR);
-		add("library_source", LogicalType::VARCHAR);
-		add("library_selection", LogicalType::VARCHAR);
-		add("library_layout", LogicalType::VARCHAR); // "SINGLE" or "PAIRED"
-		add("platform", LogicalType::VARCHAR);
-		add("instrument_model", LogicalType::VARCHAR);
+		add_required("library_strategy", LogicalType::VARCHAR, experiments_library);
+		add_required("library_source", LogicalType::VARCHAR, experiments_library);
+		add_required("library_selection", LogicalType::VARCHAR, experiments_library);
+		add_required("library_layout", LogicalType::VARCHAR, experiments_library); // "SINGLE" or "PAIRED"
+		add_required("platform", LogicalType::VARCHAR, experiments_library);
+		add_required("instrument_model", LogicalType::VARCHAR, experiments_library);
 		add("erx_accession", LogicalType::VARCHAR);
 		break;
 	case ENATableKind::RUNS:
-		info->table = "runs";
+		info->SetTableName("runs");
 		// Column order matters — BuildFromBuffer uses positional COL_*
 		// constants in src/ena_runs_insert_op.cpp. The `files` LIST(STRUCT)
 		// shape matches the SRA.run.xsd <FILES> element: each entry carries
 		// filename + filetype + md5. Server re-computes MD5 after upload and
 		// compares against this value.
-		add("alias", LogicalType::VARCHAR);
-		add("experiment_ref", LogicalType::VARCHAR);
+		add_required("alias", LogicalType::VARCHAR, R"(INSERT INTO ena.runs requires the 'alias' column)");
+		add_required("experiment_ref", LogicalType::VARCHAR,
+		             R"(INSERT INTO ena.runs requires the 'experiment_ref' column)");
 		add("title", LogicalType::VARCHAR);
-		add("files", LogicalType::LIST(LogicalType::STRUCT({{"filename", LogicalType::VARCHAR},
+		add_required("files",
+		             LogicalType::LIST(LogicalType::STRUCT({{"filename", LogicalType::VARCHAR},
 		                                                    {"filetype", LogicalType::VARCHAR},
-		                                                    {"md5", LogicalType::VARCHAR}})));
+		                                                    {"md5", LogicalType::VARCHAR}})),
+		             R"(INSERT INTO ena.runs requires the 'files' column)");
 		add("err_accession", LogicalType::VARCHAR);
 		break;
 	case ENATableKind::ANALYSES:
-		info->table = "analyses";
+		info->SetTableName("analyses");
 		add("alias", LogicalType::VARCHAR);
 		add("study_ref", LogicalType::VARCHAR);
 		add("analysis_type", LogicalType::VARCHAR);
 		add("accession", LogicalType::VARCHAR);
 		break;
 	case ENATableKind::SUBMISSION_LOG:
-		info->table = "submission_log";
+		info->SetTableName("submission_log");
 		AddSubmissionLogColumns(info->columns);
 		break;
 	}
@@ -182,7 +205,7 @@ struct ENASubmissionLogState : public GlobalTableFunctionState {
 	idx_t cursor = 0;
 };
 
-void EmitSubmissionLogColumns(vector<LogicalType> &return_types, vector<string> &names) {
+void EmitSubmissionLogColumns(vector<LogicalType> &return_types, vector<Identifier> &names) {
 	// Single source of truth for the submission_log column list — defer to the
 	// declarations in `AddSubmissionLogColumns` so the catalog and the scan
 	// function cannot drift apart.
@@ -195,7 +218,7 @@ void EmitSubmissionLogColumns(vector<LogicalType> &return_types, vector<string> 
 }
 
 unique_ptr<FunctionData> ENASubmissionLogBind(ClientContext &, TableFunctionBindInput &,
-                                              vector<LogicalType> &return_types, vector<string> &names) {
+                                              vector<LogicalType> &return_types, vector<Identifier> &names) {
 	EmitSubmissionLogColumns(return_types, names);
 	// Bind data must be supplied via GetScanFunction's bind_data out-parameter,
 	// not here; this bind callback exists only to satisfy DuckDB's table-scan
@@ -215,24 +238,24 @@ void ENASubmissionLogScan(ClientContext &, TableFunctionInput &data, DataChunk &
 	const idx_t available = state.snapshot.size() - state.cursor;
 	const idx_t produce = MinValue<idx_t>(STANDARD_VECTOR_SIZE, available);
 	if (produce == 0) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
-	output.SetCardinality(produce);
+	output.SetChildCardinality(produce);
 
-	auto submission_id = FlatVector::GetData<string_t>(output.data[0]);
-	auto submitted_at = FlatVector::GetData<timestamp_tz_t>(output.data[1]);
-	auto endpoint = FlatVector::GetData<string_t>(output.data[2]);
-	auto secret_name = FlatVector::GetData<string_t>(output.data[3]);
-	auto action = FlatVector::GetData<string_t>(output.data[4]);
-	auto object_type = FlatVector::GetData<string_t>(output.data[5]);
-	auto n_objects = FlatVector::GetData<int32_t>(output.data[6]);
-	auto success = FlatVector::GetData<bool>(output.data[7]);
-	auto era_accession = FlatVector::GetData<string_t>(output.data[8]);
-	auto request_payload = FlatVector::GetData<string_t>(output.data[9]);
-	auto receipt = FlatVector::GetData<string_t>(output.data[10]);
-	auto duration_ms = FlatVector::GetData<int64_t>(output.data[12]);
-	auto target = FlatVector::GetData<string_t>(output.data[13]);
+	auto submission_id = FlatVector::GetDataMutable<string_t>(output.data[0]);
+	auto submitted_at = FlatVector::GetDataMutable<timestamp_tz_t>(output.data[1]);
+	auto endpoint = FlatVector::GetDataMutable<string_t>(output.data[2]);
+	auto secret_name = FlatVector::GetDataMutable<string_t>(output.data[3]);
+	auto action = FlatVector::GetDataMutable<string_t>(output.data[4]);
+	auto object_type = FlatVector::GetDataMutable<string_t>(output.data[5]);
+	auto n_objects = FlatVector::GetDataMutable<int32_t>(output.data[6]);
+	auto success = FlatVector::GetDataMutable<bool>(output.data[7]);
+	auto era_accession = FlatVector::GetDataMutable<string_t>(output.data[8]);
+	auto request_payload = FlatVector::GetDataMutable<string_t>(output.data[9]);
+	auto receipt = FlatVector::GetDataMutable<string_t>(output.data[10]);
+	auto duration_ms = FlatVector::GetDataMutable<int64_t>(output.data[12]);
+	auto target = FlatVector::GetDataMutable<string_t>(output.data[13]);
 
 	auto &error_messages = output.data[11];
 	ListVector::SetListSize(error_messages, 0);
@@ -263,12 +286,12 @@ void ENASubmissionLogScan(ClientContext &, TableFunctionInput &data, DataChunk &
 		const auto &row = state.snapshot[state.cursor + i];
 		const auto count = static_cast<idx_t>(row.error_messages.size());
 		ListVector::Reserve(error_messages, child_offset + count);
-		auto &child_vec = ListVector::GetEntry(error_messages);
-		auto child_data = FlatVector::GetData<string_t>(child_vec);
+		auto &child_vec = ListVector::GetChildMutable(error_messages);
+		auto child_data = FlatVector::GetDataMutable<string_t>(child_vec);
 		for (idx_t j = 0; j < count; j++) {
 			child_data[child_offset + j] = StringVector::AddString(child_vec, row.error_messages[j]);
 		}
-		auto entries = ListVector::GetData(error_messages);
+		auto entries = FlatVector::GetDataMutable<list_entry_t>(error_messages);
 		entries[i].offset = child_offset;
 		entries[i].length = count;
 		child_offset += count;
@@ -292,12 +315,12 @@ void ENASubmissionLogScan(ClientContext &, TableFunctionInput &data, DataChunk &
 			const auto &src = row.*field;
 			const auto count = static_cast<idx_t>(src.size());
 			ListVector::Reserve(list_vec, offset + count);
-			auto &child_vec = ListVector::GetEntry(list_vec);
-			auto child_data = FlatVector::GetData<string_t>(child_vec);
+			auto &child_vec = ListVector::GetChildMutable(list_vec);
+			auto child_data = FlatVector::GetDataMutable<string_t>(child_vec);
 			for (idx_t j = 0; j < count; j++) {
 				child_data[offset + j] = StringVector::AddString(child_vec, src[j]);
 			}
-			auto entries = ListVector::GetData(list_vec);
+			auto entries = FlatVector::GetDataMutable<list_entry_t>(list_vec);
 			entries[i].offset = offset;
 			entries[i].length = count;
 			offset += count;
@@ -315,10 +338,10 @@ void ENASubmissionLogScan(ClientContext &, TableFunctionInput &data, DataChunk &
 // Bind throws before scan is ever called, so a paired scan-function is dead
 // code; route both pointers at the same throwing helper to keep them in sync.
 unique_ptr<FunctionData> NotImplementedBind(ClientContext &, TableFunctionBindInput &input,
-                                            vector<LogicalType> &return_types, vector<string> &names) {
+                                            vector<LogicalType> &return_types, vector<Identifier> &names) {
 	throw NotImplementedException("Reading from ena.%s is not supported in this build "
 	                              "(SELECT support is planned for a future phase).",
-	                              input.table_function.name);
+	                              input.table_function.GetName().GetIdentifierName());
 }
 
 void NotImplementedScanFn(ClientContext &, TableFunctionInput &, DataChunk &) {
@@ -349,7 +372,11 @@ BindInfo ENAVirtualScanGetBindInfo(const optional_ptr<FunctionData> bind_data) {
 //===--------------------------------------------------------------------===//
 
 ENATableEntry::ENATableEntry(Catalog &catalog, SchemaCatalogEntry &schema, CreateTableInfo &info, ENATableKind kind_p)
-    : TableCatalogEntry(catalog, schema, info), kind(kind_p) {
+    : TableCatalogEntry(catalog, schema, info), kind(kind_p), columns(std::move(info.columns)) {
+}
+
+const ColumnList &ENATableEntry::GetColumns() const {
+	return columns;
 }
 
 unique_ptr<BaseStatistics> ENATableEntry::GetStatistics(ClientContext &, column_t) {
@@ -459,7 +486,7 @@ optional_ptr<CatalogEntry> ENASchemaEntry::LookupEntry(CatalogTransaction, const
 	}
 	const auto &name = lookup_info.GetEntryName();
 	for (auto &t : tables) {
-		if (StringUtil::CIEquals(t->name, name)) {
+		if (t->name == name) {
 			return t.get();
 		}
 	}
@@ -527,7 +554,7 @@ ENACatalog::~ENACatalog() = default;
 
 void ENACatalog::Initialize(bool) {
 	CreateSchemaInfo info;
-	info.schema = "main";
+	info.SetQualifiedName(QualifiedName({Identifier::DefaultSchema()}, Identifier()));
 	info.internal = true;
 	main_schema = make_uniq<ENASchemaEntry>(*this, info);
 }
@@ -594,8 +621,14 @@ PhysicalOperator &ENACatalog::PlanInsert(ClientContext &context, PhysicalPlanGen
 		return op_ref;
 	}
 	default:
-		throw BinderException("ENA catalog: INSERT INTO ena.%s is not implemented in this build", table_entry.name);
+		throw BinderException("ENA catalog: INSERT INTO ena.%s is not implemented in this build",
+		                      table_entry.name.GetIdentifierName());
 	}
+}
+
+PhysicalOperator &ENACatalog::PlanMergeInto(ClientContext &, PhysicalPlanGenerator &, LogicalMergeInto &,
+                                            PhysicalOperator &) {
+	throw NotImplementedException("Database type \"%s\" does not support MERGE INTO or ON CONFLICT", GetCatalogType());
 }
 
 PhysicalOperator &ENACatalog::PlanDelete(ClientContext &, PhysicalPlanGenerator &, LogicalDelete &,

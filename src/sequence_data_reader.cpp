@@ -5,6 +5,8 @@
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/query_result.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
 
 namespace duckdb {
 
@@ -88,7 +90,7 @@ static std::vector<uint8_t> ExtractQualVector(DataChunk &chunk, idx_t col_idx, U
 	}
 
 	auto &qual_vec = chunk.data[col_idx];
-	auto &qual_list = ListVector::GetEntry(qual_vec);
+	auto &qual_list = ListVector::GetChildMutable(qual_vec);
 	auto qual_list_data = FlatVector::GetData<uint8_t>(qual_list);
 	auto qual_entries = UnifiedVectorFormat::GetData<list_entry_t>(qual_data);
 
@@ -114,7 +116,7 @@ SequenceDataMap ReadSequenceDataTable(ClientContext &context, const std::string 
 	if (schema.has_qual2) {
 		columns += ", qual2";
 	}
-	std::string query = "SELECT " + columns + " FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
+	std::string query = "SELECT " + columns + " FROM " + SQLIdentifier::ToString(table_name);
 	auto query_result = conn.Query(query);
 
 	if (query_result->HasError()) {
@@ -122,7 +124,7 @@ SequenceDataMap ReadSequenceDataTable(ClientContext &context, const std::string 
 		                            query_result->GetError());
 	}
 
-	auto &materialized = query_result->Cast<MaterializedQueryResult>();
+	auto &materialized = *query_result;
 	idx_t row_number = 0;
 
 	// Column indices in our SELECT — dynamic based on schema
@@ -140,7 +142,7 @@ SequenceDataMap ReadSequenceDataTable(ClientContext &context, const std::string 
 	}
 
 	// Temp vectors for two-pass extraction (strings first, then lists).
-	// ListVector::GetEntry() can corrupt string pointers, so all strings
+	// ListVector::GetChildMutable() can corrupt string pointers, so all strings
 	// must be copied to std::string before any list extraction.
 	std::vector<std::string> temp_read_ids;
 	std::vector<std::string> temp_seq1;
@@ -154,18 +156,18 @@ SequenceDataMap ReadSequenceDataTable(ClientContext &context, const std::string 
 		}
 
 		UnifiedVectorFormat read_id_data, seq1_data, qual1_data;
-		chunk->data[COL_READ_ID].ToUnifiedFormat(chunk->size(), read_id_data);
-		chunk->data[COL_SEQ1].ToUnifiedFormat(chunk->size(), seq1_data);
-		chunk->data[COL_QUAL1].ToUnifiedFormat(chunk->size(), qual1_data);
+		chunk->data[COL_READ_ID].ToUnifiedFormat(read_id_data);
+		chunk->data[COL_SEQ1].ToUnifiedFormat(seq1_data);
+		chunk->data[COL_QUAL1].ToUnifiedFormat(qual1_data);
 
 		UnifiedVectorFormat seq2_data, qual2_data;
 		const string_t *seq2_ptr = nullptr;
 		if (schema.has_sequence2) {
-			chunk->data[col_seq2].ToUnifiedFormat(chunk->size(), seq2_data);
+			chunk->data[col_seq2].ToUnifiedFormat(seq2_data);
 			seq2_ptr = UnifiedVectorFormat::GetData<string_t>(seq2_data);
 		}
 		if (schema.has_qual2) {
-			chunk->data[col_qual2].ToUnifiedFormat(chunk->size(), qual2_data);
+			chunk->data[col_qual2].ToUnifiedFormat(qual2_data);
 		}
 
 		auto read_id_ptr = UnifiedVectorFormat::GetData<string_t>(read_id_data);

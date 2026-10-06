@@ -9,7 +9,10 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 #include <unordered_set>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -132,7 +135,7 @@ static void ValidateAndAlignInto(const std::string &sample_literal, LoadedSingle
 }
 
 static unique_ptr<FunctionData> AlignMafftBind(ClientContext &context, TableFunctionBindInput &input,
-                                               vector<LogicalType> &return_types, vector<string> &names) {
+                                               vector<LogicalType> &return_types, vector<Identifier> &names) {
 	if (input.inputs.empty() || input.inputs[0].IsNull()) {
 		throw BinderException("align_mafft requires a sequence table name argument");
 	}
@@ -158,7 +161,7 @@ static unique_ptr<FunctionData> AlignMafftBind(ClientContext &context, TableFunc
 		DiscoverSamples(conn, data->table_name, data->sample_info.sample_id_col,
 		                {"sequence_index", "read_id", "aligned_sequence", "original_length", "aligned_length"},
 		                "align_mafft", data->sample_info);
-		names.push_back(data->sample_info.sample_id_col);
+		names.emplace_back(data->sample_info.sample_id_col);
 		return_types.push_back(data->sample_info.sample_id_type);
 	}
 
@@ -226,18 +229,18 @@ static void EmitRows(const AlignMafftData &data, AlignMafftLocalState &lstate, c
 
 	idx_t col = 0;
 	if (data.has_sample_id) {
-		output.data[col++].Reference(lstate.sample_value);
+		output.data[col++].Reference(lstate.sample_value, count_t(count));
 	}
 	auto &sequence_index_vec = output.data[col++];
 	auto &read_id_vec = output.data[col++];
 	auto &aligned_seq_vec = output.data[col++];
 	auto &original_length_vec = output.data[col++];
 	auto &aligned_length_vec = output.data[col++];
-	auto sequence_index_data = FlatVector::GetData<int64_t>(sequence_index_vec);
-	auto read_id_data = FlatVector::GetData<string_t>(read_id_vec);
-	auto aligned_seq_data = FlatVector::GetData<string_t>(aligned_seq_vec);
-	auto original_length_data = FlatVector::GetData<int32_t>(original_length_vec);
-	auto aligned_length_data = FlatVector::GetData<int32_t>(aligned_length_vec);
+	auto sequence_index_data = FlatVector::GetDataMutable<int64_t>(sequence_index_vec);
+	auto read_id_data = FlatVector::GetDataMutable<string_t>(read_id_vec);
+	auto aligned_seq_data = FlatVector::GetDataMutable<string_t>(aligned_seq_vec);
+	auto original_length_data = FlatVector::GetDataMutable<int32_t>(original_length_vec);
+	auto aligned_length_data = FlatVector::GetDataMutable<int32_t>(aligned_length_vec);
 	for (idx_t i = 0; i < count; i++) {
 		idx_t row = lstate.current_row + i;
 		sequence_index_data[i] = static_cast<int64_t>(row);
@@ -248,7 +251,7 @@ static void EmitRows(const AlignMafftData &data, AlignMafftLocalState &lstate, c
 	}
 
 	lstate.current_row += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 static void AlignMafftExecute(ClientContext & /*context*/, TableFunctionInput &data_p, DataChunk &output) {
@@ -258,7 +261,7 @@ static void AlignMafftExecute(ClientContext & /*context*/, TableFunctionInput &d
 
 	if (!data.has_sample_id) {
 		if (lstate.current_row >= gstate.names.size()) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		EmitRows(data, lstate, gstate.names, gstate.sequences, gstate.original_lengths, gstate.aligned_length, output);
@@ -273,12 +276,12 @@ static void AlignMafftExecute(ClientContext & /*context*/, TableFunctionInput &d
 		}
 		idx_t sample_idx;
 		if (!ClaimNextSample(gstate, data.sample_info.sample_values.size(), sample_idx)) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		lstate.sample_value = data.sample_info.sample_values[sample_idx];
 		auto sample_literal = lstate.sample_value.ToSQLString();
-		auto q_col = KeywordHelper::WriteOptionallyQuoted(data.sample_info.sample_id_col);
+		auto q_col = SQLIdentifier::ToString(data.sample_info.sample_id_col);
 		// Same CAST-as-VARCHAR equality as the other per-sample call sites; see the note
 		// in deblur_table_function.cpp for the DECIMAL caveat.
 		auto where_sql = "CAST(" + q_col + " AS VARCHAR) = CAST(" + sample_literal + " AS VARCHAR)";
@@ -292,7 +295,7 @@ static void AlignMafftExecute(ClientContext & /*context*/, TableFunctionInput &d
 TableFunction AlignMafftTableFunction::GetFunction() {
 	auto tf = TableFunction("align_mafft", {LogicalType::VARCHAR}, AlignMafftExecute, AlignMafftBind,
 	                        AlignMafftInitGlobal, AlignMafftInitLocal);
-	tf.named_parameters["sample_id"] = LogicalType::VARCHAR;
+	AddNamedParameter(tf, "sample_id", LogicalType::VARCHAR);
 	// Match sibling aligners — allow downstream CTAS pipelines to parallelize.
 	// Callers that want deterministic order should ORDER BY (sample_id,) sequence_index.
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;

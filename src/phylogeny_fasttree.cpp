@@ -8,8 +8,11 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
-#include "duckdb/main/materialized_query_result.hpp"
+#include "duckdb/main/query_result.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
+#include "duckdb/common/vector/constant_vector.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 
 #include "catalog_utils.hpp"
 #include "gpl_boundary/arrow_ipc.hpp"
@@ -28,6 +31,7 @@
 #include <unistd.h> // read(2) on macOS isn't reachable via <cstdio>; need this for ::read
 #include <unordered_set>
 #include <vector>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -140,20 +144,20 @@ std::string value_to_str(const std::string &param, const Value &v) {
 // Build the JSON config from named_parameters, applying every check that
 // gpl-boundary's `apply_json_to_config` performs. Failures throw before the
 // daemon spawns. Returns the serialized JSON object string ("{...}").
-std::string BuildConfigJson(const named_parameter_map_t &named_params) {
+std::string BuildConfigJson(const named_argument_map_t &named_params) {
 	ConfigJsonBuilder cfg;
 
 	// First pass: reject unknown params.
 	for (const auto &kv : named_params) {
-		if (kKnownParams.find(kv.first) == kKnownParams.end()) {
+		if (kKnownParams.find(kv.first.GetIdentifierName()) == kKnownParams.end()) {
 			throw InvalidInputException("phylogeny_fasttree: unknown named parameter '%s'. "
 			                            "See `docs/phylogeny.md` for the supported list.",
-			                            kv.first);
+			                            kv.first.GetIdentifierName());
 		}
 	}
 
 	auto get = [&](const std::string &k) -> const Value * {
-		auto it = named_params.find(k);
+		auto it = named_params.find(Identifier(k));
 		return it == named_params.end() ? nullptr : &it->second;
 	};
 
@@ -441,7 +445,7 @@ std::string BuildConfigJson(const named_parameter_map_t &named_params) {
 // Bind
 // =============================================================================
 unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &return_types,
-                              vector<string> &names) {
+                              vector<Identifier> &names) {
 	if (input.inputs.empty() || input.inputs[0].IsNull()) {
 		throw InvalidInputException("phylogeny_fasttree: a non-NULL input table name is required");
 	}
@@ -501,7 +505,7 @@ struct LoadedInput {
 
 LoadedInput LoadInputTable(ClientContext &context, const std::string &table_name) {
 	auto conn = MakeReadOnlyHelperConnection(context);
-	const std::string sql = "SELECT name, sequence FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
+	const std::string sql = "SELECT name, sequence FROM " + SQLIdentifier::ToString(table_name);
 	auto result = conn.Query(sql);
 	if (result->HasError()) {
 		throw InvalidInputException("phylogeny_fasttree: failed to read input table '%s' "
@@ -510,7 +514,7 @@ LoadedInput LoadInputTable(ClientContext &context, const std::string &table_name
 	}
 
 	LoadedInput out;
-	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto &materialized = *result;
 	out.names.reserve(materialized.RowCount());
 	out.sequences.reserve(materialized.RowCount());
 	while (auto chunk = materialized.Fetch()) {
@@ -742,7 +746,7 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 	(void)context;
 
 	if (gstate.batch_index >= gstate.batches.size()) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
@@ -761,7 +765,7 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 	const idx_t total = static_cast<idx_t>(batch.length);
 	const idx_t remaining = total - gstate.row_in_batch;
 	const idx_t to_emit = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
-	output.SetCardinality(to_emit);
+	output.SetChildCardinality(to_emit);
 
 	// gpl-boundary `19306f6` `output_schema` (verified at
 	// `ext/GPL-boundary/src/tools/fasttree.rs:145-152`):
@@ -785,23 +789,23 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 	const auto &col_is_tip = *batch.children[6];
 	const auto &col_name = *batch.children[7];
 
-	auto *out_node_idx = FlatVector::GetData<int64_t>(output.data[0]);
-	auto *out_parent_idx = FlatVector::GetData<int64_t>(output.data[1]);
-	auto *out_edge_id = FlatVector::GetData<int64_t>(output.data[2]);
-	auto *out_branch_len = FlatVector::GetData<double>(output.data[3]);
-	auto *out_support = FlatVector::GetData<double>(output.data[4]);
-	auto *out_is_tip = FlatVector::GetData<bool>(output.data[5]);
-	auto *out_n_children = FlatVector::GetData<int64_t>(output.data[7]);
+	auto *out_node_idx = FlatVector::GetDataMutable<int64_t>(output.data[0]);
+	auto *out_parent_idx = FlatVector::GetDataMutable<int64_t>(output.data[1]);
+	auto *out_edge_id = FlatVector::GetDataMutable<int64_t>(output.data[2]);
+	auto *out_branch_len = FlatVector::GetDataMutable<double>(output.data[3]);
+	auto *out_support = FlatVector::GetDataMutable<double>(output.data[4]);
+	auto *out_is_tip = FlatVector::GetDataMutable<bool>(output.data[5]);
+	auto *out_n_children = FlatVector::GetDataMutable<int64_t>(output.data[7]);
 
 	auto &v_name = output.data[6];
 
-	auto &mask_node_idx = FlatVector::Validity(output.data[0]);
-	auto &mask_parent_idx = FlatVector::Validity(output.data[1]);
-	auto &mask_edge_id = FlatVector::Validity(output.data[2]);
-	auto &mask_branch_len = FlatVector::Validity(output.data[3]);
-	auto &mask_support = FlatVector::Validity(output.data[4]);
-	auto &mask_name = FlatVector::Validity(v_name);
-	auto &mask_n_children = FlatVector::Validity(output.data[7]);
+	auto &mask_node_idx = FlatVector::ValidityMutable(output.data[0]);
+	auto &mask_parent_idx = FlatVector::ValidityMutable(output.data[1]);
+	auto &mask_edge_id = FlatVector::ValidityMutable(output.data[2]);
+	auto &mask_branch_len = FlatVector::ValidityMutable(output.data[3]);
+	auto &mask_support = FlatVector::ValidityMutable(output.data[4]);
+	auto &mask_name = FlatVector::ValidityMutable(v_name);
+	auto &mask_n_children = FlatVector::ValidityMutable(output.data[7]);
 
 	// For variable-length Utf8: offsets is `length + 1` int32s, indexed at
 	// the column's own offset. data is a contiguous byte buffer addressed by
@@ -851,7 +855,7 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 				throw IOException("phylogeny_fasttree: corrupt utf8 offsets at row %lld (start=%d end=%d)",
 				                  static_cast<long long>(a), start, end);
 			}
-			FlatVector::GetData<string_t>(v_name)[i] =
+			FlatVector::GetDataMutable<string_t>(v_name)[i] =
 			    StringVector::AddString(v_name, p_name_data + start, static_cast<idx_t>(len));
 		}
 
@@ -922,32 +926,32 @@ void PhylogenyFastTreeAvailableImpl(DataChunk &args, ExpressionState &state, Vec
 
 TableFunction PhylogenyFastTreeTableFunction::GetFunction() {
 	TableFunction fn("phylogeny_fasttree", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal, InitLocal);
-	fn.named_parameters["seq_type"] = LogicalType::VARCHAR;
-	fn.named_parameters["seed"] = LogicalType::BIGINT;
-	fn.named_parameters["verbose"] = LogicalType::BOOLEAN;
-	fn.named_parameters["bootstrap"] = LogicalType::BIGINT;
-	fn.named_parameters["nosupport"] = LogicalType::BOOLEAN;
-	fn.named_parameters["pseudo"] = LogicalType::BOOLEAN;
-	fn.named_parameters["pseudo_weight"] = LogicalType::DOUBLE;
-	fn.named_parameters["nni"] = LogicalType::BIGINT;
-	fn.named_parameters["spr"] = LogicalType::BIGINT;
-	fn.named_parameters["mlnni"] = LogicalType::BIGINT;
-	fn.named_parameters["mlacc"] = LogicalType::BIGINT;
-	fn.named_parameters["cat"] = LogicalType::BIGINT;
-	fn.named_parameters["noml"] = LogicalType::BOOLEAN;
-	fn.named_parameters["threads"] = LogicalType::BIGINT;
-	fn.named_parameters["model"] = LogicalType::VARCHAR;
-	fn.named_parameters["gtrrates"] = LogicalType::LIST(LogicalType::DOUBLE);
-	fn.named_parameters["gtrfreq"] = LogicalType::LIST(LogicalType::DOUBLE);
-	fn.named_parameters["slow"] = LogicalType::BOOLEAN;
-	fn.named_parameters["bionj"] = LogicalType::BOOLEAN;
-	fn.named_parameters["nj"] = LogicalType::BOOLEAN;
-	fn.named_parameters["top"] = LogicalType::BOOLEAN;
-	fn.named_parameters["notop"] = LogicalType::BOOLEAN;
-	fn.named_parameters["topm"] = LogicalType::DOUBLE;
-	fn.named_parameters["quote"] = LogicalType::BOOLEAN;
-	fn.named_parameters["fastest"] = LogicalType::BOOLEAN;
-	fn.named_parameters["gamma"] = LogicalType::BOOLEAN;
+	AddNamedParameter(fn, "seq_type", LogicalType::VARCHAR);
+	AddNamedParameter(fn, "seed", LogicalType::BIGINT);
+	AddNamedParameter(fn, "verbose", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "bootstrap", LogicalType::BIGINT);
+	AddNamedParameter(fn, "nosupport", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "pseudo", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "pseudo_weight", LogicalType::DOUBLE);
+	AddNamedParameter(fn, "nni", LogicalType::BIGINT);
+	AddNamedParameter(fn, "spr", LogicalType::BIGINT);
+	AddNamedParameter(fn, "mlnni", LogicalType::BIGINT);
+	AddNamedParameter(fn, "mlacc", LogicalType::BIGINT);
+	AddNamedParameter(fn, "cat", LogicalType::BIGINT);
+	AddNamedParameter(fn, "noml", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "threads", LogicalType::BIGINT);
+	AddNamedParameter(fn, "model", LogicalType::VARCHAR);
+	AddNamedParameter(fn, "gtrrates", LogicalType::LIST(LogicalType::DOUBLE));
+	AddNamedParameter(fn, "gtrfreq", LogicalType::LIST(LogicalType::DOUBLE));
+	AddNamedParameter(fn, "slow", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "bionj", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "nj", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "top", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "notop", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "topm", LogicalType::DOUBLE);
+	AddNamedParameter(fn, "quote", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "fastest", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "gamma", LogicalType::BOOLEAN);
 	fn.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return fn;
 }

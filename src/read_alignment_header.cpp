@@ -3,6 +3,8 @@
 #include "remote_file_helper.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 
 // htslib comes in via SAMReader.hpp, which owns the SAMFilePtr/SAMHeaderPtr RAII
 // wrappers used below (note the version-prefixed include path this tree uses).
@@ -11,7 +13,7 @@ namespace duckdb {
 
 unique_ptr<FunctionData> ReadAlignmentHeaderTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                                 vector<LogicalType> &return_types,
-                                                                vector<std::string> &names) {
+                                                                vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 
 	if (input.inputs[0].IsNull()) {
@@ -93,17 +95,17 @@ void ReadAlignmentHeaderTableFunction::Execute(ClientContext &, TableFunctionInp
 
 	idx_t count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, gstate.entries.size() - gstate.cursor);
 
-	auto tids = FlatVector::GetData<int32_t>(output.data[0]);
-	auto lengths = FlatVector::GetData<int64_t>(output.data[2]);
+	auto tids = FlatVector::GetDataMutable<int32_t>(output.data[0]);
+	auto lengths = FlatVector::GetDataMutable<int64_t>(output.data[2]);
 	for (idx_t i = 0; i < count; i++) {
 		const auto &e = gstate.entries[gstate.cursor + i];
 		tids[i] = e.tid;
-		FlatVector::GetData<string_t>(output.data[1])[i] = StringVector::AddString(output.data[1], e.reference);
+		FlatVector::GetDataMutable<string_t>(output.data[1])[i] = StringVector::AddString(output.data[1], e.reference);
 		lengths[i] = e.length;
 	}
 
 	gstate.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 TableFunction ReadAlignmentHeaderTableFunction::GetFunction() {

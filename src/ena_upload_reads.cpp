@@ -32,6 +32,9 @@
 #include "duckdb/main/secret/secret.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -42,6 +45,8 @@
 #include <unistd.h> // unlink, rmdir for temp-staging cleanup (available on MinGW)
 #include <vector>
 #include <zlib.h>
+#include "miint_named_parameter.hpp"
+#include "miint_streaming_query.hpp"
 
 namespace duckdb {
 
@@ -138,7 +143,7 @@ void RequireListUtinyint(const string &col, const LogicalType &actual) {
 vector<uint8_t> ExtractQualList(Vector &list_vec, UnifiedVectorFormat &list_data, idx_t row) {
 	auto entries = UnifiedVectorFormat::GetData<list_entry_t>(list_data);
 	auto sel_idx = list_data.sel->get_index(row);
-	auto &child = ListVector::GetEntry(list_vec);
+	auto &child = ListVector::GetChildMutable(list_vec);
 	auto child_data = FlatVector::GetData<uint8_t>(child);
 	const idx_t len = entries[sel_idx].length;
 	const idx_t offset = entries[sel_idx].offset;
@@ -151,14 +156,14 @@ vector<uint8_t> ExtractQualList(Vector &list_vec, UnifiedVectorFormat &list_data
 // probe, so we never materialise data just to check the schema. Returns whether
 // the optional R2 columns (sequence2 + qual2) are present.
 bool ValidateSchemaDetectR2(Connection &conn, const string &relation_name) {
-	const string query = "SELECT * FROM " + KeywordHelper::WriteOptionallyQuoted(relation_name) + " LIMIT 0";
+	const string query = "SELECT * FROM " + SQLIdentifier::ToString(relation_name) + " LIMIT 0";
 	auto result = conn.Query(query);
 	if (result->HasError()) {
 		throw InvalidInputException("ena_upload_reads: failed to read relation '%s': %s", relation_name,
 		                            result->GetError());
 	}
-	auto &names = result->names;
-	auto &types = result->types;
+	auto names = IdentifiersToStrings(result->GetNames());
+	auto &types = result->GetTypes();
 
 	const int sample_ref_idx = FindColumn(names, "sample_ref");
 	const int read_id_idx = FindColumn(names, "read_id");
@@ -228,7 +233,7 @@ void ValidateSampleRef(const string &sample_ref) {
 // stream. O(#samples) memory.
 void PlanSamples(Connection &conn, const string &relation_name, FastqLayoutMode requested, bool has_r2_columns,
                  vector<SamplePlan> &out) {
-	const string quoted = KeywordHelper::WriteOptionallyQuoted(relation_name);
+	const string quoted = SQLIdentifier::ToString(relation_name);
 	const string r2_expr = has_r2_columns ? "sequence2 IS NOT NULL" : "false";
 	const string query = "SELECT sample_ref, bool_and(" + r2_expr + ") AS all_paired, bool_or(" + r2_expr +
 	                     ") AS any_paired FROM " + quoted + " GROUP BY sample_ref";
@@ -435,9 +440,9 @@ void EncodeChunk(DataChunk &chunk, FastqLayoutMode layout, FastqEncoder &encoder
 	const idx_t n = chunk.size();
 
 	UnifiedVectorFormat read_id_data, sequence1_data, qual1_data;
-	chunk.data[0].ToUnifiedFormat(n, read_id_data);
-	chunk.data[1].ToUnifiedFormat(n, sequence1_data);
-	chunk.data[2].ToUnifiedFormat(n, qual1_data);
+	chunk.data[0].ToUnifiedFormat(read_id_data);
+	chunk.data[1].ToUnifiedFormat(sequence1_data);
+	chunk.data[2].ToUnifiedFormat(qual1_data);
 	auto read_id_strs = UnifiedVectorFormat::GetData<string_t>(read_id_data);
 	auto sequence1_strs = UnifiedVectorFormat::GetData<string_t>(sequence1_data);
 
@@ -445,8 +450,8 @@ void EncodeChunk(DataChunk &chunk, FastqLayoutMode layout, FastqEncoder &encoder
 	UnifiedVectorFormat sequence2_data, qual2_data;
 	const string_t *sequence2_strs = nullptr;
 	if (need_r2) {
-		chunk.data[3].ToUnifiedFormat(n, sequence2_data);
-		chunk.data[4].ToUnifiedFormat(n, qual2_data);
+		chunk.data[3].ToUnifiedFormat(sequence2_data);
+		chunk.data[4].ToUnifiedFormat(qual2_data);
 		sequence2_strs = UnifiedVectorFormat::GetData<string_t>(sequence2_data);
 	}
 
@@ -602,9 +607,9 @@ void UploadOneSample(ClientContext &context, const ENAUploadReadsBindData &bind,
 		GzipMd5FileSink *sink1 = sinks.size() > 1 ? sinks[1].get() : nullptr;
 
 		// Stream this sample's rows once and encode straight into the sink(s).
-		// SendQuery (not a prepared statement) is deliberate: it defaults to a
+		// SubmitStream (not a prepared statement) is deliberate: it returns a
 		// streaming result, so Fetch pulls one DataChunk at a time and peak memory
-		// stays bounded. A prepared statement's result output_type defaults to
+		// stays bounded. On DuckDB 1.5 a prepared statement's result output_type defaulted to
 		// FORCE_MATERIALIZED — it would buffer the entire sample in RAM, defeating
 		// the whole refactor. Draining to exhaustion closes the stream before the
 		// next sample's query. If EncodeChunk throws mid-stream the result is
@@ -612,7 +617,7 @@ void UploadOneSample(ClientContext &context, const ENAUploadReadsBindData &bind,
 		// torn down (its dtor runs cleanup) and never reused, so the dangling
 		// active query never matters here.
 		FastqEncoder encoder(bind.qual_offset);
-		auto result = conn.SendQuery(data_query_prefix + KeywordHelper::WriteQuoted(plan.sample_ref, '\''));
+		auto result = SubmitStream(conn, data_query_prefix + SQLString::ToString(plan.sample_ref));
 		if (result->HasError()) {
 			throw InvalidInputException("ena_upload_reads: failed to read sample '%s': %s", plan.sample_ref,
 			                            result->GetError());
@@ -712,7 +717,7 @@ void RunStreamingUpload(ClientContext &context, const ENAUploadReadsBindData &bi
 	// reject '/' and '..' but allow quotes).
 	const string data_query_prefix = "SELECT read_id, sequence1, qual1" +
 	                                 string(has_r2_columns ? ", sequence2, qual2" : "") + " FROM " +
-	                                 KeywordHelper::WriteOptionallyQuoted(bind.relation_name) + " WHERE sample_ref = ";
+	                                 SQLIdentifier::ToString(bind.relation_name) + " WHERE sample_ref = ";
 	for (auto &plan : gs.samples) {
 		UploadOneSample(context, bind, gs, conn, data_query_prefix, plan);
 	}
@@ -752,7 +757,7 @@ void ResolveUploadCredentials(ClientContext &context, const string &transport_la
 // =====================================================================
 
 unique_ptr<FunctionData> Bind(ClientContext &, TableFunctionBindInput &input, vector<LogicalType> &return_types,
-                              vector<string> &names) {
+                              vector<Identifier> &names) {
 	auto bind = make_uniq<ENAUploadReadsBindData>();
 
 	auto get_string_param = [&](const char *key, string &out, bool required) {
@@ -854,17 +859,17 @@ void Execute(ClientContext &, TableFunctionInput &data_p, DataChunk &output) {
 	auto &gs = data_p.global_state->Cast<ENAUploadReadsGlobalState>();
 	const idx_t remaining = gs.emitted.size() - gs.emit_cursor;
 	if (remaining == 0) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 	const idx_t to_emit = std::min<idx_t>(remaining, STANDARD_VECTOR_SIZE);
 
-	auto sample_ref = FlatVector::GetData<string_t>(output.data[0]);
-	auto filename = FlatVector::GetData<string_t>(output.data[1]);
-	auto filetype = FlatVector::GetData<string_t>(output.data[2]);
-	auto md5_v = FlatVector::GetData<string_t>(output.data[3]);
-	auto bytes_v = FlatVector::GetData<uint64_t>(output.data[4]);
-	auto layout_v = FlatVector::GetData<string_t>(output.data[5]);
+	auto sample_ref = FlatVector::GetDataMutable<string_t>(output.data[0]);
+	auto filename = FlatVector::GetDataMutable<string_t>(output.data[1]);
+	auto filetype = FlatVector::GetDataMutable<string_t>(output.data[2]);
+	auto md5_v = FlatVector::GetDataMutable<string_t>(output.data[3]);
+	auto bytes_v = FlatVector::GetDataMutable<uint64_t>(output.data[4]);
+	auto layout_v = FlatVector::GetDataMutable<string_t>(output.data[5]);
 
 	for (idx_t i = 0; i < to_emit; i++) {
 		const auto &row = gs.emitted[gs.emit_cursor + i];
@@ -876,19 +881,19 @@ void Execute(ClientContext &, TableFunctionInput &data_p, DataChunk &output) {
 		layout_v[i] = StringVector::AddString(output.data[5], row.layout_name);
 	}
 	gs.emit_cursor += to_emit;
-	output.SetCardinality(to_emit);
+	output.SetChildCardinality(to_emit);
 }
 
 } // namespace
 
 TableFunction ENAUploadReadsTableFunction::GetFunction() {
 	TableFunction tf("ena_upload_reads", {}, Execute, Bind, InitGlobal);
-	tf.named_parameters["relation"] = LogicalType::VARCHAR;
-	tf.named_parameters["secret"] = LogicalType::VARCHAR;
-	tf.named_parameters["target_url"] = LogicalType::VARCHAR;
-	tf.named_parameters["qual_offset"] = LogicalType::BIGINT;
-	tf.named_parameters["layout"] = LogicalType::VARCHAR;
-	tf.named_parameters["aspera_rate_limit_mbps"] = LogicalType::BIGINT;
+	AddNamedParameter(tf, "relation", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "secret", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "target_url", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "qual_offset", LogicalType::BIGINT);
+	AddNamedParameter(tf, "layout", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "aspera_rate_limit_mbps", LogicalType::BIGINT);
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return tf;
 }

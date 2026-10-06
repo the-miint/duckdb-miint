@@ -8,6 +8,8 @@
 #include "duckdb/common/types.hpp"
 #include "duckdb/function/copy_function.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
 #include <htslib-1.22.1/htslib/hts.h>
 #include <htslib-1.22.1/htslib/sam.h>
 
@@ -101,7 +103,7 @@ static void ParseReadGroup(const Value &rg, string &out_line, string &out_id) {
 	string id;
 	string rest; // non-ID fields, in user order
 	for (idx_t i = 0; i < child_types.size(); i++) {
-		string field = StringUtil::Upper(child_types[i].first);
+		string field = StringUtil::Upper(child_types[i].first.GetIdentifierName());
 		// @RG fields are 2-character SAM codes (ID, PL, DS, SM, LB, ...). Reject
 		// anything else at bind rather than emitting a malformed @RG line that
 		// sam_hdr_add_lines fails on later with an opaque error.
@@ -141,7 +143,7 @@ static void ParseTags(const Value &tags, const vector<string> &names, vector<UBA
 	auto &child_types = StructType::GetChildTypes(tags.type());
 	auto children = StructValue::GetChildren(tags);
 	for (idx_t i = 0; i < child_types.size(); i++) {
-		const string &tag = child_types[i].first;
+		const string &tag = child_types[i].first.GetIdentifierName();
 		if (tag.size() != 2) {
 			throw BinderException("TAGS tag name '%s' must be exactly 2 characters", tag);
 		}
@@ -174,18 +176,18 @@ static void ParseTags(const Value &tags, const vector<string> &names, vector<UBA
 // Bind
 //===--------------------------------------------------------------------===//
 static unique_ptr<FunctionData> UBAMCopyBind(ClientContext &context, CopyFunctionBindInput &input,
-                                             const vector<string> &names, const vector<LogicalType> &sql_types) {
+                                             const vector<Identifier> &names, const vector<LogicalType> &sql_types) {
 	auto result = make_uniq<UBAMCopyBindData>();
 	result->file_path = input.info.file_path;
-	result->names = names;
+	result->names = IdentifiersToStrings(names);
 
 	// Locate required columns (case-insensitive, matching the SAM/BAM writer).
 	for (idx_t i = 0; i < names.size(); i++) {
-		if (StringUtil::CIEquals(names[i], "read_id")) {
+		if (names[i] == "read_id") {
 			result->read_id_idx = i;
-		} else if (StringUtil::CIEquals(names[i], "sequence1")) {
+		} else if (names[i] == "sequence1") {
 			result->sequence1_idx = i;
-		} else if (StringUtil::CIEquals(names[i], "qual1")) {
+		} else if (names[i] == "qual1") {
 			result->qual1_idx = i;
 		}
 	}
@@ -214,21 +216,21 @@ static unique_ptr<FunctionData> UBAMCopyBind(ClientContext &context, CopyFunctio
 
 	// Options.
 	for (auto &option : input.info.options) {
-		if (StringUtil::CIEquals(option.first, "read_group")) {
+		if (option.first == "read_group") {
 			ParseReadGroup(option.second[0], result->rg_line, result->rg_id);
 			result->has_read_group = true;
-		} else if (StringUtil::CIEquals(option.first, "tags")) {
-			ParseTags(option.second[0], names, result->tags, sql_types);
-		} else if (StringUtil::CIEquals(option.first, "compression_level")) {
+		} else if (option.first == "tags") {
+			ParseTags(option.second[0], IdentifiersToStrings(names), result->tags, sql_types);
+		} else if (option.first == "compression_level") {
 			result->compression_level = option.second[0].GetValue<int32_t>();
 			if (result->compression_level < 0 || result->compression_level > 9) {
 				throw BinderException("COMPRESSION_LEVEL must be between 0 and 9, got %d", result->compression_level);
 			}
-		} else if (StringUtil::CIEquals(option.first, "reference_lengths")) {
+		} else if (option.first == "reference_lengths") {
 			throw BinderException("COPY FORMAT UBAM does not accept REFERENCE_LENGTHS: a uBAM is headerless "
 			                      "(unaligned reads, no @SQ). Use FORMAT BAM for aligned records.");
 		} else {
-			throw BinderException("Unknown option for COPY FORMAT UBAM: %s", option.first);
+			throw BinderException("Unknown option for COPY FORMAT UBAM: %s", option.first.GetIdentifierName());
 		}
 	}
 
@@ -330,18 +332,18 @@ static void UBAMCopySink(ExecutionContext &context, FunctionData &bind_data, Glo
 	const idx_t n = input.size();
 
 	UnifiedVectorFormat read_id_data, seq1_data, qual1_data;
-	input.data[fdata.read_id_idx].ToUnifiedFormat(n, read_id_data);
-	input.data[fdata.sequence1_idx].ToUnifiedFormat(n, seq1_data);
-	input.data[fdata.qual1_idx].ToUnifiedFormat(n, qual1_data);
+	input.data[fdata.read_id_idx].ToUnifiedFormat(read_id_data);
+	input.data[fdata.sequence1_idx].ToUnifiedFormat(seq1_data);
+	input.data[fdata.qual1_idx].ToUnifiedFormat(qual1_data);
 
 	auto seq1_strings = UnifiedVectorFormat::GetData<string_t>(seq1_data);
 	auto qual1_entries = UnifiedVectorFormat::GetData<list_entry_t>(qual1_data);
-	auto qual1_child = FlatVector::GetData<uint8_t>(ListVector::GetEntry(input.data[fdata.qual1_idx]));
+	auto qual1_child = FlatVector::GetData<uint8_t>(ListVector::GetChildMutable(input.data[fdata.qual1_idx]));
 
 	// Tag columns: unify once per chunk.
 	vector<UnifiedVectorFormat> tag_formats(fdata.tags.size());
 	for (idx_t t = 0; t < fdata.tags.size(); t++) {
-		input.data[fdata.tags[t].col_idx].ToUnifiedFormat(n, tag_formats[t]);
+		input.data[fdata.tags[t].col_idx].ToUnifiedFormat(tag_formats[t]);
 	}
 
 	// Write the header once (first thread to arrive).

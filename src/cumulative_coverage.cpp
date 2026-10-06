@@ -2,6 +2,9 @@
 #include "alignment_functions_internal.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/function/aggregate_function.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
 
 namespace duckdb {
 
@@ -65,16 +68,16 @@ struct CumulativeCoverageOperation {
 		UnifiedVectorFormat rank_data;
 		UnifiedVectorFormat start_data;
 		UnifiedVectorFormat stop_data;
-		rank_vector.ToUnifiedFormat(count, rank_data);
-		start_vector.ToUnifiedFormat(count, start_data);
-		stop_vector.ToUnifiedFormat(count, stop_data);
+		rank_vector.ToUnifiedFormat(rank_data);
+		start_vector.ToUnifiedFormat(start_data);
+		stop_vector.ToUnifiedFormat(stop_data);
 
 		auto rank_ptr = UnifiedVectorFormat::GetData<int32_t>(rank_data);
 		auto start_ptr = UnifiedVectorFormat::GetData<int64_t>(start_data);
 		auto stop_ptr = UnifiedVectorFormat::GetData<int64_t>(stop_data);
 
 		UnifiedVectorFormat state_data;
-		states.ToUnifiedFormat(count, state_data);
+		states.ToUnifiedFormat(state_data);
 		auto state_ptr = UnifiedVectorFormat::GetData<CumulativeCoverageState *>(state_data);
 
 		for (idx_t i = 0; i < count; i++) {
@@ -122,14 +125,14 @@ struct CumulativeCoverageOperation {
 		target.accumulator->Absorb(*source.accumulator);
 	}
 
-	static void Finalize(Vector &state_vector, AggregateInputData &aggr_input_data, Vector &result, idx_t count,
+	static void Finalize(Vector &state_vector, AggregateFinalizeInputData &aggr_input_data, Vector &result, idx_t count,
 	                     idx_t offset) {
 		UnifiedVectorFormat state_data;
-		state_vector.ToUnifiedFormat(count, state_data);
+		state_vector.ToUnifiedFormat(state_data);
 		auto states = UnifiedVectorFormat::GetData<CumulativeCoverageState *>(state_data);
 
-		auto &result_validity = FlatVector::Validity(result);
-		auto result_data = FlatVector::GetData<list_entry_t>(result);
+		auto &result_validity = FlatVector::ValidityMutable(result);
+		auto result_data = FlatVector::GetDataMutable<list_entry_t>(result);
 
 		for (idx_t i = 0; i < count; i++) {
 			auto state_idx = state_data.sel->get_index(i);
@@ -150,13 +153,13 @@ struct CumulativeCoverageOperation {
 				throw InvalidInputException("%s", e.what());
 			}
 
-			auto &list_entry = ListVector::GetEntry(result);
+			auto &list_entry = ListVector::GetChildMutable(result);
 			auto list_offset = ListVector::GetListSize(result);
 			ListVector::Reserve(result, list_offset + curve.size());
 
 			auto &struct_children = StructVector::GetEntries(list_entry);
-			auto rank_ptr = FlatVector::GetData<int32_t>(*struct_children[0]);
-			auto covered_ptr = FlatVector::GetData<int64_t>(*struct_children[1]);
+			auto rank_ptr = FlatVector::GetDataMutable<int32_t>(struct_children[0]);
+			auto covered_ptr = FlatVector::GetDataMutable<int64_t>(struct_children[1]);
 
 			for (idx_t j = 0; j < curve.size(); j++) {
 				rank_ptr[list_offset + j] = curve[j].rank;

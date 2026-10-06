@@ -8,6 +8,7 @@
 #include "duckdb/main/query_result.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
 #include <unordered_set>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -29,20 +30,20 @@ std::unordered_set<std::string> ReadTipNames(ClientContext &context, const std::
 
 	auto conn = MakeReadOnlyHelperConnection(context);
 
-	std::string query = "SELECT name::VARCHAR FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
+	std::string query = "SELECT name::VARCHAR FROM " + SQLIdentifier::ToString(table_name);
 	auto query_result = conn.Query(query);
 	if (query_result->HasError()) {
 		throw InvalidInputException("Failed to read from tips table '%s': %s", table_name, query_result->GetError());
 	}
 
-	auto &materialized = query_result->Cast<MaterializedQueryResult>();
+	auto &materialized = *query_result;
 	while (true) {
 		auto chunk = materialized.Fetch();
 		if (!chunk || chunk->size() == 0) {
 			break;
 		}
 		UnifiedVectorFormat name_data;
-		chunk->data[0].ToUnifiedFormat(chunk->size(), name_data);
+		chunk->data[0].ToUnifiedFormat(name_data);
 		auto name_strs = UnifiedVectorFormat::GetData<string_t>(name_data);
 		for (idx_t i = 0; i < chunk->size(); i++) {
 			auto idx = name_data.sel->get_index(i);
@@ -56,7 +57,7 @@ std::unordered_set<std::string> ReadTipNames(ClientContext &context, const std::
 }
 
 bool GetBoolParam(TableFunctionBindInput &input, const std::string &key, bool default_value) {
-	auto it = input.named_parameters.find(key);
+	auto it = input.named_parameters.find(Identifier(key));
 	if (it == input.named_parameters.end() || it->second.IsNull()) {
 		return default_value;
 	}
@@ -72,7 +73,7 @@ ShearTreeTableFunction::Data::Data(std::string tree_table, std::string tips_tabl
 }
 
 unique_ptr<FunctionData> ShearTreeTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                      vector<LogicalType> &return_types, vector<std::string> &names) {
+                                                      vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto tree_table_name = input.inputs[0].ToString();
 	auto tips_table_name = input.inputs[1].ToString();
 	RejectCTERelationName(input, tree_table_name);
@@ -136,7 +137,7 @@ void ShearTreeTableFunction::Execute(ClientContext &context, TableFunctionInput 
 	auto &global_state = data_p.global_state->Cast<GlobalState>();
 
 	if (global_state.current_row_idx >= global_state.rows.size()) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
@@ -147,13 +148,13 @@ void ShearTreeTableFunction::Execute(ClientContext &context, TableFunctionInput 
 	                                      false, "");
 
 	global_state.current_row_idx += rows_to_output;
-	output.SetCardinality(rows_to_output);
+	output.SetChildCardinality(rows_to_output);
 }
 
 TableFunction ShearTreeTableFunction::GetFunction() {
 	TableFunction tf("shear_tree", {LogicalType::VARCHAR, LogicalType::VARCHAR}, Execute, Bind, InitGlobal);
-	tf.named_parameters["collapse"] = LogicalType::BOOLEAN;
-	tf.named_parameters["ignore_missing"] = LogicalType::BOOLEAN;
+	AddNamedParameter(tf, "collapse", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "ignore_missing", LogicalType::BOOLEAN);
 	return tf;
 }
 

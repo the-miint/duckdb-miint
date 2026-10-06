@@ -29,7 +29,7 @@ require-env MIINT_KREPP_TOY_REFS
 statement ok
 CREATE TABLE toy_refs AS
 SELECT regexp_extract(filepath, '([^/]+)\.fna$', 1) AS read_id, sequence1
-FROM read_fastx('${MIINT_KREPP_TOY_REFS}/*.fna', include_filepath := true);
+FROM read_fastx('{MIINT_KREPP_TOY_REFS}/*.fna', include_filepath := true);
 
 query I
 SELECT count(DISTINCT read_id) FROM toy_refs;
@@ -54,7 +54,7 @@ FROM read_newick('ext/krepp/test/tree_toy.nwk');
 
 query IIIII
 SELECT k, w, h, num_references, status
-FROM krepp_index_create('toy_refs', '__TEST_DIR__/toy_index',
+FROM krepp_index_create('toy_refs', '{TEST_DIR}/toy_index',
                         tree_table := 'toy_tree', k := 27, w := 35, h := 11);
 ----
 27	35	11	25	ok
@@ -73,7 +73,7 @@ FROM krepp_index_create('toy_refs', '__TEST_DIR__/toy_index',
 # the two would be indistinguishable.
 query IIIII
 SELECT k, w, h, num_references, status
-FROM krepp_index_create('toy_refs', '__TEST_DIR__/toy_index_derived',
+FROM krepp_index_create('toy_refs', '{TEST_DIR}/toy_index_derived',
                         newick_path := 'ext/krepp/test/tree_toy.nwk', k := 27);
 ----
 27	33	11	25	ok
@@ -82,7 +82,7 @@ FROM krepp_index_create('toy_refs', '__TEST_DIR__/toy_index_derived',
 # backbone among them - an index built without a tree silently has no tree file
 # at all, which is why one is required.
 query I
-SELECT count(*) FROM glob('__TEST_DIR__/toy_index/*') WHERE file LIKE '%-m4r1-frac';
+SELECT count(*) FROM glob('{TEST_DIR}/toy_index/*') WHERE file LIKE '%-m4r1-frac';
 ----
 6
 
@@ -91,7 +91,7 @@ CREATE TABLE toy_reads AS SELECT read_id, sequence1 FROM read_fastx('ext/krepp/t
 
 statement ok
 CREATE TABLE toy_placements AS
-SELECT * FROM place_krepp(query_table='toy_reads', index_path='__TEST_DIR__/toy_index');
+SELECT * FROM place_krepp(query_table='toy_reads', index_path='{TEST_DIR}/toy_index');
 
 # Reads place at all. Without this every assertion below passes vacuously on an
 # empty result - the failure mode where the index is structurally valid and

@@ -2,7 +2,10 @@
 #include "catalog_utils.hpp"
 #include "miint_log.hpp"
 #include "duckdb/common/vector_size.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 #include <sstream>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -114,7 +117,7 @@ bool ReadNCBITableFunction::GlobalState::FetchNextBatch(ClientContext &context) 
 }
 
 unique_ptr<FunctionData> ReadNCBITableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                     vector<LogicalType> &return_types, vector<std::string> &names) {
+                                                     vector<LogicalType> &return_types, vector<Identifier> &names) {
 	std::vector<std::string> accessions;
 
 	if (input.inputs[0].IsNull()) {
@@ -214,7 +217,7 @@ void ReadNCBITableFunction::Execute(ClientContext &context, TableFunctionInput &
 		global_state.metadata_results.clear();
 		global_state.result_offset = 0;
 		if (!global_state.FetchNextBatch(context)) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 	}
@@ -227,13 +230,17 @@ void ReadNCBITableFunction::Execute(ClientContext &context, TableFunctionInput &
 	for (idx_t i = 0; i < count; i++) {
 		const auto &meta = global_state.metadata_results[offset + i];
 
-		FlatVector::GetData<string_t>(output.data[0])[i] = StringVector::AddString(output.data[0], meta.accession);
-		FlatVector::GetData<int32_t>(output.data[1])[i] = meta.version;
-		FlatVector::GetData<string_t>(output.data[2])[i] = StringVector::AddString(output.data[2], meta.description);
-		FlatVector::GetData<string_t>(output.data[3])[i] = StringVector::AddString(output.data[3], meta.organism);
-		FlatVector::GetData<int64_t>(output.data[4])[i] = meta.taxonomy_id;
-		FlatVector::GetData<int64_t>(output.data[5])[i] = meta.length;
-		FlatVector::GetData<string_t>(output.data[6])[i] = StringVector::AddString(output.data[6], meta.molecule_type);
+		FlatVector::GetDataMutable<string_t>(output.data[0])[i] =
+		    StringVector::AddString(output.data[0], meta.accession);
+		FlatVector::GetDataMutable<int32_t>(output.data[1])[i] = meta.version;
+		FlatVector::GetDataMutable<string_t>(output.data[2])[i] =
+		    StringVector::AddString(output.data[2], meta.description);
+		FlatVector::GetDataMutable<string_t>(output.data[3])[i] =
+		    StringVector::AddString(output.data[3], meta.organism);
+		FlatVector::GetDataMutable<int64_t>(output.data[4])[i] = meta.taxonomy_id;
+		FlatVector::GetDataMutable<int64_t>(output.data[5])[i] = meta.length;
+		FlatVector::GetDataMutable<string_t>(output.data[6])[i] =
+		    StringVector::AddString(output.data[6], meta.molecule_type);
 
 		if (!meta.update_date.empty()) {
 			date_t date;
@@ -241,23 +248,23 @@ void ReadNCBITableFunction::Execute(ClientContext &context, TableFunctionInput &
 			bool special;
 			auto result = Date::TryConvertDate(meta.update_date.c_str(), meta.update_date.size(), pos, date, special);
 			if (result == DateCastResult::SUCCESS) {
-				FlatVector::GetData<date_t>(output.data[7])[i] = date;
+				FlatVector::GetDataMutable<date_t>(output.data[7])[i] = date;
 			} else {
-				FlatVector::Validity(output.data[7]).SetInvalid(i);
+				FlatVector::ValidityMutable(output.data[7]).SetInvalid(i);
 			}
 		} else {
-			FlatVector::Validity(output.data[7]).SetInvalid(i);
+			FlatVector::ValidityMutable(output.data[7]).SetInvalid(i);
 		}
 	}
 
 	global_state.result_offset += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 TableFunction ReadNCBITableFunction::GetFunction() {
 	auto tf = TableFunction("read_ncbi", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
-	tf.named_parameters["api_key"] = LogicalType::VARCHAR;
-	tf.named_parameters["batch_size"] = LogicalType::BIGINT;
+	AddNamedParameter(tf, "api_key", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "batch_size", LogicalType::BIGINT);
 	return tf;
 }
 

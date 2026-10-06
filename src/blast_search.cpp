@@ -6,6 +6,9 @@
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -23,7 +26,7 @@ static std::vector<LogicalType> GetBlastOutputTypes(const LogicalType &query_id_
 }
 
 unique_ptr<FunctionData> BlastSearchTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                        vector<LogicalType> &return_types, vector<std::string> &names) {
+                                                        vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 
 	if (input.inputs[0].IsNull()) {
@@ -36,25 +39,25 @@ unique_ptr<FunctionData> BlastSearchTableFunction::Bind(ClientContext &context, 
 	}
 
 	auto get_string = [&](const std::string &name, std::string &out) {
-		auto it = input.named_parameters.find(name);
+		auto it = input.named_parameters.find(Identifier(name));
 		if (it != input.named_parameters.end() && !it->second.IsNull()) {
 			out = it->second.ToString();
 		}
 	};
 	auto get_double = [&](const std::string &name, double &out) {
-		auto it = input.named_parameters.find(name);
+		auto it = input.named_parameters.find(Identifier(name));
 		if (it != input.named_parameters.end() && !it->second.IsNull()) {
 			out = it->second.GetValue<double>();
 		}
 	};
 	auto get_int = [&](const std::string &name, int &out) {
-		auto it = input.named_parameters.find(name);
+		auto it = input.named_parameters.find(Identifier(name));
 		if (it != input.named_parameters.end() && !it->second.IsNull()) {
 			out = it->second.GetValue<int>();
 		}
 	};
 	auto get_bool = [&](const std::string &name, bool &out) {
-		auto it = input.named_parameters.find(name);
+		auto it = input.named_parameters.find(Identifier(name));
 		if (it != input.named_parameters.end() && !it->second.IsNull()) {
 			out = it->second.GetValue<bool>();
 		}
@@ -155,19 +158,20 @@ static void OutputBlastHits(DataChunk &output, const std::vector<miint::BlastHit
 		const auto &hit = hits[offset + i];
 		// query_id mirrors the query table's id type; subject_id is always VARCHAR.
 		EmitIdCell(output.data[0], i, hit.query_id, query_id_type);
-		FlatVector::GetData<string_t>(output.data[1])[i] = StringVector::AddString(output.data[1], hit.subject_id);
-		FlatVector::GetData<double>(output.data[2])[i] = hit.pct_identity;
-		FlatVector::GetData<int32_t>(output.data[3])[i] = hit.alignment_length;
-		FlatVector::GetData<int32_t>(output.data[4])[i] = hit.mismatches;
-		FlatVector::GetData<int32_t>(output.data[5])[i] = hit.gap_opens;
-		FlatVector::GetData<int64_t>(output.data[6])[i] = hit.query_start;
-		FlatVector::GetData<int64_t>(output.data[7])[i] = hit.query_end;
-		FlatVector::GetData<int64_t>(output.data[8])[i] = hit.subject_start;
-		FlatVector::GetData<int64_t>(output.data[9])[i] = hit.subject_end;
-		FlatVector::GetData<double>(output.data[10])[i] = hit.evalue;
-		FlatVector::GetData<double>(output.data[11])[i] = hit.bit_score;
+		FlatVector::GetDataMutable<string_t>(output.data[1])[i] =
+		    StringVector::AddString(output.data[1], hit.subject_id);
+		FlatVector::GetDataMutable<double>(output.data[2])[i] = hit.pct_identity;
+		FlatVector::GetDataMutable<int32_t>(output.data[3])[i] = hit.alignment_length;
+		FlatVector::GetDataMutable<int32_t>(output.data[4])[i] = hit.mismatches;
+		FlatVector::GetDataMutable<int32_t>(output.data[5])[i] = hit.gap_opens;
+		FlatVector::GetDataMutable<int64_t>(output.data[6])[i] = hit.query_start;
+		FlatVector::GetDataMutable<int64_t>(output.data[7])[i] = hit.query_end;
+		FlatVector::GetDataMutable<int64_t>(output.data[8])[i] = hit.subject_start;
+		FlatVector::GetDataMutable<int64_t>(output.data[9])[i] = hit.subject_end;
+		FlatVector::GetDataMutable<double>(output.data[10])[i] = hit.evalue;
+		FlatVector::GetDataMutable<double>(output.data[11])[i] = hit.bit_score;
 	}
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 void BlastSearchTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
@@ -181,7 +185,7 @@ void BlastSearchTableFunction::Execute(ClientContext &context, TableFunctionInpu
 		gstate.result_buffer.clear();
 		gstate.result_offset = 0;
 		if (!gstate.FetchNextBatch(context)) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 	}
@@ -194,12 +198,12 @@ void BlastSearchTableFunction::Execute(ClientContext &context, TableFunctionInpu
 
 TableFunction BlastSearchTableFunction::GetFunction() {
 	auto tf = TableFunction("blast", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal, InitLocal);
-	tf.named_parameters["program"] = LogicalType::VARCHAR;
-	tf.named_parameters["database"] = LogicalType::VARCHAR;
-	tf.named_parameters["evalue"] = LogicalType::DOUBLE;
-	tf.named_parameters["max_targets"] = LogicalType::INTEGER;
-	tf.named_parameters["megablast"] = LogicalType::BOOLEAN;
-	tf.named_parameters["api_key"] = LogicalType::VARCHAR;
+	AddNamedParameter(tf, "program", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "database", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "evalue", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "max_targets", LogicalType::INTEGER);
+	AddNamedParameter(tf, "megablast", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "api_key", LogicalType::VARCHAR);
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return tf;
 }

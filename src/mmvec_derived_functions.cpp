@@ -12,6 +12,7 @@
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/main/query_result.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
 
 #include <stdexcept>
 #include <string>
@@ -128,7 +129,7 @@ ModelIdTypes ResolveModelIdTypes(ClientContext &context, const std::string &tabl
 std::vector<miint::mmvec::ModelCell> ReadModelCells(ClientContext &context, const std::string &table_name,
                                                     const char *caller) {
 	auto conn = MakeReadOnlyHelperConnection(context);
-	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
+	const auto qname = SQLIdentifier::ToString(table_name);
 	const std::string projection = "SELECT modality::VARCHAR, x_feature_id::VARCHAR, y_feature_id::VARCHAR, "
 	                               "axis::INTEGER, value::DOUBLE FROM " +
 	                               qname;
@@ -146,18 +147,18 @@ std::vector<miint::mmvec::ModelCell> ReadModelCells(ClientContext &context, cons
 	}
 
 	std::vector<miint::mmvec::ModelCell> cells;
-	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto &materialized = *result;
 	while (auto chunk = materialized.Fetch()) {
 		const idx_t n = chunk->size();
 		if (n == 0) {
 			break;
 		}
 		UnifiedVectorFormat mod_u, x_u, y_u, axis_u, val_u;
-		chunk->data[0].ToUnifiedFormat(n, mod_u);
-		chunk->data[1].ToUnifiedFormat(n, x_u);
-		chunk->data[2].ToUnifiedFormat(n, y_u);
-		chunk->data[3].ToUnifiedFormat(n, axis_u);
-		chunk->data[4].ToUnifiedFormat(n, val_u);
+		chunk->data[0].ToUnifiedFormat(mod_u);
+		chunk->data[1].ToUnifiedFormat(x_u);
+		chunk->data[2].ToUnifiedFormat(y_u);
+		chunk->data[3].ToUnifiedFormat(axis_u);
+		chunk->data[4].ToUnifiedFormat(val_u);
 		auto mod_data = UnifiedVectorFormat::GetData<string_t>(mod_u);
 		auto x_data = UnifiedVectorFormat::GetData<string_t>(x_u);
 		auto y_data = UnifiedVectorFormat::GetData<string_t>(y_u);
@@ -220,7 +221,7 @@ struct MmvecRanksBindData : public TableFunctionData {
 };
 
 unique_ptr<FunctionData> MmvecRanksBind(ClientContext &context, TableFunctionBindInput &input,
-                                        vector<LogicalType> &return_types, vector<string> &names) {
+                                        vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<MmvecRanksBindData>();
 	data->model_table = input.inputs[0].GetValue<string>();
 	RejectCTERelationName(input, data->model_table);
@@ -286,8 +287,8 @@ void MmvecRanksExecute(ClientContext &, TableFunctionInput &data_p, DataChunk &o
 
 	auto &v_x = output.data[0];
 	auto &v_y = output.data[1];
-	auto rank = FlatVector::GetData<double>(output.data[2]);
-	auto prob = FlatVector::GetData<double>(output.data[3]);
+	auto rank = FlatVector::GetDataMutable<double>(output.data[2]);
+	auto prob = FlatVector::GetDataMutable<double>(output.data[3]);
 
 	// The output is row-major over (X feature, Y feature), so within a chunk the X id
 	// repeats for up to d2 consecutive rows while the Y id never repeats. Emitting the
@@ -314,7 +315,7 @@ void MmvecRanksExecute(ClientContext &, TableFunctionInput &data_p, DataChunk &o
 		prob[r] = g.probs[k];
 	}
 	g.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 // ---------------------------------------------------------------------------
@@ -345,7 +346,7 @@ struct MmvecPredictBindData : public TableFunctionData {
 };
 
 unique_ptr<FunctionData> MmvecPredictBind(ClientContext &context, TableFunctionBindInput &input,
-                                          vector<LogicalType> &return_types, vector<string> &names) {
+                                          vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<MmvecPredictBindData>();
 	data->model_table = input.inputs[0].GetValue<string>();
 	data->x_table = input.inputs[1].GetValue<string>();
@@ -403,7 +404,7 @@ void MmvecPredictExecute(ClientContext &, TableFunctionInput &data_p, DataChunk 
 
 	auto &v_sample = output.data[0];
 	auto &v_y = output.data[1];
-	auto proportion = FlatVector::GetData<double>(output.data[2]);
+	auto proportion = FlatVector::GetDataMutable<double>(output.data[2]);
 
 	for (idx_t r = 0; r < count; ++r) {
 		const idx_t k = g.cursor + r;
@@ -414,7 +415,7 @@ void MmvecPredictExecute(ClientContext &, TableFunctionInput &data_p, DataChunk 
 		proportion[r] = g.proportions[k];
 	}
 	g.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 // ---------------------------------------------------------------------------
@@ -428,7 +429,7 @@ struct MmvecScoreBindData : public TableFunctionData {
 };
 
 unique_ptr<FunctionData> MmvecScoreBind(ClientContext &context, TableFunctionBindInput &input,
-                                        vector<LogicalType> &return_types, vector<string> &names) {
+                                        vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<MmvecScoreBindData>();
 	data->model_table = input.inputs[0].GetValue<string>();
 	data->x_table = input.inputs[1].GetValue<string>();
@@ -480,12 +481,12 @@ unique_ptr<GlobalTableFunctionState> MmvecScoreInitGlobal(ClientContext &context
 void MmvecScoreExecute(ClientContext &, TableFunctionInput &data_p, DataChunk &output) {
 	auto &g = data_p.global_state->Cast<MmvecScoreGlobalState>();
 	if (g.emitted) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
-	FlatVector::GetData<double>(output.data[0])[0] = g.q_squared;
+	FlatVector::GetDataMutable<double>(output.data[0])[0] = g.q_squared;
 	g.emitted = true;
-	output.SetCardinality(1);
+	output.SetChildCardinality(1);
 }
 
 } // namespace

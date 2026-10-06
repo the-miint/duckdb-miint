@@ -46,19 +46,19 @@ CREATE TABLE result_all_bigint AS SELECT
     NULL::VARCHAR AS tag_yt, NULL::VARCHAR AS tag_md, NULL::VARCHAR AS tag_sa;
 
 statement ok
-COPY result_all_bigint TO '__TEST_DIR__/all_bigint.sam'
+COPY result_all_bigint TO '{TEST_DIR}/all_bigint.sam'
 (FORMAT SAM, REFERENCE_LENGTHS 'ref_bigint_lengths');
 
 # Decimal stringification on write, VARCHAR on read-back.
 query III
 SELECT read_id, reference, mate_reference
-FROM read_sam('__TEST_DIR__/all_bigint.sam');
+FROM read_sam('{TEST_DIR}/all_bigint.sam');
 ----
 1001	2001	2002
 
 query III
 SELECT typeof(read_id), typeof(reference), typeof(mate_reference)
-FROM read_sam('__TEST_DIR__/all_bigint.sam')
+FROM read_sam('{TEST_DIR}/all_bigint.sam')
 LIMIT 1;
 ----
 VARCHAR	VARCHAR	VARCHAR
@@ -86,12 +86,12 @@ CREATE TABLE result_bigint_eq AS SELECT
     NULL::VARCHAR AS tag_yt, NULL::VARCHAR AS tag_md, NULL::VARCHAR AS tag_sa;
 
 statement ok
-COPY result_bigint_eq TO '__TEST_DIR__/bigint_eq.sam'
+COPY result_bigint_eq TO '{TEST_DIR}/bigint_eq.sam'
 (FORMAT SAM, REFERENCE_LENGTHS 'ref_bigint_lengths');
 
 query III
 SELECT read_id, reference, mate_reference
-FROM read_sam('__TEST_DIR__/bigint_eq.sam');
+FROM read_sam('{TEST_DIR}/bigint_eq.sam');
 ----
 1002	2001	=
 
@@ -120,12 +120,12 @@ statement ok
 CREATE TABLE ref_dummy AS SELECT 'dummy' AS name, 1000 AS length;
 
 statement ok
-COPY result_null_ids TO '__TEST_DIR__/null_bigint_ids.sam'
+COPY result_null_ids TO '{TEST_DIR}/null_bigint_ids.sam'
 (FORMAT SAM, INCLUDE_HEADER false, REFERENCE_LENGTHS 'ref_dummy');
 
 query III
 SELECT read_id, reference, mate_reference
-FROM read_sam('__TEST_DIR__/null_bigint_ids.sam', reference_lengths='ref_dummy');
+FROM read_sam('{TEST_DIR}/null_bigint_ids.sam', reference_lengths='ref_dummy');
 ----
 *	*	*
 
@@ -152,11 +152,11 @@ CREATE TABLE result_mixed AS SELECT
     NULL::VARCHAR AS tag_yt, NULL::VARCHAR AS tag_md, NULL::VARCHAR AS tag_sa;
 
 statement ok
-COPY result_mixed TO '__TEST_DIR__/mixed.sam'
+COPY result_mixed TO '{TEST_DIR}/mixed.sam'
 (FORMAT SAM, REFERENCE_LENGTHS 'ref_bigint_lengths');
 
 query III
-SELECT read_id, reference, mate_reference FROM read_sam('__TEST_DIR__/mixed.sam');
+SELECT read_id, reference, mate_reference FROM read_sam('{TEST_DIR}/mixed.sam');
 ----
 read-mixed-1	2002	2001
 
@@ -165,11 +165,11 @@ read-mixed-1	2002	2001
 # ---------------------------------------------------------------------------
 
 statement ok
-COPY result_all_bigint TO '__TEST_DIR__/all_bigint.bam'
+COPY result_all_bigint TO '{TEST_DIR}/all_bigint.bam'
 (FORMAT BAM, REFERENCE_LENGTHS 'ref_bigint_lengths');
 
 query III
-SELECT read_id, reference, mate_reference FROM read_sam('__TEST_DIR__/all_bigint.bam');
+SELECT read_id, reference, mate_reference FROM read_sam('{TEST_DIR}/all_bigint.bam');
 ----
 1001	2001	2002
 
@@ -182,7 +182,7 @@ COPY (SELECT
     1::INTEGER AS read_id, 0::USMALLINT AS flags, 'r' AS reference, 1::BIGINT AS position,
     1::BIGINT AS stop_position, 0::UTINYINT AS mapq, '*' AS cigar, '*' AS mate_reference,
     0::BIGINT AS mate_position, 0::BIGINT AS template_length
-) TO '__TEST_DIR__/bad_read_id.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_dummy');
+) TO '{TEST_DIR}/bad_read_id.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_dummy');
 ----
 Column 'read_id' must be VARCHAR, BIGINT, or UUID
 
@@ -191,7 +191,7 @@ COPY (SELECT
     'r' AS read_id, 0::USMALLINT AS flags, 1::INTEGER AS reference, 1::BIGINT AS position,
     1::BIGINT AS stop_position, 0::UTINYINT AS mapq, '*' AS cigar, '*' AS mate_reference,
     0::BIGINT AS mate_position, 0::BIGINT AS template_length
-) TO '__TEST_DIR__/bad_reference.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_dummy');
+) TO '{TEST_DIR}/bad_reference.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_dummy');
 ----
 Column 'reference' must be VARCHAR, BIGINT, or UUID
 
@@ -200,6 +200,6 @@ COPY (SELECT
     'r' AS read_id, 0::USMALLINT AS flags, 'r' AS reference, 1::BIGINT AS position,
     1::BIGINT AS stop_position, 0::UTINYINT AS mapq, '*' AS cigar, 1::DOUBLE AS mate_reference,
     0::BIGINT AS mate_position, 0::BIGINT AS template_length
-) TO '__TEST_DIR__/bad_mate.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_dummy');
+) TO '{TEST_DIR}/bad_mate.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_dummy');
 ----
 Column 'mate_reference' must be VARCHAR, BIGINT, or UUID

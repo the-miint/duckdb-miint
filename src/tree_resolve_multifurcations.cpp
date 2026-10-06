@@ -13,7 +13,7 @@ TreeResolveMultifurcationsTableFunction::Data::Data(std::string tree_table) : tr
 unique_ptr<FunctionData> TreeResolveMultifurcationsTableFunction::Bind(ClientContext &context,
                                                                        TableFunctionBindInput &input,
                                                                        vector<LogicalType> &return_types,
-                                                                       vector<std::string> &names) {
+                                                                       vector<Identifier> &names) {
 	auto tree_table_name = input.inputs[0].ToString();
 	RejectCTERelationName(input, tree_table_name);
 
@@ -67,7 +67,7 @@ void TreeResolveMultifurcationsTableFunction::Execute(ClientContext &context, Ta
 	auto &global_state = data_p.global_state->Cast<GlobalState>();
 
 	if (global_state.current_row_idx >= global_state.rows.size()) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
@@ -78,7 +78,7 @@ void TreeResolveMultifurcationsTableFunction::Execute(ClientContext &context, Ta
 	                                      false, "");
 
 	global_state.current_row_idx += rows_to_output;
-	output.SetCardinality(rows_to_output);
+	output.SetChildCardinality(rows_to_output);
 }
 
 TableFunction TreeResolveMultifurcationsTableFunction::GetFunction() {

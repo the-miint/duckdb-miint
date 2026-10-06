@@ -50,7 +50,7 @@ static std::vector<std::pair<std::string, uint64_t>> ReadReferenceRows(ClientCon
 	// Execute a query to read from the table/view
 	// This approach works for both tables and views uniformly
 	// We select the first two columns by position (using *)
-	std::string query = "SELECT * FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
+	std::string query = "SELECT * FROM " + SQLIdentifier::ToString(table_name);
 
 	auto query_result = conn.Query(query);
 
@@ -59,8 +59,8 @@ static std::vector<std::pair<std::string, uint64_t>> ReadReferenceRows(ClientCon
 		                            query_result->GetError());
 	}
 
-	auto &materialized = query_result->Cast<MaterializedQueryResult>();
-	auto &result_types = materialized.types;
+	auto &materialized = *query_result;
+	auto &result_types = materialized.GetTypes();
 
 	// Get the length column type for proper extraction
 	auto &length_type = result_types[1];
@@ -79,8 +79,8 @@ static std::vector<std::pair<std::string, uint64_t>> ReadReferenceRows(ClientCon
 
 		// Convert to unified format for proper NULL handling
 		UnifiedVectorFormat name_data, length_data;
-		name_vector.ToUnifiedFormat(chunk->size(), name_data);
-		length_vector.ToUnifiedFormat(chunk->size(), length_data);
+		name_vector.ToUnifiedFormat(name_data);
+		length_vector.ToUnifiedFormat(length_data);
 
 		auto name_ptr = UnifiedVectorFormat::GetData<string_t>(name_data);
 

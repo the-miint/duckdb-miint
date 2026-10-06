@@ -10,10 +10,12 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
 
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -83,7 +85,7 @@ struct AbsQuantCellCountsGlobalState : public GlobalTableFunctionState {
 };
 
 unique_ptr<FunctionData> AbsQuantCellCountsBind(ClientContext &context, TableFunctionBindInput &input,
-                                                vector<LogicalType> &return_types, vector<string> &names) {
+                                                vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<AbsQuantCellCountsBindData>();
 	for (idx_t i = 0; i < 7; ++i) {
 		if (input.inputs[i].IsNull()) {
@@ -102,7 +104,7 @@ unique_ptr<FunctionData> AbsQuantCellCountsBind(ClientContext &context, TableFun
 	RejectCTERelationName(input, data->params_table);
 	data->options.min_coverage = input.inputs[6].GetValue<double>();
 	for (const auto &kv : input.named_parameters) {
-		if (StringUtil::Lower(kv.first) == "min_rsquared") {
+		if (kv.first == "min_rsquared") {
 			if (kv.second.IsNull()) {
 				throw BinderException("%s: min_rsquared must not be NULL", kCallerName);
 			}
@@ -303,7 +305,7 @@ void AbsQuantCellCountsExecute(ClientContext &, TableFunctionInput &data_p, Data
 
 	auto &sample_id = output.data[0];
 	auto &feature_id = output.data[1];
-	auto value = FlatVector::GetData<double>(output.data[2]);
+	auto value = FlatVector::GetDataMutable<double>(output.data[2]);
 
 	for (idx_t r = 0; r < count; ++r) {
 		const auto &cell = g.values[g.cursor + r];
@@ -312,7 +314,7 @@ void AbsQuantCellCountsExecute(ClientContext &, TableFunctionInput &data_p, Data
 		value[r] = cell.value;
 	}
 	g.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 } // namespace
@@ -322,7 +324,7 @@ void RegisterAbsQuantCellCounts(ExtensionLoader &loader) {
 	                    {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
 	                     LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::DOUBLE},
 	                    AbsQuantCellCountsExecute, AbsQuantCellCountsBind, AbsQuantCellCountsInitGlobal);
-	cells.named_parameters["min_rsquared"] = LogicalType::DOUBLE;
+	AddNamedParameter(cells, "min_rsquared", LogicalType::DOUBLE);
 	cells.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(cells);
 }

@@ -2,7 +2,11 @@
 #include "catalog_utils.hpp"
 #include "miint_log.hpp"
 #include "duckdb/common/vector_size.hpp"
+#include "duckdb/common/vector/constant_vector.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 #include <sstream>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -167,7 +171,7 @@ bool ReadNCBIFastaTableFunction::GlobalState::FetchNextBatch(ClientContext &cont
 
 unique_ptr<FunctionData> ReadNCBIFastaTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                           vector<LogicalType> &return_types,
-                                                          vector<std::string> &names) {
+                                                          vector<Identifier> &names) {
 	// Parse accession(s) - can be VARCHAR or VARCHAR[]
 	std::vector<std::string> accessions;
 
@@ -274,7 +278,7 @@ void ReadNCBIFastaTableFunction::Execute(ClientContext &context, TableFunctionIn
 	// If current batch is exhausted, fetch next work unit.
 	while (global_state.current_batch.empty() || global_state.batch_offset >= global_state.current_batch.size()) {
 		if (!global_state.FetchNextBatch(context)) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 	}
@@ -288,20 +292,20 @@ void ReadNCBIFastaTableFunction::Execute(ClientContext &context, TableFunctionIn
 	size_t offset = global_state.batch_offset;
 
 	// sequence_index (column 0)
-	auto seq_idx_data = FlatVector::GetData<int64_t>(output.data[0]);
+	auto seq_idx_data = FlatVector::GetDataMutable<int64_t>(output.data[0]);
 	for (idx_t i = 0; i < count; i++) {
 		seq_idx_data[i] = global_state.sequence_index++;
 	}
 
 	// read_id (column 1)
-	auto read_id_data = FlatVector::GetData<string_t>(output.data[1]);
+	auto read_id_data = FlatVector::GetDataMutable<string_t>(output.data[1]);
 	for (idx_t i = 0; i < count; i++) {
 		read_id_data[i] = StringVector::AddString(output.data[1], batch.read_ids[offset + i]);
 	}
 
 	// comment (column 2) - nullable
-	auto comment_data = FlatVector::GetData<string_t>(output.data[2]);
-	auto &comment_validity = FlatVector::Validity(output.data[2]);
+	auto comment_data = FlatVector::GetDataMutable<string_t>(output.data[2]);
+	auto &comment_validity = FlatVector::ValidityMutable(output.data[2]);
 	for (idx_t i = 0; i < count; i++) {
 		const auto &comment = batch.comments[offset + i];
 		comment_data[i] = StringVector::AddString(output.data[2], comment);
@@ -311,7 +315,7 @@ void ReadNCBIFastaTableFunction::Execute(ClientContext &context, TableFunctionIn
 	}
 
 	// sequence1 (column 3)
-	auto seq1_data = FlatVector::GetData<string_t>(output.data[3]);
+	auto seq1_data = FlatVector::GetDataMutable<string_t>(output.data[3]);
 	for (idx_t i = 0; i < count; i++) {
 		seq1_data[i] = StringVector::AddString(output.data[3], batch.sequences1[offset + i]);
 	}
@@ -338,14 +342,14 @@ void ReadNCBIFastaTableFunction::Execute(ClientContext &context, TableFunctionIn
 	}
 
 	global_state.batch_offset += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 TableFunction ReadNCBIFastaTableFunction::GetFunction() {
 	auto tf = TableFunction("read_ncbi_fasta", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
-	tf.named_parameters["api_key"] = LogicalType::VARCHAR;
-	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
-	tf.named_parameters["batch_size"] = LogicalType::BIGINT;
+	AddNamedParameter(tf, "api_key", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "include_filepath", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "batch_size", LogicalType::BIGINT);
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return tf;
 }

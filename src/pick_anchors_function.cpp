@@ -18,6 +18,8 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 namespace {
@@ -50,7 +52,7 @@ struct PickAnchorsGlobalState : public GlobalTableFunctionState {
 };
 
 unique_ptr<FunctionData> PickAnchorsBind(ClientContext &context, TableFunctionBindInput &input,
-                                         vector<LogicalType> &return_types, vector<string> &names) {
+                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<PickAnchorsData>();
 	data->table_name = input.inputs[0].GetValue<string>();
 	RejectCTERelationName(input, data->table_name);
@@ -60,7 +62,7 @@ unique_ptr<FunctionData> PickAnchorsBind(ClientContext &context, TableFunctionBi
 
 	bool has_n = false;
 	for (const auto &kv : input.named_parameters) {
-		const auto key = StringUtil::Lower(kv.first);
+		const auto key = StringUtil::Lower(kv.first.GetIdentifierName());
 		if (key == "n_anchors") {
 			data->n_anchors = kv.second.GetValue<int32_t>();
 			has_n = true;
@@ -150,19 +152,19 @@ void PickAnchorsExecute(ClientContext &, TableFunctionInput &input, DataChunk &o
 	auto &gstate = input.global_state->Cast<PickAnchorsGlobalState>();
 	const idx_t total = gstate.anchors.size();
 	if (gstate.cursor >= total) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 	const idx_t n = MinValue<idx_t>(STANDARD_VECTOR_SIZE, total - gstate.cursor);
 
-	auto rank_data = FlatVector::GetData<int32_t>(output.data[0]);
+	auto rank_data = FlatVector::GetDataMutable<int32_t>(output.data[0]);
 	auto &sample_id_vec = output.data[1];
 	for (idx_t i = 0; i < n; ++i) {
 		rank_data[i] = static_cast<int32_t>(gstate.cursor + i);
 		EmitIdCell(sample_id_vec, i, gstate.anchors[gstate.cursor + i], gstate.sample_id_type);
 	}
 	gstate.cursor += n;
-	output.SetCardinality(n);
+	output.SetChildCardinality(n);
 }
 
 } // namespace
@@ -170,11 +172,11 @@ void PickAnchorsExecute(ClientContext &, TableFunctionInput &input, DataChunk &o
 void RegisterPickAnchors(ExtensionLoader &loader) {
 	TableFunction fn("pick_anchors", {LogicalType::VARCHAR}, PickAnchorsExecute, PickAnchorsBind,
 	                 PickAnchorsInitGlobal);
-	fn.named_parameters["n_anchors"] = LogicalType::INTEGER;
-	fn.named_parameters["method"] = LogicalType::VARCHAR;
-	fn.named_parameters["seed"] = LogicalType::BIGINT;
-	fn.named_parameters["n_dims"] = LogicalType::INTEGER;
-	fn.named_parameters["n_bins"] = LogicalType::INTEGER;
+	AddNamedParameter(fn, "n_anchors", LogicalType::INTEGER);
+	AddNamedParameter(fn, "method", LogicalType::VARCHAR);
+	AddNamedParameter(fn, "seed", LogicalType::BIGINT);
+	AddNamedParameter(fn, "n_dims", LogicalType::INTEGER);
+	AddNamedParameter(fn, "n_bins", LogicalType::INTEGER);
 	loader.RegisterFunction(fn);
 }
 

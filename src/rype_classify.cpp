@@ -6,6 +6,9 @@
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -56,7 +59,7 @@ RypeClassifyTableFunction::GlobalState::~GlobalState() {
 // Bind
 // ============================================================================
 unique_ptr<FunctionData> RypeClassifyTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                         vector<LogicalType> &return_types, vector<string> &names) {
+                                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 
 	// Required: index_path (first positional parameter)
@@ -165,8 +168,8 @@ unique_ptr<GlobalTableFunctionState> RypeClassifyTableFunction::InitGlobal(Clien
 	// for why this must not be BinaryView (#222).
 	ConfigureRypeArrowExport(conn);
 
-	std::string id_col_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.id_column);
-	std::string table_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.sequence_table);
+	std::string id_col_quoted = SQLIdentifier::ToString(bind_data.id_column);
+	std::string table_quoted = SQLIdentifier::ToString(bind_data.sequence_table);
 
 	// Build the Arrow input stream: one streaming scan of the caller's relation,
 	// carrying the identifier and the sequence in the same row. See
@@ -250,7 +253,7 @@ void RypeClassifyTableFunction::Execute(ClientContext &context, TableFunctionInp
 	// No mutex needed - MaxThreads() returns 1, enforcing single-threaded execution
 
 	if (gstate.done) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
@@ -271,7 +274,7 @@ void RypeClassifyTableFunction::Execute(ClientContext &context, TableFunctionInp
 		// Check if stream is exhausted
 		if (!wrapper->arrow_array.release) {
 			gstate.done = true;
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 
@@ -283,7 +286,7 @@ void RypeClassifyTableFunction::Execute(ClientContext &context, TableFunctionInp
 	idx_t remaining = static_cast<idx_t>(batch.length) - gstate.batch_offset;
 	idx_t to_output = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
 
-	output.SetCardinality(to_output);
+	output.SetChildCardinality(to_output);
 
 	// RYpe output schema: query_id (Int64), bucket_id (UInt32), score (Float64)
 	// Our output schema: read_id (mirrors the id_column's type -- VARCHAR, BIGINT or UUID;
@@ -324,7 +327,7 @@ void RypeClassifyTableFunction::Execute(ClientContext &context, TableFunctionInp
 		if (!name) {
 			throw IOException("RYpe returned unknown bucket_id %u - index may be corrupted", bucket_id);
 		}
-		FlatVector::GetData<string_t>(output.data[2])[i] = StringVector::AddString(output.data[2], name);
+		FlatVector::GetDataMutable<string_t>(output.data[2])[i] = StringVector::AddString(output.data[2], name);
 	}
 
 	// --- Column 1 (bucket_id) and Column 3 (score): zero-copy via Arrow conversion ---
@@ -366,9 +369,9 @@ TableFunction RypeClassifyTableFunction::GetFunction() {
 	                 InitLocal);
 
 	// Named parameters
-	tf.named_parameters["id_column"] = LogicalType::VARCHAR;
-	tf.named_parameters["threshold"] = LogicalType::DOUBLE;
-	tf.named_parameters["negative_index"] = LogicalType::VARCHAR;
+	AddNamedParameter(tf, "id_column", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "threshold", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "negative_index", LogicalType::VARCHAR);
 	AddRypeSharedNamedParameters(tf);
 
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;

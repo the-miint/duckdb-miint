@@ -3,9 +3,12 @@
 #include "ensure_httpfs.hpp"
 #include "miint_log.hpp"
 #include "duckdb/common/vector_size.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 
 #include <cstdlib>
 #include <unordered_set>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -39,9 +42,9 @@ std::string TaxidToString(const Value &v) {
 // Emit a VARCHAR cell, or NULL when the collapsed rank is absent.
 void SetRankCell(DataChunk &output, idx_t col, idx_t row, const std::string &value) {
 	if (value.empty()) {
-		FlatVector::Validity(output.data[col]).SetInvalid(row);
+		FlatVector::ValidityMutable(output.data[col]).SetInvalid(row);
 	} else {
-		FlatVector::GetData<string_t>(output.data[col])[row] = StringVector::AddString(output.data[col], value);
+		FlatVector::GetDataMutable<string_t>(output.data[col])[row] = StringVector::AddString(output.data[col], value);
 	}
 }
 
@@ -127,7 +130,7 @@ bool ReadNCBILineageTableFunction::GlobalState::FetchNextBatch(ClientContext &co
 
 unique_ptr<FunctionData> ReadNCBILineageTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                             vector<LogicalType> &return_types,
-                                                            vector<std::string> &names) {
+                                                            vector<Identifier> &names) {
 	std::vector<std::string> taxids;
 
 	if (input.inputs[0].IsNull()) {
@@ -205,7 +208,7 @@ void ReadNCBILineageTableFunction::Execute(ClientContext &context, TableFunction
 		global_state.results.clear();
 		global_state.result_offset = 0;
 		if (!global_state.FetchNextBatch(context)) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 	}
@@ -216,9 +219,9 @@ void ReadNCBILineageTableFunction::Execute(ClientContext &context, TableFunction
 
 	for (idx_t i = 0; i < count; i++) {
 		const auto &lin = global_state.results[offset + i];
-		FlatVector::GetData<int64_t>(output.data[0])[i] = lin.taxid;
-		FlatVector::GetData<string_t>(output.data[1])[i] = StringVector::AddString(output.data[1], lin.name);
-		FlatVector::GetData<string_t>(output.data[2])[i] = StringVector::AddString(output.data[2], lin.rank);
+		FlatVector::GetDataMutable<int64_t>(output.data[0])[i] = lin.taxid;
+		FlatVector::GetDataMutable<string_t>(output.data[1])[i] = StringVector::AddString(output.data[1], lin.name);
+		FlatVector::GetDataMutable<string_t>(output.data[2])[i] = StringVector::AddString(output.data[2], lin.rank);
 		SetRankCell(output, 3, i, lin.domain);
 		SetRankCell(output, 4, i, lin.phylum);
 		SetRankCell(output, 5, i, lin.tax_class);
@@ -227,17 +230,18 @@ void ReadNCBILineageTableFunction::Execute(ClientContext &context, TableFunction
 		SetRankCell(output, 8, i, lin.genus);
 		SetRankCell(output, 9, i, lin.species);
 		SetRankCell(output, 10, i, lin.strain);
-		FlatVector::GetData<string_t>(output.data[11])[i] = StringVector::AddString(output.data[11], lin.lineage);
+		FlatVector::GetDataMutable<string_t>(output.data[11])[i] =
+		    StringVector::AddString(output.data[11], lin.lineage);
 	}
 
 	global_state.result_offset += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 TableFunction ReadNCBILineageTableFunction::GetFunction() {
 	auto tf = TableFunction("read_ncbi_lineage", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
-	tf.named_parameters["api_key"] = LogicalType::VARCHAR;
-	tf.named_parameters["batch_size"] = LogicalType::BIGINT;
+	AddNamedParameter(tf, "api_key", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "batch_size", LogicalType::BIGINT);
 	return tf;
 }
 

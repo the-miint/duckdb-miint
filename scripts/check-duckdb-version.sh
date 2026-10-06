@@ -57,6 +57,20 @@ fi
 mapfile -t wf_versions < <(grep -oE '^[[:space:]]*duckdb_version:[[:space:]]*v?[0-9]+\.[0-9]+\.[0-9]+' "$WORKFLOW" \
                            | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+')
 
+# Pre-release: before the target DuckDB is tagged, both jobs take duckdb_version from
+# extension-ci-tools' _submodule_version.yml (the duckdb submodule pin) instead of a
+# literal. There is then no release version to hold the other spellings to, so report
+# that loudly and stop. Only the all-or-nothing form is accepted: a workflow mixing a
+# literal with the pin falls through to the normal checks and fails there.
+n_pin=$(grep -cE '^[[:space:]]*duckdb_version:[[:space:]]*\$\{\{[[:space:]]*needs\.duckdb-submodule-version\.outputs\.version[[:space:]]*\}\}' "$WORKFLOW" || true)
+if (( ${#wf_versions[@]} == 0 && n_pin == 2 )); then
+    pinned_sha=$(git ls-tree HEAD duckdb 2>/dev/null | awk '{print $3}')
+    msg="PRE-RELEASE: $WORKFLOW builds the duckdb submodule pin (${pinned_sha:0:10}), not a release tag. The Dockerfile, publish cron, Python CLI pin and wasm artifact name are NOT checked until literal duckdb_version inputs are restored on release day."
+    printf '%s\n' "$msg"
+    [[ "${GITHUB_ACTIONS:-}" == true ]] && printf '::warning::%s\n' "$msg"
+    exit 0
+fi
+
 if (( ${#wf_versions[@]} == 0 )); then
     printf 'ERROR: no duckdb_version found in %s\n' "$WORKFLOW" >&2
     exit 1

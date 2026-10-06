@@ -11,10 +11,11 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
-#include "duckdb/main/materialized_query_result.hpp"
+#include "duckdb/main/query_result.hpp"
 #include "duckdb/main/query_result.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
+#include "duckdb/common/vector/constant_vector.hpp"
 
 #include "gpl_boundary/arrow_ipc.hpp"
 #include "gpl_boundary/process.hpp"
@@ -33,6 +34,8 @@
 #include <unistd.h>
 #include <unordered_set>
 #include <vector>
+#include "miint_named_parameter.hpp"
+#include "miint_streaming_query.hpp"
 
 namespace duckdb {
 
@@ -65,12 +68,12 @@ std::unordered_set<std::string> MakeKnownAlignParams() {
 // instead) — an explicit value wins, else nthreads defaults to `db_threads`
 // (DuckDB's configured thread budget) so alignment uses the query's cores by
 // default rather than one.
-std::string BuildAlignConfigJson(const named_parameter_map_t &named_params, const std::string &index_basename,
+std::string BuildAlignConfigJson(const named_argument_map_t &named_params, const std::string &index_basename,
                                  int64_t db_threads) {
 	static const auto kKnown = MakeKnownAlignParams();
 	for (const auto &kv : named_params) {
-		if (kKnown.find(kv.first) == kKnown.end()) {
-			throw InvalidInputException("align_bowtie2: unknown named parameter '%s'.", kv.first);
+		if (kKnown.find(kv.first.GetIdentifierName()) == kKnown.end()) {
+			throw InvalidInputException("align_bowtie2: unknown named parameter '%s'.", kv.first.GetIdentifierName());
 		}
 	}
 
@@ -116,7 +119,7 @@ struct AlignBowtie2BindData : public TableFunctionData {
 	std::string subject_table;
 	// Carry the user's named_params forward so InitGlobal can build the
 	// align config_json once it knows the index basename.
-	named_parameter_map_t named_params;
+	named_argument_map_t named_params;
 
 	// Detected at bind time, used by Execute when building the query Arrow
 	// batches. Auto-detection of paired-end is per-batch on the daemon
@@ -145,7 +148,7 @@ struct AlignBowtie2GlobalState : public GlobalTableFunctionState {
 
 	// Streaming input cursor.
 	std::unique_ptr<Connection> input_conn;
-	std::unique_ptr<QueryResult> input_stream;
+	unique_ptr<StreamingQuery> input_stream;
 	bool input_exhausted = false;
 	std::string query_select_sql;
 
@@ -206,14 +209,14 @@ struct AlignBowtie2LocalState : public LocalTableFunctionState {};
 void DetectQueryColumns(ClientContext &context, AlignBowtie2BindData &bd) {
 	auto conn = MakeReadOnlyHelperConnection(context);
 	const std::string sql = "SELECT column_name, column_type FROM (DESCRIBE " +
-	                        KeywordHelper::WriteOptionallyQuoted(bd.query_table) +
+	                        SQLIdentifier::ToString(bd.query_table) +
 	                        ") WHERE column_name IN ('sequence2','qual1','qual2')";
 	auto result = conn.Query(sql);
 	if (result->HasError()) {
 		throw InvalidInputException("align_bowtie2: failed to introspect query table '%s': %s", bd.query_table,
 		                            result->GetError());
 	}
-	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto &materialized = *result;
 	while (auto chunk = materialized.Fetch()) {
 		for (idx_t i = 0; i < chunk->size(); ++i) {
 			const auto col = chunk->GetValue(0, i).ToString();
@@ -240,7 +243,7 @@ void DetectQueryColumns(ClientContext &context, AlignBowtie2BindData &bd) {
 }
 
 unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &return_types,
-                              vector<std::string> &names) {
+                              vector<Identifier> &names) {
 	if (input.inputs.size() < 2) {
 		throw BinderException("align_bowtie2 requires query_table and subject_table parameters");
 	}
@@ -268,12 +271,16 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 	// at SQL-compile rather than at execution).
 	static const auto kKnown = MakeKnownAlignParams();
 	for (const auto &kv : bd->named_params) {
-		if (kKnown.find(kv.first) == kKnown.end()) {
-			throw InvalidInputException("align_bowtie2: unknown named parameter '%s'.", kv.first);
+		if (kKnown.find(kv.first.GetIdentifierName()) == kKnown.end()) {
+			throw InvalidInputException("align_bowtie2: unknown named parameter '%s'.", kv.first.GetIdentifierName());
 		}
 	}
 
-	bt2_daemon::PopulateOutputSchema(names, return_types, bd->query_id_type, bd->subject_id_type);
+	std::vector<std::string> schema_names;
+	bt2_daemon::PopulateOutputSchema(schema_names, return_types, bd->query_id_type, bd->subject_id_type);
+	for (auto &n : schema_names) {
+		names.emplace_back(n);
+	}
 	return std::move(bd);
 }
 
@@ -347,8 +354,8 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	//    config JSON.
 	gs->config_json_align = BuildAlignConfigJson(bd.named_params, index_basename, db_threads);
 
-	// 5. Open a streaming cursor on the query table. SendQuery returns a
-	//    StreamQueryResult that fetches chunks lazily.
+	// 5. Open a streaming cursor on the query table. SubmitStream returns a
+	//    streaming result that fetches chunks lazily.
 	gs->input_conn = std::make_unique<Connection>(DatabaseInstance::GetDatabase(context));
 	InheritTempObjects(context, *gs->input_conn);
 	std::string select = "SELECT read_id, sequence1";
@@ -361,9 +368,9 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	if (bd.query_has_qual2) {
 		select += ", qual2";
 	}
-	select += " FROM " + KeywordHelper::WriteOptionallyQuoted(bd.query_table);
+	select += " FROM " + SQLIdentifier::ToString(bd.query_table);
 	gs->query_select_sql = select;
-	gs->input_stream = gs->input_conn->SendQuery(select);
+	gs->input_stream = SubmitStream(*gs->input_conn, select);
 	if (gs->input_stream->HasError()) {
 		throw InvalidInputException("align_bowtie2: failed to open streaming cursor on query table '%s': %s",
 		                            bd.query_table, gs->input_stream->GetError());
@@ -534,7 +541,7 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 			continue;
 		}
 		const idx_t to_emit = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
-		output.SetCardinality(to_emit);
+		output.SetChildCardinality(to_emit);
 		bt2_daemon::EmitChunkRows(output, to_emit, gs.row_in_batch, batch, bd.query_id_type, bd.subject_id_type);
 		gs.row_in_batch += to_emit;
 		return;
@@ -547,7 +554,7 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 	bt2_daemon::QueryBatch qb;
 	while (true) {
 		if (!FetchNextQueryBatch(gs, bd, qb)) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		if (qb.read_ids.empty()) {
@@ -567,7 +574,7 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 	}
 	const idx_t total = static_cast<idx_t>(batch.length);
 	const idx_t to_emit = MinValue<idx_t>(total, STANDARD_VECTOR_SIZE);
-	output.SetCardinality(to_emit);
+	output.SetChildCardinality(to_emit);
 	bt2_daemon::EmitChunkRows(output, to_emit, 0, batch, bd.query_id_type, bd.subject_id_type);
 	gs.row_in_batch = to_emit;
 }
@@ -582,7 +589,7 @@ TableFunction AlignBowtie2TableFunction::GetFunction() {
 	auto tf = TableFunction("align_bowtie2", {LogicalType::VARCHAR, LogicalType::VARCHAR}, Execute, Bind, InitGlobal,
 	                        InitLocal);
 	bt2_daemon::RegisterBowtie2AlignNamedParameterTypes(tf);
-	tf.named_parameters["threads"] = LogicalType::INTEGER; // miint-side; maps to daemon nthreads
+	AddNamedParameter(tf, "threads", LogicalType::INTEGER); // miint-side; maps to daemon nthreads
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return tf;
 }

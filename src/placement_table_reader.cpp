@@ -72,7 +72,7 @@ std::vector<miint::Placement> ReadPlacementTable(ClientContext &context, const s
 	// to the lowest pendant_length in the chain, which can sit outside epsilon of
 	// the maximum. test/sql/tree_resolve_placement_order.test carries that case.
 	std::string query = "SELECT fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length FROM " +
-	                    KeywordHelper::WriteOptionallyQuoted(table_name) +
+	                    SQLIdentifier::ToString(table_name) +
 	                    " ORDER BY fragment_id, like_weight_ratio DESC, pendant_length, edge_id";
 
 	auto query_result = conn.Query(query);
@@ -82,8 +82,8 @@ std::vector<miint::Placement> ReadPlacementTable(ClientContext &context, const s
 		                            query_result->GetError());
 	}
 
-	auto &materialized = query_result->Cast<MaterializedQueryResult>();
-	auto &result_types = materialized.types;
+	auto &materialized = *query_result;
+	auto &result_types = materialized.GetTypes();
 
 	// Get column types for proper data extraction
 	// Column order: fragment_id(0), edge_id(1), like_weight_ratio(2), distal_length(3), pendant_length(4)
@@ -109,11 +109,11 @@ std::vector<miint::Placement> ReadPlacementTable(ClientContext &context, const s
 
 		// Convert to unified format for proper NULL handling
 		UnifiedVectorFormat fragment_data, edge_data, lwr_data, distal_data, pendant_data;
-		fragment_id_vec.ToUnifiedFormat(chunk->size(), fragment_data);
-		edge_id_vec.ToUnifiedFormat(chunk->size(), edge_data);
-		lwr_vec.ToUnifiedFormat(chunk->size(), lwr_data);
-		distal_vec.ToUnifiedFormat(chunk->size(), distal_data);
-		pendant_vec.ToUnifiedFormat(chunk->size(), pendant_data);
+		fragment_id_vec.ToUnifiedFormat(fragment_data);
+		edge_id_vec.ToUnifiedFormat(edge_data);
+		lwr_vec.ToUnifiedFormat(lwr_data);
+		distal_vec.ToUnifiedFormat(distal_data);
+		pendant_vec.ToUnifiedFormat(pendant_data);
 
 		auto fragment_ids = UnifiedVectorFormat::GetData<string_t>(fragment_data);
 

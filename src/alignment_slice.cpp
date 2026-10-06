@@ -13,6 +13,9 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/query_result.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "miint_named_parameter.hpp"
+#include "miint_streaming_query.hpp"
 
 namespace duckdb {
 
@@ -49,7 +52,8 @@ const vector<AlignmentSliceTableFunction::ColumnInfo> &AlignmentSliceTableFuncti
 }
 
 unique_ptr<FunctionData> AlignmentSliceTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                           vector<LogicalType> &return_types, vector<string> &names) {
+                                                           vector<LogicalType> &return_types,
+                                                           vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 
 	// Extract positional parameters
@@ -60,7 +64,7 @@ unique_ptr<FunctionData> AlignmentSliceTableFunction::Bind(ClientContext &contex
 
 	// Extract named parameters
 	data->include_deletions = false;
-	if (input.named_parameters.count("include_deletions")) {
+	if (input.named_parameters.contains("include_deletions")) {
 		data->include_deletions = input.named_parameters.at("include_deletions").GetValue<bool>();
 	}
 
@@ -107,11 +111,11 @@ unique_ptr<FunctionData> AlignmentSliceTableFunction::Bind(ClientContext &contex
 	for (const auto &col : recognized) {
 		if (input_col_present[col.name] >= 0) {
 			select_col_idx[col.name] = static_cast<int>(select_cols.size());
-			select_cols.push_back(KeywordHelper::WriteOptionallyQuoted(col.name));
+			select_cols.push_back(SQLIdentifier::ToString(col.name));
 		}
 	}
-	data->select_query = "SELECT " + StringUtil::Join(select_cols, ", ") + " FROM " +
-	                     KeywordHelper::WriteOptionallyQuoted(data->table_name);
+	data->select_query =
+	    "SELECT " + StringUtil::Join(select_cols, ", ") + " FROM " + SQLIdentifier::ToString(data->table_name);
 
 	// Store slicer-relevant indices into the SELECT result
 	data->select_cigar_idx = select_col_idx.at("cigar");
@@ -166,7 +170,7 @@ unique_ptr<FunctionData> AlignmentSliceTableFunction::Bind(ClientContext &contex
 		}
 	}
 
-	names = data->output_names;
+	names = StringsToIdentifiers(data->output_names);
 	return_types = data->output_types;
 
 	return data;
@@ -181,11 +185,11 @@ unique_ptr<GlobalTableFunctionState> AlignmentSliceTableFunction::InitGlobal(Cli
 	gstate->slicer = make_uniq<miint::AlignmentSlicer>(data.region_start, data.region_stop, data.include_deletions);
 
 	// Separate connection avoids deadlocking the current context.
-	// SendQuery streams chunks lazily — only one chunk in memory at a time.
+	// SubmitStream streams chunks lazily — only one chunk in memory at a time.
 	auto &db = DatabaseInstance::GetDatabase(context);
 	gstate->conn = make_uniq<Connection>(db);
 	InheritTempObjects(context, *gstate->conn);
-	gstate->query_result = gstate->conn->SendQuery(data.select_query);
+	gstate->query_result = SubmitStream(*gstate->conn, data.select_query);
 
 	return gstate;
 }
@@ -330,13 +334,13 @@ void AlignmentSliceTableFunction::Execute(ClientContext &context, TableFunctionI
 		out_row++;
 	}
 
-	output.SetCardinality(out_row);
+	output.SetChildCardinality(out_row);
 }
 
 void AlignmentSliceTableFunction::Register(ExtensionLoader &loader) {
 	auto tf = TableFunction("alignment_slice", {LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT},
 	                        Execute, Bind, InitGlobal);
-	tf.named_parameters["include_deletions"] = LogicalType::BOOLEAN;
+	AddNamedParameter(tf, "include_deletions", LogicalType::BOOLEAN);
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(tf);
 }

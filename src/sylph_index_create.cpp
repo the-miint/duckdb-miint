@@ -1,3 +1,4 @@
+#include "miint_named_parameter.hpp"
 // sylph_index_create() — build a sylph `.syldb` / `.syl2db` from a reference-sequence table.
 // See sylph_index_create.hpp for the contract. The build is a synchronous side
 // effect in InitGlobal: the distinct genome ids are enumerated, then N worker
@@ -21,7 +22,7 @@
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
-#include "duckdb/main/materialized_query_result.hpp"
+#include "duckdb/main/query_result.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
 
@@ -47,7 +48,7 @@ namespace {
 // struct's zero, so callers never pass 0 explicitly here).
 template <typename T>
 void ApplyBoundedInt(TableFunctionBindInput &input, const std::string &param, int64_t hi, T &out) {
-	auto it = input.named_parameters.find(param);
+	auto it = input.named_parameters.find(Identifier(param));
 	if (it == input.named_parameters.end() || it->second.IsNull()) {
 		return;
 	}
@@ -66,7 +67,7 @@ void ApplyBoundedInt(TableFunctionBindInput &input, const std::string &param, in
 // =============================================================================
 unique_ptr<FunctionData> SylphIndexCreateTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                              vector<LogicalType> &return_types,
-                                                             vector<std::string> &names) {
+                                                             vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 
 	if (input.inputs.size() < 2) {
@@ -133,7 +134,7 @@ unique_ptr<FunctionData> SylphIndexCreateTableFunction::Bind(ClientContext &cont
 		throw IOException("sylph_index_create: sylph_two_stage_params_default failed");
 	}
 	const bool has_two_stage_knobs =
-	    input.named_parameters.count("screen_c") != 0 || input.named_parameters.count("min_sparse_kmers") != 0;
+	    input.named_parameters.contains("screen_c") || input.named_parameters.contains("min_sparse_kmers");
 	if (data->two_stage) {
 		ApplyBoundedInt(input, "screen_c", 4294967295LL, data->two_stage_params.screen_c);
 		ApplyBoundedInt(input, "min_sparse_kmers", 4294967295LL, data->two_stage_params.min_sparse_kmers);
@@ -161,9 +162,9 @@ unique_ptr<FunctionData> SylphIndexCreateTableFunction::Bind(ClientContext &cont
 	// for both tables and views and reports missing columns as a clean error.
 	{
 		auto conn = MakeReadOnlyHelperConnection(context);
-		auto src = KeywordHelper::WriteOptionallyQuoted(data->source_table);
-		auto gcol = KeywordHelper::WriteOptionallyQuoted(data->genome_id_col);
-		auto ocol = KeywordHelper::WriteOptionallyQuoted(data->order_by_col);
+		auto src = SQLIdentifier::ToString(data->source_table);
+		auto gcol = SQLIdentifier::ToString(data->genome_id_col);
+		auto ocol = SQLIdentifier::ToString(data->order_by_col);
 		auto probe = conn.Query("SELECT " + gcol + ", " + ocol + " FROM " + src + " LIMIT 0");
 		if (probe->HasError()) {
 			throw BinderException("sylph_index_create: genome_id/order_by column check failed: %s", probe->GetError());
@@ -172,9 +173,10 @@ unique_ptr<FunctionData> SylphIndexCreateTableFunction::Bind(ClientContext &cont
 		// as read_id / the other tools (VARCHAR, BIGINT, or UUID). Its value is
 		// persisted as the genome's file_name; the decimal/canonical string form
 		// (what CAST/ToString produces) matches the id_column codec.
-		if (!IsAllowedIdType(probe->types[0])) {
+		if (!IsAllowedIdType(probe->GetTypes()[0])) {
 			throw BinderException("sylph_index_create: genome_id column '%s' must be %s (got %s)",
-			                      data->genome_id_col.c_str(), AllowedIdTypeList(), probe->types[0].ToString().c_str());
+			                      data->genome_id_col.c_str(), AllowedIdTypeList(),
+			                      probe->GetTypes()[0].ToString().c_str());
 		}
 		// Detect an optional `comment` column (present in read_fastx output). Its
 		// presence switches on full-header contig-name reconstruction below.
@@ -182,7 +184,7 @@ unique_ptr<FunctionData> SylphIndexCreateTableFunction::Bind(ClientContext &cont
 		data->has_comment = !comment_probe->HasError();
 	}
 
-	names = data->names;
+	names = StringsToIdentifiers(data->names);
 	return_types = data->types;
 	return std::move(data);
 }
@@ -195,9 +197,9 @@ unique_ptr<GlobalTableFunctionState> SylphIndexCreateTableFunction::InitGlobal(C
 	auto &data = input.bind_data->Cast<Data>();
 	auto gstate = make_uniq<GlobalState>();
 
-	auto src = KeywordHelper::WriteOptionallyQuoted(data.source_table);
-	auto gcol = KeywordHelper::WriteOptionallyQuoted(data.genome_id_col);
-	auto ocol = KeywordHelper::WriteOptionallyQuoted(data.order_by_col);
+	auto src = SQLIdentifier::ToString(data.source_table);
+	auto gcol = SQLIdentifier::ToString(data.genome_id_col);
+	auto ocol = SQLIdentifier::ToString(data.order_by_col);
 
 	// Contig name = the full FASTA header. sylph (via needletail) stores the whole
 	// header line as first_contig_name; read_fastx splits it into read_id (first
@@ -218,8 +220,10 @@ unique_ptr<GlobalTableFunctionState> SylphIndexCreateTableFunction::InitGlobal(C
 		if (res->HasError()) {
 			throw InvalidInputException("sylph_index_create: failed to enumerate genomes: %s", res->GetError());
 		}
-		for (idx_t r = 0; r < res->RowCount(); r++) {
-			auto v = res->GetValue(0, r);
+		// v2.0: Collection().GetValue rebuilds every row per call; build the rows once.
+		auto rows = res->Collection().GetRows();
+		for (idx_t r = 0; r < rows.size(); r++) {
+			auto v = rows.GetValue(0, r);
 			if (!v.IsNull()) {
 				ids.push_back(std::move(v));
 			}
@@ -294,11 +298,12 @@ unique_ptr<GlobalTableFunctionState> SylphIndexCreateTableFunction::InitGlobal(C
 						ThrowFFI("add_contig failed");
 					}
 				};
-				for (idx_t r = 0; r < res->RowCount(); r++) {
-					auto ordv = res->GetValue(0, r);
+				auto rows = res->Collection().GetRows();
+				for (idx_t r = 0; r < rows.size(); r++) {
+					auto ordv = rows.GetValue(0, r);
 					int64_t ord = ordv.IsNull() ? std::numeric_limits<int64_t>::max() : ordv.GetValue<int64_t>();
-					std::string nm = res->GetValue(1, r).ToString();
-					std::string seq = res->GetValue(2, r).ToString();
+					std::string nm = rows.GetValue(1, r).ToString();
+					std::string seq = rows.GetValue(2, r).ToString();
 					if (!have_contig || nm != cur_name) {
 						if (have_contig) {
 							flush();
@@ -373,7 +378,7 @@ void SylphIndexCreateTableFunction::Execute(ClientContext &, TableFunctionInput 
 	auto &gstate = data_p.global_state->Cast<GlobalState>();
 
 	if (gstate.done) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
@@ -387,7 +392,7 @@ void SylphIndexCreateTableFunction::Execute(ClientContext &, TableFunctionInput 
 	output.data[3].SetValue(0, Value::UBIGINT(gstate.num_genomes));
 	output.data[4].SetValue(0, Value("ok"));
 
-	output.SetCardinality(1);
+	output.SetChildCardinality(1);
 	gstate.done = true;
 }
 
@@ -398,16 +403,16 @@ TableFunction SylphIndexCreateTableFunction::GetFunction() {
 	TableFunction tf("sylph_index_create", {LogicalType::VARCHAR, LogicalType::VARCHAR}, Execute, Bind, InitGlobal,
 	                 InitLocal);
 
-	tf.named_parameters["genome_id"] = LogicalType::VARCHAR;
-	tf.named_parameters["order_by"] = LogicalType::VARCHAR;
-	tf.named_parameters["k"] = LogicalType::INTEGER;
-	tf.named_parameters["c"] = LogicalType::INTEGER;
-	tf.named_parameters["min_spacing"] = LogicalType::INTEGER;
-	tf.named_parameters["pseudotax"] = LogicalType::BOOLEAN;
-	tf.named_parameters["threads"] = LogicalType::INTEGER;
-	tf.named_parameters["two_stage"] = LogicalType::BOOLEAN;
-	tf.named_parameters["screen_c"] = LogicalType::INTEGER;
-	tf.named_parameters["min_sparse_kmers"] = LogicalType::INTEGER;
+	AddNamedParameter(tf, "genome_id", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "order_by", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "k", LogicalType::INTEGER);
+	AddNamedParameter(tf, "c", LogicalType::INTEGER);
+	AddNamedParameter(tf, "min_spacing", LogicalType::INTEGER);
+	AddNamedParameter(tf, "pseudotax", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "threads", LogicalType::INTEGER);
+	AddNamedParameter(tf, "two_stage", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "screen_c", LogicalType::INTEGER);
+	AddNamedParameter(tf, "min_sparse_kmers", LogicalType::INTEGER);
 
 	return tf;
 }

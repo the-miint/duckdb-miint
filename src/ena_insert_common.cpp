@@ -28,7 +28,7 @@ ENACatalog *FindAttachedENACatalog(ClientContext &context, const string &caller,
 		return nullptr;
 	}
 	auto &db_manager = DatabaseManager::Get(context);
-	auto db = db_manager.GetDatabase(context, catalog_name);
+	auto db = db_manager.GetDatabase(context, Identifier(catalog_name));
 	if (!db) {
 		if (explicit_name) {
 			throw InvalidInputException("%s: catalog '%s' is not attached", caller, catalog_name);

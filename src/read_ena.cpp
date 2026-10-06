@@ -1,7 +1,11 @@
 #include "read_ena.hpp"
 #include "duckdb/common/vector_size.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 #include <algorithm>
 #include <sstream>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -180,7 +184,7 @@ bool ReadENATableFunction::GlobalState::FetchNextAccession() {
 // ---- Bind ----
 
 unique_ptr<FunctionData> ReadENATableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                    vector<LogicalType> &return_types, vector<std::string> &names) {
+                                                    vector<LogicalType> &return_types, vector<Identifier> &names) {
 	std::vector<std::string> accessions;
 	if (input.inputs[0].IsNull()) {
 		throw InvalidInputException("read_ena: accession cannot be NULL");
@@ -269,7 +273,7 @@ void ReadENATableFunction::Execute(ClientContext &context, TableFunctionInput &d
 
 	while (global_state.row_offset >= global_state.rows.size()) {
 		if (!global_state.FetchNextAccession()) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 	}
@@ -283,10 +287,10 @@ void ReadENATableFunction::Execute(ClientContext &context, TableFunctionInput &d
 
 	for (idx_t col = 0; col < num_cols; col++) {
 		const auto &col_type = bind_data.types[col];
-		auto &validity = FlatVector::Validity(output.data[col]);
+		auto &validity = FlatVector::ValidityMutable(output.data[col]);
 
 		if (col_type.id() == LogicalTypeId::BIGINT) {
-			auto col_data = FlatVector::GetData<int64_t>(output.data[col]);
+			auto col_data = FlatVector::GetDataMutable<int64_t>(output.data[col]);
 			for (idx_t i = 0; i < count; i++) {
 				auto &row = rows[offset + i];
 				if (col < row.size()) {
@@ -308,8 +312,8 @@ void ReadENATableFunction::Execute(ClientContext &context, TableFunctionInput &d
 		} else if (col_type.id() == LogicalTypeId::LIST) {
 			// List columns: LIST(VARCHAR) or LIST(BIGINT)
 			auto &child_type = ListType::GetChildType(col_type);
-			auto list_entries = ListVector::GetData(output.data[col]);
-			auto &child_vec = ListVector::GetEntry(output.data[col]);
+			auto list_entries = FlatVector::GetDataMutable<list_entry_t>(output.data[col]);
+			auto &child_vec = ListVector::GetChildMutable(output.data[col]);
 
 			// Reserve capacity for the worst case (every row contributes at least one element)
 			idx_t worst_case = 0;
@@ -330,7 +334,7 @@ void ReadENATableFunction::Execute(ClientContext &context, TableFunctionInput &d
 					list_entries[i] = list_entry_t(child_offset, parts.size());
 
 					if (child_type.id() == LogicalTypeId::BIGINT) {
-						auto child_data = FlatVector::GetData<int64_t>(child_vec);
+						auto child_data = FlatVector::GetDataMutable<int64_t>(child_vec);
 						for (size_t j = 0; j < parts.size(); j++) {
 							try {
 								child_data[child_offset + j] = std::stoll(parts[j]);
@@ -340,7 +344,7 @@ void ReadENATableFunction::Execute(ClientContext &context, TableFunctionInput &d
 							}
 						}
 					} else {
-						auto child_data = FlatVector::GetData<string_t>(child_vec);
+						auto child_data = FlatVector::GetDataMutable<string_t>(child_vec);
 						for (size_t j = 0; j < parts.size(); j++) {
 							child_data[child_offset + j] = StringVector::AddString(child_vec, parts[j]);
 						}
@@ -355,7 +359,7 @@ void ReadENATableFunction::Execute(ClientContext &context, TableFunctionInput &d
 			ListVector::SetListSize(output.data[col], child_offset);
 		} else {
 			// Default: VARCHAR
-			auto col_data = FlatVector::GetData<string_t>(output.data[col]);
+			auto col_data = FlatVector::GetDataMutable<string_t>(output.data[col]);
 			for (idx_t i = 0; i < count; i++) {
 				auto &row = rows[offset + i];
 				if (col < row.size()) {
@@ -373,15 +377,15 @@ void ReadENATableFunction::Execute(ClientContext &context, TableFunctionInput &d
 	}
 
 	global_state.row_offset += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 // ---- Registration ----
 
 TableFunction ReadENATableFunction::GetFunction() {
 	auto tf = TableFunction("read_ena", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
-	tf.named_parameters["result"] = LogicalType::VARCHAR;
-	tf.named_parameters["fields"] = LogicalType::VARCHAR;
+	AddNamedParameter(tf, "result", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "fields", LogicalType::VARCHAR);
 	return tf;
 }
 

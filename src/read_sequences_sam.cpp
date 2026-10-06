@@ -5,15 +5,19 @@
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 #include <read_sequences_sam.hpp>
 #include <cstring>
 #include <stdexcept>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
 unique_ptr<FunctionData> ReadSequencesSamTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                              vector<duckdb::LogicalType> &return_types,
-                                                             vector<std::string> &names) {
+                                                             vector<Identifier> &names) {
 	FileSystem &fs = FileSystem::GetFileSystem(context);
 
 	std::vector<std::string> file_paths;
@@ -98,10 +102,10 @@ void ReadSequencesSamTableFunction::Execute(ClientContext &context, TableFunctio
 	// 5=qual1 6=qual2 [7=filepath]. read_id / sequence1 / qual1 are decoded straight from
 	// the raw bam1_t into these vectors -- no intermediate std::string, no SAMRecordBatch
 	// SOA, and none of the alignment metadata read_sequences_sam discards.
-	auto read_id_data = FlatVector::GetData<string_t>(output.data[1]);
-	auto sequence1_data = FlatVector::GetData<string_t>(output.data[3]);
+	auto read_id_data = FlatVector::GetDataMutable<string_t>(output.data[1]);
+	auto sequence1_data = FlatVector::GetDataMutable<string_t>(output.data[3]);
 	auto &qual1_vector = output.data[5];
-	auto qual1_entries = FlatVector::GetData<list_entry_t>(qual1_vector);
+	auto qual1_entries = FlatVector::GetDataMutable<list_entry_t>(qual1_vector);
 	auto &qual_scratch = local_state.qual_scratch;
 
 	std::string current_filepath;
@@ -114,7 +118,7 @@ void ReadSequencesSamTableFunction::Execute(ClientContext &context, TableFunctio
 			lock_guard<mutex> read_lock(global_state.lock);
 
 			if (global_state.next_file_idx >= global_state.readers.size()) {
-				output.SetCardinality(0);
+				output.SetChildCardinality(0);
 				return;
 			}
 
@@ -184,13 +188,13 @@ void ReadSequencesSamTableFunction::Execute(ClientContext &context, TableFunctio
 	ListVector::Reserve(qual1_vector, qual_scratch.size());
 	ListVector::SetListSize(qual1_vector, qual_scratch.size());
 	if (!qual_scratch.empty()) {
-		auto &qual_child = ListVector::GetEntry(qual1_vector);
-		auto qual_child_data = FlatVector::GetData<uint8_t>(qual_child);
+		auto &qual_child = ListVector::GetChildMutable(qual1_vector);
+		auto qual_child_data = FlatVector::GetDataMutable<uint8_t>(qual_child);
 		std::memcpy(qual_child_data, qual_scratch.data(), qual_scratch.size());
-		FlatVector::Validity(qual_child).SetAllValid(qual_scratch.size());
+		FlatVector::ValidityMutable(qual_child).SetAllValid(qual_scratch.size());
 	}
 	// Per-row qual1 nullability: zero-length entries (absent quality) are NULL.
-	auto &qual1_validity = FlatVector::Validity(qual1_vector);
+	auto &qual1_validity = FlatVector::ValidityMutable(qual1_vector);
 	qual1_validity.SetAllValid(count);
 	for (idx_t j = 0; j < count; j++) {
 		if (qual1_entries[j].length == 0) {
@@ -201,7 +205,7 @@ void ReadSequencesSamTableFunction::Execute(ClientContext &context, TableFunctio
 	// sequence_index: per-file monotonic counter.
 	uint64_t start_sequence_index = global_state.file_sequence_counters[local_state.current_file_idx];
 	global_state.file_sequence_counters[local_state.current_file_idx] += count;
-	auto sequence_index_data = FlatVector::GetData<int64_t>(output.data[0]);
+	auto sequence_index_data = FlatVector::GetDataMutable<int64_t>(output.data[0]);
 	for (idx_t j = 0; j < count; j++) {
 		sequence_index_data[j] = static_cast<int64_t>(start_sequence_index + j);
 	}
@@ -215,12 +219,12 @@ void ReadSequencesSamTableFunction::Execute(ClientContext &context, TableFunctio
 		SetResultVectorFilepath(output.data[7], current_filepath);
 	}
 
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 TableFunction ReadSequencesSamTableFunction::GetFunction() {
 	auto tf = TableFunction("read_sequences_sam", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
-	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
+	AddNamedParameter(tf, "include_filepath", LogicalType::BOOLEAN);
 	return tf;
 }
 

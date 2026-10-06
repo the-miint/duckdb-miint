@@ -142,29 +142,33 @@ void AlignPairwiseKsw2DualAffineScoreFunction::Register(ExtensionLoader &loader)
 
 	ScalarFunction score_2arg("align_pairwise_ksw2_dual_affine_score", {LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                          LogicalType::INTEGER, AlignPairwiseKsw2DualAffineScoreExecute);
-	score_2arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	score_2arg.bind = [](ClientContext &ctx, ScalarFunction &fn, vector<unique_ptr<Expression>> &args) {
+	score_2arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	score_2arg.SetBindCallback([](BindScalarFunctionInput &input) {
 		return unique_ptr<FunctionData>(AlignPairwiseKsw2DualAffineBindData::Defaults().release());
-	};
-	score_2arg.init_local_state = AlignPairwiseKsw2DualAffineInitLocalState;
+	});
+	score_2arg.SetInitStateCallback(AlignPairwiseKsw2DualAffineInitLocalState);
 	function_set.AddFunction(score_2arg);
 
 	ScalarFunction score_8arg("align_pairwise_ksw2_dual_affine_score", EightArgTypes(), LogicalType::INTEGER,
 	                          AlignPairwiseKsw2DualAffineScoreExecute);
-	score_8arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	score_8arg.bind = [](ClientContext &ctx, ScalarFunction &fn, vector<unique_ptr<Expression>> &args) {
+	score_8arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	score_8arg.SetBindCallback([](BindScalarFunctionInput &input) {
+		auto &ctx = input.GetClientContext();
+		auto &args = input.GetArguments();
 		return unique_ptr<FunctionData>(AlignPairwiseKsw2DualAffineBindData::FromArgs8(ctx, args).release());
-	};
-	score_8arg.init_local_state = AlignPairwiseKsw2DualAffineInitLocalState;
+	});
+	score_8arg.SetInitStateCallback(AlignPairwiseKsw2DualAffineInitLocalState);
 	function_set.AddFunction(score_8arg);
 
 	ScalarFunction score_10arg("align_pairwise_ksw2_dual_affine_score", TenArgTypes(), LogicalType::INTEGER,
 	                           AlignPairwiseKsw2DualAffineScoreExecute);
-	score_10arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	score_10arg.bind = [](ClientContext &ctx, ScalarFunction &fn, vector<unique_ptr<Expression>> &args) {
+	score_10arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	score_10arg.SetBindCallback([](BindScalarFunctionInput &input) {
+		auto &ctx = input.GetClientContext();
+		auto &args = input.GetArguments();
 		return unique_ptr<FunctionData>(AlignPairwiseKsw2DualAffineBindData::FromArgs10(ctx, args).release());
-	};
-	score_10arg.init_local_state = AlignPairwiseKsw2DualAffineInitLocalState;
+	});
+	score_10arg.SetInitStateCallback(AlignPairwiseKsw2DualAffineInitLocalState);
 	function_set.AddFunction(score_10arg);
 
 	loader.RegisterFunction(function_set);
@@ -181,32 +185,39 @@ void AlignPairwiseKsw2DualAffineCigarFunction::Register(ExtensionLoader &loader)
 
 	ScalarFunction cigar_2arg("align_pairwise_ksw2_dual_affine_cigar", {LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                          PairwiseCigarReturnType(), AlignPairwiseKsw2DualAffineCigarExecute);
-	cigar_2arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	cigar_2arg.bind = [](ClientContext &ctx, ScalarFunction &fn, vector<unique_ptr<Expression>> &args) {
-		fn.return_type = PairwiseCigarReturnType();
+	cigar_2arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	cigar_2arg.SetBindCallback([](BindScalarFunctionInput &input) {
+		auto &fn = input.GetBoundFunction();
+		fn.SetReturnType(PairwiseCigarReturnType());
 		return unique_ptr<FunctionData>(AlignPairwiseKsw2DualAffineBindData::Defaults().release());
-	};
-	cigar_2arg.init_local_state = AlignPairwiseKsw2DualAffineInitLocalState;
+	});
+	cigar_2arg.SetInitStateCallback(AlignPairwiseKsw2DualAffineInitLocalState);
 	function_set.AddFunction(cigar_2arg);
 
 	ScalarFunction cigar_8arg("align_pairwise_ksw2_dual_affine_cigar", EightArgTypes(), PairwiseCigarReturnType(),
 	                          AlignPairwiseKsw2DualAffineCigarExecute);
-	cigar_8arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	cigar_8arg.bind = [](ClientContext &ctx, ScalarFunction &fn, vector<unique_ptr<Expression>> &args) {
-		fn.return_type = PairwiseCigarReturnType();
+	cigar_8arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	cigar_8arg.SetBindCallback([](BindScalarFunctionInput &input) {
+		auto &ctx = input.GetClientContext();
+		auto &fn = input.GetBoundFunction();
+		auto &args = input.GetArguments();
+		fn.SetReturnType(PairwiseCigarReturnType());
 		return unique_ptr<FunctionData>(AlignPairwiseKsw2DualAffineBindData::FromArgs8(ctx, args).release());
-	};
-	cigar_8arg.init_local_state = AlignPairwiseKsw2DualAffineInitLocalState;
+	});
+	cigar_8arg.SetInitStateCallback(AlignPairwiseKsw2DualAffineInitLocalState);
 	function_set.AddFunction(cigar_8arg);
 
 	ScalarFunction cigar_10arg("align_pairwise_ksw2_dual_affine_cigar", TenArgTypes(), PairwiseCigarReturnType(),
 	                           AlignPairwiseKsw2DualAffineCigarExecute);
-	cigar_10arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	cigar_10arg.bind = [](ClientContext &ctx, ScalarFunction &fn, vector<unique_ptr<Expression>> &args) {
-		fn.return_type = PairwiseCigarReturnType();
+	cigar_10arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	cigar_10arg.SetBindCallback([](BindScalarFunctionInput &input) {
+		auto &ctx = input.GetClientContext();
+		auto &fn = input.GetBoundFunction();
+		auto &args = input.GetArguments();
+		fn.SetReturnType(PairwiseCigarReturnType());
 		return unique_ptr<FunctionData>(AlignPairwiseKsw2DualAffineBindData::FromArgs10(ctx, args).release());
-	};
-	cigar_10arg.init_local_state = AlignPairwiseKsw2DualAffineInitLocalState;
+	});
+	cigar_10arg.SetInitStateCallback(AlignPairwiseKsw2DualAffineInitLocalState);
 	function_set.AddFunction(cigar_10arg);
 
 	loader.RegisterFunction(function_set);
@@ -224,32 +235,39 @@ void AlignPairwiseKsw2DualAffineFullFunction::Register(ExtensionLoader &loader) 
 
 	ScalarFunction full_2arg("align_pairwise_ksw2_dual_affine_full", {LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                         PairwiseFullReturnType(), AlignPairwiseKsw2DualAffineFullExecute);
-	full_2arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	full_2arg.bind = [](ClientContext &ctx, ScalarFunction &fn, vector<unique_ptr<Expression>> &args) {
-		fn.return_type = PairwiseFullReturnType();
+	full_2arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	full_2arg.SetBindCallback([](BindScalarFunctionInput &input) {
+		auto &fn = input.GetBoundFunction();
+		fn.SetReturnType(PairwiseFullReturnType());
 		return unique_ptr<FunctionData>(AlignPairwiseKsw2DualAffineBindData::Defaults().release());
-	};
-	full_2arg.init_local_state = AlignPairwiseKsw2DualAffineInitLocalState;
+	});
+	full_2arg.SetInitStateCallback(AlignPairwiseKsw2DualAffineInitLocalState);
 	function_set.AddFunction(full_2arg);
 
 	ScalarFunction full_8arg("align_pairwise_ksw2_dual_affine_full", EightArgTypes(), PairwiseFullReturnType(),
 	                         AlignPairwiseKsw2DualAffineFullExecute);
-	full_8arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	full_8arg.bind = [](ClientContext &ctx, ScalarFunction &fn, vector<unique_ptr<Expression>> &args) {
-		fn.return_type = PairwiseFullReturnType();
+	full_8arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	full_8arg.SetBindCallback([](BindScalarFunctionInput &input) {
+		auto &ctx = input.GetClientContext();
+		auto &fn = input.GetBoundFunction();
+		auto &args = input.GetArguments();
+		fn.SetReturnType(PairwiseFullReturnType());
 		return unique_ptr<FunctionData>(AlignPairwiseKsw2DualAffineBindData::FromArgs8(ctx, args).release());
-	};
-	full_8arg.init_local_state = AlignPairwiseKsw2DualAffineInitLocalState;
+	});
+	full_8arg.SetInitStateCallback(AlignPairwiseKsw2DualAffineInitLocalState);
 	function_set.AddFunction(full_8arg);
 
 	ScalarFunction full_10arg("align_pairwise_ksw2_dual_affine_full", TenArgTypes(), PairwiseFullReturnType(),
 	                          AlignPairwiseKsw2DualAffineFullExecute);
-	full_10arg.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-	full_10arg.bind = [](ClientContext &ctx, ScalarFunction &fn, vector<unique_ptr<Expression>> &args) {
-		fn.return_type = PairwiseFullReturnType();
+	full_10arg.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	full_10arg.SetBindCallback([](BindScalarFunctionInput &input) {
+		auto &ctx = input.GetClientContext();
+		auto &fn = input.GetBoundFunction();
+		auto &args = input.GetArguments();
+		fn.SetReturnType(PairwiseFullReturnType());
 		return unique_ptr<FunctionData>(AlignPairwiseKsw2DualAffineBindData::FromArgs10(ctx, args).release());
-	};
-	full_10arg.init_local_state = AlignPairwiseKsw2DualAffineInitLocalState;
+	});
+	full_10arg.SetInitStateCallback(AlignPairwiseKsw2DualAffineInitLocalState);
 	function_set.AddFunction(full_10arg);
 
 	loader.RegisterFunction(function_set);

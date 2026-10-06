@@ -10,10 +10,12 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
 
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -56,7 +58,7 @@ struct AbsQuantFitGlobalState : public GlobalTableFunctionState {
 };
 
 unique_ptr<FunctionData> AbsQuantFitBind(ClientContext &context, TableFunctionBindInput &input,
-                                         vector<LogicalType> &return_types, vector<string> &names) {
+                                         vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<AbsQuantFitBindData>();
 	for (idx_t i = 0; i < 4; ++i) {
 		if (input.inputs[i].IsNull()) {
@@ -71,7 +73,7 @@ unique_ptr<FunctionData> AbsQuantFitBind(ClientContext &context, TableFunctionBi
 	RejectCTERelationName(input, data->params_table);
 	data->options.syndna_contributing_fraction = input.inputs[3].GetValue<double>();
 	for (const auto &kv : input.named_parameters) {
-		if (StringUtil::Lower(kv.first) == "min_syndna_counts") {
+		if (kv.first == "min_syndna_counts") {
 			if (kv.second.IsNull()) {
 				throw BinderException("%s: min_syndna_counts must not be NULL", kCallerName);
 			}
@@ -200,12 +202,12 @@ void AbsQuantFitExecute(ClientContext &, TableFunctionInput &data_p, DataChunk &
 	const idx_t count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, total - g.cursor);
 
 	auto &sample_id = output.data[0];
-	auto slope = FlatVector::GetData<double>(output.data[1]);
-	auto intercept = FlatVector::GetData<double>(output.data[2]);
-	auto rvalue = FlatVector::GetData<double>(output.data[3]);
-	auto pvalue = FlatVector::GetData<double>(output.data[4]);
-	auto stderr_ = FlatVector::GetData<double>(output.data[5]);
-	auto intercept_stderr = FlatVector::GetData<double>(output.data[6]);
+	auto slope = FlatVector::GetDataMutable<double>(output.data[1]);
+	auto intercept = FlatVector::GetDataMutable<double>(output.data[2]);
+	auto rvalue = FlatVector::GetDataMutable<double>(output.data[3]);
+	auto pvalue = FlatVector::GetDataMutable<double>(output.data[4]);
+	auto stderr_ = FlatVector::GetDataMutable<double>(output.data[5]);
+	auto intercept_stderr = FlatVector::GetDataMutable<double>(output.data[6]);
 
 	for (idx_t r = 0; r < count; ++r) {
 		const auto &model = g.models[g.cursor + r];
@@ -218,7 +220,7 @@ void AbsQuantFitExecute(ClientContext &, TableFunctionInput &data_p, DataChunk &
 		intercept_stderr[r] = model.fit.intercept_stderr;
 	}
 	g.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 } // namespace
@@ -227,7 +229,7 @@ void RegisterAbsQuant(ExtensionLoader &loader) {
 	TableFunction fit("absquant_fit_models",
 	                  {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::DOUBLE},
 	                  AbsQuantFitExecute, AbsQuantFitBind, AbsQuantFitInitGlobal);
-	fit.named_parameters["min_syndna_counts"] = LogicalType::BIGINT;
+	AddNamedParameter(fit, "min_syndna_counts", LogicalType::BIGINT);
 	fit.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(fit);
 }

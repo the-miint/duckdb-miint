@@ -11,6 +11,9 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -88,13 +91,13 @@ static void ValidateDeblurTableSchema(ClientContext &context, const std::string 
 }
 
 static unique_ptr<FunctionData> DeblurBind(ClientContext &context, TableFunctionBindInput &input,
-                                           vector<LogicalType> &return_types, vector<std::string> &names) {
+                                           vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<DeblurData>();
 	data->input_table = input.inputs[0].GetValue<std::string>();
 	RejectCTERelationName(input, data->input_table);
 
 	auto get_col_override = [&](const std::string &param_name, std::string &out) {
-		auto it = input.named_parameters.find(param_name);
+		auto it = input.named_parameters.find(Identifier(param_name));
 		if (it != input.named_parameters.end()) {
 			auto val = it->second.GetValue<std::string>();
 			if (val.empty()) {
@@ -175,7 +178,7 @@ static unique_ptr<FunctionData> DeblurBind(ClientContext &context, TableFunction
 		DiscoverSamples(conn, data->input_table, data->sample_info.sample_id_col, {"read_id", "sequence", "abundance"},
 		                "deblur", data->sample_info);
 
-		names.push_back(data->sample_info.sample_id_col);
+		names.emplace_back(data->sample_info.sample_id_col);
 		return_types.push_back(data->sample_info.sample_id_type);
 	}
 
@@ -203,17 +206,17 @@ static unique_ptr<GlobalTableFunctionState> DeblurInitGlobal(ClientContext &cont
 
 	// Non-sample path: load whole table once, deblur, hold for single-threaded drain.
 	auto conn = MakeReadOnlyHelperConnection(context);
-	auto q_id = KeywordHelper::WriteOptionallyQuoted(data.id_col);
-	auto q_seq = KeywordHelper::WriteOptionallyQuoted(data.sequence_col);
-	auto q_count = KeywordHelper::WriteOptionallyQuoted(data.count_col);
+	auto q_id = SQLIdentifier::ToString(data.id_col);
+	auto q_seq = SQLIdentifier::ToString(data.sequence_col);
+	auto q_count = SQLIdentifier::ToString(data.count_col);
 	auto result = conn.Query("SELECT " + q_id + ", " + q_seq + ", CAST(" + q_count + " AS BIGINT) FROM " +
-	                         KeywordHelper::WriteOptionallyQuoted(data.input_table) + " ORDER BY " + q_count + " DESC");
+	                         SQLIdentifier::ToString(data.input_table) + " ORDER BY " + q_count + " DESC");
 	if (result->HasError()) {
 		throw InvalidInputException("deblur: failed to read table '%s': %s", data.input_table, result->GetError());
 	}
 
 	std::vector<miint::DeblurSequence> sequences;
-	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto &materialized = *result;
 	while (auto chunk = materialized.Fetch()) {
 		for (idx_t i = 0; i < chunk->size(); i++) {
 			auto read_id_val = chunk->GetValue(0, i);
@@ -262,11 +265,11 @@ static unique_ptr<LocalTableFunctionState> DeblurInitLocal(ExecutionContext &con
 // switch this (and the other per-sample call sites) to type-aware literals.
 static std::vector<miint::DeblurResult> RunDeblurForSample(Connection &conn, const DeblurData &data,
                                                            const Value &sample_value) {
-	auto q_src = KeywordHelper::WriteOptionallyQuoted(data.input_table);
-	auto q_col = KeywordHelper::WriteOptionallyQuoted(data.sample_info.sample_id_col);
-	auto q_id = KeywordHelper::WriteOptionallyQuoted(data.id_col);
-	auto q_seq = KeywordHelper::WriteOptionallyQuoted(data.sequence_col);
-	auto q_count = KeywordHelper::WriteOptionallyQuoted(data.count_col);
+	auto q_src = SQLIdentifier::ToString(data.input_table);
+	auto q_col = SQLIdentifier::ToString(data.sample_info.sample_id_col);
+	auto q_id = SQLIdentifier::ToString(data.id_col);
+	auto q_seq = SQLIdentifier::ToString(data.sequence_col);
+	auto q_count = SQLIdentifier::ToString(data.count_col);
 	auto sample_literal = sample_value.ToSQLString();
 
 	auto sql = "SELECT " + q_id + ", " + q_seq + ", CAST(" + q_count + " AS BIGINT) FROM " + q_src + " WHERE CAST(" +
@@ -278,7 +281,7 @@ static std::vector<miint::DeblurResult> RunDeblurForSample(Connection &conn, con
 	}
 
 	std::vector<miint::DeblurSequence> sequences;
-	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto &materialized = *result;
 	while (auto chunk = materialized.Fetch()) {
 		for (idx_t i = 0; i < chunk->size(); i++) {
 			auto read_id_val = chunk->GetValue(0, i);
@@ -315,14 +318,14 @@ static void EmitRows(const DeblurData &data, DeblurLocalState &lstate, const std
 
 	idx_t col = 0;
 	if (data.has_sample_id) {
-		output.data[col++].Reference(lstate.sample_value);
+		output.data[col++].Reference(lstate.sample_value, count_t(count));
 	}
 	auto &read_id_vec = output.data[col++];
 	auto &seq_vec = output.data[col++];
 	auto &abundance_vec = output.data[col++];
-	auto read_id_data = FlatVector::GetData<string_t>(read_id_vec);
-	auto seq_data = FlatVector::GetData<string_t>(seq_vec);
-	auto abundance_data = FlatVector::GetData<int64_t>(abundance_vec);
+	auto read_id_data = FlatVector::GetDataMutable<string_t>(read_id_vec);
+	auto seq_data = FlatVector::GetDataMutable<string_t>(seq_vec);
+	auto abundance_data = FlatVector::GetDataMutable<int64_t>(abundance_vec);
 	for (idx_t i = 0; i < count; i++) {
 		auto &r = source[lstate.current_row + i];
 		read_id_data[i] = StringVector::AddString(read_id_vec, r.label);
@@ -330,7 +333,7 @@ static void EmitRows(const DeblurData &data, DeblurLocalState &lstate, const std
 		abundance_data[i] = r.abundance;
 	}
 	lstate.current_row += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 static void DeblurExecute(ClientContext & /*context*/, TableFunctionInput &data_p, DataChunk &output) {
@@ -341,7 +344,7 @@ static void DeblurExecute(ClientContext & /*context*/, TableFunctionInput &data_
 	if (!data.has_sample_id) {
 		// Single thread (MaxThreads()=1) drains gstate.shared_results via lstate's cursor.
 		if (lstate.current_row >= gstate.shared_results.size()) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		EmitRows(data, lstate, gstate.shared_results, output);
@@ -357,7 +360,7 @@ static void DeblurExecute(ClientContext & /*context*/, TableFunctionInput &data_
 		// fall through to claim again.
 		idx_t sample_idx;
 		if (!ClaimNextSample(gstate, data.sample_info.sample_values.size(), sample_idx)) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		lstate.sample_value = data.sample_info.sample_values[sample_idx];
@@ -369,14 +372,14 @@ static void DeblurExecute(ClientContext & /*context*/, TableFunctionInput &data_
 TableFunction DeblurTableFunction::GetFunction() {
 	auto tf =
 	    TableFunction("deblur", {LogicalType::VARCHAR}, DeblurExecute, DeblurBind, DeblurInitGlobal, DeblurInitLocal);
-	tf.named_parameters["mean_error"] = LogicalType::DOUBLE;
-	tf.named_parameters["error_profile"] = LogicalType::LIST(LogicalType::DOUBLE);
-	tf.named_parameters["indel_prob"] = LogicalType::DOUBLE;
-	tf.named_parameters["indel_max"] = LogicalType::INTEGER;
-	tf.named_parameters["sample_id"] = LogicalType::VARCHAR;
-	tf.named_parameters["id_col"] = LogicalType::VARCHAR;
-	tf.named_parameters["sequence_col"] = LogicalType::VARCHAR;
-	tf.named_parameters["count_col"] = LogicalType::VARCHAR;
+	AddNamedParameter(tf, "mean_error", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "error_profile", LogicalType::LIST(LogicalType::DOUBLE));
+	AddNamedParameter(tf, "indel_prob", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "indel_max", LogicalType::INTEGER);
+	AddNamedParameter(tf, "sample_id", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "id_col", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "sequence_col", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "count_col", LogicalType::VARCHAR);
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return tf;
 }

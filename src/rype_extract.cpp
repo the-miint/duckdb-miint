@@ -6,6 +6,8 @@
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -96,8 +98,8 @@ BuildExtractionInputStream(ClientContext &context, const RypeExtractData &bind_d
 	// Export BLOB with 64-bit offsets — see ConfigureRypeArrowExport in rype_common.hpp (#222).
 	ConfigureRypeArrowExport(conn);
 
-	std::string id_col_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.id_column);
-	std::string table_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.sequence_table);
+	std::string id_col_quoted = SQLIdentifier::ToString(bind_data.id_column);
+	std::string table_quoted = SQLIdentifier::ToString(bind_data.sequence_table);
 
 	// One streaming scan of the caller's relation, carrying the identifier and the
 	// sequence in the same row. Extraction is single-sequence, so no pair column.
@@ -164,7 +166,7 @@ BuildExtractionInputStream(ClientContext &context, const RypeExtractData &bind_d
 static void ExecuteExtraction(RypeExtractGlobalState &gstate, RypeExtractLocalState &lstate, DataChunk &output,
                               idx_t num_list_cols) {
 	if (gstate.done) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
@@ -183,7 +185,7 @@ static void ExecuteExtraction(RypeExtractGlobalState &gstate, RypeExtractLocalSt
 
 		if (!wrapper->arrow_array.release) {
 			gstate.done = true;
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 
@@ -194,7 +196,7 @@ static void ExecuteExtraction(RypeExtractGlobalState &gstate, RypeExtractLocalSt
 	auto &batch = gstate.current_chunk->arrow_array;
 	idx_t remaining = static_cast<idx_t>(batch.length) - gstate.batch_offset;
 	idx_t to_output = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
-	output.SetCardinality(to_output);
+	output.SetChildCardinality(to_output);
 
 	// Column 0: id (Int64) → read_id (mirrors id_column type) — manual transformation.
 	// Offset calculation follows rype_classify pattern: parent batch offset + child array offset.
@@ -243,7 +245,7 @@ static void ExecuteExtraction(RypeExtractGlobalState &gstate, RypeExtractLocalSt
 unique_ptr<FunctionData> RypeExtractMinimizerSetTableFunction::Bind(ClientContext &context,
                                                                     TableFunctionBindInput &input,
                                                                     vector<LogicalType> &return_types,
-                                                                    vector<string> &names) {
+                                                                    vector<Identifier> &names) {
 	auto data = BindExtraction(context, input, "rype_extract_minimizer_set");
 
 	data->names = {"read_id", "fwd_set", "rc_set"};
@@ -305,8 +307,8 @@ void RypeExtractMinimizerSetTableFunction::Execute(ClientContext &context, Table
 TableFunction RypeExtractMinimizerSetTableFunction::GetFunction() {
 	TableFunction tf("rype_extract_minimizer_set", {LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT},
 	                 Execute, Bind, InitGlobal, InitLocal);
-	tf.named_parameters["salt"] = LogicalType::UBIGINT;
-	tf.named_parameters["id_column"] = LogicalType::VARCHAR;
+	AddNamedParameter(tf, "salt", LogicalType::UBIGINT);
+	AddNamedParameter(tf, "id_column", LogicalType::VARCHAR);
 	AddRypeSharedNamedParameters(tf);
 	return tf;
 }
@@ -321,7 +323,7 @@ void RypeExtractMinimizerSetTableFunction::Register(ExtensionLoader &loader) {
 unique_ptr<FunctionData> RypeExtractStrandMinimizersTableFunction::Bind(ClientContext &context,
                                                                         TableFunctionBindInput &input,
                                                                         vector<LogicalType> &return_types,
-                                                                        vector<string> &names) {
+                                                                        vector<Identifier> &names) {
 	auto data = BindExtraction(context, input, "rype_extract_strand_minimizers");
 
 	data->names = {"read_id", "fwd_hashes", "fwd_positions", "rc_hashes", "rc_positions"};
@@ -384,8 +386,8 @@ void RypeExtractStrandMinimizersTableFunction::Execute(ClientContext &context, T
 TableFunction RypeExtractStrandMinimizersTableFunction::GetFunction() {
 	TableFunction tf("rype_extract_strand_minimizers", {LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT},
 	                 Execute, Bind, InitGlobal, InitLocal);
-	tf.named_parameters["salt"] = LogicalType::UBIGINT;
-	tf.named_parameters["id_column"] = LogicalType::VARCHAR;
+	AddNamedParameter(tf, "salt", LogicalType::UBIGINT);
+	AddNamedParameter(tf, "id_column", LogicalType::VARCHAR);
 	AddRypeSharedNamedParameters(tf);
 	return tf;
 }

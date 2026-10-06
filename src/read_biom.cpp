@@ -7,11 +7,15 @@
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/vector_size.hpp"
+#include "duckdb/common/vector/constant_vector.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
 unique_ptr<FunctionData> ReadBIOMTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                     vector<LogicalType> &return_types, vector<std::string> &names) {
+                                                     vector<LogicalType> &return_types, vector<Identifier> &names) {
 	FileSystem &fs = FileSystem::GetFileSystem(context);
 
 	std::vector<std::string> biom_paths;
@@ -107,7 +111,7 @@ void ReadBIOMTableFunction::SetResultVector(Vector &result_vector, const miint::
 
 void ReadBIOMTableFunction::SetResultVectorString(Vector &result_vector, const miint::BIOMTableField &field,
                                                   const miint::BIOMTable &record, size_t current_row, size_t n_rows) {
-	auto result_data = FlatVector::GetData<string_t>(result_vector);
+	auto result_data = FlatVector::GetDataMutable<string_t>(result_vector);
 
 	const auto &indices =
 	    (field == miint::BIOMTableField::SAMPLE_ID) ? record.COOSampleIndices() : record.COOFeatureIndices();
@@ -121,7 +125,7 @@ void ReadBIOMTableFunction::SetResultVectorString(Vector &result_vector, const m
 
 void ReadBIOMTableFunction::SetResultVectorDouble(Vector &result_vector, const miint::BIOMTableField &field,
                                                   const miint::BIOMTable &record, size_t current_row, size_t n_rows) {
-	auto result_data = FlatVector::GetData<double>(result_vector);
+	auto result_data = FlatVector::GetDataMutable<double>(result_vector);
 	auto &data = record.COOValues();
 
 	for (size_t i = 0; i < n_rows; i++) {
@@ -147,7 +151,7 @@ void ReadBIOMTableFunction::Execute(ClientContext &context, TableFunctionInput &
 		bool got_file = local_state.GetNextFile(global_state);
 		if (!got_file) {
 			// No more files to process
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		// GetNextFile resets current_row to 0 and loads new table
@@ -168,13 +172,13 @@ void ReadBIOMTableFunction::Execute(ClientContext &context, TableFunctionInput &
 		SetResultVectorFilepath(result_vector, local_state.path, n_rows);
 	}
 
-	output.SetCardinality(n_rows);
+	output.SetChildCardinality(n_rows);
 	local_state.current_row += n_rows;
 }
 
 TableFunction ReadBIOMTableFunction::GetFunction() {
 	auto tf = TableFunction("read_biom", {LogicalType::ANY}, Execute, Bind, InitGlobal);
-	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
+	AddNamedParameter(tf, "include_filepath", LogicalType::BOOLEAN);
 	tf.init_local = InitLocal;
 	return tf;
 }

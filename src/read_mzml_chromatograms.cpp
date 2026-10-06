@@ -5,12 +5,13 @@
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include <read_mzml_chromatograms.hpp>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
 unique_ptr<FunctionData> ReadMzMLChromatogramsTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                                   vector<duckdb::LogicalType> &return_types,
-                                                                  vector<std::string> &names) {
+                                                                  vector<Identifier> &names) {
 	FileSystem &fs = FileSystem::GetFileSystem(context);
 
 	std::vector<std::string> file_paths;
@@ -87,7 +88,7 @@ void ReadMzMLChromatogramsTableFunction::Execute(ClientContext &context, TableFu
 			lock_guard<mutex> read_lock(global_state.lock);
 
 			if (global_state.next_file_idx >= global_state.filepaths.size()) {
-				output.SetCardinality(0);
+				output.SetChildCardinality(0);
 				return;
 			}
 
@@ -141,12 +142,12 @@ void ReadMzMLChromatogramsTableFunction::Execute(ClientContext &context, TableFu
 		SetResultVectorFilepath(output.data[col++], current_filepath);
 	}
 
-	output.SetCardinality(batch.size());
+	output.SetChildCardinality(batch.size());
 }
 
 TableFunction ReadMzMLChromatogramsTableFunction::GetFunction() {
 	auto tf = TableFunction("read_mzml_chromatograms", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
-	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
+	AddNamedParameter(tf, "include_filepath", LogicalType::BOOLEAN);
 	return tf;
 }
 

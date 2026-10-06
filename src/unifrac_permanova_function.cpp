@@ -28,9 +28,12 @@
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/query_result.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 
 // scikit-bio-binaries — PERMANOVA pseudo-F + p-value on a fp32 distance matrix.
 #include "distance.h"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 namespace {
@@ -77,27 +80,27 @@ struct WideMetadata {
 WideMetadata ReadWideMetadata(ClientContext &context, const std::string &table_name,
                               const std::vector<std::string> &requested_variables, const std::string &caller_name) {
 	auto conn = MakeReadOnlyHelperConnection(context);
-	const auto qname = KeywordHelper::WriteOptionallyQuoted(table_name);
+	const auto qname = SQLIdentifier::ToString(table_name);
 
 	auto probe = conn.Query("SELECT * FROM " + qname + " LIMIT 0");
 	if (probe->HasError()) {
 		throw InvalidInputException("%s: failed to read metadata relation '%s': %s", caller_name, table_name,
 		                            probe->GetError());
 	}
-	auto &probe_mat = probe->Cast<MaterializedQueryResult>();
-	const auto &all_names = probe_mat.names;
+	auto &probe_mat = *probe;
+	const auto &all_names = probe_mat.GetNames();
 
 	idx_t sample_id_col = DConstants::INVALID_INDEX;
 	std::vector<std::string> non_sample_cols;
 	std::vector<idx_t> non_sample_indices;
 	for (idx_t i = 0; i < all_names.size(); ++i) {
-		if (StringUtil::Lower(all_names[i]) == "sample_id") {
+		if (all_names[i] == "sample_id") {
 			if (sample_id_col != DConstants::INVALID_INDEX) {
 				throw BinderException("%s: metadata '%s' has multiple 'sample_id' columns", caller_name, table_name);
 			}
 			sample_id_col = i;
 		} else {
-			non_sample_cols.push_back(all_names[i]);
+			non_sample_cols.push_back(all_names[i].GetIdentifierName());
 			non_sample_indices.push_back(i);
 		}
 	}
@@ -132,9 +135,9 @@ WideMetadata ReadWideMetadata(ClientContext &context, const std::string &table_n
 		}
 	}
 
-	std::string sql = "SELECT " + KeywordHelper::WriteOptionallyQuoted(all_names[sample_id_col]) + "::VARCHAR";
+	std::string sql = "SELECT " + SQLIdentifier::ToString(all_names[sample_id_col].GetIdentifierName()) + "::VARCHAR";
 	for (auto col_idx : chosen_indices) {
-		sql += ", " + KeywordHelper::WriteOptionallyQuoted(all_names[col_idx]) + "::VARCHAR";
+		sql += ", " + SQLIdentifier::ToString(all_names[col_idx].GetIdentifierName()) + "::VARCHAR";
 	}
 	sql += " FROM " + qname;
 
@@ -146,20 +149,20 @@ WideMetadata ReadWideMetadata(ClientContext &context, const std::string &table_n
 
 	WideMetadata out;
 	out.column_names = chosen_variables;
-	auto &mat = result->Cast<MaterializedQueryResult>();
+	auto &mat = *result;
 	while (auto chunk = mat.Fetch()) {
 		const idx_t n = chunk->size();
 		if (n == 0) {
 			break;
 		}
 		UnifiedVectorFormat sid_u;
-		chunk->data[0].ToUnifiedFormat(n, sid_u);
+		chunk->data[0].ToUnifiedFormat(sid_u);
 		auto sid_data = UnifiedVectorFormat::GetData<string_t>(sid_u);
 
 		std::vector<UnifiedVectorFormat> var_u(chosen_variables.size());
 		std::vector<const string_t *> var_data(chosen_variables.size());
 		for (size_t v = 0; v < chosen_variables.size(); ++v) {
-			chunk->data[v + 1].ToUnifiedFormat(n, var_u[v]);
+			chunk->data[v + 1].ToUnifiedFormat(var_u[v]);
 			var_data[v] = UnifiedVectorFormat::GetData<string_t>(var_u[v]);
 		}
 		for (idx_t i = 0; i < n; ++i) {
@@ -231,7 +234,7 @@ void RunPermanovaOnMatrix(const float *mat, uint32_t n, const std::vector<std::s
 // Declare the PERMANOVA output schema. Shared by unifrac_permanova and permanova
 // so the two functions can never drift apart column-wise — the "identical output
 // schema" invariant is enforced structurally rather than by discipline.
-void DeclarePermanovaOutputSchema(vector<LogicalType> &return_types, vector<string> &names) {
+void DeclarePermanovaOutputSchema(vector<LogicalType> &return_types, vector<Identifier> &names) {
 	names.emplace_back("iteration");
 	return_types.emplace_back(LogicalType::INTEGER);
 	names.emplace_back("variable");
@@ -272,7 +275,7 @@ void ComputeOneIteration(const miint::unifrac::UnifracSupportBiomView &biom_view
 }
 
 unique_ptr<FunctionData> UnifracPermanovaBind(ClientContext &context, TableFunctionBindInput &input,
-                                              vector<LogicalType> &return_types, vector<string> &names) {
+                                              vector<LogicalType> &return_types, vector<Identifier> &names) {
 	const std::string table_name = input.inputs[0].GetValue<string>();
 	const std::string tree_name = input.inputs[1].GetValue<string>();
 	const std::string metadata_name = input.inputs[2].GetValue<string>();
@@ -300,7 +303,7 @@ unique_ptr<FunctionData> UnifracPermanovaBind(ClientContext &context, TableFunct
 	int32_t seed = -1;
 	int32_t threads = 0; // 0 = follow DuckDB's TaskScheduler::NumberOfThreads()
 	for (const auto &kv : input.named_parameters) {
-		const auto key = StringUtil::Lower(kv.first);
+		const auto key = StringUtil::Lower(kv.first.GetIdentifierName());
 		if (key == "variant") {
 			variant = kv.second.GetValue<string>();
 		} else if (key == "n_permutations") {
@@ -427,19 +430,19 @@ void UnifracPermanovaExecute(ClientContext &, TableFunctionInput &input, DataChu
 	auto &gstate = input.global_state->Cast<UnifracPermanovaGlobalState>();
 	const idx_t total = gstate.rows.size();
 	if (gstate.cursor >= total) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 	const idx_t remaining = total - gstate.cursor;
 	const idx_t n = std::min<idx_t>(STANDARD_VECTOR_SIZE, remaining);
 
-	auto iter_data = FlatVector::GetData<int32_t>(output.data[0]);
+	auto iter_data = FlatVector::GetDataMutable<int32_t>(output.data[0]);
 	auto &variable_vec = output.data[1];
-	auto variable_data = FlatVector::GetData<string_t>(variable_vec);
-	auto n_groups_data = FlatVector::GetData<int32_t>(output.data[2]);
-	auto f_stat_data = FlatVector::GetData<double>(output.data[3]);
-	auto p_value_data = FlatVector::GetData<double>(output.data[4]);
-	auto n_perm_data = FlatVector::GetData<int32_t>(output.data[5]);
+	auto variable_data = FlatVector::GetDataMutable<string_t>(variable_vec);
+	auto n_groups_data = FlatVector::GetDataMutable<int32_t>(output.data[2]);
+	auto f_stat_data = FlatVector::GetDataMutable<double>(output.data[3]);
+	auto p_value_data = FlatVector::GetDataMutable<double>(output.data[4]);
+	auto n_perm_data = FlatVector::GetDataMutable<int32_t>(output.data[5]);
 
 	for (idx_t i = 0; i < n; ++i) {
 		const auto &r = gstate.rows[gstate.cursor + i];
@@ -451,7 +454,7 @@ void UnifracPermanovaExecute(ClientContext &, TableFunctionInput &input, DataChu
 		n_perm_data[i] = r.n_permutations;
 	}
 	gstate.cursor += n;
-	output.SetCardinality(n);
+	output.SetChildCardinality(n);
 }
 
 // ── permanova(distances, metadata, ...) — metric-agnostic PERMANOVA ───────────
@@ -464,7 +467,7 @@ void UnifracPermanovaExecute(ClientContext &, TableFunctionInput &input, DataChu
 // unchanged — the output schema is identical, iteration is always 0 (kept for
 // parity), and there is no subsampling (a distance table is a fixed matrix).
 unique_ptr<FunctionData> PermanovaFromDistancesBind(ClientContext &context, TableFunctionBindInput &input,
-                                                    vector<LogicalType> &return_types, vector<string> &names) {
+                                                    vector<LogicalType> &return_types, vector<Identifier> &names) {
 	const std::string table_name = input.inputs[0].GetValue<string>();
 	const std::string metadata_name = input.inputs[1].GetValue<string>();
 	RejectCTERelationName(input, table_name);
@@ -478,7 +481,7 @@ unique_ptr<FunctionData> PermanovaFromDistancesBind(ClientContext &context, Tabl
 	int32_t seed = -1;
 	int32_t threads = 0; // 0 = follow DuckDB's TaskScheduler::NumberOfThreads()
 	for (const auto &kv : input.named_parameters) {
-		const auto key = StringUtil::Lower(kv.first);
+		const auto key = StringUtil::Lower(kv.first.GetIdentifierName());
 		if (key == "n_permutations") {
 			n_permutations = kv.second.GetValue<int32_t>();
 		} else if (key == "variables") {
@@ -521,28 +524,28 @@ unique_ptr<FunctionData> PermanovaFromDistancesBind(ClientContext &context, Tabl
 void RegisterUnifracPermanova(ExtensionLoader &loader) {
 	TableFunction fn("unifrac_permanova", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                 UnifracPermanovaExecute, UnifracPermanovaBind, UnifracPermanovaInitGlobal);
-	fn.named_parameters["variant"] = LogicalType::VARCHAR;
-	fn.named_parameters["n_permutations"] = LogicalType::INTEGER;
-	fn.named_parameters["variables"] = LogicalType::LIST(LogicalType::VARCHAR);
-	fn.named_parameters["variance_adjust"] = LogicalType::BOOLEAN;
-	fn.named_parameters["alpha"] = LogicalType::DOUBLE;
-	fn.named_parameters["bypass_tips"] = LogicalType::BOOLEAN;
-	fn.named_parameters["normalize_sample_counts"] = LogicalType::BOOLEAN;
-	fn.named_parameters["subsample_depth"] = LogicalType::INTEGER;
-	fn.named_parameters["subsample_with_replacement"] = LogicalType::BOOLEAN;
-	fn.named_parameters["n_subsamples"] = LogicalType::INTEGER;
-	fn.named_parameters["seed"] = LogicalType::INTEGER;
-	fn.named_parameters["threads"] = LogicalType::INTEGER;
+	AddNamedParameter(fn, "variant", LogicalType::VARCHAR);
+	AddNamedParameter(fn, "n_permutations", LogicalType::INTEGER);
+	AddNamedParameter(fn, "variables", LogicalType::LIST(LogicalType::VARCHAR));
+	AddNamedParameter(fn, "variance_adjust", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "alpha", LogicalType::DOUBLE);
+	AddNamedParameter(fn, "bypass_tips", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "normalize_sample_counts", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "subsample_depth", LogicalType::INTEGER);
+	AddNamedParameter(fn, "subsample_with_replacement", LogicalType::BOOLEAN);
+	AddNamedParameter(fn, "n_subsamples", LogicalType::INTEGER);
+	AddNamedParameter(fn, "seed", LogicalType::INTEGER);
+	AddNamedParameter(fn, "threads", LogicalType::INTEGER);
 	loader.RegisterFunction(fn);
 }
 
 void RegisterPermanovaFromDistances(ExtensionLoader &loader) {
 	TableFunction fn("permanova", {LogicalType::VARCHAR, LogicalType::VARCHAR}, UnifracPermanovaExecute,
 	                 PermanovaFromDistancesBind, UnifracPermanovaInitGlobal);
-	fn.named_parameters["n_permutations"] = LogicalType::INTEGER;
-	fn.named_parameters["variables"] = LogicalType::LIST(LogicalType::VARCHAR);
-	fn.named_parameters["seed"] = LogicalType::INTEGER;
-	fn.named_parameters["threads"] = LogicalType::INTEGER;
+	AddNamedParameter(fn, "n_permutations", LogicalType::INTEGER);
+	AddNamedParameter(fn, "variables", LogicalType::LIST(LogicalType::VARCHAR));
+	AddNamedParameter(fn, "seed", LogicalType::INTEGER);
+	AddNamedParameter(fn, "threads", LogicalType::INTEGER);
 	fn.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(fn);
 }

@@ -10,15 +10,19 @@
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
-#include "duckdb/main/materialized_query_result.hpp"
+#include "duckdb/main/query_result.hpp"
 #include "duckdb/main/query_result.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 
 #include <algorithm>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include "miint_streaming_query.hpp"
 
 namespace duckdb {
 
@@ -37,7 +41,7 @@ struct PileupGlobalState : public GlobalTableFunctionState {
 
 	// Streaming alignment reader — conn must outlive alignment_stream.
 	unique_ptr<Connection> conn;
-	unique_ptr<QueryResult> alignment_stream;
+	unique_ptr<StreamingQuery> alignment_stream;
 	bool stream_exhausted = false;
 
 	// Result buffer: pileup rows from the current alignment chunk.
@@ -55,7 +59,7 @@ struct PileupGlobalState : public GlobalTableFunctionState {
 static void ValidateTableSchema(ClientContext &context, const std::string &table_name, const std::string &probe,
                                 const char *role) {
 	auto conn = MakeReadOnlyHelperConnection(context);
-	std::string query = "SELECT " + probe + " FROM " + KeywordHelper::WriteOptionallyQuoted(table_name) + " LIMIT 0";
+	std::string query = "SELECT " + probe + " FROM " + SQLIdentifier::ToString(table_name) + " LIMIT 0";
 	auto result = conn.Query(query);
 	if (result->HasError()) {
 		throw BinderException("%s: %s table '%s' missing required column(s) — expected (%s) (%s)", FN_NAME, role,
@@ -66,7 +70,7 @@ static void ValidateTableSchema(ClientContext &context, const std::string &table
 // Load reference table → ref_id → sequence map.
 //
 // NOTE: deviation from the plan, which suggested `string_view`. We use owning
-// `std::string` because the source `string_t` from MaterializedQueryResult is
+// `std::string` because the source `string_t` from QueryResult is
 // only valid for the lifetime of `result`, which is local to this function.
 // A string_view map would dangle as soon as LoadReference returned. For
 // human-scale references (chr1 = 250 MB) this doubles peak memory; for the
@@ -75,17 +79,17 @@ static std::unordered_map<std::string, std::string> LoadReference(ClientContext 
                                                                   const std::string &table_name) {
 	std::unordered_map<std::string, std::string> ref;
 	auto conn = MakeReadOnlyHelperConnection(context);
-	std::string query = "SELECT ref_id, sequence FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
+	std::string query = "SELECT ref_id, sequence FROM " + SQLIdentifier::ToString(table_name);
 	auto result = conn.Query(query);
 	if (result->HasError()) {
 		throw InvalidInputException("%s: failed to read reference table '%s': %s", FN_NAME, table_name,
 		                            result->GetError());
 	}
-	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto &materialized = *result;
 	while (auto chunk = materialized.Fetch()) {
 		UnifiedVectorFormat id_data, seq_data;
-		chunk->data[0].ToUnifiedFormat(chunk->size(), id_data);
-		chunk->data[1].ToUnifiedFormat(chunk->size(), seq_data);
+		chunk->data[0].ToUnifiedFormat(id_data);
+		chunk->data[1].ToUnifiedFormat(seq_data);
 		auto id_ptr = UnifiedVectorFormat::GetData<string_t>(id_data);
 		auto seq_ptr = UnifiedVectorFormat::GetData<string_t>(seq_data);
 		for (idx_t i = 0; i < chunk->size(); ++i) {
@@ -106,12 +110,12 @@ static std::unordered_map<std::string, std::string> LoadReference(ClientContext 
 static void ProcessAlignmentChunk(DataChunk &chunk, const std::unordered_map<std::string, std::string> &ref,
                                   std::vector<miint::PileupRow> &rows) {
 	UnifiedVectorFormat read_id_data, ref_data, pos_data, cigar_data, seq_data, qual_data;
-	chunk.data[0].ToUnifiedFormat(chunk.size(), read_id_data);
-	chunk.data[1].ToUnifiedFormat(chunk.size(), ref_data);
-	chunk.data[2].ToUnifiedFormat(chunk.size(), pos_data);
-	chunk.data[3].ToUnifiedFormat(chunk.size(), cigar_data);
-	chunk.data[4].ToUnifiedFormat(chunk.size(), seq_data);
-	chunk.data[5].ToUnifiedFormat(chunk.size(), qual_data);
+	chunk.data[0].ToUnifiedFormat(read_id_data);
+	chunk.data[1].ToUnifiedFormat(ref_data);
+	chunk.data[2].ToUnifiedFormat(pos_data);
+	chunk.data[3].ToUnifiedFormat(cigar_data);
+	chunk.data[4].ToUnifiedFormat(seq_data);
+	chunk.data[5].ToUnifiedFormat(qual_data);
 
 	auto read_id_ptr = UnifiedVectorFormat::GetData<string_t>(read_id_data);
 	auto ref_ptr = UnifiedVectorFormat::GetData<string_t>(ref_data);
@@ -119,7 +123,7 @@ static void ProcessAlignmentChunk(DataChunk &chunk, const std::unordered_map<std
 	auto cigar_ptr = UnifiedVectorFormat::GetData<string_t>(cigar_data);
 	auto seq_ptr = UnifiedVectorFormat::GetData<string_t>(seq_data);
 	auto qual_entries = UnifiedVectorFormat::GetData<list_entry_t>(qual_data);
-	auto &qual_child_vec = ListVector::GetEntry(chunk.data[5]);
+	auto &qual_child_vec = ListVector::GetChildMutable(chunk.data[5]);
 	auto qual_child_data = FlatVector::GetData<uint8_t>(qual_child_vec);
 
 	for (idx_t i = 0; i < chunk.size(); ++i) {
@@ -171,7 +175,7 @@ static void ProcessAlignmentChunk(DataChunk &chunk, const std::unordered_map<std
 // Bind
 // ---------------------------------------------------------------------------
 static unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input,
-                                     vector<LogicalType> &return_types, vector<std::string> &names) {
+                                     vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<PileupBindData>();
 	data->alignments_table = input.inputs[0].GetValue<std::string>();
 	data->reference_table = input.inputs[1].GetValue<std::string>();
@@ -201,8 +205,8 @@ static unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, T
 	gstate->conn = make_uniq<Connection>(db);
 	InheritTempObjects(context, *gstate->conn);
 	std::string query = "SELECT read_id, reference, position, cigar, sequence, qual FROM " +
-	                    KeywordHelper::WriteOptionallyQuoted(data.alignments_table);
-	gstate->alignment_stream = gstate->conn->SendQuery(query);
+	                    SQLIdentifier::ToString(data.alignments_table);
+	gstate->alignment_stream = SubmitStream(*gstate->conn, query);
 	if (gstate->alignment_stream->HasError()) {
 		throw InvalidInputException("%s: failed to read alignments table '%s': %s", FN_NAME, data.alignments_table,
 		                            gstate->alignment_stream->GetError());
@@ -216,15 +220,15 @@ static unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, T
 // ---------------------------------------------------------------------------
 static void EmitPileupRows(DataChunk &output, const std::vector<miint::PileupRow> &rows, idx_t offset, idx_t count) {
 	auto &ref_id_vec = output.data[0];
-	auto ref_pos_data = FlatVector::GetData<int64_t>(output.data[1]);
+	auto ref_pos_data = FlatVector::GetDataMutable<int64_t>(output.data[1]);
 	auto &read_id_vec = output.data[2];
 	auto &ref_base_vec = output.data[3];
 	auto &query_base_vec = output.data[4];
-	auto query_qual_data = FlatVector::GetData<uint8_t>(output.data[5]);
-	auto insert_pos_data = FlatVector::GetData<int32_t>(output.data[6]);
-	auto &ref_base_validity = FlatVector::Validity(output.data[3]);
-	auto &query_base_validity = FlatVector::Validity(output.data[4]);
-	auto &query_qual_validity = FlatVector::Validity(output.data[5]);
+	auto query_qual_data = FlatVector::GetDataMutable<uint8_t>(output.data[5]);
+	auto insert_pos_data = FlatVector::GetDataMutable<int32_t>(output.data[6]);
+	auto &ref_base_validity = FlatVector::ValidityMutable(output.data[3]);
+	auto &query_base_validity = FlatVector::ValidityMutable(output.data[4]);
+	auto &query_qual_validity = FlatVector::ValidityMutable(output.data[5]);
 
 	ref_base_validity.SetAllValid(count);
 	query_base_validity.SetAllValid(count);
@@ -232,19 +236,20 @@ static void EmitPileupRows(DataChunk &output, const std::vector<miint::PileupRow
 
 	for (idx_t i = 0; i < count; ++i) {
 		const auto &r = rows[offset + i];
-		FlatVector::GetData<string_t>(ref_id_vec)[i] = StringVector::AddString(ref_id_vec, r.ref_id);
+		FlatVector::GetDataMutable<string_t>(ref_id_vec)[i] = StringVector::AddString(ref_id_vec, r.ref_id);
 		ref_pos_data[i] = r.ref_pos;
-		FlatVector::GetData<string_t>(read_id_vec)[i] = StringVector::AddString(read_id_vec, r.read_id);
+		FlatVector::GetDataMutable<string_t>(read_id_vec)[i] = StringVector::AddString(read_id_vec, r.read_id);
 		insert_pos_data[i] = r.insert_pos;
 		if (r.ref_base_is_null) {
 			ref_base_validity.SetInvalid(i);
 		} else {
-			FlatVector::GetData<string_t>(ref_base_vec)[i] = StringVector::AddString(ref_base_vec, &r.ref_base, 1);
+			FlatVector::GetDataMutable<string_t>(ref_base_vec)[i] =
+			    StringVector::AddString(ref_base_vec, &r.ref_base, 1);
 		}
 		if (r.query_is_null) {
 			query_base_validity.SetInvalid(i);
 		} else {
-			FlatVector::GetData<string_t>(query_base_vec)[i] =
+			FlatVector::GetDataMutable<string_t>(query_base_vec)[i] =
 			    StringVector::AddString(query_base_vec, &r.query_base, 1);
 		}
 		if (r.qual_is_null) {
@@ -254,7 +259,7 @@ static void EmitPileupRows(DataChunk &output, const std::vector<miint::PileupRow
 		}
 	}
 
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
@@ -274,7 +279,7 @@ static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChun
 		gstate.buffer_offset = 0;
 
 		if (gstate.stream_exhausted) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 
@@ -285,12 +290,12 @@ static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChun
 				                            gstate.alignment_stream->GetError());
 			}
 			gstate.stream_exhausted = true;
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		if (chunk->size() == 0) {
 			gstate.stream_exhausted = true;
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 

@@ -28,6 +28,8 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include "miint_named_parameter.hpp"
+#include "miint_streaming_query.hpp"
 
 namespace duckdb {
 
@@ -195,7 +197,7 @@ private:
 // Reads an optional named parameter, leaving `target` alone when absent.
 // Same shape as place_krepp's, kept local for the same reason.
 template <typename T>
-void ReadOptional(const named_parameter_map_t &params, const char *key, T &target, T (*convert)(const Value &)) {
+void ReadOptional(const named_argument_map_t &params, const char *key, T &target, T (*convert)(const Value &)) {
 	auto it = params.find(key);
 	if (it != params.end() && !it->second.IsNull()) {
 		target = convert(it->second);
@@ -205,7 +207,7 @@ void ReadOptional(const named_parameter_map_t &params, const char *key, T &targe
 // k, w and h are uint8_t in krepp's config. Taking them as INTEGER and
 // narrowing silently would turn `k := 285` into k = 29 - a valid-looking build
 // with the wrong k - so the range is checked before the cast rather than after.
-uint8_t ReadByteParam(const named_parameter_map_t &params, const char *key, uint8_t fallback, bool *was_set = nullptr) {
+uint8_t ReadByteParam(const named_argument_map_t &params, const char *key, uint8_t fallback, bool *was_set = nullptr) {
 	auto it = params.find(key);
 	if (it == params.end() || it->second.IsNull()) {
 		return fallback;
@@ -221,7 +223,7 @@ uint8_t ReadByteParam(const named_parameter_map_t &params, const char *key, uint
 	return static_cast<uint8_t>(value);
 }
 
-uint32_t ReadUIntParam(const named_parameter_map_t &params, const char *key, uint32_t fallback) {
+uint32_t ReadUIntParam(const named_argument_map_t &params, const char *key, uint32_t fallback) {
 	auto it = params.find(key);
 	if (it == params.end() || it->second.IsNull()) {
 		return fallback;
@@ -270,7 +272,7 @@ void ReadIndexMetadata(const std::string &index_dir, const std::string &suffix, 
 
 unique_ptr<FunctionData> KreppIndexCreateTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                              vector<LogicalType> &return_types,
-                                                             vector<std::string> &names) {
+                                                             vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 
 	if (input.inputs.size() < 2) {
@@ -369,7 +371,7 @@ unique_ptr<FunctionData> KreppIndexCreateTableFunction::Bind(ClientContext &cont
 	}
 
 	return_types = data->types;
-	names = data->names;
+	names = StringsToIdentifiers(data->names);
 	return std::move(data);
 }
 
@@ -584,7 +586,9 @@ unique_ptr<GlobalTableFunctionState> KreppIndexCreateTableFunction::InitGlobal(C
 		// this connection's ClientConfig rather than through SET, which
 		// lock_configuration refuses (DBConfig::CheckLock); no other connection
 		// sees it.
-		ClientConfig::GetConfig(*conn.context).streaming_buffer_size = 1000;
+		// DuckDB v2.0 renamed the setting to max_streaming_buffer_size (default 10 MB). The figures above were
+		// measured on 1.5; the same cap is kept until the v2.0 peak RSS is re-measured.
+		ClientConfig::GetConfig(*conn.context).max_streaming_buffer_size = 1000;
 		// Cast to VARCHAR so a BIGINT read_id and a text one reach krepp the
 		// same way; a reference name is text on both sides of the map.
 		// sequence2 is selected only to refuse it. A krepp reference is one
@@ -593,8 +597,8 @@ unique_ptr<GlobalTableFunctionState> KreppIndexCreateTableFunction::InitGlobal(C
 		// ReadSubjectTable: the column may exist, its values may not.
 		const std::string sql = "SELECT read_id::VARCHAR AS read_id, sequence1" +
 		                        std::string(data.schema.has_sequence2 ? ", sequence2" : "") + " FROM " +
-		                        KeywordHelper::WriteOptionallyQuoted(data.sequence_table);
-		auto result = conn.SendQuery(sql);
+		                        SQLIdentifier::ToString(data.sequence_table);
+		auto result = SubmitStream(conn, sql);
 		if (result->HasError()) {
 			throw InvalidInputException("%s: failed to read '%s': %s", kCallerName, data.sequence_table,
 			                            result->GetError());
@@ -748,7 +752,7 @@ void KreppIndexCreateTableFunction::Execute(ClientContext &context, TableFunctio
 	auto &gstate = data_p.global_state->Cast<GlobalState>();
 
 	if (gstate.done) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
@@ -758,24 +762,24 @@ void KreppIndexCreateTableFunction::Execute(ClientContext &context, TableFunctio
 	output.data[3].SetValue(0, Value::INTEGER(gstate.h));
 	output.data[4].SetValue(0, Value::BIGINT(gstate.num_references));
 	output.data[5].SetValue(0, Value("ok"));
-	output.SetCardinality(1);
+	output.SetChildCardinality(1);
 	gstate.done = true;
 }
 
 TableFunction KreppIndexCreateTableFunction::GetFunction() {
 	auto tf =
 	    TableFunction(kCallerName, {LogicalType::VARCHAR, LogicalType::VARCHAR}, Execute, Bind, InitGlobal, InitLocal);
-	tf.named_parameters["tree_table"] = LogicalType::VARCHAR;
-	tf.named_parameters["newick_path"] = LogicalType::VARCHAR;
-	tf.named_parameters["k"] = LogicalType::INTEGER;
-	tf.named_parameters["w"] = LogicalType::INTEGER;
-	tf.named_parameters["h"] = LogicalType::INTEGER;
-	tf.named_parameters["m"] = LogicalType::INTEGER;
-	tf.named_parameters["r"] = LogicalType::INTEGER;
-	tf.named_parameters["frac"] = LogicalType::BOOLEAN;
-	tf.named_parameters["threads"] = LogicalType::INTEGER;
-	tf.named_parameters["sdust_t"] = LogicalType::INTEGER;
-	tf.named_parameters["sdust_w"] = LogicalType::INTEGER;
+	AddNamedParameter(tf, "tree_table", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "newick_path", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "k", LogicalType::INTEGER);
+	AddNamedParameter(tf, "w", LogicalType::INTEGER);
+	AddNamedParameter(tf, "h", LogicalType::INTEGER);
+	AddNamedParameter(tf, "m", LogicalType::INTEGER);
+	AddNamedParameter(tf, "r", LogicalType::INTEGER);
+	AddNamedParameter(tf, "frac", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "threads", LogicalType::INTEGER);
+	AddNamedParameter(tf, "sdust_t", LogicalType::INTEGER);
+	AddNamedParameter(tf, "sdust_w", LogicalType::INTEGER);
 	return tf;
 }
 

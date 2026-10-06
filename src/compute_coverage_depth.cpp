@@ -3,6 +3,9 @@
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/function/aggregate_function.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
 
 namespace duckdb {
 
@@ -66,11 +69,11 @@ struct CoverageDepthOperation {
 		auto &ref_length_vector = inputs[3];
 
 		UnifiedVectorFormat position_data, stop_data, cigar_data, ref_length_data, state_data;
-		position_vector.ToUnifiedFormat(count, position_data);
-		stop_position_vector.ToUnifiedFormat(count, stop_data);
-		cigar_vector.ToUnifiedFormat(count, cigar_data);
-		ref_length_vector.ToUnifiedFormat(count, ref_length_data);
-		states.ToUnifiedFormat(count, state_data);
+		position_vector.ToUnifiedFormat(position_data);
+		stop_position_vector.ToUnifiedFormat(stop_data);
+		cigar_vector.ToUnifiedFormat(cigar_data);
+		ref_length_vector.ToUnifiedFormat(ref_length_data);
+		states.ToUnifiedFormat(state_data);
 
 		auto position_ptr = UnifiedVectorFormat::GetData<int64_t>(position_data);
 		auto stop_ptr = UnifiedVectorFormat::GetData<int64_t>(stop_data);
@@ -150,14 +153,14 @@ struct CoverageDepthOperation {
 		}
 	}
 
-	static void Finalize(Vector &state_vector, AggregateInputData &aggr_input_data, Vector &result, idx_t count,
+	static void Finalize(Vector &state_vector, AggregateFinalizeInputData &aggr_input_data, Vector &result, idx_t count,
 	                     idx_t offset) {
 		UnifiedVectorFormat state_data;
-		state_vector.ToUnifiedFormat(count, state_data);
+		state_vector.ToUnifiedFormat(state_data);
 		auto states = UnifiedVectorFormat::GetData<CoverageDepthState *>(state_data);
 
-		auto &result_validity = FlatVector::Validity(result);
-		auto result_data = FlatVector::GetData<list_entry_t>(result);
+		auto &result_validity = FlatVector::ValidityMutable(result);
+		auto result_data = FlatVector::GetDataMutable<list_entry_t>(result);
 
 		for (idx_t i = 0; i < count; i++) {
 			auto state_idx = state_data.sel->get_index(i);
@@ -171,11 +174,11 @@ struct CoverageDepthOperation {
 			auto &depths = state.GetDepths();
 			auto list_size = static_cast<idx_t>(depths.size());
 
-			auto &list_entry = ListVector::GetEntry(result);
+			auto &list_entry = ListVector::GetChildMutable(result);
 			auto list_offset = ListVector::GetListSize(result);
 			ListVector::Reserve(result, list_offset + list_size);
 
-			auto child_ptr = FlatVector::GetData<uint32_t>(list_entry);
+			auto child_ptr = FlatVector::GetDataMutable<uint32_t>(list_entry);
 
 			for (idx_t j = 0; j < list_size; j++) {
 				child_ptr[list_offset + j] = depths[j];
@@ -204,8 +207,9 @@ void ComputeCoverageDepthFunction::Register(ExtensionLoader &loader) {
 	    AggregateFunction::StateDestroy<CoverageDepthState, CoverageDepthOperation>);
 
 	// Validate mode parameter at bind time
-	fun.bind = [](ClientContext &context, AggregateFunction &function,
-	              vector<unique_ptr<Expression>> &arguments) -> unique_ptr<FunctionData> {
+	fun.SetBindCallback([](BindAggregateFunctionInput &input) -> unique_ptr<FunctionData> {
+		auto &context = input.GetClientContext();
+		auto &arguments = input.GetArguments();
 		if (arguments[4]->IsFoldable()) {
 			auto mode_val = ExpressionExecutor::EvaluateScalar(context, *arguments[4]);
 			if (!mode_val.IsNull()) {
@@ -224,7 +228,7 @@ void ComputeCoverageDepthFunction::Register(ExtensionLoader &loader) {
 		}
 		throw InvalidInputException("compute_coverage_depth: mode parameter must be a constant string "
 		                            "('include_deletions' or 'exclude_deletions')");
-	};
+	});
 
 	loader.RegisterFunction(fun);
 }

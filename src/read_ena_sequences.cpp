@@ -4,8 +4,10 @@
 #include "miint_log.hpp"
 #include "read_ena_sequences_policy.hpp"
 #include "duckdb/common/vector_size.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
 #include <cerrno>
 #include <fstream>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -73,7 +75,7 @@ static std::vector<miint::ENARunInfo> ResolveRuns(miint::ENAClient &client, cons
 
 unique_ptr<FunctionData> ReadENASequencesTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                              vector<LogicalType> &return_types,
-                                                             vector<std::string> &names) {
+                                                             vector<Identifier> &names) {
 	// Lateral / subquery dispatch: DuckDB's BindTableInTableOutFunction binds
 	// the expressions into a subquery and leaves `input.inputs` empty. An empty
 	// inputs vector is therefore the authoritative signal — it does not mean
@@ -377,7 +379,7 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 						miint::EmitWarning(context, msg);
 					}
 				}
-				output.SetCardinality(0);
+				output.SetChildCardinality(0);
 				return;
 			}
 
@@ -519,7 +521,7 @@ void ReadENASequencesTableFunction::FillOutputFromBatch(DataChunk &output, const
 	idx_t field_idx = 0;
 
 	// sequence_index (column 0)
-	auto seq_idx_data = FlatVector::GetData<int64_t>(output.data[field_idx++]);
+	auto seq_idx_data = FlatVector::GetDataMutable<int64_t>(output.data[field_idx++]);
 	for (idx_t i = 0; i < count; i++) {
 		seq_idx_data[i] = static_cast<int64_t>(seq_counter++);
 	}
@@ -580,7 +582,7 @@ void ReadENASequencesTableFunction::FillOutputFromBatch(DataChunk &output, const
 		SetResultVectorFilepath(output.data[field_idx++], filepath);
 	}
 
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 // ---- ExecuteInOut ----
@@ -642,14 +644,14 @@ OperatorResultType ReadENASequencesTableFunction::ExecuteInOut(ExecutionContext 
 	// Phase 1: need a fresh outer row → pull and resolve.
 	if (local.row_consumed && local.pending_runs.empty()) {
 		if (input.size() == 0) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return OperatorResultType::NEED_MORE_INPUT;
 		}
 		auto acc_val = input.data[0].GetValue(0);
 		if (acc_val.IsNull()) {
 			// NULL accession → no rows for this outer row. Not a failure
 			// (outer emitted NULL intentionally); skip quietly.
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return OperatorResultType::NEED_MORE_INPUT;
 		}
 		local.current_accession = acc_val.ToString();
@@ -670,7 +672,7 @@ OperatorResultType ReadENASequencesTableFunction::ExecuteInOut(ExecutionContext 
 				record_skip(local.current_accession, "",
 				            "ENA returned no runs for this accession (may not exist, may have no sequence data)");
 				local.row_consumed = true;
-				output.SetCardinality(0);
+				output.SetChildCardinality(0);
 				return OperatorResultType::NEED_MORE_INPUT;
 			}
 			for (const auto &run : it->second) {
@@ -679,7 +681,7 @@ OperatorResultType ReadENASequencesTableFunction::ExecuteInOut(ExecutionContext 
 		} catch (const std::exception &e) {
 			record_skip(local.current_accession, "", std::string("metadata resolution failed: ") + e.what());
 			local.row_consumed = true;
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return OperatorResultType::NEED_MORE_INPUT;
 		}
 		local.row_consumed = false;
@@ -690,7 +692,7 @@ OperatorResultType ReadENASequencesTableFunction::ExecuteInOut(ExecutionContext 
 	if (!local.current_reader) {
 		if (local.pending_runs.empty()) {
 			local.row_consumed = true;
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return OperatorResultType::NEED_MORE_INPUT;
 		}
 		auto run = local.pending_runs.front();
@@ -714,7 +716,7 @@ OperatorResultType ReadENASequencesTableFunction::ExecuteInOut(ExecutionContext 
 				// will call us back to handle the next pending run or yield
 				// NEED_MORE_INPUT. This is why HAVE_MORE_OUTPUT + cardinality=0
 				// is safe here — forward progress is guaranteed.
-				output.SetCardinality(0);
+				output.SetChildCardinality(0);
 				return OperatorResultType::HAVE_MORE_OUTPUT;
 			}
 		}
@@ -744,7 +746,7 @@ OperatorResultType ReadENASequencesTableFunction::ExecuteInOut(ExecutionContext 
 		            "failed mid-stream after emitting " + std::to_string(emitted) +
 		                " read(s); downstream sees partial data for this run (error: " + e.what() + ")");
 		local.current_reader.reset();
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return OperatorResultType::HAVE_MORE_OUTPUT;
 	}
 
@@ -762,11 +764,11 @@ OperatorResultType ReadENASequencesTableFunction::ExecuteInOut(ExecutionContext 
 		}
 		local.current_reader.reset();
 		if (!local.pending_runs.empty()) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return OperatorResultType::HAVE_MORE_OUTPUT;
 		}
 		local.row_consumed = true;
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return OperatorResultType::NEED_MORE_INPUT;
 	}
 
@@ -816,13 +818,13 @@ TableFunction ReadENASequencesTableFunction::GetFunction() {
 	// progress); correlated / subquery args take `ExecuteInOut` (one outer row
 	// at a time, LIMIT-inside-LATERAL short-circuits via LocalState dtor).
 	tf.in_out_function = ExecuteInOut;
-	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
-	tf.named_parameters["qual_offset"] = LogicalType::BIGINT;
-	tf.named_parameters["download_method"] = LogicalType::VARCHAR;
-	tf.named_parameters["prefer_format"] = LogicalType::VARCHAR;
-	tf.named_parameters["trim_sff"] = LogicalType::BOOLEAN;
-	tf.named_parameters["max_sequences"] = LogicalType::BIGINT;
-	tf.named_parameters["verify_md5"] = LogicalType::BOOLEAN;
+	AddNamedParameter(tf, "include_filepath", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "qual_offset", LogicalType::BIGINT);
+	AddNamedParameter(tf, "download_method", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "prefer_format", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "trim_sff", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "max_sequences", LogicalType::BIGINT);
+	AddNamedParameter(tf, "verify_md5", LogicalType::BOOLEAN);
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	tf.table_scan_progress = Progress;
 	return tf;

@@ -23,6 +23,7 @@ static void FormulaScalarFunction(DataChunk &args, ExpressionState &state, Vecto
 
 void FormulaFunction::Register(ExtensionLoader &loader) {
 	ScalarFunction formula_func("formula", {LogicalType::VARCHAR}, LogicalType::DOUBLE, FormulaScalarFunction);
+	formula_func.SetFallible();
 	loader.RegisterFunction(formula_func);
 }
 

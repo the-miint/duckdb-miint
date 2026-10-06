@@ -5,13 +5,15 @@
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
 #include <read_sequences_sff.hpp>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
 unique_ptr<FunctionData> ReadSequencesSFFTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                              vector<duckdb::LogicalType> &return_types,
-                                                             vector<std::string> &names) {
+                                                             vector<Identifier> &names) {
 	FileSystem &fs = FileSystem::GetFileSystem(context);
 
 	std::vector<std::string> file_paths;
@@ -104,7 +106,7 @@ void ReadSequencesSFFTableFunction::Execute(ClientContext &context, TableFunctio
 			lock_guard<mutex> read_lock(global_state.lock);
 
 			if (global_state.next_file_idx >= global_state.filepaths.size()) {
-				output.SetCardinality(0);
+				output.SetChildCardinality(0);
 				return;
 			}
 
@@ -136,7 +138,7 @@ void ReadSequencesSFFTableFunction::Execute(ClientContext &context, TableFunctio
 
 	// Set sequence_index column
 	auto &sequence_index_vector = output.data[0];
-	auto sequence_index_data = FlatVector::GetData<int64_t>(sequence_index_vector);
+	auto sequence_index_data = FlatVector::GetDataMutable<int64_t>(sequence_index_vector);
 	for (idx_t j = 0; j < batch.size(); j++) {
 		sequence_index_data[j] = static_cast<int64_t>(start_sequence_index + j);
 	}
@@ -165,13 +167,13 @@ void ReadSequencesSFFTableFunction::Execute(ClientContext &context, TableFunctio
 		SetResultVectorFilepath(output.data[field_idx++], current_filepath);
 	}
 
-	output.SetCardinality(batch.size());
+	output.SetChildCardinality(batch.size());
 }
 
 TableFunction ReadSequencesSFFTableFunction::GetFunction() {
 	auto tf = TableFunction("read_sequences_sff", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
-	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
-	tf.named_parameters["trim"] = LogicalType::BOOLEAN;
+	AddNamedParameter(tf, "include_filepath", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "trim", LogicalType::BOOLEAN);
 	return tf;
 }
 

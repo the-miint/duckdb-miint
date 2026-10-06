@@ -10,6 +10,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
 
 #include <stdexcept>
 #include <string>
@@ -57,7 +58,7 @@ struct AbsQuantOrfCopiesGlobalState : public GlobalTableFunctionState {
 };
 
 unique_ptr<FunctionData> AbsQuantOrfCopiesBind(ClientContext &context, TableFunctionBindInput &input,
-                                               vector<LogicalType> &return_types, vector<string> &names) {
+                                               vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<AbsQuantOrfCopiesBindData>();
 	for (idx_t i = 0; i < 3; ++i) {
 		if (input.inputs[i].IsNull()) {
@@ -203,7 +204,7 @@ void AbsQuantOrfCopiesExecute(ClientContext &, TableFunctionInput &data_p, DataC
 
 	auto &sample_id = output.data[0];
 	auto &feature_id = output.data[1];
-	auto value = FlatVector::GetData<double>(output.data[2]);
+	auto value = FlatVector::GetDataMutable<double>(output.data[2]);
 
 	for (idx_t r = 0; r < count; ++r) {
 		const auto &cell = g.values[g.cursor + r];
@@ -212,7 +213,7 @@ void AbsQuantOrfCopiesExecute(ClientContext &, TableFunctionInput &data_p, DataC
 		value[r] = cell.value;
 	}
 	g.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 } // namespace

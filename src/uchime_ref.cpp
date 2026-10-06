@@ -10,6 +10,7 @@
 #include "duckdb/parallel/task_scheduler.hpp"
 
 #include <algorithm>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -25,7 +26,7 @@ static bool EmitFromBuffer(const std::vector<miint::UchimeResult> &buffer, idx_t
 	idx_t remaining = buffer.size() - result_offset;
 	idx_t count = std::min(remaining, static_cast<idx_t>(STANDARD_VECTOR_SIZE));
 	if (has_sample_id) {
-		output.data[0].Reference(sample_value);
+		output.data[0].Reference(sample_value, count_t(count));
 		OutputUchimeResults(output, buffer, result_offset, count, read_id_type, parent_type, /*start_col=*/1);
 	} else {
 		OutputUchimeResults(output, buffer, result_offset, count, read_id_type, parent_type);
@@ -35,7 +36,7 @@ static bool EmitFromBuffer(const std::vector<miint::UchimeResult> &buffer, idx_t
 }
 
 unique_ptr<FunctionData> UchimeRefTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                      vector<LogicalType> &return_types, vector<std::string> &names) {
+                                                      vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 
 	data->query_table = input.inputs[0].GetValue<std::string>();
@@ -54,7 +55,7 @@ unique_ptr<FunctionData> UchimeRefTableFunction::Bind(ClientContext &context, Ta
 	data->ref_schema = ValidateSequenceTableSchema(context, data->ref_table, /*allow_bigint=*/true);
 
 	auto get_double = [&](const std::string &name, double &out, double min_val, const char *constraint) {
-		auto it = input.named_parameters.find(name);
+		auto it = input.named_parameters.find(Identifier(name));
 		if (it != input.named_parameters.end()) {
 			out = it->second.GetValue<double>();
 			if (out < min_val) {
@@ -63,7 +64,7 @@ unique_ptr<FunctionData> UchimeRefTableFunction::Bind(ClientContext &context, Ta
 		}
 	};
 	auto get_int = [&](const std::string &name, int &out, int min_val, int max_val, const char *constraint) {
-		auto it = input.named_parameters.find(name);
+		auto it = input.named_parameters.find(Identifier(name));
 		if (it != input.named_parameters.end()) {
 			out = it->second.GetValue<int>();
 			if (out < min_val || out > max_val) {
@@ -99,12 +100,12 @@ unique_ptr<FunctionData> UchimeRefTableFunction::Bind(ClientContext &context, Ta
 		DiscoverSamples(conn, data->query_table, data->sample_info.sample_id_col, data->names, "detect_chimera_uchime",
 		                data->sample_info);
 
-		names.push_back(data->sample_info.sample_id_col);
+		names.emplace_back(data->sample_info.sample_id_col);
 		return_types.push_back(data->sample_info.sample_id_type);
 	}
 
 	for (auto &n : data->names) {
-		names.push_back(n);
+		names.emplace_back(n);
 	}
 	for (auto &t : data->types) {
 		return_types.push_back(t);
@@ -164,7 +165,7 @@ void UchimeRefTableFunction::Execute(ClientContext & /*context*/, TableFunctionI
 
 			auto query_batch = gstate.query_stream->FetchSubBatch();
 			if (query_batch.empty()) {
-				output.SetCardinality(0);
+				output.SetChildCardinality(0);
 				return;
 			}
 			gstate.wrapper.detect_batch(query_batch.read_ids, query_batch.sequences1, gstate.result_buffer);
@@ -192,13 +193,13 @@ void UchimeRefTableFunction::Execute(ClientContext & /*context*/, TableFunctionI
 		// Current sample exhausted; claim the next.
 		idx_t sample_idx;
 		if (!ClaimNextSample(gstate, data.sample_info.sample_values.size(), sample_idx)) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		lstate.sample_value = data.sample_info.sample_values[sample_idx];
 		auto sample_literal = lstate.sample_value.ToSQLString();
-		auto q_col = KeywordHelper::WriteOptionallyQuoted(data.sample_info.sample_id_col);
-		auto q_src = KeywordHelper::WriteOptionallyQuoted(data.query_table);
+		auto q_col = SQLIdentifier::ToString(data.sample_info.sample_id_col);
+		auto q_src = SQLIdentifier::ToString(data.query_table);
 		// Build a per-sample TEMP VIEW on the thread's connection, then hand that same
 		// connection to QuerySequenceStream so the stream can resolve the view. The
 		// CAST-as-VARCHAR equality matches the other per-sample call sites; DECIMAL caveat
@@ -218,14 +219,14 @@ void UchimeRefTableFunction::Execute(ClientContext & /*context*/, TableFunctionI
 TableFunction UchimeRefTableFunction::GetFunction() {
 	auto tf = TableFunction("detect_chimera_uchime", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal, InitLocal);
 
-	tf.named_parameters["db"] = LogicalType::VARCHAR;
-	tf.named_parameters["minh"] = LogicalType::DOUBLE;
-	tf.named_parameters["xn"] = LogicalType::DOUBLE;
-	tf.named_parameters["dn"] = LogicalType::DOUBLE;
-	tf.named_parameters["mindiv"] = LogicalType::DOUBLE;
-	tf.named_parameters["mindiffs"] = LogicalType::INTEGER;
-	tf.named_parameters["sample_id"] = LogicalType::VARCHAR;
-	tf.named_parameters["threads"] = LogicalType::INTEGER;
+	AddNamedParameter(tf, "db", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "minh", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "xn", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "dn", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "mindiv", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "mindiffs", LogicalType::INTEGER);
+	AddNamedParameter(tf, "sample_id", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "threads", LogicalType::INTEGER);
 
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 

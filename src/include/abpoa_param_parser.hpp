@@ -6,7 +6,7 @@
 
 namespace duckdb {
 
-inline miint::AbpoaAlignParams ParseAbpoaParams(const named_parameter_map_t &named_params) {
+inline miint::AbpoaAlignParams ParseAbpoaParams(const named_argument_map_t &named_params) {
 	miint::AbpoaAlignParams params;
 	for (auto &kv : named_params) {
 		if (kv.first == "sample_id") {

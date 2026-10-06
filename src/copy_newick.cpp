@@ -92,22 +92,22 @@ struct NewickCopyLocalState : public LocalFunctionData {
 // Bind
 //===--------------------------------------------------------------------===//
 static unique_ptr<FunctionData> NewickCopyBind(ClientContext &context, CopyFunctionBindInput &input,
-                                               const vector<string> &names, const vector<LogicalType> &sql_types) {
+                                               const vector<Identifier> &names, const vector<LogicalType> &sql_types) {
 	auto result = make_uniq<NewickCopyBindData>();
 	result->file_path = input.info.file_path;
 
 	// Find column indices
 	for (idx_t i = 0; i < names.size(); i++) {
 		const auto &name = names[i];
-		if (StringUtil::CIEquals(name, "node_index")) {
+		if (name == "node_index") {
 			result->node_index_idx = i;
-		} else if (StringUtil::CIEquals(name, "parent_index")) {
+		} else if (name == "parent_index") {
 			result->parent_index_idx = i;
-		} else if (StringUtil::CIEquals(name, "name")) {
+		} else if (name == "name") {
 			result->name_idx = i;
-		} else if (StringUtil::CIEquals(name, "branch_length")) {
+		} else if (name == "branch_length") {
 			result->branch_length_idx = i;
-		} else if (StringUtil::CIEquals(name, "edge_id")) {
+		} else if (name == "edge_id") {
 			result->edge_id_idx = i;
 		}
 		// Ignore unknown columns (like is_tip, filepath)
@@ -126,7 +126,7 @@ static unique_ptr<FunctionData> NewickCopyBind(ClientContext &context, CopyFunct
 	bool edge_ids_specified = false;
 	std::optional<std::string> placements_table;
 	for (auto &option : input.info.options) {
-		auto loption = StringUtil::Lower(option.first);
+		auto loption = StringUtil::Lower(option.first.GetIdentifierName());
 		if (loption == "edge_ids") {
 			if (option.second.size() != 1 || option.second[0].type().id() != LogicalTypeId::BOOLEAN) {
 				throw BinderException("EDGE_IDS option requires a boolean value");
@@ -146,7 +146,7 @@ static unique_ptr<FunctionData> NewickCopyBind(ClientContext &context, CopyFunct
 			// Validate placements table/view exists and has correct schema
 			ValidatePlacementTableSchema(context, placements_table.value());
 		} else {
-			throw BinderException("Unknown option for COPY FORMAT NEWICK: %s", option.first);
+			throw BinderException("Unknown option for COPY FORMAT NEWICK: %s", option.first.GetIdentifierName());
 		}
 	}
 
@@ -205,8 +205,8 @@ static void NewickCopySink(ExecutionContext &context, FunctionData &bind_data, G
 	UnifiedVectorFormat node_index_data, parent_index_data;
 	UnifiedVectorFormat name_data, branch_length_data, edge_id_data;
 
-	input.data[fdata.node_index_idx].ToUnifiedFormat(input.size(), node_index_data);
-	input.data[fdata.parent_index_idx].ToUnifiedFormat(input.size(), parent_index_data);
+	input.data[fdata.node_index_idx].ToUnifiedFormat(node_index_data);
+	input.data[fdata.parent_index_idx].ToUnifiedFormat(parent_index_data);
 
 	auto node_indices = UnifiedVectorFormat::GetData<int64_t>(node_index_data);
 	auto parent_indices = UnifiedVectorFormat::GetData<int64_t>(parent_index_data);
@@ -220,15 +220,15 @@ static void NewickCopySink(ExecutionContext &context, FunctionData &bind_data, G
 	const int64_t *edge_ids_ptr = nullptr;
 
 	if (has_name) {
-		input.data[fdata.name_idx].ToUnifiedFormat(input.size(), name_data);
+		input.data[fdata.name_idx].ToUnifiedFormat(name_data);
 		names_ptr = UnifiedVectorFormat::GetData<string_t>(name_data);
 	}
 	if (has_branch_length) {
-		input.data[fdata.branch_length_idx].ToUnifiedFormat(input.size(), branch_length_data);
+		input.data[fdata.branch_length_idx].ToUnifiedFormat(branch_length_data);
 		branch_lengths_ptr = UnifiedVectorFormat::GetData<double>(branch_length_data);
 	}
 	if (has_edge_id) {
-		input.data[fdata.edge_id_idx].ToUnifiedFormat(input.size(), edge_id_data);
+		input.data[fdata.edge_id_idx].ToUnifiedFormat(edge_id_data);
 		edge_ids_ptr = UnifiedVectorFormat::GetData<int64_t>(edge_id_data);
 	}
 

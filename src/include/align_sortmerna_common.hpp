@@ -15,12 +15,13 @@
 #include "duckdb/function/table_function.hpp"
 #include <string>
 #include <vector>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
 // Parse a LIST(VARCHAR) ref_paths named parameter into std::vector<std::string>.
 // `fn_name` is the caller's SQL-facing name, used to prefix error messages.
-inline std::vector<std::string> ParseSortMeRNARefPaths(const named_parameter_map_t &params, const char *fn_name) {
+inline std::vector<std::string> ParseSortMeRNARefPaths(const named_argument_map_t &params, const char *fn_name) {
 	auto it = params.find("ref_paths");
 	if (it == params.end() || it->second.IsNull()) {
 		throw BinderException("%s requires ref_paths (LIST of FASTA paths)", fn_name);
@@ -40,7 +41,7 @@ inline std::vector<std::string> ParseSortMeRNARefPaths(const named_parameter_map
 	return result;
 }
 
-inline void ParseSortMeRNAConfigParams(const named_parameter_map_t &params, miint::SortMeRNAConfig &cfg) {
+inline void ParseSortMeRNAConfigParams(const named_argument_map_t &params, miint::SortMeRNAConfig &cfg) {
 	auto set_i32 = [&](const char *name, int32_t &dst) {
 		auto it = params.find(name);
 		if (it != params.end() && !it->second.IsNull()) {
@@ -85,21 +86,21 @@ inline void ParseSortMeRNAConfigParams(const named_parameter_map_t &params, miin
 // Register the shared LIST(VARCHAR)/INTEGER/DOUBLE/BOOLEAN named parameters on
 // a sortmerna-family TableFunction.
 inline void RegisterSortMeRNANamedParameters(TableFunction &tf) {
-	tf.named_parameters["ref_paths"] = LogicalType::LIST(LogicalType::VARCHAR);
-	tf.named_parameters["num_threads"] = LogicalType::INTEGER;
-	tf.named_parameters["match"] = LogicalType::INTEGER;
-	tf.named_parameters["mismatch"] = LogicalType::INTEGER;
-	tf.named_parameters["gap_open"] = LogicalType::INTEGER;
-	tf.named_parameters["gap_ext"] = LogicalType::INTEGER;
-	tf.named_parameters["score_N"] = LogicalType::INTEGER;
-	tf.named_parameters["evalue"] = LogicalType::DOUBLE;
-	tf.named_parameters["seed_win_len"] = LogicalType::UINTEGER;
-	tf.named_parameters["num_alignments"] = LogicalType::UINTEGER;
-	tf.named_parameters["best"] = LogicalType::BOOLEAN;
-	tf.named_parameters["paired"] = LogicalType::BOOLEAN;
-	tf.named_parameters["forward_only"] = LogicalType::BOOLEAN;
-	tf.named_parameters["reverse_only"] = LogicalType::BOOLEAN;
-	tf.named_parameters["full_search"] = LogicalType::BOOLEAN;
+	AddNamedParameter(tf, "ref_paths", LogicalType::LIST(LogicalType::VARCHAR));
+	AddNamedParameter(tf, "num_threads", LogicalType::INTEGER);
+	AddNamedParameter(tf, "match", LogicalType::INTEGER);
+	AddNamedParameter(tf, "mismatch", LogicalType::INTEGER);
+	AddNamedParameter(tf, "gap_open", LogicalType::INTEGER);
+	AddNamedParameter(tf, "gap_ext", LogicalType::INTEGER);
+	AddNamedParameter(tf, "score_N", LogicalType::INTEGER);
+	AddNamedParameter(tf, "evalue", LogicalType::DOUBLE);
+	AddNamedParameter(tf, "seed_win_len", LogicalType::UINTEGER);
+	AddNamedParameter(tf, "num_alignments", LogicalType::UINTEGER);
+	AddNamedParameter(tf, "best", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "paired", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "forward_only", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "reverse_only", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "full_search", LogicalType::BOOLEAN);
 }
 
 } // namespace duckdb

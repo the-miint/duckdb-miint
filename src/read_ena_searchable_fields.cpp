@@ -1,6 +1,8 @@
 #include "read_ena_searchable_fields.hpp"
 
 #include "duckdb/common/vector_size.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 
 #include <sstream>
 
@@ -20,7 +22,7 @@ ReadENASearchableFieldsTableFunction::GlobalState::GlobalState(DatabaseInstance 
 unique_ptr<FunctionData> ReadENASearchableFieldsTableFunction::Bind(ClientContext &context,
                                                                     TableFunctionBindInput &input,
                                                                     vector<LogicalType> &return_types,
-                                                                    vector<std::string> &names) {
+                                                                    vector<Identifier> &names) {
 	if (input.inputs.empty() || input.inputs[0].IsNull()) {
 		throw InvalidInputException(
 		    "ena_searchable_fields: result_type is required (e.g., 'sample', 'read_run', 'study', 'experiment')");
@@ -131,14 +133,14 @@ void ReadENASearchableFieldsTableFunction::Execute(ClientContext &context, Table
 	idx_t remaining = global.rows.size() - global.offset;
 	idx_t count = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
 	if (count == 0) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
-	auto name_data = FlatVector::GetData<string_t>(output.data[0]);
-	auto type_data = FlatVector::GetData<string_t>(output.data[1]);
-	auto desc_data = FlatVector::GetData<string_t>(output.data[2]);
-	auto &desc_validity = FlatVector::Validity(output.data[2]);
+	auto name_data = FlatVector::GetDataMutable<string_t>(output.data[0]);
+	auto type_data = FlatVector::GetDataMutable<string_t>(output.data[1]);
+	auto desc_data = FlatVector::GetDataMutable<string_t>(output.data[2]);
+	auto &desc_validity = FlatVector::ValidityMutable(output.data[2]);
 
 	for (idx_t i = 0; i < count; i++) {
 		const auto &row = global.rows[global.offset + i];
@@ -152,7 +154,7 @@ void ReadENASearchableFieldsTableFunction::Execute(ClientContext &context, Table
 	}
 
 	global.offset += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 // ---- Registration ----

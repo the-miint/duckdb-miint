@@ -1,3 +1,8 @@
+# DuckDB v2.0 defaults DUCKDB_OPTIMIZATION_PROFILE to CLI (-march=x86-64-v3) for every target, extensions included.
+# Extensions are meant to build with EXTENSION (x86-64-v2): portable, and it matches the baseline-built embedded
+# archives (skbb/ssu) whose Eigen code otherwise ODR-clashes with miint's. Included at DuckDB's top-level scope.
+set(DUCKDB_OPTIMIZATION_PROFILE EXTENSION)
+
 # This file is included by DuckDB's build system. It specifies which extension to load
 
 # The rype + sylph duplicate-Rust-std issue used to require platform-specific
@@ -30,3 +35,5 @@ duckdb_extension_load(miint
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}
     LOAD_TESTS
 )
+# DuckDB v2.0: duckdb_extension_load only builds; linking into the shell/unittest must be requested.
+duckdb_extension_statically_link(miint)

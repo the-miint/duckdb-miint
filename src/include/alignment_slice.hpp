@@ -9,6 +9,7 @@
 
 #include <string>
 #include <vector>
+#include "miint_streaming_query.hpp"
 
 namespace duckdb {
 
@@ -61,9 +62,9 @@ public:
 	};
 
 	struct GlobalState : public GlobalTableFunctionState {
-		// Connection must outlive the StreamQueryResult (it streams lazily)
+		// Connection must outlive the streaming query (it streams lazily)
 		unique_ptr<Connection> conn;
-		unique_ptr<QueryResult> query_result;
+		unique_ptr<StreamingQuery> query_result;
 		unique_ptr<DataChunk> current_chunk;
 		idx_t chunk_offset = 0;        // current position within current_chunk
 		bool stream_exhausted = false; // true after Fetch() returns null
@@ -81,7 +82,7 @@ public:
 	};
 
 	static unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input,
-	                                     vector<LogicalType> &return_types, vector<string> &names);
+	                                     vector<LogicalType> &return_types, vector<Identifier> &names);
 
 	static unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFunctionInitInput &input);
 

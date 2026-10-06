@@ -13,10 +13,12 @@
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
-#include "duckdb/main/materialized_query_result.hpp"
+#include "duckdb/main/query_result.hpp"
 #include "duckdb/main/query_result.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 
 #include <atomic>
 
@@ -37,6 +39,8 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include "miint_named_parameter.hpp"
+#include "miint_streaming_query.hpp"
 
 namespace duckdb {
 
@@ -192,7 +196,7 @@ struct AlignBowtie2ShardedBindData : public TableFunctionData {
 	std::string query_table;
 	std::string shard_directory;
 	std::string read_to_shard_table;
-	named_parameter_map_t named_params;
+	named_argument_map_t named_params;
 
 	// Detected at bind time; affects the per-batch Arrow IPC encoding.
 	bool query_has_sequence2 = false;
@@ -353,7 +357,7 @@ struct AlignBowtie2ShardedLocalState : public LocalTableFunctionState {
 	// Current shard claim. Sentinel value DConstants::INVALID_INDEX means
 	// "no shard claimed yet"; Execute will claim next on the next iteration.
 	idx_t current_shard_idx = DConstants::INVALID_INDEX;
-	std::unique_ptr<QueryResult> input_stream;
+	unique_ptr<StreamingQuery> input_stream;
 	std::string current_shard_name; // copied for `include_shard_name`
 	// Set once `input_stream->Fetch()` returns EOF. A streaming QueryResult
 	// throws "closed pending query result" if Fetch() is called again after it
@@ -428,14 +432,14 @@ struct AlignBowtie2ShardedLocalState : public LocalTableFunctionState {
 void DetectQueryColumns(ClientContext &context, AlignBowtie2ShardedBindData &bd) {
 	auto conn = MakeReadOnlyHelperConnection(context);
 	const std::string sql = "SELECT column_name, column_type FROM (DESCRIBE " +
-	                        KeywordHelper::WriteOptionallyQuoted(bd.query_table) +
+	                        SQLIdentifier::ToString(bd.query_table) +
 	                        ") WHERE column_name IN ('sequence2','qual1','qual2')";
 	auto result = conn.Query(sql);
 	if (result->HasError()) {
 		throw InvalidInputException("align_bowtie2_sharded: failed to introspect query table '%s': %s", bd.query_table,
 		                            result->GetError());
 	}
-	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto &materialized = *result;
 	while (auto chunk = materialized.Fetch()) {
 		for (idx_t i = 0; i < chunk->size(); ++i) {
 			const auto col = chunk->GetValue(0, i).ToString();
@@ -466,7 +470,7 @@ void DetectQueryColumns(ClientContext &context, AlignBowtie2ShardedBindData &bd)
 // Submits from different miint worker threads fan out to independent
 // per-fingerprint workers in the daemon — that's how cross-shard
 // parallelism falls out for free.
-std::string BuildAlignConfigJson(const named_parameter_map_t &named_params, const std::string &index_prefix,
+std::string BuildAlignConfigJson(const named_argument_map_t &named_params, const std::string &index_prefix,
                                  idx_t max_threads_per_shard) {
 	bt2_daemon::ConfigJsonBuilder cfg;
 	cfg.append_str("index_path", index_prefix);
@@ -489,7 +493,7 @@ std::string BuildAlignConfigJson(const named_parameter_map_t &named_params, cons
 // =============================================================================
 
 unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &return_types,
-                              vector<std::string> &names) {
+                              vector<Identifier> &names) {
 	if (input.inputs.size() < 1) {
 		throw BinderException("align_bowtie2_sharded requires query_table parameter");
 	}
@@ -536,8 +540,9 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 	// Reject unknown params at bind time.
 	for (const auto &kv : input.named_parameters) {
 		static const auto kKnown = MakeKnownShardedParams();
-		if (kKnown.find(kv.first) == kKnown.end()) {
-			throw InvalidInputException("align_bowtie2_sharded: unknown named parameter '%s'", kv.first);
+		if (kKnown.find(kv.first.GetIdentifierName()) == kKnown.end()) {
+			throw InvalidInputException("align_bowtie2_sharded: unknown named parameter '%s'",
+			                            kv.first.GetIdentifierName());
 		}
 	}
 	bd->named_params = input.named_parameters;
@@ -616,7 +621,11 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 	// Output schema reflects captured id types: read_id mirrors the query
 	// side; reference and mate_reference are always VARCHAR (subject side
 	// is opaque bytes in the prebuilt bowtie2 index).
-	bt2_daemon::PopulateOutputSchema(names, return_types, bd->query_id_type, bd->subject_id_type);
+	std::vector<std::string> schema_names;
+	bt2_daemon::PopulateOutputSchema(schema_names, return_types, bd->query_id_type, bd->subject_id_type);
+	for (auto &n : schema_names) {
+		names.emplace_back(n);
+	}
 	if (bd->include_shard_name) {
 		names.emplace_back("shard_name");
 		return_types.emplace_back(LogicalType::VARCHAR);
@@ -790,8 +799,8 @@ void OpenCurrentShardStream(AlignBowtie2ShardedLocalState &local, const AlignBow
 	if (bd.query_has_qual2) {
 		select += ", q.qual2";
 	}
-	select += " FROM " + KeywordHelper::WriteOptionallyQuoted(bd.query_table) + " q";
-	select += " JOIN " + KeywordHelper::WriteOptionallyQuoted(bd.read_to_shard_table) + " rts";
+	select += " FROM " + SQLIdentifier::ToString(bd.query_table) + " q";
+	select += " JOIN " + SQLIdentifier::ToString(bd.read_to_shard_table) + " rts";
 	select += " ON q.read_id = rts.read_id";
 	// shard.name is a user-supplied row value from `read_to_shard`. Direct
 	// concatenation into the WHERE clause would be a SQL-injection vector
@@ -799,9 +808,9 @@ void OpenCurrentShardStream(AlignBowtie2ShardedLocalState &local, const AlignBow
 	// and silently send reads to the wrong index). WriteQuoted wraps the
 	// value in single quotes and doubles any embedded single quote, matching
 	// the convention already used in sequence_table_reader.cpp:377.
-	select += " WHERE rts.shard_name = " + KeywordHelper::WriteQuoted(shard.name, '\'');
+	select += " WHERE rts.shard_name = " + SQLString::ToString(shard.name);
 
-	local.input_stream = local.input_conn->SendQuery(select);
+	local.input_stream = SubmitStream(*local.input_conn, select);
 	local.stream_exhausted = false;
 	if (local.input_stream->HasError()) {
 		throw InvalidInputException("align_bowtie2_sharded: failed to open cursor for shard '%s': %s", shard.name,
@@ -1012,8 +1021,8 @@ void SubmitAndDecode(AlignBowtie2ShardedLocalState &local, const AlignBowtie2Sha
 // Synthesize `shard_name` into the last output column when include_shard_name=true.
 void FillShardNameColumn(DataChunk &output, idx_t to_emit, const std::string &shard_name) {
 	auto &v = output.data[bt2_daemon::kNumOutputColumns]; // 21st (0-indexed) column
-	auto *out_data = FlatVector::GetData<string_t>(v);
-	auto &validity = FlatVector::Validity(v);
+	auto *out_data = FlatVector::GetDataMutable<string_t>(v);
+	auto &validity = FlatVector::ValidityMutable(v);
 	for (idx_t i = 0; i < to_emit; ++i) {
 		out_data[i] = StringVector::AddString(v, shard_name);
 		validity.SetValid(i);
@@ -1043,7 +1052,7 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 				continue;
 			}
 			const idx_t to_emit = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
-			output.SetCardinality(to_emit);
+			output.SetChildCardinality(to_emit);
 			bt2_daemon::EmitChunkRows(output, to_emit, local.row_in_batch, batch, bd.query_id_type, bd.subject_id_type);
 			if (bd.include_shard_name) {
 				FillShardNameColumn(output, to_emit, local.current_shard_name);
@@ -1155,7 +1164,7 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 		//    without re-checking that invariant.
 		const idx_t shard_idx = gs.next_shard_idx.fetch_add(1, std::memory_order_relaxed);
 		if (shard_idx >= bd.shards.size()) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		local.current_shard_idx = shard_idx;
@@ -1218,14 +1227,14 @@ void Execute(ClientContext &context, TableFunctionInput &data, DataChunk &output
 TableFunction AlignBowtie2ShardedTableFunction::GetFunction() {
 	auto tf = TableFunction("align_bowtie2_sharded", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal, InitLocal);
 	bt2_daemon::RegisterBowtie2AlignNamedParameterTypes(tf);
-	tf.named_parameters["shard_directory"] = LogicalType::VARCHAR;
-	tf.named_parameters["read_to_shard"] = LogicalType::VARCHAR;
-	tf.named_parameters["threads"] = LogicalType::INTEGER; // ignored in sharded mode; warning at bind
-	tf.named_parameters["max_threads_per_shard"] = LogicalType::INTEGER;
-	tf.named_parameters["include_shard_name"] = LogicalType::BOOLEAN;
-	tf.named_parameters["submit_batch_reads"] = LogicalType::INTEGER;
-	tf.named_parameters["prefetch_ahead"] = LogicalType::INTEGER;
-	tf.named_parameters["progress"] = LogicalType::BOOLEAN;
+	AddNamedParameter(tf, "shard_directory", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "read_to_shard", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "threads", LogicalType::INTEGER); // ignored in sharded mode; warning at bind
+	AddNamedParameter(tf, "max_threads_per_shard", LogicalType::INTEGER);
+	AddNamedParameter(tf, "include_shard_name", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "submit_batch_reads", LogicalType::INTEGER);
+	AddNamedParameter(tf, "prefetch_ahead", LogicalType::INTEGER);
+	AddNamedParameter(tf, "progress", LogicalType::BOOLEAN);
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return tf;
 }

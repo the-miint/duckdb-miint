@@ -184,18 +184,18 @@ FROM range(1, 7) t(i);
 
 statement ok
 COPY (SELECT * FROM sq_multi ORDER BY reference, position)
-TO '__TEST_DIR__/sq_header.bam' (FORMAT BAM, REFERENCE_LENGTHS 'sq_refs');
+TO '{TEST_DIR}/sq_header.bam' (FORMAT BAM, REFERENCE_LENGTHS 'sq_refs');
 
 # Records survived: guards the vacuous-pass failure mode above.
 query I
-SELECT COUNT(*) FROM read_sam('__TEST_DIR__/sq_header.bam');
+SELECT COUNT(*) FROM read_sam('{TEST_DIR}/sq_header.bam');
 ----
 6
 
 # THE ASSERTION: @SQ is emitted in name-sorted order, and tid follows it. This
 # is what could not be checked before.
 query IIT
-SELECT tid, reference, length FROM read_alignment_header('__TEST_DIR__/sq_header.bam') ORDER BY tid;
+SELECT tid, reference, length FROM read_alignment_header('{TEST_DIR}/sq_header.bam') ORDER BY tid;
 ----
 0	s1.ctg000001l	10
 1	s1.ctg000002l	20
@@ -210,7 +210,7 @@ query I
 SELECT COUNT(*) = 0 FROM (
   SELECT tid, reference,
          ROW_NUMBER() OVER (ORDER BY reference) - 1 AS expected_tid
-  FROM read_alignment_header('__TEST_DIR__/sq_header.bam')
+  FROM read_alignment_header('{TEST_DIR}/sq_header.bam')
 ) WHERE tid != expected_tid;
 ----
 true
@@ -246,18 +246,18 @@ FROM range(1, 3001) t(i);
 
 statement ok
 COPY (SELECT * FROM big_aln ORDER BY reference, position)
-TO '__TEST_DIR__/big_header.bam' (FORMAT BAM, REFERENCE_LENGTHS 'big_refs');
+TO '{TEST_DIR}/big_header.bam' (FORMAT BAM, REFERENCE_LENGTHS 'big_refs');
 
 # Every reference is emitted exactly once -- a cursor that reset, double-counted
 # or stopped after the first vector would not return 3000.
 query I
-SELECT COUNT(*) FROM read_alignment_header('__TEST_DIR__/big_header.bam');
+SELECT COUNT(*) FROM read_alignment_header('{TEST_DIR}/big_header.bam');
 ----
 3000
 
 # tid is dense, 0-based and contiguous across the vector boundary.
 query III
-SELECT MIN(tid), MAX(tid), COUNT(DISTINCT tid) FROM read_alignment_header('__TEST_DIR__/big_header.bam');
+SELECT MIN(tid), MAX(tid), COUNT(DISTINCT tid) FROM read_alignment_header('{TEST_DIR}/big_header.bam');
 ----
 0	2999	3000
 
@@ -266,7 +266,7 @@ SELECT MIN(tid), MAX(tid), COUNT(DISTINCT tid) FROM read_alignment_header('__TES
 query I
 SELECT COUNT(*) = 0 FROM (
   SELECT tid, ROW_NUMBER() OVER (ORDER BY reference) - 1 AS expected_tid
-  FROM read_alignment_header('__TEST_DIR__/big_header.bam')
+  FROM read_alignment_header('{TEST_DIR}/big_header.bam')
 ) WHERE tid != expected_tid;
 ----
 true
@@ -275,7 +275,7 @@ true
 # built as 100 + i and the names sort in the same order, so the pairing is
 # checkable arithmetically rather than by listing 3000 rows.
 query I
-SELECT COUNT(*) = 0 FROM read_alignment_header('__TEST_DIR__/big_header.bam')
+SELECT COUNT(*) = 0 FROM read_alignment_header('{TEST_DIR}/big_header.bam')
 WHERE length != 101 + tid;
 ----
 true

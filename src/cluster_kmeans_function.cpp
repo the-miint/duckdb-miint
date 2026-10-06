@@ -8,9 +8,11 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
 
 #include <algorithm>
 #include <stdexcept>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -40,14 +42,14 @@ struct ClusterKmeansGlobalState : public GlobalTableFunctionState {
 };
 
 unique_ptr<FunctionData> ClusterKmeansBind(ClientContext &context, TableFunctionBindInput &input,
-                                           vector<LogicalType> &return_types, vector<string> &names) {
+                                           vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<ClusterKmeansBindData>();
 	data->table_name = input.inputs[0].GetValue<string>();
 	RejectCTERelationName(input, data->table_name);
 
 	bool has_k = false;
 	for (auto &kv : input.named_parameters) {
-		const auto key = StringUtil::Lower(kv.first);
+		const auto key = StringUtil::Lower(kv.first.GetIdentifierName());
 		if (key == "k") {
 			data->k = kv.second.GetValue<int32_t>();
 			has_k = true;
@@ -125,14 +127,14 @@ void ClusterKmeansExecute(ClientContext &, TableFunctionInput &data_p, DataChunk
 	const idx_t count = MinValue<idx_t>(STANDARD_VECTOR_SIZE, total - g.cursor);
 
 	auto &sid_vec = output.data[0];
-	auto cluster = FlatVector::GetData<int32_t>(output.data[1]);
+	auto cluster = FlatVector::GetDataMutable<int32_t>(output.data[1]);
 	for (idx_t r = 0; r < count; ++r) {
 		const idx_t k = g.cursor + r;
 		EmitIdCell(sid_vec, r, g.sample_ids[k], g.sample_id_type);
 		cluster[r] = g.assignments[k];
 	}
 	g.cursor += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 } // namespace
@@ -140,11 +142,11 @@ void ClusterKmeansExecute(ClientContext &, TableFunctionInput &data_p, DataChunk
 void RegisterClusterKmeans(ExtensionLoader &loader) {
 	TableFunction fn("cluster_kmeans", {LogicalType::VARCHAR}, ClusterKmeansExecute, ClusterKmeansBind,
 	                 ClusterKmeansInitGlobal);
-	fn.named_parameters["k"] = LogicalType::INTEGER;
-	fn.named_parameters["seed"] = LogicalType::BIGINT;
-	fn.named_parameters["max_iter"] = LogicalType::INTEGER;
-	fn.named_parameters["n_init"] = LogicalType::INTEGER;
-	fn.named_parameters["n_dims"] = LogicalType::INTEGER;
+	AddNamedParameter(fn, "k", LogicalType::INTEGER);
+	AddNamedParameter(fn, "seed", LogicalType::BIGINT);
+	AddNamedParameter(fn, "max_iter", LogicalType::INTEGER);
+	AddNamedParameter(fn, "n_init", LogicalType::INTEGER);
+	AddNamedParameter(fn, "n_dims", LogicalType::INTEGER);
 	fn.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(fn);
 }

@@ -9,7 +9,10 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 #include <unordered_set>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -58,7 +61,7 @@ static void ValidateAndGetConsensus(const std::string &sample_literal, LoadedSin
 }
 
 static unique_ptr<FunctionData> ConsensusAbpoaBind(ClientContext &context, TableFunctionBindInput &input,
-                                                   vector<LogicalType> &return_types, vector<string> &names) {
+                                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
 	if (input.inputs.empty() || input.inputs[0].IsNull()) {
 		throw BinderException("consensus_abpoa requires a sequence table name argument");
 	}
@@ -85,7 +88,7 @@ static unique_ptr<FunctionData> ConsensusAbpoaBind(ClientContext &context, Table
 		DiscoverSamples(conn, data->table_name, data->sample_info.sample_id_col,
 		                {"consensus_id", "consensus_sequence", "consensus_length", "num_reads"}, "consensus_abpoa",
 		                data->sample_info);
-		names.push_back(data->sample_info.sample_id_col);
+		names.emplace_back(data->sample_info.sample_id_col);
 		return_types.push_back(data->sample_info.sample_id_type);
 	}
 
@@ -138,16 +141,16 @@ static void EmitConsensusRows(const ConsensusAbpoaData &data, ConsensusAbpoaLoca
 
 	idx_t col = 0;
 	if (data.has_sample_id) {
-		output.data[col++].Reference(lstate.sample_value);
+		output.data[col++].Reference(lstate.sample_value, count_t(count));
 	}
 	auto &cons_id_vec = output.data[col++];
 	auto &cons_seq_vec = output.data[col++];
 	auto &cons_len_vec = output.data[col++];
 	auto &num_reads_vec = output.data[col++];
-	auto cons_id_data = FlatVector::GetData<int32_t>(cons_id_vec);
-	auto cons_seq_data = FlatVector::GetData<string_t>(cons_seq_vec);
-	auto cons_len_data = FlatVector::GetData<int32_t>(cons_len_vec);
-	auto num_reads_data = FlatVector::GetData<int32_t>(num_reads_vec);
+	auto cons_id_data = FlatVector::GetDataMutable<int32_t>(cons_id_vec);
+	auto cons_seq_data = FlatVector::GetDataMutable<string_t>(cons_seq_vec);
+	auto cons_len_data = FlatVector::GetDataMutable<int32_t>(cons_len_vec);
+	auto num_reads_data = FlatVector::GetDataMutable<int32_t>(num_reads_vec);
 	for (idx_t i = 0; i < count; i++) {
 		idx_t row = lstate.current_row + i;
 		cons_id_data[i] = static_cast<int32_t>(entries[row].consensus_id);
@@ -157,7 +160,7 @@ static void EmitConsensusRows(const ConsensusAbpoaData &data, ConsensusAbpoaLoca
 	}
 
 	lstate.current_row += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 static void ConsensusAbpoaExecute(ClientContext & /*context*/, TableFunctionInput &data_p, DataChunk &output) {
@@ -167,7 +170,7 @@ static void ConsensusAbpoaExecute(ClientContext & /*context*/, TableFunctionInpu
 
 	if (!data.has_sample_id) {
 		if (lstate.current_row >= gstate.entries.size()) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		EmitConsensusRows(data, lstate, gstate.entries, output);
@@ -181,12 +184,12 @@ static void ConsensusAbpoaExecute(ClientContext & /*context*/, TableFunctionInpu
 		}
 		idx_t sample_idx;
 		if (!ClaimNextSample(gstate, data.sample_info.sample_values.size(), sample_idx)) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		lstate.sample_value = data.sample_info.sample_values[sample_idx];
 		auto sample_literal = lstate.sample_value.ToSQLString();
-		auto q_col = KeywordHelper::WriteOptionallyQuoted(data.sample_info.sample_id_col);
+		auto q_col = SQLIdentifier::ToString(data.sample_info.sample_id_col);
 		auto where_sql = "CAST(" + q_col + " AS VARCHAR) = CAST(" + sample_literal + " AS VARCHAR)";
 		auto loaded =
 		    LoadSingleEndSequences(*lstate.conn, data.table_name, "consensus_abpoa", /*strict=*/true, where_sql);
@@ -198,25 +201,25 @@ static void ConsensusAbpoaExecute(ClientContext & /*context*/, TableFunctionInpu
 TableFunction ConsensusAbpoaTableFunction::GetFunction() {
 	auto tf = TableFunction("consensus_abpoa", {LogicalType::VARCHAR}, ConsensusAbpoaExecute, ConsensusAbpoaBind,
 	                        ConsensusAbpoaInitGlobal, ConsensusAbpoaInitLocal);
-	tf.named_parameters["sample_id"] = LogicalType::VARCHAR;
-	tf.named_parameters["match"] = LogicalType::INTEGER;
-	tf.named_parameters["mismatch"] = LogicalType::INTEGER;
-	tf.named_parameters["gap_open1"] = LogicalType::INTEGER;
-	tf.named_parameters["gap_open2"] = LogicalType::INTEGER;
-	tf.named_parameters["gap_ext1"] = LogicalType::INTEGER;
-	tf.named_parameters["gap_ext2"] = LogicalType::INTEGER;
-	tf.named_parameters["align_mode"] = LogicalType::VARCHAR;
-	tf.named_parameters["progressive"] = LogicalType::BOOLEAN;
-	tf.named_parameters["disable_seeding"] = LogicalType::BOOLEAN;
-	tf.named_parameters["amb_strand"] = LogicalType::BOOLEAN;
-	tf.named_parameters["k"] = LogicalType::INTEGER;
-	tf.named_parameters["w"] = LogicalType::INTEGER;
-	tf.named_parameters["min_w"] = LogicalType::INTEGER;
-	tf.named_parameters["bandwidth"] = LogicalType::INTEGER;
-	tf.named_parameters["bandwidth_frac"] = LogicalType::FLOAT;
-	tf.named_parameters["max_num_cons"] = LogicalType::INTEGER;
-	tf.named_parameters["min_freq"] = LogicalType::FLOAT;
-	tf.named_parameters["algorithm"] = LogicalType::VARCHAR;
+	AddNamedParameter(tf, "sample_id", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "match", LogicalType::INTEGER);
+	AddNamedParameter(tf, "mismatch", LogicalType::INTEGER);
+	AddNamedParameter(tf, "gap_open1", LogicalType::INTEGER);
+	AddNamedParameter(tf, "gap_open2", LogicalType::INTEGER);
+	AddNamedParameter(tf, "gap_ext1", LogicalType::INTEGER);
+	AddNamedParameter(tf, "gap_ext2", LogicalType::INTEGER);
+	AddNamedParameter(tf, "align_mode", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "progressive", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "disable_seeding", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "amb_strand", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "k", LogicalType::INTEGER);
+	AddNamedParameter(tf, "w", LogicalType::INTEGER);
+	AddNamedParameter(tf, "min_w", LogicalType::INTEGER);
+	AddNamedParameter(tf, "bandwidth", LogicalType::INTEGER);
+	AddNamedParameter(tf, "bandwidth_frac", LogicalType::FLOAT);
+	AddNamedParameter(tf, "max_num_cons", LogicalType::INTEGER);
+	AddNamedParameter(tf, "min_freq", LogicalType::FLOAT);
+	AddNamedParameter(tf, "algorithm", LogicalType::VARCHAR);
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	return tf;
 }

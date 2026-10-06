@@ -6,6 +6,7 @@
 #include "catalog_utils.hpp"
 #include "id_column_utils.hpp"
 #include "per_sample_table_function.hpp"
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -29,18 +30,18 @@ struct WoltkaOguData : public TableFunctionData {
 	PerSampleBindInfo sample_info;
 
 	// Non-sample path: pre-run at Bind; ownership moved to GlobalState at InitGlobal.
-	unique_ptr<MaterializedQueryResult> non_sample_result;
+	unique_ptr<QueryResult> non_sample_result;
 };
 
 struct WoltkaOguGlobalState : public PerSampleGlobalState {
 	// Non-sample path: pre-run result transferred from bind data at InitGlobal.
 	// Single thread drains it from Execute; no synchronization needed.
-	unique_ptr<MaterializedQueryResult> non_sample_result;
+	unique_ptr<QueryResult> non_sample_result;
 };
 
 struct WoltkaOguLocalState : public LocalTableFunctionState {
-	unique_ptr<Connection> conn;                // per-sample mode only
-	unique_ptr<MaterializedQueryResult> result; // current sample's result
+	unique_ptr<Connection> conn;    // per-sample mode only
+	unique_ptr<QueryResult> result; // current sample's result
 	// Keeps the fetched chunk alive while output.Reference() points into its
 	// buffers. Overwritten on the next Execute call, after the upstream
 	// operator has consumed the previous output (DuckDB pull-based guarantee).
@@ -48,8 +49,8 @@ struct WoltkaOguLocalState : public LocalTableFunctionState {
 };
 
 static string BuildAggregationSql(const string &source, const string &seq_id_col) {
-	auto q_src = KeywordHelper::WriteOptionallyQuoted(source);
-	auto q_seq = KeywordHelper::WriteOptionallyQuoted(seq_id_col);
+	auto q_src = SQLIdentifier::ToString(source);
+	auto q_seq = SQLIdentifier::ToString(seq_id_col);
 	return "WITH base AS ("
 	       "  SELECT DISTINCT "
 	       "    " +
@@ -69,8 +70,7 @@ static string BuildAggregationSql(const string &source, const string &seq_id_col
 	       "GROUP BY feature_id";
 }
 
-static unique_ptr<MaterializedQueryResult> RunGlobalAggregation(Connection &conn, const string &source,
-                                                                const string &seq_id_col) {
+static unique_ptr<QueryResult> RunGlobalAggregation(Connection &conn, const string &source, const string &seq_id_col) {
 	auto sql = BuildAggregationSql(source, seq_id_col);
 	auto result = conn.Query(sql);
 	if (result->HasError()) {
@@ -81,12 +81,11 @@ static unique_ptr<MaterializedQueryResult> RunGlobalAggregation(Connection &conn
 
 // Run the woltka_ogu pipeline for a single sample value. Creates a TEMP VIEW
 // scoped to `conn`. Each thread has its own Connection, so names don't collide.
-static unique_ptr<MaterializedQueryResult> RunSampleAggregation(Connection &conn, const string &source,
-                                                                const string &seq_id_col, const string &sample_col,
-                                                                const Value &sample_value,
-                                                                const LogicalType &sample_type) {
-	auto q_src = KeywordHelper::WriteOptionallyQuoted(source);
-	auto q_sample = KeywordHelper::WriteOptionallyQuoted(sample_col);
+static unique_ptr<QueryResult> RunSampleAggregation(Connection &conn, const string &source, const string &seq_id_col,
+                                                    const string &sample_col, const Value &sample_value,
+                                                    const LogicalType &sample_type) {
+	auto q_src = SQLIdentifier::ToString(source);
+	auto q_sample = SQLIdentifier::ToString(sample_col);
 	// ToSQLString handles all Value types (integers, timestamps, strings) safely.
 	auto sample_literal = sample_value.ToSQLString();
 	// Cast the inlined literal back to the sample column's declared type before
@@ -114,7 +113,7 @@ static unique_ptr<MaterializedQueryResult> RunSampleAggregation(Connection &conn
 }
 
 static unique_ptr<FunctionData> WoltkaOguBind(ClientContext &context, TableFunctionBindInput &input,
-                                              vector<LogicalType> &return_types, vector<string> &names) {
+                                              vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<WoltkaOguData>();
 	data->source = input.inputs[0].GetValue<string>();
 	RejectCTERelationName(input, data->source);
@@ -135,8 +134,8 @@ static unique_ptr<FunctionData> WoltkaOguBind(ClientContext &context, TableFunct
 
 	auto conn = MakeReadOnlyHelperConnection(context);
 
-	auto q_src = KeywordHelper::WriteOptionallyQuoted(data->source);
-	auto q_seq = KeywordHelper::WriteOptionallyQuoted(data->seq_id_col);
+	auto q_src = SQLIdentifier::ToString(data->source);
+	auto q_seq = SQLIdentifier::ToString(data->seq_id_col);
 
 	// Validate source resolves AND required columns exist AND flags casts to USMALLINT.
 	// reference is selected natively (not cast to VARCHAR) so its storage type can
@@ -156,9 +155,9 @@ static unique_ptr<FunctionData> WoltkaOguBind(ClientContext &context, TableFunct
 	// the probe's select list can't silently pick the wrong column's type.
 	LogicalType reference_type;
 	bool reference_found = false;
-	for (idx_t i = 0; i < probe->names.size(); i++) {
-		if (StringUtil::CIEquals(probe->names[i], "reference")) {
-			reference_type = probe->types[i];
+	for (idx_t i = 0; i < probe->GetNames().size(); i++) {
+		if (probe->GetNames()[i] == "reference") {
+			reference_type = probe->GetTypes()[i];
 			reference_found = true;
 			break;
 		}
@@ -176,7 +175,7 @@ static unique_ptr<FunctionData> WoltkaOguBind(ClientContext &context, TableFunct
 		DiscoverSamples(conn, data->source, data->sample_info.sample_id_col, {"feature_id", "value"}, "woltka_ogu",
 		                data->sample_info);
 
-		names.push_back(data->sample_info.sample_id_col);
+		names.emplace_back(data->sample_info.sample_id_col);
 		return_types.push_back(data->sample_info.sample_id_type);
 	} else {
 		// Non-sample path: pre-run the aggregation once here. Ownership of the result
@@ -229,7 +228,7 @@ static void WoltkaOguExecute(ClientContext &context, TableFunctionInput &input, 
 			output.Reference(*lstate.current_chunk);
 			return;
 		}
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
@@ -245,7 +244,7 @@ static void WoltkaOguExecute(ClientContext &context, TableFunctionInput &input, 
 		}
 		idx_t sample_idx;
 		if (!ClaimNextSample(gstate, data.sample_info.sample_values.size(), sample_idx)) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 		lstate.result =
@@ -257,7 +256,7 @@ static void WoltkaOguExecute(ClientContext &context, TableFunctionInput &input, 
 void WoltkaOguFunction::Register(ExtensionLoader &loader) {
 	TableFunction fn("woltka_ogu", {LogicalType::VARCHAR, LogicalType::VARCHAR}, WoltkaOguExecute, WoltkaOguBind,
 	                 WoltkaOguInitGlobal, WoltkaOguInitLocal);
-	fn.named_parameters["sample_id"] = LogicalType::VARCHAR;
+	AddNamedParameter(fn, "sample_id", LogicalType::VARCHAR);
 	fn.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(fn);
 }

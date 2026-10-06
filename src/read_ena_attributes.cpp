@@ -5,6 +5,8 @@
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_operator_expression.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 
 namespace duckdb {
 
@@ -30,7 +32,7 @@ namespace {
 //   still correct.
 std::string ResolveColumnName(const BoundColumnRefExpression &ref, const LogicalGet &get) {
 	const auto &col_ids = get.GetColumnIds();
-	idx_t local_idx = ref.binding.column_index;
+	idx_t local_idx = ref.Binding().column_index;
 	if (local_idx >= col_ids.size()) {
 		return "";
 	}
@@ -38,69 +40,72 @@ std::string ResolveColumnName(const BoundColumnRefExpression &ref, const Logical
 	if (actual_col >= get.names.size()) {
 		return "";
 	}
-	return get.names[actual_col];
+	return get.names[actual_col].GetIdentifierName();
 }
 
 std::unique_ptr<miint::ENAFilterNode> ExpressionToFilterNode(const Expression &expr, const LogicalGet &get);
 
 // Handle `col = const` or `const = col`. Only VARCHAR constants are mapped;
 // anything else (NULL, non-string) => unsupported.
-std::unique_ptr<miint::ENAFilterNode> TranslateEqual(const BoundComparisonExpression &cmp, const LogicalGet &get) {
+std::unique_ptr<miint::ENAFilterNode> TranslateEqual(const BoundFunctionExpression &cmp, const LogicalGet &get) {
 	const Expression *col_side = nullptr;
 	const Expression *const_side = nullptr;
-	if (cmp.left->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
-	    cmp.right->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-		col_side = cmp.left.get();
-		const_side = cmp.right.get();
-	} else if (cmp.right->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
-	           cmp.left->GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
-		col_side = cmp.right.get();
-		const_side = cmp.left.get();
+	auto &left = BoundComparisonExpression::Left(cmp);
+	auto &right = BoundComparisonExpression::Right(cmp);
+	if (left.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+	    right.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+		col_side = &left;
+		const_side = &right;
+	} else if (right.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF &&
+	           left.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+		col_side = &right;
+		const_side = &left;
 	} else {
 		return miint::ENAFilterNode::MakeUnsupported();
 	}
 
 	const auto &col_ref = col_side->Cast<BoundColumnRefExpression>();
 	const auto &const_expr = const_side->Cast<BoundConstantExpression>();
-	if (const_expr.value.IsNull()) {
+	if (const_expr.GetValue().IsNull()) {
 		return miint::ENAFilterNode::MakeUnsupported();
 	}
-	if (const_expr.return_type.id() != LogicalTypeId::VARCHAR) {
+	if (const_expr.GetReturnType().id() != LogicalTypeId::VARCHAR) {
 		return miint::ENAFilterNode::MakeUnsupported();
 	}
 	auto col_name = ResolveColumnName(col_ref, get);
 	if (col_name.empty()) {
 		return miint::ENAFilterNode::MakeUnsupported();
 	}
-	return miint::ENAFilterNode::MakeEqual(col_name, const_expr.value.ToString());
+	return miint::ENAFilterNode::MakeEqual(col_name, const_expr.GetValue().ToString());
 }
 
 // Handle `col IN (c1, c2, ...)`. Children[0] is the column ref; remaining
 // children are the values. Anything else in the IN list (NULL, non-string
 // constant, subexpression) => unsupported.
 std::unique_ptr<miint::ENAFilterNode> TranslateIn(const BoundOperatorExpression &op, const LogicalGet &get) {
-	if (op.children.size() < 2) {
+	const auto &children = op.GetChildren();
+	if (children.size() < 2) {
 		return miint::ENAFilterNode::MakeUnsupported();
 	}
-	if (op.children[0]->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
+	if (children[0]->GetExpressionClass() != ExpressionClass::BOUND_COLUMN_REF) {
 		return miint::ENAFilterNode::MakeUnsupported();
 	}
-	const auto &col_ref = op.children[0]->Cast<BoundColumnRefExpression>();
+	const auto &col_ref = children[0]->Cast<BoundColumnRefExpression>();
 	auto col_name = ResolveColumnName(col_ref, get);
 	if (col_name.empty()) {
 		return miint::ENAFilterNode::MakeUnsupported();
 	}
 	std::vector<std::string> values;
-	values.reserve(op.children.size() - 1);
-	for (idx_t i = 1; i < op.children.size(); i++) {
-		if (op.children[i]->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
+	values.reserve(children.size() - 1);
+	for (idx_t i = 1; i < children.size(); i++) {
+		if (children[i]->GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
 			return miint::ENAFilterNode::MakeUnsupported();
 		}
-		const auto &c = op.children[i]->Cast<BoundConstantExpression>();
-		if (c.value.IsNull() || c.return_type.id() != LogicalTypeId::VARCHAR) {
+		const auto &c = children[i]->Cast<BoundConstantExpression>();
+		if (c.GetValue().IsNull() || c.GetReturnType().id() != LogicalTypeId::VARCHAR) {
 			return miint::ENAFilterNode::MakeUnsupported();
 		}
-		values.push_back(c.value.ToString());
+		values.push_back(c.GetValue().ToString());
 	}
 	return miint::ENAFilterNode::MakeIn(col_name, values);
 }
@@ -108,8 +113,8 @@ std::unique_ptr<miint::ENAFilterNode> TranslateIn(const BoundOperatorExpression 
 std::unique_ptr<miint::ENAFilterNode> TranslateConjunction(const BoundConjunctionExpression &conj,
                                                            const LogicalGet &get, bool is_and) {
 	std::vector<std::unique_ptr<miint::ENAFilterNode>> children;
-	children.reserve(conj.children.size());
-	for (const auto &child : conj.children) {
+	children.reserve(conj.GetChildren().size());
+	for (const auto &child : conj.GetChildren()) {
 		children.push_back(ExpressionToFilterNode(*child, get));
 	}
 	return is_and ? miint::ENAFilterNode::MakeAnd(std::move(children))
@@ -117,14 +122,14 @@ std::unique_ptr<miint::ENAFilterNode> TranslateConjunction(const BoundConjunctio
 }
 
 std::unique_ptr<miint::ENAFilterNode> ExpressionToFilterNode(const Expression &expr, const LogicalGet &get) {
-	switch (expr.GetExpressionClass()) {
-	case ExpressionClass::BOUND_COMPARISON: {
-		const auto &cmp = expr.Cast<BoundComparisonExpression>();
-		if (cmp.GetExpressionType() != ExpressionType::COMPARE_EQUAL) {
+	// v2.0: comparisons are BoundFunctionExpressions (BOUND_FUNCTION class), so they cannot share the switch
+	if (BoundComparisonExpression::IsComparison(expr)) {
+		if (expr.GetExpressionType() != ExpressionType::COMPARE_EQUAL) {
 			return miint::ENAFilterNode::MakeUnsupported();
 		}
-		return TranslateEqual(cmp, get);
+		return TranslateEqual(expr.Cast<BoundFunctionExpression>(), get);
 	}
+	switch (expr.GetExpressionClass()) {
 	case ExpressionClass::BOUND_OPERATOR: {
 		const auto &op = expr.Cast<BoundOperatorExpression>();
 		// COMPARE_NOT_IN is a distinct expression type and correctly lands
@@ -318,7 +323,7 @@ bool ReadENAAttributesTableFunction::GlobalState::FetchNextStructuredBatch(
 
 unique_ptr<FunctionData> ReadENAAttributesTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                               vector<LogicalType> &return_types,
-                                                              vector<std::string> &names) {
+                                                              vector<Identifier> &names) {
 	std::vector<std::string> accessions;
 	if (input.inputs[0].IsNull()) {
 		throw InvalidInputException("read_ena_attributes: accession cannot be NULL");
@@ -406,7 +411,7 @@ void ReadENAAttributesTableFunction::Execute(ClientContext &context, TableFuncti
 		bool ok =
 		    use_structured ? global_state.FetchNextStructuredBatch(bind_data.pushdown) : global_state.FetchNextBatch();
 		if (!ok) {
-			output.SetCardinality(0);
+			output.SetChildCardinality(0);
 			return;
 		}
 	}
@@ -417,20 +422,20 @@ void ReadENAAttributesTableFunction::Execute(ClientContext &context, TableFuncti
 	idx_t count = MinValue<idx_t>(remaining, STANDARD_VECTOR_SIZE);
 
 	// sample_accession (column 0)
-	auto acc_data = FlatVector::GetData<string_t>(output.data[0]);
+	auto acc_data = FlatVector::GetDataMutable<string_t>(output.data[0]);
 	for (idx_t i = 0; i < count; i++) {
 		acc_data[i] = StringVector::AddString(output.data[0], attrs[offset + i].sample_accession);
 	}
 
 	// tag (column 1)
-	auto tag_data = FlatVector::GetData<string_t>(output.data[1]);
+	auto tag_data = FlatVector::GetDataMutable<string_t>(output.data[1]);
 	for (idx_t i = 0; i < count; i++) {
 		tag_data[i] = StringVector::AddString(output.data[1], attrs[offset + i].tag);
 	}
 
 	// value (column 2)
-	auto val_data = FlatVector::GetData<string_t>(output.data[2]);
-	auto &val_validity = FlatVector::Validity(output.data[2]);
+	auto val_data = FlatVector::GetDataMutable<string_t>(output.data[2]);
+	auto &val_validity = FlatVector::ValidityMutable(output.data[2]);
 	for (idx_t i = 0; i < count; i++) {
 		const auto &val = attrs[offset + i].value;
 		if (val.empty()) {
@@ -441,7 +446,7 @@ void ReadENAAttributesTableFunction::Execute(ClientContext &context, TableFuncti
 	}
 
 	global_state.current_batch_offset += count;
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 // ---- Pushdown complex filter ----

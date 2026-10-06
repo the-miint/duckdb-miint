@@ -5,6 +5,8 @@
 #include "align_result_utils.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -50,7 +52,7 @@ inline void OutputSortMeRNARRNABatch(DataChunk &output, const miint::SortMeRNARe
 	SetAlignResultDouble(output.data[col++], batch.coverages, offset, count);
 	SetAlignResultInt32(output.data[col++], batch.edit_distances, offset, count);
 	SetAlignResultInt32(output.data[col++], batch.segment_indices, offset, count);
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 // Project a SortMeRNAResultBatch slice onto the shared SAM output schema
@@ -107,33 +109,33 @@ inline void OutputSortMeRNASamBatch(DataChunk &output, const miint::SortMeRNARes
 	auto &tag_md_vec = output.data[col++];
 	auto &tag_sa_vec = output.data[col++];
 
-	auto flags_data = FlatVector::GetData<uint16_t>(flags_vec);
-	auto position_data = FlatVector::GetData<int64_t>(position_vec);
-	auto stop_position_data = FlatVector::GetData<int64_t>(stop_position_vec);
-	auto mapq_data = FlatVector::GetData<uint8_t>(mapq_vec);
-	auto cigar_data = FlatVector::GetData<string_t>(cigar_vec);
-	auto mate_position_data = FlatVector::GetData<int64_t>(mate_position_vec);
-	auto template_length_data = FlatVector::GetData<int64_t>(template_length_vec);
-	auto tag_as_data = FlatVector::GetData<int64_t>(tag_as_vec);
-	auto tag_nm_data = FlatVector::GetData<int64_t>(tag_nm_vec);
+	auto flags_data = FlatVector::GetDataMutable<uint16_t>(flags_vec);
+	auto position_data = FlatVector::GetDataMutable<int64_t>(position_vec);
+	auto stop_position_data = FlatVector::GetDataMutable<int64_t>(stop_position_vec);
+	auto mapq_data = FlatVector::GetDataMutable<uint8_t>(mapq_vec);
+	auto cigar_data = FlatVector::GetDataMutable<string_t>(cigar_vec);
+	auto mate_position_data = FlatVector::GetDataMutable<int64_t>(mate_position_vec);
+	auto template_length_data = FlatVector::GetDataMutable<int64_t>(template_length_vec);
+	auto tag_as_data = FlatVector::GetDataMutable<int64_t>(tag_as_vec);
+	auto tag_nm_data = FlatVector::GetDataMutable<int64_t>(tag_nm_vec);
 
 	// Match the SetAlignResult*Nullable pattern in align_result_utils.hpp:
 	// mark validity explicitly before per-row writes rather than trusting the
 	// DataChunk's recycled state. tag_as / tag_nm flip to valid on aligned
 	// rows; the remaining nine tags are always NULL for sortmerna output.
-	auto &tag_as_validity = FlatVector::Validity(tag_as_vec);
-	auto &tag_nm_validity = FlatVector::Validity(tag_nm_vec);
+	auto &tag_as_validity = FlatVector::ValidityMutable(tag_as_vec);
+	auto &tag_nm_validity = FlatVector::ValidityMutable(tag_nm_vec);
 	tag_as_validity.SetAllInvalid(count);
 	tag_nm_validity.SetAllInvalid(count);
-	FlatVector::Validity(tag_xs_vec).SetAllInvalid(count);
-	FlatVector::Validity(tag_ys_vec).SetAllInvalid(count);
-	FlatVector::Validity(tag_xn_vec).SetAllInvalid(count);
-	FlatVector::Validity(tag_xm_vec).SetAllInvalid(count);
-	FlatVector::Validity(tag_xo_vec).SetAllInvalid(count);
-	FlatVector::Validity(tag_xg_vec).SetAllInvalid(count);
-	FlatVector::Validity(tag_yt_vec).SetAllInvalid(count);
-	FlatVector::Validity(tag_md_vec).SetAllInvalid(count);
-	FlatVector::Validity(tag_sa_vec).SetAllInvalid(count);
+	FlatVector::ValidityMutable(tag_xs_vec).SetAllInvalid(count);
+	FlatVector::ValidityMutable(tag_ys_vec).SetAllInvalid(count);
+	FlatVector::ValidityMutable(tag_xn_vec).SetAllInvalid(count);
+	FlatVector::ValidityMutable(tag_xm_vec).SetAllInvalid(count);
+	FlatVector::ValidityMutable(tag_xo_vec).SetAllInvalid(count);
+	FlatVector::ValidityMutable(tag_xg_vec).SetAllInvalid(count);
+	FlatVector::ValidityMutable(tag_yt_vec).SetAllInvalid(count);
+	FlatVector::ValidityMutable(tag_md_vec).SetAllInvalid(count);
+	FlatVector::ValidityMutable(tag_sa_vec).SetAllInvalid(count);
 
 	// Stage id-typed columns into vector<string> slices and bulk-emit via
 	// EmitIdColumnFromStrings after the row loop — supports VARCHAR and BIGINT
@@ -242,7 +244,7 @@ inline void OutputSortMeRNASamBatch(DataChunk &output, const miint::SortMeRNARes
 	EmitIdColumnFromStrings(reference_vec, emit_references, 0, count, subject_id_type);
 	EmitIdColumnFromStrings(mate_reference_vec, emit_mate_references, 0, count, subject_id_type);
 
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 }
 
 } // namespace duckdb

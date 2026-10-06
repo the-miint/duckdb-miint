@@ -12,7 +12,7 @@ as follows:
   - `duckdb_version` input in the `duckdb-stable-build` job
   - `duckdb_version` input in the `code-quality-check` job
   - the commented-out artifact name in the disabled `verify-wasm` job (`miint-<ver>-extension-...`), so it isn't stale when that job is re-enabled
-  - `ci_tools_version` and the `uses:` refs need NO change — they point at the moving release-series branch, not a per-patch tag
+  - `ci_tools_version` and the `uses:` refs need NO change within a release series — they point at the moving release-series branch, not a per-patch tag. Moving to a new series (e.g. `v1.5-variegata` → `v2.0-cyanoptera`) changes both, together with the `./extension-ci-tools` branch above
 - Bump the target version everywhere else it is spelled out
   - `Dockerfile` `ARG DUCKDB_VERSION` (local default; `docker.yml` resolves the newest Docker Hub tag at runtime and passes `--build-arg`)
   - `DUCKDB_VERSION` default in `scripts/cron-publish-extension.sh` — it drives the `miint-<ver>-extension-*` artifact prefix and the published paths, so a stale value makes every publish reject

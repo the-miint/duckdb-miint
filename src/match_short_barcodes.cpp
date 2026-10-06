@@ -9,13 +9,16 @@
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
-#include "duckdb/main/materialized_query_result.hpp"
+#include "duckdb/main/query_result.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/string_vector.hpp"
 
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <string>
 #include <vector>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -122,22 +125,22 @@ static constexpr const char *FN_NAME = "match_short_barcodes";
 static size_t LoadAndPack(ClientContext &context, const std::string &table_name, const char *role,
                           std::vector<PackedBarcode> &out) {
 	auto conn = MakeReadOnlyHelperConnection(context);
-	std::string query = "SELECT id, sequence FROM " + KeywordHelper::WriteOptionallyQuoted(table_name);
+	std::string query = "SELECT id, sequence FROM " + SQLIdentifier::ToString(table_name);
 	auto result = conn.Query(query);
 	if (result->HasError()) {
 		throw InvalidInputException("%s: failed to read %s table '%s': %s", FN_NAME, role, table_name,
 		                            result->GetError());
 	}
 
-	auto &materialized = result->Cast<MaterializedQueryResult>();
+	auto &materialized = *result;
 	size_t expected_len = 0;
 	bool first = true;
 	while (auto chunk = materialized.Fetch()) {
 		auto &id_vec = chunk->data[0];
 		auto &seq_vec = chunk->data[1];
 		UnifiedVectorFormat id_data, seq_data;
-		id_vec.ToUnifiedFormat(chunk->size(), id_data);
-		seq_vec.ToUnifiedFormat(chunk->size(), seq_data);
+		id_vec.ToUnifiedFormat(id_data);
+		seq_vec.ToUnifiedFormat(seq_data);
 		auto id_ptr = UnifiedVectorFormat::GetData<string_t>(id_data);
 		auto seq_ptr = UnifiedVectorFormat::GetData<string_t>(seq_data);
 
@@ -174,7 +177,7 @@ static size_t LoadAndPack(ClientContext &context, const std::string &table_name,
 // catalog TABLE_ENTRY lookup.
 static void ValidateTableExists(ClientContext &context, const std::string &table_name) {
 	auto conn = MakeReadOnlyHelperConnection(context);
-	std::string query = "SELECT id, sequence FROM " + KeywordHelper::WriteOptionallyQuoted(table_name) + " LIMIT 0";
+	std::string query = "SELECT id, sequence FROM " + SQLIdentifier::ToString(table_name) + " LIMIT 0";
 	auto result = conn.Query(query);
 	if (result->HasError()) {
 		throw BinderException("%s: '%s' does not exist or is missing 'id'/'sequence' columns (%s)", FN_NAME, table_name,
@@ -186,7 +189,7 @@ static void ValidateTableExists(ClientContext &context, const std::string &table
 // Bind
 // ---------------------------------------------------------------------------
 static unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input,
-                                     vector<LogicalType> &return_types, vector<std::string> &names) {
+                                     vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto data = make_uniq<MatchData>();
 	data->query_table = input.inputs[0].GetValue<std::string>();
 	data->ref_table = input.inputs[1].GetValue<std::string>();
@@ -290,7 +293,7 @@ static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChun
 	auto &gstate = data_p.global_state->Cast<MatchGlobalState>();
 
 	if (gstate.hit_offset >= gstate.hits.size()) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
@@ -299,17 +302,18 @@ static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChun
 
 	auto &query_id_vec = output.data[0];
 	auto &ref_id_vec = output.data[1];
-	auto nm_data = FlatVector::GetData<int32_t>(output.data[2]);
+	auto nm_data = FlatVector::GetDataMutable<int32_t>(output.data[2]);
 
 	for (idx_t i = 0; i < count; ++i) {
 		const auto &hit = gstate.hits[gstate.hit_offset + i];
-		FlatVector::GetData<string_t>(query_id_vec)[i] =
+		FlatVector::GetDataMutable<string_t>(query_id_vec)[i] =
 		    StringVector::AddString(query_id_vec, gstate.queries[hit.query_idx].id);
-		FlatVector::GetData<string_t>(ref_id_vec)[i] = StringVector::AddString(ref_id_vec, gstate.refs[hit.ref_idx].id);
+		FlatVector::GetDataMutable<string_t>(ref_id_vec)[i] =
+		    StringVector::AddString(ref_id_vec, gstate.refs[hit.ref_idx].id);
 		nm_data[i] = hit.nm;
 	}
 
-	output.SetCardinality(count);
+	output.SetChildCardinality(count);
 	gstate.hit_offset += count;
 }
 
@@ -318,8 +322,8 @@ static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChun
 // ---------------------------------------------------------------------------
 void MatchShortBarcodesTableFunction::Register(ExtensionLoader &loader) {
 	TableFunction tf("match_short_barcodes", {LogicalType::VARCHAR, LogicalType::VARCHAR}, Execute, Bind, InitGlobal);
-	tf.named_parameters["max_nm"] = LogicalType::INTEGER;
-	tf.named_parameters["report_all"] = LogicalType::BOOLEAN;
+	AddNamedParameter(tf, "max_nm", LogicalType::INTEGER);
+	AddNamedParameter(tf, "report_all", LogicalType::BOOLEAN);
 	tf.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(tf);
 }

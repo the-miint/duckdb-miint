@@ -188,7 +188,7 @@ void ENASamplesInsert::AppendReturningRows(ColumnDataCollection &return_collecti
 		chunk.data[COL_ERS_ACCESSION].SetValue(idx, Value(row.ers_accession));
 		chunk.data[COL_SAMEA_ACCESSION].SetValue(idx, row.samea_accession.empty() ? Value(LogicalType::VARCHAR)
 		                                                                          : Value(row.samea_accession));
-		chunk.SetCardinality(idx + 1);
+		chunk.SetChildCardinality(idx + 1);
 		if (chunk.size() == STANDARD_VECTOR_SIZE) {
 			return_collection.Append(chunk);
 			chunk.Reset();

@@ -131,10 +131,10 @@ public:
 			// member destruction, so without this explicit reset the DROP below
 			// would run while `standard->query_stream` (an early-terminated query,
 			// e.g. LIMIT, never reads it to exhaustion) still has an open
-			// StreamQueryResult over that same table.
+			// streaming query over that same table.
 			standard.reset();
 			if (snapshot_conn) {
-				DropHelperTempRelation(*snapshot_conn, KeywordHelper::WriteOptionallyQuoted(query_snapshot));
+				DropHelperTempRelation(*snapshot_conn, SQLIdentifier::ToString(query_snapshot));
 			}
 		}
 	};
@@ -152,7 +152,7 @@ public:
 	};
 
 	static unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input,
-	                                     vector<LogicalType> &return_types, vector<std::string> &names);
+	                                     vector<LogicalType> &return_types, vector<Identifier> &names);
 
 	static unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFunctionInitInput &input);
 

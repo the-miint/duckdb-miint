@@ -147,7 +147,7 @@ void ENAProjectsInsert::AppendReturningRows(ColumnDataCollection &return_collect
 				chunk.data[COL_HOLD_UNTIL_DATE].SetValue(idx, Value(LogicalType::DATE));
 			}
 		}
-		chunk.SetCardinality(idx + 1);
+		chunk.SetChildCardinality(idx + 1);
 		if (chunk.size() == STANDARD_VECTOR_SIZE) {
 			return_collection.Append(chunk);
 			chunk.Reset();

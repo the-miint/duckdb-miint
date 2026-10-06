@@ -63,7 +63,7 @@ SELECT COUNT(*) FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype
 3
 
 statement ok
-SELECT * FROM rype_index_create('chunks', '__TEST_DIR__/baseline.ryxdi', k := 16, w := 8);
+SELECT * FROM rype_index_create('chunks', '{TEST_DIR}/baseline.ryxdi', k := 16, w := 8);
 
 # -----------------------------------------------------------------------------
 # The same calls with a caller-set global that would previously have selected the
@@ -94,7 +94,7 @@ SELECT COUNT(*) FROM rype_log_ratio('data/rype/test_numerator.ryxdi', 'data/rype
 3
 
 statement ok
-SELECT * FROM rype_index_create('chunks', '__TEST_DIR__/hostile.ryxdi', k := 16, w := 8);
+SELECT * FROM rype_index_create('chunks', '{TEST_DIR}/hostile.ryxdi', k := 16, w := 8);
 
 # The caller's own setting must be left as they set it — we pin the sub-connection,
 # not the session the user is working in.

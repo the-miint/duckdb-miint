@@ -26,14 +26,14 @@ CREATE TABLE subjects AS SELECT * FROM (VALUES
 # Build into a sharded-layout subdir <dir>/myshard/index.* (what align_bowtie2_sharded expects).
 query II
 SELECT success, num_subjects
-FROM save_bowtie2_index('subjects', '__TEST_DIR__/shards/myshard/index');
+FROM save_bowtie2_index('subjects', '{TEST_DIR}/shards/myshard/index');
 ----
 true	2
 
 # The four bowtie2 index files required by align_bowtie2_sharded must exist
 # (bowtie2-build also writes .3/.4, so assert at least the required set).
 query I
-SELECT COUNT(*) >= 4 FROM glob('__TEST_DIR__/shards/myshard/index.*.bt2');
+SELECT COUNT(*) >= 4 FROM glob('{TEST_DIR}/shards/myshard/index.*.bt2');
 ----
 true
 
@@ -57,7 +57,7 @@ CREATE TABLE read_to_shard AS SELECT * FROM (VALUES
 query II
 SELECT read_id, reference
 FROM align_bowtie2_sharded('queries',
-    shard_directory := '__TEST_DIR__/shards',
+    shard_directory := '{TEST_DIR}/shards',
     read_to_shard := 'read_to_shard',
     max_secondary := 0)
 WHERE flags & 4 = 0
@@ -72,7 +72,7 @@ query2	ref2
 
 # Missing subject table
 statement error
-SELECT * FROM save_bowtie2_index('nonexistent_subjects', '__TEST_DIR__/shards/none/index');
+SELECT * FROM save_bowtie2_index('nonexistent_subjects', '{TEST_DIR}/shards/none/index');
 ----
 does not exist
 
@@ -81,7 +81,7 @@ statement ok
 CREATE TABLE empty_subjects(read_id VARCHAR, sequence1 VARCHAR);
 
 statement error
-SELECT * FROM save_bowtie2_index('empty_subjects', '__TEST_DIR__/shards/empty/index');
+SELECT * FROM save_bowtie2_index('empty_subjects', '{TEST_DIR}/shards/empty/index');
 ----
 is empty
 
@@ -92,6 +92,6 @@ CREATE TABLE paired_subjects AS SELECT * FROM (VALUES
 ) AS t(read_id, sequence1, sequence2);
 
 statement error
-SELECT * FROM save_bowtie2_index('paired_subjects', '__TEST_DIR__/shards/paired/index');
+SELECT * FROM save_bowtie2_index('paired_subjects', '{TEST_DIR}/shards/paired/index');
 ----
 single-end

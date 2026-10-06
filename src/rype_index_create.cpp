@@ -4,12 +4,13 @@
 
 // The chunk-table input is still exported through DuckDB's generic wrapper: it
 // feeds rype_index_create, not the (id, sequence) shape RypeInputStream builds.
-#include "duckdb/common/arrow/result_arrow_wrapper.hpp"
+#include "miint_arrow_stream.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 
 #include <algorithm>
 #include <utility>
+#include "miint_named_parameter.hpp"
 
 namespace duckdb {
 
@@ -33,10 +34,10 @@ namespace {
 // ordering requirement — each feature contiguous, ascending, 0-based, gap-free —
 // holds: a feature lives wholly inside one window, windows ascend by feature_idx,
 // and the per-window ORDER BY groups each feature's chunks. The chunk_table may be
-// in ANY physical order. Only one window's StreamQueryResult is open at a time,
+// in ANY physical order. Only one window's streaming query is open at a time,
 // satisfying the one-active-stream-per-Connection rule.
 //
-// Ownership mirrors ResultArrowArrayStreamWrapper: rype_index_build_from_arrow
+// Ownership mirrors DuckDB 1.5's ResultArrowArrayStreamWrapper: rype_index_build_from_arrow
 // takes the stream and invokes release() synchronously during the build, which
 // deletes this object.
 struct WindowedChunkStream {
@@ -46,7 +47,7 @@ struct WindowedChunkStream {
 	std::vector<std::pair<int64_t, int64_t>> windows; // inclusive [lo, hi] feature_idx ranges, ascending
 	idx_t batch_size;
 	idx_t next_window = 0; // index of the next window to open
-	unique_ptr<ResultArrowArrayStreamWrapper> active;
+	unique_ptr<ChunkSourceArrowStream<StreamingQuery>> active;
 	std::string last_error;
 
 	WindowedChunkStream(Connection &conn_p, std::string table_quoted_p,
@@ -61,12 +62,13 @@ struct WindowedChunkStream {
 	}
 
 	bool OpenQuery(const std::string &sql) {
-		auto result = conn.SendQuery(sql);
+		auto result = SubmitStream(conn, sql);
 		if (result->HasError()) {
 			last_error = result->GetError();
 			return false;
 		}
-		active = make_uniq<ResultArrowArrayStreamWrapper>(std::move(result), batch_size);
+		auto props = result->GetClientProperties();
+		active = make_uniq<ChunkSourceArrowStream<StreamingQuery>>(std::move(result), batch_size, std::move(props));
 		return true;
 	}
 
@@ -163,7 +165,7 @@ idx_t AutoWindowFeatures(Connection &conn, const std::string &table_quoted, cons
 	if (result->HasError()) {
 		return kFallback;
 	}
-	auto value = result->GetValue(0, 0);
+	auto value = result->Collection().GetValue(0, 0);
 	if (value.IsNull()) {
 		return kFallback;
 	}
@@ -180,7 +182,8 @@ idx_t AutoWindowFeatures(Connection &conn, const std::string &table_quoted, cons
 // Bind
 // ============================================================================
 unique_ptr<FunctionData> RypeIndexCreateTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
-                                                            vector<LogicalType> &return_types, vector<string> &names) {
+                                                            vector<LogicalType> &return_types,
+                                                            vector<Identifier> &names) {
 	auto data = make_uniq<Data>();
 
 	// Required positional parameters: chunk_table, output_path
@@ -289,7 +292,7 @@ unique_ptr<GlobalTableFunctionState> RypeIndexCreateTableFunction::InitGlobal(Cl
 	// rype build path accepts Utf8/LargeUtf8/Binary/LargeBinary/Utf8View/BinaryView.
 	ConfigureRypeArrowExport(conn);
 
-	std::string chunk_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.chunk_table);
+	std::string chunk_quoted = SQLIdentifier::ToString(bind_data.chunk_table);
 
 	// Mapping stream: feature_idx Int64, bucket_name Utf8. Materialized — it is
 	// small (one row per feature) and RYpe reads the whole mapping into memory
@@ -304,7 +307,7 @@ unique_ptr<GlobalTableFunctionState> RypeIndexCreateTableFunction::InitGlobal(Cl
 		              "'unnamed-bucket'::VARCHAR AS bucket_name FROM " +
 		              chunk_quoted;
 	} else {
-		std::string mapping_quoted = KeywordHelper::WriteOptionallyQuoted(bind_data.mapping_table);
+		std::string mapping_quoted = SQLIdentifier::ToString(bind_data.mapping_table);
 		mapping_sql =
 		    "SELECT feature_idx::BIGINT AS feature_idx, bucket_name::VARCHAR AS bucket_name FROM " + mapping_quoted;
 	}
@@ -314,7 +317,10 @@ unique_ptr<GlobalTableFunctionState> RypeIndexCreateTableFunction::InitGlobal(Cl
 		                            bind_data.mapping_table.empty() ? bind_data.chunk_table : bind_data.mapping_table,
 		                            mapping_result->GetError());
 	}
-	auto mapping_wrapper = make_uniq<ResultArrowArrayStreamWrapper>(std::move(mapping_result), STANDARD_VECTOR_SIZE);
+	// Materialized on purpose: the windowed chunk stream reuses `conn`, which allows one open stream at a time.
+	auto mapping_props = mapping_result->client_properties;
+	auto mapping_wrapper = make_uniq<ChunkSourceArrowStream<QueryResult>>(
+	    std::move(mapping_result), STANDARD_VECTOR_SIZE, std::move(mapping_props));
 
 	// Chunk stream: feature_idx Int64, chunk_index Int32, chunk_data. RYpe requires
 	// each feature's chunks to arrive contiguously in ascending, 0-based, gap-free
@@ -391,7 +397,7 @@ void RypeIndexCreateTableFunction::Execute(ClientContext &context, TableFunction
 	auto &gstate = data_p.global_state->Cast<GlobalState>();
 
 	if (gstate.done) {
-		output.SetCardinality(0);
+		output.SetChildCardinality(0);
 		return;
 	}
 
@@ -400,7 +406,7 @@ void RypeIndexCreateTableFunction::Execute(ClientContext &context, TableFunction
 	output.data[2].SetValue(0, Value::INTEGER(bind_data.w));
 	output.data[3].SetValue(0, Value("ok"));
 
-	output.SetCardinality(1);
+	output.SetChildCardinality(1);
 	gstate.done = true;
 }
 
@@ -411,13 +417,13 @@ TableFunction RypeIndexCreateTableFunction::GetFunction() {
 	TableFunction tf("rype_index_create", {LogicalType::VARCHAR, LogicalType::VARCHAR}, Execute, Bind, InitGlobal,
 	                 InitLocal);
 
-	tf.named_parameters["mapping_table"] = LogicalType::VARCHAR;
-	tf.named_parameters["k"] = LogicalType::INTEGER;
-	tf.named_parameters["w"] = LogicalType::INTEGER;
-	tf.named_parameters["salt"] = LogicalType::UBIGINT;
-	tf.named_parameters["orient"] = LogicalType::BOOLEAN;
-	tf.named_parameters["max_memory"] = LogicalType::BIGINT;
-	tf.named_parameters["feed_window_features"] = LogicalType::BIGINT;
+	AddNamedParameter(tf, "mapping_table", LogicalType::VARCHAR);
+	AddNamedParameter(tf, "k", LogicalType::INTEGER);
+	AddNamedParameter(tf, "w", LogicalType::INTEGER);
+	AddNamedParameter(tf, "salt", LogicalType::UBIGINT);
+	AddNamedParameter(tf, "orient", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "max_memory", LogicalType::BIGINT);
+	AddNamedParameter(tf, "feed_window_features", LogicalType::BIGINT);
 
 	return tf;
 }
