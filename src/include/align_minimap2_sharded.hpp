@@ -31,24 +31,58 @@ struct ShardInfo {
 	idx_t read_count;       // Number of reads for this shard (for priority ordering)
 };
 
+// The TEMP snapshots every shard stream reads from: the query relation and the
+// routing relation, each read exactly once (#229) and then replayed once per
+// shard and index part.
+//
+// Held by shared_ptr, and pinned by every QuerySequenceStream opened over them,
+// because the DROP must wait for the last open stream. DuckDB does not guarantee
+// that local states die before the global one, and a LocalState keeps its
+// ActiveShard — with that shard's live StreamQueryResult — whenever the scan ends
+// without draining (a LIMIT above the function is the ordinary case). Dropping a
+// table out from under a live stream is not something the reader survives, so
+// ownership decides when it happens: the stream that reads these tables holds
+// them (see QuerySequenceStream's `source_keepalive`), rather than any holder
+// maintaining a destruction order it cannot enforce.
+//
+// The connection is part of the handle for the same reason it was part of the
+// state before: the tables were created on a connection that inherits the
+// caller's TEMP catalog, so they live in the user's session, and a missed drop
+// leaves them visible in SHOW TABLES rather than dying with us.
+struct QuerySnapshots {
+	std::unique_ptr<Connection> conn;
+	std::string query_reads;   // unquoted; empty => nothing to drop
+	std::string read_to_shard; // unquoted; empty => nothing to drop
+
+	~QuerySnapshots() {
+		if (!conn) {
+			return;
+		}
+		// DropHelperTempRelation is no-op on an empty name and never propagates.
+		DropHelperTempRelation(*conn, KeywordHelper::WriteOptionallyQuoted(read_to_shard));
+		DropHelperTempRelation(*conn, KeywordHelper::WriteOptionallyQuoted(query_reads));
+	}
+};
+
 // A shard that is currently being processed by one or more threads.
 // `parts` owns the shard's .mmi and, for a multi-part shard, walks its workers
-// through the parts one at a time (see Minimap2PartCursor); the shard's reads
-// are held in shard_sequences for the shard's lifetime and re-walked from
-// offset 0 against every part. Worker tracking uses atomics and never holds the
+// through the parts one at a time (see Minimap2PartCursor). The shard's reads
+// are never held whole: `stream` streams them from the query snapshot in
+// sub-batches, and every part gets a fresh stream, opened by the leader in the
+// cursor's `prepare` step and swapped in under the cursor lock in `publish`.
+// `stream` is a shared_ptr so a thread that picked it up just before a swap can
+// keep draining it safely. Worker tracking uses atomics and never holds the
 // global lock.
 struct ActiveShard {
 	idx_t shard_idx;                                  // Index into Data::shards
-	idx_t batch_size;                                 // Per-shard batch size
-	miint::SequenceRecordBatch shard_sequences;       // Pre-fetched sequences for this shard
+	std::shared_ptr<QuerySequenceStream> stream;      // Current part's reads; read via parts->WithCurrentPart
 	std::unique_ptr<miint::Minimap2PartCursor> parts; // Index parts; set once ready
-	idx_t next_batch_offset = 0;                      // Claimed via parts->WithCurrentPart; reset per part
 	std::atomic<idx_t> active_workers {0};            // Threads currently on this shard
 	std::atomic<bool> exhausted {false};              // Set when no more batches to read
-	std::atomic<bool> ready {false};                  // Set when index is loaded and IDs materialized
+	std::atomic<bool> ready {false};                  // Set when index is loaded and stream opened
+	std::atomic<bool> progress_reconciled {false};    // Estimated read count corrected to the streamed one
 	// Progress-only (read/written only when GlobalState::progress is true).
 	std::atomic<idx_t> alignments_emitted {0};        // Mapped alignments produced for this shard
-	idx_t total_reads = 0;                            // Reads pre-fetched for this shard
 	std::chrono::steady_clock::time_point start_time; // Stamped when the shard becomes ready
 };
 
@@ -101,20 +135,13 @@ public:
 		std::atomic<idx_t> total_associations {0};
 		std::atomic<idx_t> associations_processed {0};
 
-		// What ClaimWork reads a shard's sequences FROM: either a one-pass TEMP
-		// snapshot of the shard-assigned reads (multi-shard, #229) or an inline
-		// subquery over the query relation (single shard, where nothing is re-read so
-		// a snapshot would be pure overhead). Set once in InitGlobal; keeping the
-		// choice here is what lets ClaimWork stay branch-free.
-		std::string shard_read_source;
-
-		// Set only when shard_read_source is a snapshot. The connection is held for
-		// the life of the state so the destructor can drop the TEMP table: it was
-		// created on an inheriting connection, so it lives in the caller's catalog,
-		// and a missed drop leaks a relation into the user's session (visible in
-		// SHOW TABLES) instead of dying with us.
-		std::unique_ptr<Connection> snapshot_conn;
-		std::string query_snapshot; // unquoted; empty => no snapshot to drop
+		// TEMP snapshots of the query and routing relations, which every shard's
+		// stream reads from (BuildShardReadsSelect). Taken even for a single shard:
+		// a multi-part shard replays its reads once per part, and re-reading the
+		// user's relations instead would silently drop rows for any relation not
+		// stable across re-evaluation (#229 — see
+		// docs/internals/reading-tables-views.md § "Read the relation ONCE").
+		std::shared_ptr<QuerySnapshots> snapshots;
 
 		idx_t MaxThreads() const override {
 			return max_active_shards * max_threads_per_shard;
@@ -122,11 +149,8 @@ public:
 
 		GlobalState() = default;
 
-		~GlobalState() override {
-			if (snapshot_conn) {
-				DropHelperTempRelation(*snapshot_conn, KeywordHelper::WriteOptionallyQuoted(query_snapshot));
-			}
-		}
+		// No destructor: the snapshots are dropped by ~QuerySnapshots once the last
+		// shard still streaming them is gone, which may be after this state dies.
 	};
 
 	struct LocalState : public LocalTableFunctionState {

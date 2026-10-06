@@ -366,6 +366,44 @@ SELECT
 0
 
 # ==============================================================================
+# DUPLICATE ROUTING ROWS
+# ==============================================================================
+
+# A read listed more than once for the SAME shard is aligned against that shard
+# ONCE. The per-shard read query filters on `read_id IN (...)`, which is set
+# membership: "listed twice" and "listed once" are the same predicate. v1.0.0
+# -v1.0.1 snapshotted `query JOIN read_to_shard` instead and emitted the
+# alignment once per duplicate row, so a routing table with an accidental
+# duplicate silently double-counted that read.
+#
+# Duplicates across DIFFERENT shards still align once per shard — that is the
+# multi-shard case above, and it is unaffected.
+
+statement ok
+CREATE TABLE dup_shard_mapping AS SELECT * FROM (VALUES
+    ('query1', 'shard_a'),
+    ('query1', 'shard_a'),
+    ('query1', 'shard_a'),
+    ('query2', 'shard_b')
+) AS t(read_id, shard_name);
+
+query II
+SELECT read_id, count(*)
+FROM align_minimap2_sharded('queries',
+    shard_directory := 'data/shards/',
+    read_to_shard := 'dup_shard_mapping',
+    max_secondary := 0)
+WHERE flags & 4 = 0
+GROUP BY read_id
+ORDER BY read_id;
+----
+query1	1
+query2	1
+
+statement ok
+DROP TABLE dup_shard_mapping;
+
+# ==============================================================================
 # CLEANUP
 # ==============================================================================
 

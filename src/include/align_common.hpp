@@ -378,7 +378,7 @@ inline void FilterMappedOnly(miint::SAMRecordBatch &batch) {
 //   - `read_id` defaults to VARCHAR (back-compat). When `expected_read_id_type`
 //     is non-INVALID, the column must match it exactly — supports BIGINT once
 //     the caller has captured the query table's id type. The strict equality
-//     check keeps the downstream shard join (BuildShardedQueryReadsSelect for
+//     check keeps the downstream shard filter (BuildShardReadsSelect for
 //     minimap2, OpenCurrentShardStream for bowtie2) well-typed without relying on
 //     implicit casts.
 inline void ValidateReadToShardSchema(ClientContext &context, const std::string &table_name,

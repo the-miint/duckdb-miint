@@ -1,0 +1,138 @@
+# name: test/sql/align_minimap2_sharded_memory.test
+# description: align_minimap2_sharded holds each read once, however many shards it is routed to
+# group: [sql]
+
+require miint
+
+# Regression: align_minimap2_sharded used to snapshot `query JOIN read_to_shard`
+# into a TEMP table before aligning anything, so a read routed to N shards was
+# held N times over, sequence and quality included. Routing 1M HiFi reads to
+# all 1000 shards of a reference therefore needed ~1000 copies of the corpus
+# before the first alignment: >8 TB spilled, OOM-killed at 500 GB, zero rows
+# written. What a sharded run holds must scale with the reads, not with
+# reads x shards.
+#
+# Spilling is disabled below so this measures what the function HOLDS rather
+# than what it can offload to disk. The corpus is 400 reads x (5 kb sequence +
+# 5 kb quality) = ~4 MB, and every read is routed to all 60 shards: one copy of
+# the reads fits in memory_limit comfortably, a per-(read, shard) copy (~240 MB,
+# or ~120 MB without quality) cannot. The routing snapshot the function also
+# takes is reads x shards rows, but ids only (24,000 x ~25 B), which is why
+# snapshotting routing is not a reintroduction of the bug above.
+
+statement ok
+SELECT setseed(0.5);
+
+# One random 20 kb reference. Every read below is an exact 5 kb substring of it,
+# so each read has exactly one primary alignment against every shard.
+statement ok
+CREATE TABLE mem_ref AS
+SELECT 'ref1' AS read_id,
+       string_agg(substr('ACGT', 1 + floor(random() * 4)::INTEGER, 1), '' ORDER BY i) AS sequence1
+FROM range(20000) t(i);
+
+statement ok
+CREATE TABLE mem_reads AS
+SELECT 'read' || i AS read_id,
+       substr((SELECT sequence1 FROM mem_ref), 1 + (i * 37) % 15000, 5000) AS sequence1,
+       list_transform(range(5000), x -> 40::UTINYINT) AS qual1
+FROM range(400) t(i);
+
+# 60 shards, all indexing the same reference, so every (read, shard) pair has a
+# known expected outcome.
+loop i 0 60
+
+statement ok
+SELECT success FROM save_minimap2_index('mem_ref', '__TEST_DIR__/mem_shard_${i}.mmi', preset := 'map-hifi');
+
+endloop
+
+statement ok
+CREATE TABLE mem_read_to_shard AS
+SELECT r.read_id, 'mem_shard_' || s AS shard_name
+FROM mem_reads r, range(60) t(s);
+
+statement ok
+SET temp_directory = '';
+
+# Pin the thread count: max_active_shards is ceil(threads / max_threads_per_shard),
+# so on a many-core runner more shards are resident at once, each with its own
+# read stream and in-flight sub-batches. What this test asserts is that the
+# function does not hold reads x shards — a property of the snapshot, independent
+# of threads — so leaving the concurrency to the host would only make the 64MB
+# budget below pass or fail by core count.
+statement ok
+SET threads = 4;
+
+statement ok
+SET memory_limit = '64MB';
+
+# Every read aligns exactly once to every shard it was routed to: no pair
+# dropped, none duplicated. A count alone would miss a pair lost in one shard
+# and doubled in another, so the distinct (read, shard) pairs are checked too.
+query III
+SELECT count(*), count(DISTINCT (read_id, shard_name)), count(DISTINCT shard_name)
+FROM align_minimap2_sharded('mem_reads',
+    shard_directory := '__TEST_DIR__',
+    read_to_shard := 'mem_read_to_shard',
+    preset := 'map-hifi',
+    max_secondary := 0,
+    include_shard_name := true);
+----
+24000	24000	60
+
+statement ok
+RESET memory_limit;
+
+statement ok
+RESET threads;
+
+statement ok
+RESET temp_directory;
+
+# The per-shard read query must build its hash table on the shard's read_ids,
+# never on the reads. The spill-free run above cannot catch the reverse at this
+# scale (a hash of 400 reads fits), so the plan shape is pinned directly. The
+# SQL below is BuildShardReadsSelect's shape (src/sequence_table_reader.cpp);
+# edit the two together.
+#
+# Routing every read to every shard makes the routing table reads x shards
+# rows, and DuckDB estimates `shard_name = x` at a fraction of that, far more
+# than the reads. That is exactly when a SEMI join is flipped to RIGHT_SEMI,
+# which builds on the reads, sequences included, once per shard:
+
+statement ok
+PRAGMA explain_output = PHYSICAL_ONLY;
+
+query II
+EXPLAIN
+SELECT q.read_id, q.sequence1 FROM mem_reads q
+SEMI JOIN (SELECT read_id FROM mem_read_to_shard WHERE shard_name = 'mem_shard_0') s ON q.read_id = s.read_id;
+----
+physical_plan	<REGEX>:.*RIGHT_SEMI.*
+
+# ...whereas the projected IN is a MARK join, which DuckDB never flips, so the
+# reads stay on the probe side. If this starts failing after a DuckDB upgrade,
+# the per-shard query can hash the whole query set once per shard again.
+query II
+EXPLAIN
+SELECT read_id, sequence1 FROM (
+    SELECT read_id, sequence1,
+           read_id IN (SELECT read_id FROM mem_read_to_shard WHERE shard_name = 'mem_shard_0') AS _miint_in_shard
+    FROM mem_reads)
+WHERE _miint_in_shard;
+----
+physical_plan	<REGEX>:.*Join Type: MARK.*
+
+query II
+EXPLAIN
+SELECT read_id, sequence1 FROM (
+    SELECT read_id, sequence1,
+           read_id IN (SELECT read_id FROM mem_read_to_shard WHERE shard_name = 'mem_shard_0') AS _miint_in_shard
+    FROM mem_reads)
+WHERE _miint_in_shard;
+----
+physical_plan	<!REGEX>:.*RIGHT_SEMI.*
+
+statement ok
+RESET explain_output;

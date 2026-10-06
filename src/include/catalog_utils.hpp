@@ -112,6 +112,14 @@ public:
 		DropHelperTempRelation(conn, quoted_name);
 	}
 
+	// Hand the relation to the caller: it survives this scope. For a function
+	// that builds a TEMP relation and returns it on success but must not leak it
+	// on any of several failure paths — arm the guard, then release it on the one
+	// path that succeeds, instead of repeating the drop before every throw.
+	void Release() {
+		quoted_name.clear(); // DropHelperTempRelation is a no-op on an empty name
+	}
+
 private:
 	Connection &conn;
 	std::string quoted_name;
