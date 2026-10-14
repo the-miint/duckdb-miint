@@ -1,0 +1,253 @@
+# name: test/sql/sc_predict.test
+# description: test sc_predict_classifier / sc_predict_regressor table functions
+# group: [sql]
+
+require miint
+
+require-env HDF5_AVAILABLE
+
+statement ok
+PRAGMA enable_verification;
+
+# The split that matters: train on four samples, predict the held-out two. The
+# two halves have DIFFERENT feature sets, which is the normal case for real
+# data and the reason the model carries its own vocabulary.
+statement ok
+CREATE TABLE p_train_ids AS SELECT unnest(['Sample1','Sample2','Sample3','Sample4']) AS sample_id;
+
+statement ok
+CREATE TABLE p_train AS SELECT * FROM read_biom('data/biom/test.biom') SEMI JOIN p_train_ids USING (sample_id);
+
+statement ok
+CREATE TABLE p_test AS SELECT * FROM read_biom('data/biom/test.biom') ANTI JOIN p_train_ids USING (sample_id);
+
+statement ok
+CREATE TABLE p_meta AS
+  SELECT unnest(['Sample1','Sample2','Sample3','Sample4']) AS sample_id,
+         unnest(['gut','gut','skin','skin']) AS value;
+
+statement ok
+CREATE TABLE p_model AS
+  SELECT * FROM fit_classifier('p_train', 'p_meta', n_estimators := 50, random_state := 1, name := 'm44');
+
+# Train has 5 features, test has 3. Re-deriving an encoding here would build a
+# 3-column matrix and the 5-column model would reject it.
+query II
+SELECT (SELECT count(DISTINCT feature_id) FROM p_train),
+       (SELECT count(DISTINCT feature_id) FROM p_test);
+----
+5	3
+
+query I
+SELECT count(*) FROM predict('p_test', 'p_model');
+----
+2
+
+# Predictions are drawn from the model's training labels, never invented.
+query I
+SELECT bool_and(prediction IN ('gut','skin')) FROM predict('p_test', 'p_model');
+----
+true
+
+# One row per sample in the data, in sorted sample order.
+query I
+SELECT list(sample_id) FROM predict('p_test', 'p_model');
+----
+[Sample5, Sample6]
+
+# Same model, same data, same answer -- prediction reads the tree structure and
+# must be a pure function.
+query I
+SELECT (SELECT list(prediction ORDER BY sample_id) FROM predict('p_test','p_model'))
+     = (SELECT list(prediction ORDER BY sample_id) FROM predict('p_test','p_model'));
+----
+true
+
+# Row order in the source must not change the answer.
+statement ok
+CREATE TABLE p_test_shuffled AS SELECT * FROM p_test ORDER BY hash(feature_id || sample_id);
+
+query I
+SELECT (SELECT list(prediction ORDER BY sample_id) FROM predict('p_test','p_model'))
+     = (SELECT list(prediction ORDER BY sample_id) FROM predict('p_test_shuffled','p_model'));
+----
+true
+
+# --- regression ---
+
+statement ok
+CREATE TABLE p_rmeta AS
+  SELECT unnest(['Sample1','Sample2','Sample3','Sample4','Sample5','Sample6']) AS sample_id,
+         unnest(['1','3','6','9','12','15']) AS value;
+
+statement ok
+CREATE TABLE p_full AS SELECT * FROM read_biom('data/biom/test.biom');
+
+statement ok
+CREATE TABLE p_rmodel AS
+  SELECT * FROM fit_regressor('p_full', 'p_rmeta', n_estimators := 100, random_state := 1, name := 'm45');
+
+query I
+SELECT count(*) FROM predict('p_full', 'p_rmodel');
+----
+6
+
+# Predictions land inside the training range -- a forest averages leaf values
+# and cannot extrapolate past what it saw.
+query I
+SELECT bool_and(prediction BETWEEN 1.0 AND 15.0) FROM predict('p_full', 'p_rmodel');
+----
+true
+
+# --- sample_coverage ---
+
+# Every feature known to the model.
+query I
+SELECT bool_and(sample_coverage = 1.0) FROM predict('p_full', 'p_rmodel');
+----
+true
+
+# Half the cells use features the model never saw: coverage is matched/observed
+# for that sample, so exactly 0.5.
+statement ok
+CREATE TABLE p_mixed AS
+  SELECT sample_id, feature_id, value FROM p_full WHERE sample_id IN ('Sample1','Sample2')
+  UNION ALL
+  SELECT sample_id, 'ALIEN_' || feature_id, value FROM p_full WHERE sample_id IN ('Sample1','Sample2');
+
+query I
+SELECT list(round(sample_coverage, 3) ORDER BY sample_id) FROM predict('p_mixed', 'p_rmodel');
+----
+[0.5, 0.5]
+
+# A sample sharing nothing with the model still gets a row, predicted from an
+# all-zero matrix, with coverage 0.0 saying so. Dropping it would silently
+# shorten the output.
+statement ok
+CREATE TABLE p_partial AS
+  SELECT sample_id, feature_id, value FROM p_full WHERE sample_id = 'Sample1'
+  UNION ALL SELECT 'Stranger', 'NEVER_SEEN', 42.0;
+
+query II
+SELECT sample_id, sample_coverage FROM predict('p_partial', 'p_rmodel') ORDER BY sample_id;
+----
+Sample1	1.0
+Stranger	0.0
+
+# --- errors ---
+
+# No shared vocabulary at all is a different reference database or pipeline,
+# not a borderline case.
+statement ok
+CREATE TABLE p_alien AS SELECT sample_id, 'ALIEN_' || feature_id AS feature_id, value FROM p_full;
+
+statement error
+SELECT * FROM predict('p_alien', 'p_rmodel');
+----
+do not share a feature vocabulary
+
+# One function for both tasks: the prediction column is VARCHAR for a classifier
+# and DOUBLE for a regressor, resolved at bind time from the model's task
+# column. There is no wrong function to call.
+query I
+SELECT count(*) FROM predict('p_full', 'p_model');
+----
+6
+
+# A model relation missing its task column cannot be typed, and says so.
+statement ok
+CREATE TABLE p_blob_only AS SELECT model_blob FROM p_rmodel;
+
+statement error
+SELECT * FROM predict('p_full', 'p_blob_only');
+----
+has no 'task' column
+
+# A data table passed as the model fails at bind, on the task column, before
+# anything is scanned.
+statement error
+SELECT * FROM predict('p_full', 'p_full');
+----
+has no 'task' column
+
+statement error
+SELECT * FROM predict('no_such_table', 'p_rmodel');
+----
+does not match the required COO triplet schema
+
+# NULLs mean a broken join upstream, not zero counts.
+statement ok
+CREATE TABLE p_nulls AS
+  SELECT sample_id, feature_id, CASE WHEN value = 5 THEN NULL ELSE value END AS value FROM p_full;
+
+statement error
+SELECT * FROM predict('p_nulls', 'p_rmodel');
+----
+NULL in data relation
+
+# Non-DOUBLE counts and non-VARCHAR ids are cast, not misread. Reading a
+# vector's buffer directly assumes its physical type; DECIMAL and INTEGER
+# columns would otherwise be decoded as the wrong width.
+statement ok
+CREATE TABLE p_ints AS SELECT sample_id, feature_id, value::INTEGER AS value FROM p_full;
+
+query I
+SELECT count(*) FROM predict('p_ints', 'p_rmodel');
+----
+6
+
+# --- selecting one model out of a registry ---
+#
+# A model table holds many; a call needs one. `name :=` resolves that in the
+# call itself rather than forcing a view to narrow the relation first.
+
+statement ok
+CREATE TABLE reg AS SELECT * FROM fit_classifier('p_train','p_meta', n_estimators := 20, random_state := 1, name := 'site_clf');
+
+statement ok
+INSERT INTO reg SELECT * FROM fit_regressor('p_full','p_rmeta', n_estimators := 40, random_state := 1, name := 'month_reg');
+
+query I
+SELECT count(*) FROM predict('p_test', 'reg', name := 'site_clf');
+----
+2
+
+# The column type is bound from the NAMED model, not the relation -- one table
+# holding both tasks, and each call types itself correctly.
+query I
+SELECT typeof(prediction) FROM predict('p_test', 'reg', name := 'site_clf') LIMIT 1;
+----
+VARCHAR
+
+query I
+SELECT typeof(prediction) FROM predict('p_full', 'reg', name := 'month_reg') LIMIT 1;
+----
+DOUBLE
+
+statement error
+SELECT * FROM predict('p_test', 'reg', name := 'no_such_model');
+----
+No model named 'no_such_model'
+
+statement ok
+INSERT INTO reg SELECT * FROM fit_classifier('p_train','p_meta', n_estimators := 25, random_state := 2, name := 'site_clf');
+
+statement error
+SELECT * FROM predict('p_test', 'reg', name := 'site_clf');
+----
+a name has to identify exactly one
+
+# Without a name the whole relation must resolve to one row, and the message
+# points at the way out.
+statement error
+SELECT * FROM predict('p_test', 'reg');
+----
+so this call is ambiguous
+
+# The name is a value, never SQL. Only the literal comes from the caller and it
+# is escaped, so a quote cannot start a new clause -- which is why `name :=` is
+# safe where a general `where :=` would not be.
+statement error
+SELECT * FROM predict('p_test', 'reg', name := 'site_clf'' OR 1=1 --');
+----
+No model named

@@ -1,0 +1,172 @@
+# name: test/sql/sc_id_types.test
+# description: sc functions accept VARCHAR, BIGINT and UUID ids and return them as the type they came in as
+# group: [sql]
+
+require miint
+
+statement ok
+PRAGMA enable_verification;
+
+# The same 20 x 8 table three times: VARCHAR, BIGINT and UUID ids.
+statement ok
+CREATE TABLE v_counts AS
+  SELECT 'S' || s AS sample_id, 'F' || f AS feature_id, ((s * 7 + f * 3) % 11 + 1)::DOUBLE AS value
+  FROM range(1, 21) t(s), range(1, 9) u(f);
+
+statement ok
+CREATE TABLE b_counts AS
+  SELECT s AS sample_id, f * 1000 AS feature_id, ((s * 7 + f * 3) % 11 + 1)::DOUBLE AS value
+  FROM range(1, 21) t(s), range(1, 9) u(f);
+
+statement ok
+CREATE TABLE u_counts AS
+  SELECT ('00000000-0000-0000-0000-' || lpad(s::VARCHAR, 12, '0'))::UUID AS sample_id,
+         ('11111111-0000-0000-0000-' || lpad(f::VARCHAR, 12, '0'))::UUID AS feature_id,
+         ((s * 7 + f * 3) % 11 + 1)::DOUBLE AS value
+  FROM range(1, 21) t(s), range(1, 9) u(f);
+
+statement ok
+CREATE TABLE b_meta AS SELECT s AS sample_id, CASE WHEN s % 2 = 0 THEN 'a' ELSE 'b' END AS label FROM range(1, 21) t(s);
+
+statement ok
+CREATE TABLE v_meta AS SELECT 'S' || sample_id AS sample_id, label FROM b_meta;
+
+statement ok
+CREATE TABLE u_meta AS
+  SELECT ('00000000-0000-0000-0000-' || lpad(sample_id::VARCHAR, 12, '0'))::UUID AS sample_id, label FROM b_meta;
+
+statement ok
+CREATE TABLE models AS
+  SELECT * FROM fit_classifier('v_counts', 'v_meta', n_estimators := 10, random_state := 1, name := 'v')
+  UNION ALL
+  SELECT * FROM fit_classifier('b_counts', 'b_meta', n_estimators := 10, random_state := 1, name := 'b')
+  UNION ALL
+  SELECT * FROM fit_classifier('u_counts', 'u_meta', n_estimators := 10, random_state := 1, name := 'u');
+
+# The fit records what feature_id type applying the model will require.
+query II
+SELECT name, feature_id_type FROM models ORDER BY name;
+----
+b	BIGINT
+u	UUID
+v	VARCHAR
+
+# ---- ids come back as the type they went in as ----------------------------------
+
+query II
+SELECT DISTINCT typeof(sample_id), count(*) OVER () FROM predict('b_counts', 'models', name := 'b');
+----
+BIGINT	20
+
+query I
+SELECT DISTINCT typeof(sample_id) FROM predict_proba('b_counts', 'models', name := 'b');
+----
+BIGINT
+
+query II
+SELECT DISTINCT typeof(sample_id), typeof(feature_id) FROM shap('b_counts', 'models', name := 'b');
+----
+BIGINT	BIGINT
+
+query II
+SELECT DISTINCT typeof(sample_id), typeof(feature_id) FROM shap('u_counts', 'models', name := 'u');
+----
+UUID	UUID
+
+query I
+SELECT DISTINCT typeof(sample_id) FROM cross_validate_classifier('u_counts', 'u_meta', n_folds := 2, n_estimators := 5);
+----
+UUID
+
+query I
+SELECT DISTINCT typeof(feature_id) FROM model_features('models', name := 'b');
+----
+BIGINT
+
+query I
+SELECT DISTINCT typeof(feature_id) FROM feature_importances('models', name := 'u');
+----
+UUID
+
+# The round trip is exact: every returned id joins back to the input natively.
+query I
+SELECT count(*) FROM shap('b_counts', 'models', name := 'b') s
+  WHERE s.sample_id NOT IN (SELECT sample_id FROM b_counts)
+     OR s.feature_id NOT IN (SELECT feature_id FROM b_counts);
+----
+0
+
+query I
+SELECT count(*) FROM predict('u_counts', 'models', name := 'u') p SEMI JOIN u_meta USING (sample_id);
+----
+20
+
+# sample_id follows the data, not the model: a model has no sample ids of its own.
+statement ok
+CREATE VIEW b_text_samples AS SELECT sample_id::VARCHAR AS sample_id, feature_id, value FROM b_counts;
+
+query I
+SELECT DISTINCT typeof(sample_id) FROM predict('b_text_samples', 'models', name := 'b');
+----
+VARCHAR
+
+# ---- feature_id must match the model's type exactly ---------------------------
+
+statement ok
+CREATE VIEW b_text_features AS SELECT sample_id, feature_id::VARCHAR AS feature_id, value FROM b_counts;
+
+statement error
+SELECT * FROM shap('b_text_features', 'models', name := 'b');
+----
+shap: model 'b' was trained on feature_id BIGINT, but 'b_text_features' field feature_id has VARCHAR. Cast it first: CREATE VIEW v AS SELECT sample_id, feature_id::BIGINT AS feature_id, value FROM b_text_features;
+
+statement error
+SELECT * FROM predict('b_text_features', 'models', name := 'b');
+----
+predict: model 'b' was trained on feature_id BIGINT, but 'b_text_features' field feature_id has VARCHAR
+
+statement error
+SELECT * FROM predict_proba('b_text_features', 'models', name := 'b');
+----
+predict_proba: model 'b' was trained on feature_id BIGINT, but 'b_text_features' field feature_id has VARCHAR
+
+# The other direction, and the wording when the relation holds a single unnamed model.
+statement ok
+CREATE TABLE v_model AS SELECT * FROM models WHERE name = 'v';
+
+statement error
+SELECT * FROM predict('b_counts', 'v_model');
+----
+predict: the model in 'v_model' was trained on feature_id VARCHAR, but 'b_counts' field feature_id has BIGINT. Cast it first: CREATE VIEW v AS SELECT sample_id, feature_id::VARCHAR AS feature_id, value FROM b_counts;
+
+# The suggested cast is the fix.
+statement ok
+CREATE VIEW b_recast AS SELECT sample_id, feature_id::BIGINT AS feature_id, value FROM b_text_features;
+
+query I
+SELECT count(*) FROM predict('b_recast', 'models', name := 'b');
+----
+20
+
+# ---- only VARCHAR, BIGINT and UUID ids are accepted ----------------------------
+
+statement ok
+CREATE VIEW i_samples AS SELECT sample_id::INTEGER AS sample_id, feature_id, value FROM b_counts;
+
+statement error
+SELECT * FROM fit_classifier('i_samples', 'b_meta', name := 'i');
+----
+fit: 'i_samples' field sample_id has INTEGER, but ids must be VARCHAR, BIGINT, or UUID. Cast it first: CREATE VIEW v AS SELECT sample_id::BIGINT AS sample_id, feature_id, value FROM i_samples;
+
+statement ok
+CREATE VIEW d_features AS SELECT sample_id, feature_id::DOUBLE AS feature_id, value FROM b_counts;
+
+statement error
+SELECT * FROM predict('d_features', 'models', name := 'b');
+----
+predict: 'd_features' field feature_id has DOUBLE, but ids must be VARCHAR, BIGINT, or UUID. Cast it first: CREATE VIEW v AS SELECT sample_id, feature_id::VARCHAR AS feature_id, value FROM d_features;
+
+statement error
+SELECT * FROM cross_validate_regressor('i_samples', 'b_meta', target_column := 'label');
+----
+cross_validate_regressor: 'i_samples' field sample_id has INTEGER

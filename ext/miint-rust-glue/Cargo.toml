@@ -31,3 +31,8 @@ rype-fastx = ["rype/fastx"]
 # entry points from both crates (rype's classify + sylph_profile).
 rype  = { path = "../rype",  default-features = false, features = ["arrow-ffi"] }
 sylph = { path = "../sylph", default-features = false, features = ["arrow-ffi"], optional = true }
+# sc-capi is the sc_* C-API (opaque handles + Arrow C Data Interface I/O). It
+# pulls sc-arrow and sc-core transitively. Its build.rs regenerates
+# ext/sc/include/sc.h via cbindgen on every build, so the header the C++ side
+# includes can never drift from the linked symbols.
+sc-capi = { path = "../sc/crates/sc-capi" }
