@@ -259,6 +259,7 @@ unique_ptr<FunctionData> ReadENASequencesTableFunction::Bind(ClientContext &cont
 					if (!key_path.empty()) {
 						data->use_aspera = true;
 						data->aspera_config = miint::AsperaUtils::BuildConfig(ascp_path, key_path);
+						data->aspera_config.fall_back_to_http = download_method == "auto";
 					}
 				}
 			}
@@ -315,14 +316,32 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 	// the PerRunReader; the GlobalState holds only the run metadata + counters.
 	auto make_reader = [&](size_t idx) {
 		const miint::AsperaConfig *cfg = nullptr;
+		std::atomic<bool> *fell_back = nullptr;
 #if MIINT_ASPERA_SUPPORTED
 		if (global_state.use_aspera) {
 			cfg = &global_state.aspera_config;
+			fell_back = &global_state.aspera_fell_back;
 		}
 #endif
 		return std::make_unique<miint::PerRunReader>(global_state.fs, global_state.runs[idx], global_state.use_aspera,
 		                                             global_state.trim, bind_data.verify_md5, global_state.open_mutex,
-		                                             cfg, bind_data.max_sequences, &context);
+		                                             cfg, bind_data.max_sequences, &context, fell_back);
+	};
+
+	// Records a failed run as skipped, with the first such error, and completes
+	// it. The release on runs_completed publishes the push_back to the summary
+	// thread's acquire load (see the all_claimed branch).
+	auto skip_run = [&](const miint::ENARunInfo &run, const std::exception &error) {
+		{
+			lock_guard<mutex> skip_guard(global_state.skipped_lock);
+			global_state.skipped_runs.push_back(run.run_accession);
+			if (global_state.first_skip_error.empty()) {
+				global_state.first_skip_error = ErrorData(error).RawMessage();
+			}
+		}
+		global_state.bytes_completed.fetch_add(run.total_bytes, std::memory_order_relaxed);
+		global_state.runs_completed.fetch_add(1, std::memory_order_release);
+		local_state.has_run = false;
 	};
 
 	miint::SequenceRecordBatch batch;
@@ -350,8 +369,8 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 				// on one of those would append to skipped_runs *after* this thread
 				// snapshotted the list — producing a stale summary followed by an
 				// orphan per-run warning. The acquire load pairs with the release
-				// fetch_add on runs_completed in the failure paths below; once we
-				// observe total_runs, all skipped_runs.push_back's are visible.
+				// fetch_add on runs_completed in skip_run above; once we observe
+				// total_runs, all skipped_runs.push_back's are visible.
 				//
 				// Workers that lose this check just return empty; the worker that
 				// posts the final fetch_add will be the one to come back through
@@ -363,15 +382,23 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 					// establishing a skipped_lock → LogManager::lock ordering
 					// that future code could deadlock against.
 					std::string msg;
+					bool every_run_failed = false;
 					{
 						lock_guard<mutex> skip_guard(global_state.skipped_lock);
-						if (!global_state.skipped_runs.empty()) {
-							msg = "read_ena_sequences: WARNING: " + std::to_string(global_state.skipped_runs.size()) +
+						const auto &skipped = global_state.skipped_runs;
+						every_run_failed = miint::EveryRunFailed(skipped.size(), global_state.total_runs);
+						if (every_run_failed) {
+							msg = miint::BuildEveryRunFailedMessage(skipped, global_state.first_skip_error);
+						} else if (!skipped.empty()) {
+							msg = "read_ena_sequences: WARNING: " + std::to_string(skipped.size()) +
 							      " run(s) skipped due to download errors:";
-							for (const auto &acc : global_state.skipped_runs) {
+							for (const auto &acc : skipped) {
 								msg += " " + acc;
 							}
 						}
+					}
+					if (every_run_failed) {
+						throw IOException(msg);
 					}
 					if (!msg.empty()) {
 						miint::EmitWarning(context, msg);
@@ -381,7 +408,8 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 				return;
 			}
 
-			// Open reader — retry once on failure before skipping.
+			// Open reader — retry once on failure, then skip the run, or raise in a
+			// single-run scan (ShouldSkipFailedRun).
 			// On retry, destroy the partially-initialized reader (its dtor runs
 			// any teardown) and recreate from scratch. Reset the run's
 			// sequence counter so the retry starts numbering from 1.
@@ -398,18 +426,13 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 					global_state.readers[local_state.current_run_idx] = make_reader(local_state.current_run_idx);
 					global_state.readers[local_state.current_run_idx]->Open();
 				} catch (const std::exception &e2) {
+					global_state.readers[local_state.current_run_idx].reset();
+					if (!miint::ShouldSkipFailedRun(global_state.total_runs)) {
+						throw;
+					}
 					miint::EmitWarning(context, "read_ena_sequences: warning: run '%s' failed on retry (%s), skipping",
 					                   run.run_accession, e2.what());
-					global_state.readers[local_state.current_run_idx].reset();
-					{
-						lock_guard<mutex> skip_guard(global_state.skipped_lock);
-						global_state.skipped_runs.push_back(run.run_accession);
-					}
-					global_state.bytes_completed.fetch_add(run.total_bytes, std::memory_order_relaxed);
-					// release: publishes skipped_runs.push_back above to the summary
-					// thread's acquire load on runs_completed (see all_claimed branch).
-					global_state.runs_completed.fetch_add(1, std::memory_order_release);
-					local_state.has_run = false;
+					skip_run(run, e2);
 					continue;
 				}
 			}
@@ -442,15 +465,7 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 			                   "(%s); skipping remainder — downstream sees partial data for this run",
 			                   run.run_accession, static_cast<unsigned long long>(emitted), e.what());
 			global_state.readers[current_run_idx].reset();
-			{
-				lock_guard<mutex> skip_guard(global_state.skipped_lock);
-				global_state.skipped_runs.push_back(run.run_accession);
-			}
-			global_state.bytes_completed.fetch_add(run.total_bytes, std::memory_order_relaxed);
-			// release: publishes skipped_runs.push_back above to the summary
-			// thread's acquire load on runs_completed (see all_claimed branch).
-			global_state.runs_completed.fetch_add(1, std::memory_order_release);
-			local_state.has_run = false;
+			skip_run(run, e);
 			continue;
 		}
 
@@ -463,16 +478,9 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 				reader.Finish();
 			} catch (const std::exception &e) {
 				global_state.readers[current_run_idx].reset();
-				// A single-run scan still throws: nothing else to discard, and a
-				// downstream that resolves a scalar accession one run per call
-				// relies on the error. A multi-run scan (varchar[] of accessions,
-				// or a project accession expanded to many runs) must NOT let one
-				// corrupt run abort the whole scan and throw away every sibling
-				// already downloaded -- skip it with a loud warning, like the
-				// open-failure and mid-stream branches, and let the rest land.
 				// The skipped run's rows were already emitted by true EOF; the
 				// warning + skipped_runs summary flag them as unverified.
-				if (!miint::ShouldSkipRunIntegrityFailure(global_state.total_runs)) {
+				if (!miint::ShouldSkipFailedRun(global_state.total_runs)) {
 					throw;
 				}
 				auto &run = global_state.runs[current_run_idx];
@@ -480,15 +488,7 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 				                   "read_ena_sequences: WARNING: run '%s' failed integrity verification at "
 				                   "completion (%s); skipping — its already-emitted rows are unverified",
 				                   run.run_accession, e.what());
-				{
-					lock_guard<mutex> skip_guard(global_state.skipped_lock);
-					global_state.skipped_runs.push_back(run.run_accession);
-				}
-				global_state.bytes_completed.fetch_add(run.total_bytes, std::memory_order_relaxed);
-				// release: publishes skipped_runs.push_back above to the summary
-				// thread's acquire load on runs_completed (see all_claimed branch).
-				global_state.runs_completed.fetch_add(1, std::memory_order_release);
-				local_state.has_run = false;
+				skip_run(run, e);
 				continue;
 			}
 			global_state.readers[current_run_idx].reset();
@@ -501,9 +501,8 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 		break;
 	}
 
-	const auto &run = global_state.runs[current_run_idx];
 	auto &seq_counter = global_state.run_sequence_counters[current_run_idx];
-	FillOutputFromBatch(output, batch, bind_data, run, seq_counter);
+	FillOutputFromBatch(output, batch, bind_data, *global_state.readers[current_run_idx], seq_counter);
 }
 
 // ---- FillOutputFromBatch (shared by Execute + ExecuteInOut) ----
@@ -513,8 +512,9 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 // LocalState for in-out runs), so we take it by reference and post-increment
 // one id per row.
 void ReadENASequencesTableFunction::FillOutputFromBatch(DataChunk &output, const miint::SequenceRecordBatch &batch,
-                                                        const Data &bind_data, const miint::ENARunInfo &run,
+                                                        const Data &bind_data, const miint::PerRunReader &reader,
                                                         uint64_t &seq_counter) {
+	const auto &run = reader.Run();
 	idx_t count = batch.size();
 	idx_t field_idx = 0;
 
@@ -566,7 +566,7 @@ void ReadENASequencesTableFunction::FillOutputFromBatch(DataChunk &output, const
 		std::string filepath;
 		if (run.format == miint::ENASequenceFormat::SFF) {
 			filepath = run.sff_url;
-		} else if (bind_data.use_aspera && !run.aspera_paths.empty()) {
+		} else if (reader.UsesAspera() && !run.aspera_paths.empty()) {
 			filepath = run.aspera_paths[0].host + ":" + run.aspera_paths[0].remote_path;
 			for (size_t u = 1; u < run.aspera_paths.size(); u++) {
 				filepath += ";" + run.aspera_paths[u].host + ":" + run.aspera_paths[u].remote_path;
@@ -585,9 +585,10 @@ void ReadENASequencesTableFunction::FillOutputFromBatch(DataChunk &output, const
 
 // ---- ExecuteInOut ----
 //
-// State machine for the lateral / in-out path. Mirrors the literal path's
-// retry policy (Execute): one-shot retry on open failure, one-shot retry on
-// mid-stream read failure, skip-with-warning on second failure. Returning
+// State machine for the lateral / in-out path: one retry on an open failure,
+// then a skip with a warning; a mid-stream read failure skips the rest of the
+// run at once. Unlike the literal path (Execute), it skips a run even when it is
+// the only one, and does not raise when every run fails. Returning
 // `HAVE_MORE_OUTPUT` with cardinality=0 is safe because internal state
 // (current_reader reset, pending_runs popped, lateral_sequence_counter reset)
 // advances between callbacks — the dispatcher loops until state progresses to
@@ -771,7 +772,7 @@ OperatorResultType ReadENASequencesTableFunction::ExecuteInOut(ExecutionContext 
 	}
 
 	// Phase 4: emit the batch.
-	FillOutputFromBatch(output, batch, bind_data, local.current_reader->Run(), local.lateral_sequence_counter);
+	FillOutputFromBatch(output, batch, bind_data, *local.current_reader, local.lateral_sequence_counter);
 	return OperatorResultType::HAVE_MORE_OUTPUT;
 }
 

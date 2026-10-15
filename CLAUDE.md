@@ -123,9 +123,11 @@ If a test produces an **incorrect expected value**: DO NOT change the expected v
 ```bash
 bash run_tests.sh                                                 # all SQL tests
 ./build/release/extension/miint/tests                             # C++ unit tests
+export DUCKDB_TEST_CONFIG=$PWD/test/configs/no_skipped_errors.json  # as run_tests.sh does
 ./build/release/test/unittest "test/sql/read_alignments.test"     # single SQL test
 ./build/release/test/unittest "[alignment]"                       # tests matching a pattern
 ```
+Without `DUCKDB_TEST_CONFIG`, `unittest` skips a test whose error contains "HTTP" or "Unable to connect" instead of failing it. A `require httpfs` file always skips under plain `unittest`; `docs/testing.md`, "Guards and skipped tests", gives the command that runs one.
 
 ### Python CLI smoke tests
 ```bash
@@ -142,11 +144,14 @@ SQL tests use `require-env VAR_NAME` (after `require miint`) to skip gracefully 
 `run_tests.sh` is the authoritative source for what gets detected and exported. It covers these kinds of guards:
 - **Runtime binaries** detected via `command -v` (e.g., `ASPERA_AVAILABLE`, `MASSQL_PYTHON_AVAILABLE`, `GPL_BOUNDARY_AVAILABLE` for the FastTree process-isolation host)
 - **Compile-time features** detected by querying the built extension (e.g., `HDF5_AVAILABLE`, `VSEARCH_AVAILABLE`, `MAFFT_AVAILABLE` — each checks for a registered function or library entry)
+- **Live network services**, exported when a probe gets an answer (e.g., `ENA_AVAILABLE`, `NCBI_AVAILABLE`, `MIINT_TAXDUMP_REMOTE`). `BLAST_LIVE_AVAILABLE` is also opt-in (`MIINT_BLAST_LIVE_TEST=1`), because NCBI's queue can outlast the run.
 - **Downloaded / served test data** (e.g., `MIINT_HTTPS_TEST_URL`, `MASSQL_TEST_DATA`, `MASSQL_GNPS_DATA`, `MZXML_REAL_DATA`)
 - **An oracle pinned to a submodule commit** (`SORTMERNA_REAL_ORACLE`) — exported only when the `ext/sortmerna` commit recorded with the committed oracle matches the submodule's HEAD; regenerate with `MIINT_SORTMERNA_REAL_DATA=1`. Every other committed golden fails its parity test when stale instead of skipping (`docs/testing.md`, "Guards and skipped tests").
 - **Process state the main pass cannot provide** (currently `MIINT_LOW_FD_TEST`, guarding `test/sql/read_fastx_fd_release.test`) — not an availability check. `make test` has no way to set `RLIMIT_NOFILE`, so the file opts out of that pass and `run_tests.sh` reruns it in a subshell with the limit lowered. Reach for this only when the test needs process state, never to work around missing data.
 
 When adding a new guard: detect in `run_tests.sh`, add `require-env` to the test file(s), and leave availability-check tests (that only verify the scalar/feature-flag query itself) unguarded so they always run.
+
+The httpfs pass in `run_tests.sh` fails when a file skips on a guard missing from its `HTTPFS_ALLOWED_SKIPS`. A new guard on a `require httpfs` file for something a machine can lack (a service, credentials, a binary, an optional library) goes on that list; a guard on something `run_tests.sh` itself provides, such as a mock server's URL, does not.
 
 ## Reviewing a branch
 

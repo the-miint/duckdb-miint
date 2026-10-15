@@ -319,7 +319,8 @@ These are invoked via `fork`/`exec` at runtime; the extension links no code for 
 - Detected at runtime via `which ascp`; not required at build time
 - SSH key auto-discovered at `~/.aspera/connect/etc/`, `$CONDA_PREFIX/etc/`, or downloaded from GitHub on demand
 - Uses `stdio://` and `stdio-tar://` protocols to stream directly to stdout (confirmed working with ENA FASP servers)
-- `read_ena_fastx` with `download_method='auto'` falls back to HTTP transparently when `ascp` isn't available
+- The child is started so that a rejected key fails instead of hanging on a password prompt: `-q`, a new session, stdin on `/dev/null`, and stderr captured for the error message (the reasons are in `AsperaProcess`'s constructor, `src/aspera_stream.cpp`). In its own session, `ascp` is out of DuckDB's process group, so a signal sent to the group (Ctrl-C, `kill %1`) does not reach it; the reader's destructor stops it, and on Linux so does `PR_SET_PDEATHSIG`.
+- `read_ena_sequences` with `download_method='auto'` reads over HTTP when `ascp` isn't on `PATH` or no key is found. When `ascp` starts but exits before sending any data (a rejected key, an unreachable host), it warns and reads over HTTP, and the scan's later runs skip `ascp`; `'aspera'` raises with `ascp`'s message. EBI rejected the public `asperaweb_id_dsa` key when this was written ([#311](https://github.com/the-miint/duckdb-miint/issues/311)).
 
 ## 5. Vendored Source (compiled inline)
 

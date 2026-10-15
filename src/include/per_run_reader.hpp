@@ -9,6 +9,7 @@
 #include "stream_md5.hpp"
 #include "duckdb/common/file_system.hpp"
 
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -51,9 +52,12 @@ public:
 	// this way (SFF concatenates before hashing is possible in this path;
 	// Aspera never wires a tap) and get a loud warning instead of silent
 	// skip when verify_md5 is requested for them.
+	// `aspera_fell_back`: optional, shared by every reader of one scan. A run
+	// that cannot start ascp under fall_back_to_http sets it, and later runs
+	// then go straight to HTTP instead of starting ascp and warning again.
 	PerRunReader(duckdb::FileSystem &fs, ENARunInfo run, bool use_aspera, bool trim, bool verify_md5,
 	             std::mutex &open_mutex, const AsperaConfig *aspera_config, uint64_t max_sequences = 0,
-	             duckdb::ClientContext *log_context = nullptr);
+	             duckdb::ClientContext *log_context = nullptr, std::atomic<bool> *aspera_fell_back = nullptr);
 	~PerRunReader();
 
 	PerRunReader(const PerRunReader &) = delete;
@@ -80,6 +84,12 @@ public:
 		return run_;
 	}
 
+	// Whether this run's data comes over Aspera. After Open(), false when it
+	// fell back to HTTP.
+	bool UsesAspera() const {
+		return use_aspera_;
+	}
+
 private:
 	duckdb::FileSystem &fs_;
 	ENARunInfo run_;
@@ -87,7 +97,7 @@ private:
 	bool trim_;
 	bool verify_md5_;
 	std::mutex &open_mutex_;
-	const AsperaConfig *aspera_config_; // nullable; non-null only when use_aspera_ is true
+	const AsperaConfig *aspera_config_; // nullable; non-null when the scan uses Aspera, even after a fallback
 
 	std::unique_ptr<SequenceReader> fastx_reader_;
 	std::unique_ptr<SFFReader> sff_reader_;
@@ -105,6 +115,7 @@ private:
 	uint64_t max_sequences_ = 0; // 0 = unlimited
 	uint64_t sequences_emitted_ = 0;
 	duckdb::ClientContext *log_context_ = nullptr;
+	std::atomic<bool> *aspera_fell_back_ = nullptr;
 
 	// Set ONLY when ReadBatch's natural-EOF branch fires (the underlying
 	// reader ran out of records on its own), never when max_sequences_ caps
@@ -123,15 +134,19 @@ private:
 
 	void OpenHTTP();
 	void OpenSFF();
+	// A user-facing warning: to miint_warnings() when log_context_ is set, else
+	// to stderr.
+	void Warn(const std::string &msg);
 	// Emits a loud (never silent) warning that md5 verification was requested
-	// but is not being performed for this run's transport, via miint_warnings()
-	// when log_context_ is set, else stderr.
+	// but is not being performed for this run's transport.
 	void WarnMd5Skipped(const std::string &reason);
 	// See definition (per_run_reader.cpp) for the conditions under which this
 	// returns non-null.
 	std::shared_ptr<miint::StreamMd5> MakeMd5Tap(size_t file_idx, std::shared_ptr<miint::StreamMd5> *slot);
 #if MIINT_ASPERA_SUPPORTED
-	void OpenAspera();
+	// Returns a non-empty message, and opens nothing, when ascp exits before
+	// sending any data; throws on every other failure.
+	std::string OpenAspera();
 #endif
 };
 

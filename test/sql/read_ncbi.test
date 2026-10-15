@@ -9,7 +9,9 @@ require httpfs
 
 require miint
 
-# httpfs is auto-loaded by the miint extension
+# Skip when NCBI is not reachable (offline CI, blocked network).
+# run_tests.sh probes and exports this; unset → skip the whole file.
+require-env NCBI_AVAILABLE
 
 # Test error: empty accession
 statement error

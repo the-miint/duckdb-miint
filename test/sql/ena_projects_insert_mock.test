@@ -7,10 +7,8 @@ require miint
 require-env ENA_WEBIN_MOCK_URL
 
 # httpfs implements POST in DuckDB; the built-in HTTP client supports only GET.
-# `require httpfs` skips silently when the extension isn't pre-installed in the
-# test harness. CI builds with extension auto-install enabled run this; local
-# runs without httpfs cached are skipped (the Catch2 + attach tests still cover
-# the pure-data and StorageExtension code paths).
+# `make test` skips this file because httpfs is not linked into unittest;
+# run_tests.sh runs it in its httpfs pass.
 require httpfs
 
 statement ok

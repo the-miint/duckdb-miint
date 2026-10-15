@@ -66,10 +66,9 @@ public:
 	static constexpr const char *BROWSER_BASE = "https://www.ebi.ac.uk/ena/browser/api";
 };
 
-// Percent-encode a string for use as the value of a URL query parameter.
-// Encodes everything outside the RFC 3986 unreserved set (alnum + `-._~`).
-// Used by ena_attributes_filter (ENA portal /search query=) and
-// ena_alias_check (alias collision IN-list).
+// Percent-encode a value spliced into an ENA URL, as a query parameter value
+// or a path segment. Encodes every byte outside the RFC 3986 unreserved set
+// (alnum + `-._~`).
 std::string PercentEncodeQueryValue(const std::string &s);
 
 } // namespace miint

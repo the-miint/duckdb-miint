@@ -166,16 +166,34 @@ TEST_CASE("ENARunInfoExtractor degrades to empty fastq_md5 on a count mismatch r
 	CHECK(runs[0].fastq_md5.empty());
 }
 
-TEST_CASE("ShouldSkipRunIntegrityFailure skips a corrupt run only when siblings exist", "[ena_md5]") {
-	// A run's md5 mismatch (or bad ascp exit) at completion must not abort a
-	// multi-run scan and discard every sibling already downloaded -- the
+TEST_CASE("ShouldSkipFailedRun skips a failed run only when siblings exist", "[ena_md5]") {
+	// A run that fails to open (after its retry), or fails its md5 or ascp exit
+	// check at completion, must not abort a multi-run scan and discard every
+	// sibling already downloaded -- the
 	// varchar[] / project-accession case that would otherwise make bulk fetches
 	// unusable. A single-run scan keeps the hard throw: no sibling to protect,
 	// and a downstream that resolves a scalar accession one run per call (the
 	// Qiita ENA ingest job) relies on that error to fail the run.
-	CHECK_FALSE(miint::ShouldSkipRunIntegrityFailure(1)); // scalar / single run -> throw
-	CHECK(miint::ShouldSkipRunIntegrityFailure(2));       // varchar[] siblings -> skip the bad one
-	CHECK(miint::ShouldSkipRunIntegrityFailure(100));     // project expansion -> skip the bad one
+	CHECK_FALSE(miint::ShouldSkipFailedRun(1)); // scalar / single run -> throw
+	CHECK(miint::ShouldSkipFailedRun(2));       // varchar[] siblings -> skip the bad one
+	CHECK(miint::ShouldSkipFailedRun(100));     // project expansion -> skip the bad one
+}
+
+TEST_CASE("EveryRunFailed holds only when every run of the scan was skipped", "[ena_md5]") {
+	CHECK(miint::EveryRunFailed(1, 1));
+	CHECK(miint::EveryRunFailed(3, 3));
+	// A sibling's rows landed, so the scan returns them with a warning.
+	CHECK_FALSE(miint::EveryRunFailed(2, 3));
+	// A scan of no runs failed nothing.
+	CHECK_FALSE(miint::EveryRunFailed(0, 0));
+	CHECK_FALSE(miint::EveryRunFailed(0, 2));
+}
+
+TEST_CASE("BuildEveryRunFailedMessage names each run and the first failure", "[ena_md5]") {
+	// The order is the order the runs failed in, which parallel workers decide.
+	CHECK(miint::BuildEveryRunFailedMessage({"ERR2", "ERR1"}, "read_ena_sequences: ascp exited with code 1") ==
+	      "read_ena_sequences: every run failed (2): ERR2 ERR1; first error: read_ena_sequences: ascp exited with "
+	      "code 1");
 }
 
 TEST_CASE("BuildMd5MismatchMessage names the label and attributes each digest", "[ena_md5]") {

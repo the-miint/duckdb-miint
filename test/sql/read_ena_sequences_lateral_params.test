@@ -1,0 +1,27 @@
+# name: test/sql/read_ena_sequences_lateral_params.test
+# description: A LATERAL read_ena_sequences call cannot take named parameters
+# group: [sql]
+
+# DuckDB does not extract named parameters for an in-out table function called
+# with a column argument, so in a LATERAL call no syntax sets max_sequences or
+# any other parameter; docs/insdc_ena.md ("Lateral invocation") bounds each run
+# with LIMIT inside the subquery instead. Both errors come from DuckDB's binder,
+# before read_ena_sequences binds or sends a request, so this file needs no
+# network and no httpfs. If DuckDB starts accepting either form, it fails, and
+# the limit described in docs/insdc_ena.md has to be revisited.
+
+require miint
+
+statement error
+SELECT COUNT(*)
+FROM (VALUES ('ERR1074767')) AS r(run_accession),
+     LATERAL (SELECT 1 FROM read_ena_sequences(r.run_accession, max_sequences => 5)) seq;
+----
+No function matches the given name and argument types 'read_ena_sequences(VARCHAR, INTEGER)'
+
+statement error
+SELECT COUNT(*)
+FROM (VALUES ('ERR1074767')) AS r(run_accession),
+     LATERAL (SELECT 1 FROM read_ena_sequences(r.run_accession, max_sequences = 5)) seq;
+----
+Referenced column "max_sequences" not found in FROM clause

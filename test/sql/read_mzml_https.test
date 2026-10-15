@@ -2,8 +2,8 @@
 # description: Test read_mzml from HTTP URL
 # group: [sql]
 
-# NOTE: Skipped in CI because httpfs is disabled at build time.
-# Active coverage is in test/shell/read_https.sh (uses LOAD httpfs at runtime).
+# `make test` skips this file because httpfs is not linked into unittest;
+# run_tests.sh runs it in its httpfs pass.
 
 require miint
 
@@ -13,15 +13,15 @@ require-env MIINT_HTTPS_TEST_URL
 
 # mzML via HTTP
 query I
-SELECT COUNT(*) FROM read_mzml(getenv('MIINT_HTTPS_TEST_URL') || '/mzml/basic_3spectra.mzML');
+SELECT COUNT(*) FROM read_mzml('${MIINT_HTTPS_TEST_URL}/mzml/basic_3spectra.mzML');
 ----
 3
 
 # Multiple remote mzML files
 query I
 SELECT COUNT(*) FROM read_mzml([
-    getenv('MIINT_HTTPS_TEST_URL') || '/mzml/basic_3spectra.mzML',
-    getenv('MIINT_HTTPS_TEST_URL') || '/mzml/compressed.mzML'
+    '${MIINT_HTTPS_TEST_URL}/mzml/basic_3spectra.mzML',
+    '${MIINT_HTTPS_TEST_URL}/mzml/compressed.mzML'
 ]);
 ----
 4

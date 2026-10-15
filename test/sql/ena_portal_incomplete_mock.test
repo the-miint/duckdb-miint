@@ -1,0 +1,61 @@
+# name: test/sql/ena_portal_incomplete_mock.test
+# description: A Portal API answer that ENA marks as incomplete is retried, then raised, never read as the result
+# group: [sql]
+
+require miint
+
+require-env ENA_WEBIN_MOCK_URL
+
+require-env MIINT_ENA_PORTAL_URL_BASE
+
+# No `require httpfs`, unlike the other mock tests: every statement here stops
+# at the alias check, a GET the built-in HTTP client serves, before any POST.
+
+# The Portal API sometimes answers a search with HTTP 200, the header row, and
+# an error line where the rows should be. Every ENA metadata GET goes through
+# one retry loop; the pre-INSERT alias check is the Portal search this mock
+# can serve. An alias starting with "INCOMPLETE_" gets that answer from it.
+
+statement ok
+CREATE SECRET test_ena_incomplete_mock (
+    TYPE ENA,
+    USER 'Webin-99999',
+    PASSWORD 'mock-password',
+    ENDPOINT 'test',
+    ENDPOINT_URL '${ENA_WEBIN_MOCK_URL}'
+);
+
+statement ok
+ATTACH '' AS ena (TYPE ENA, SECRET 'test_ena_incomplete_mock');
+
+# One incomplete answer, then the real one, which names the colliding alias.
+# Read as the result, the incomplete answer finds no collision and the
+# projects get submitted. The expected text is the collision error's, because
+# the incomplete-result error quotes the URL, which holds both aliases.
+statement error
+INSERT INTO ena.projects (alias, title, project_type) VALUES
+    ('INCOMPLETE_ONCE_' || (random()*1e9)::INTEGER::VARCHAR, 'answered on retry', 'METAGENOMIC'),
+    ('EXISTS_behind_incomplete', 'colliding project', 'METAGENOMIC');
+----
+alias already exists in submission account: 'EXISTS_behind_incomplete'
+
+# Every answer incomplete: the error says so, after as many attempts as a 5xx
+# gets.
+statement error
+INSERT INTO ena.projects (alias, title, project_type)
+VALUES ('INCOMPLETE_always', 'never answered', 'METAGENOMIC');
+----
+failed after 4 attempts: the last response was incomplete
+
+# Neither INSERT got as far as a submission. Any POST, even one that fails,
+# logs a row.
+query I
+SELECT count(*) FROM ena.submission_log WHERE object_type = 'projects';
+----
+0
+
+statement ok
+DETACH ena;
+
+statement ok
+DROP SECRET test_ena_incomplete_mock;

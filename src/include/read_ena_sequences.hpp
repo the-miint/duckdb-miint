@@ -77,6 +77,12 @@ public:
 	struct GlobalState : public GlobalTableFunctionState {
 		mutex lock;
 		mutex open_mutex; // Serializes file opens to avoid overwhelming remote servers
+#if MIINT_ASPERA_SUPPORTED
+		// The readers point at both, so they come first and outlive the readers.
+		// aspera_fell_back: see PerRunReader's constructor.
+		miint::AsperaConfig aspera_config;
+		std::atomic<bool> aspera_fell_back {false};
+#endif
 		std::vector<std::unique_ptr<miint::PerRunReader>> readers;
 		std::vector<miint::ENARunInfo> runs;
 		size_t next_run_idx;
@@ -91,14 +97,11 @@ public:
 		std::atomic<uint64_t> bytes_completed;
 		uint64_t total_bytes; // Sum across all runs; 0 means fall back to run-count progress
 
-		// Skipped runs (transient failures after retry)
+		// Skipped runs: failed at open after the retry, mid-stream, or at completion
 		mutex skipped_lock;
 		std::vector<std::string> skipped_runs;
+		std::string first_skip_error; // guarded by skipped_lock
 		std::atomic<bool> skipped_warned;
-
-#if MIINT_ASPERA_SUPPORTED
-		miint::AsperaConfig aspera_config;
-#endif
 
 		// Literal path: cap at 8 worker threads. In deferred (in-out) mode, runs
 		// is empty at Bind time so this returns 0 — harmless because DuckDB's
@@ -145,8 +148,9 @@ public:
 	// Shared column-fill helper used by both Execute (literal path) and
 	// ExecuteInOut (lateral path). Takes the sequence counter by reference so
 	// the caller (which owns the counter) can track progress across batches.
+	// `reader` is the run's open reader; filepath names the transport it used.
 	static void FillOutputFromBatch(DataChunk &output, const miint::SequenceRecordBatch &batch, const Data &bind_data,
-	                                const miint::ENARunInfo &run, uint64_t &seq_counter);
+	                                const miint::PerRunReader &reader, uint64_t &seq_counter);
 	static double Progress(ClientContext &context, const FunctionData *bind_data,
 	                       const GlobalTableFunctionState *global_state);
 	static TableFunction GetFunction();

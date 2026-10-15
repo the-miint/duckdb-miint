@@ -2,8 +2,8 @@
 # description: Test read_sequences_sam from HTTP URL
 # group: [sql]
 
-# NOTE: Skipped in CI because httpfs is disabled at build time.
-# Active coverage is in test/shell/read_https.sh (uses LOAD httpfs at runtime).
+# `make test` skips this file because httpfs is not linked into unittest;
+# run_tests.sh runs it in its httpfs pass.
 
 require miint
 
@@ -13,15 +13,15 @@ require-env MIINT_HTTPS_TEST_URL
 
 # uBAM via HTTP
 query I
-SELECT COUNT(*) FROM read_sequences_sam(getenv('MIINT_HTTPS_TEST_URL') || '/sam/ubam_no_sq.sam');
+SELECT COUNT(*) FROM read_sequences_sam('${MIINT_HTTPS_TEST_URL}/sam/ubam_no_sq.sam');
 ----
 3
 
 # Multiple remote files
 query I
 SELECT COUNT(*) FROM read_sequences_sam([
-    getenv('MIINT_HTTPS_TEST_URL') || '/sam/ubam_no_sq.sam',
-    getenv('MIINT_HTTPS_TEST_URL') || '/sam/ubam_no_sq_2.sam'
+    '${MIINT_HTTPS_TEST_URL}/sam/ubam_no_sq.sam',
+    '${MIINT_HTTPS_TEST_URL}/sam/ubam_no_sq_2.sam'
 ]);
 ----
 5

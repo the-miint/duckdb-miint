@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+# Stands in for ascp 4.4.7 when the server rejects the key, as EBI does for the
+# public asperaweb_id_dsa key. ascp then asks for a password: on /dev/tty when
+# it has a controlling terminal, otherwise on stdin, and exits 1 when none
+# comes. The pipe opened first takes the lowest free descriptor, as ascp's
+# connection does, so a parent that closed stdin hands it fd 0 and the prompt
+# waits on a pipe that nothing writes. Like ascp, it also writes its session
+# status to stdout, which is the data stream under stdio://, unless -q is
+# given.
+#
+# MIINT_ASCP_STUB_MODE selects other behaviour:
+#   empty      exit 0 without writing anything.
+#   data       write the gzip of $MIINT_ASCP_STUB_DATA_R1, or of
+#              $MIINT_ASCP_STUB_DATA_R2 for a remote path ending in _2.fastq.gz,
+#              to stdout and exit 0, as a transfer that works does.
+#   truncated  write the first half of that gzip and exit 1, as a transfer that
+#              breaks partway does.
+import gzip
+import os
+import sys
+
+mode = os.environ.get("MIINT_ASCP_STUB_MODE", "")
+if mode == "empty":
+    sys.exit(0)
+if mode in ("data", "truncated"):
+    remote_path = sys.argv[-2]
+    mate = "R2" if remote_path.endswith("_2.fastq.gz") else "R1"
+    with open(os.environ["MIINT_ASCP_STUB_DATA_" + mate], "rb") as f:
+        payload = gzip.compress(f.read())
+    if mode == "truncated":
+        sys.stdout.buffer.write(payload[: len(payload) // 2])
+        sys.exit(1)
+    sys.stdout.buffer.write(payload)
+    sys.exit(0)
+
+os.pipe()
+try:
+    tty = os.open("/dev/tty", os.O_RDWR)
+except OSError:
+    tty = None
+if tty is not None:
+    os.write(tty, b"Password: ")
+    os.read(tty, 1)
+else:
+    sys.stderr.write("Password: ")
+    sys.stderr.flush()
+    os.read(0, 1)
+sys.stderr.write("ascp: failed to authenticate, exiting.\n")
+if "-q" not in sys.argv[1:]:
+    sys.stdout.write("\r\nSession Stop  (Error: failed to authenticate)\n")
+sys.exit(1)

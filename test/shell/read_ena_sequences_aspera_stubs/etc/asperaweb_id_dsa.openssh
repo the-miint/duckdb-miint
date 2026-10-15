@@ -1,0 +1,3 @@
+Placeholder, not a key. Key lookup must find a file here, under
+$CONDA_PREFIX/etc, so the test never downloads the real key; the ascp stub
+never reads it.

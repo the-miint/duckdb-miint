@@ -9,8 +9,8 @@ require-env ENA_WEBIN_MOCK_URL
 require-env MIINT_ENA_PORTAL_URL_BASE
 
 # httpfs implements POST in DuckDB; the built-in HTTP client is GET-only.
-# `require httpfs` skips silently when the extension isn't pre-installed
-# (matches the existing miint pattern in read_ncbi.test).
+# `make test` skips this file because httpfs is not linked into unittest;
+# run_tests.sh runs it in its httpfs pass.
 require httpfs
 
 statement ok

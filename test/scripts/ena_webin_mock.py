@@ -20,7 +20,10 @@ Behavior:
   - On GET to /portal/api/search (Phase 8 alias collision check), parses the
     `query=<kind>_alias IN ("a1","a2",...)` filter and returns a TSV with
     one row per alias starting with the literal prefix "EXISTS_". All other
-    aliases are reported as not present.
+    aliases are reported as not present. An "INCOMPLETE_" alias makes the
+    search answer with the Portal API's in-band failure line instead;
+    "INCOMPLETE_ONCE_" does so only on the first request for that query, for
+    the life of the mock process, so a test needs a fresh alias on every run.
   - On GET to /browser/api/xml/<accession> (Phase 8 checklist registry):
       * "TST000001" -> strict fixture (mandatory + units + CV) for the
         Phase 8 Step 8b validation tests.
@@ -42,6 +45,13 @@ import os
 import re
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+# A stand-in for the line the Portal API returned in place of rows in an HTTP
+# 200 (captured 2026-10-14 with the query's JSON after "Query: "; no trailing
+# newline).
+_PORTAL_INCOMPLETE_LINE = "ERROR occurred. Not all results may have been written.Query: {}"
+# Queries that have already failed once ("INCOMPLETE_ONCE_" aliases).
+_FAILED_ONCE_QUERIES: set[str] = set()
 
 _CHECKLIST_TST000001 = """<?xml version="1.0" encoding="UTF-8"?>
 <CHECKLIST_SET>
@@ -450,11 +460,20 @@ class Handler(BaseHTTPRequestHandler):
                 aliases.append(rhs[1:-1])
         # Only aliases that start with the literal prefix "EXISTS_" are
         # treated as already-present in the submission account. SQL tests
-        # use this convention to drive the collision path without a stateful
-        # mock. (Production users won't see this behaviour because the real
+        # use this convention to drive the collision path; it needs no mock
+        # state. (Production users won't see this behaviour because the real
         # ENA portal API replies with their actual submission history.)
         present = [a for a in aliases if a.startswith("EXISTS_")]
         lines = [fields] + present
+        # An alias starting with "INCOMPLETE_" makes the search fail the way
+        # the real Portal API sometimes does: HTTP 200, the header row, then
+        # its error line where the rows would go. "INCOMPLETE_ONCE_" fails
+        # only the first request for its query, so a retry gets the rows.
+        if any(a.startswith("INCOMPLETE_") for a in aliases):
+            always = any(a.startswith("INCOMPLETE_") and not a.startswith("INCOMPLETE_ONCE_") for a in aliases)
+            if always or query not in _FAILED_ONCE_QUERIES:
+                _FAILED_ONCE_QUERIES.add(query)
+                return fields + "\n" + _PORTAL_INCOMPLETE_LINE
         return "\n".join(lines) + "\n"
 
     def _handle_reports_lookup(self, path: str) -> str | None:

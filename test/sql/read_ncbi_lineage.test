@@ -9,6 +9,10 @@ require httpfs
 
 require miint
 
+# Skip when NCBI is not reachable (offline CI, blocked network).
+# run_tests.sh probes and exports this; unset → skip the whole file.
+require-env NCBI_AVAILABLE
+
 statement ok
 CREATE TEMP TABLE lin AS SELECT * FROM read_ncbi_lineage([9606, 562]);
 

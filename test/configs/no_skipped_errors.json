@@ -1,0 +1,4 @@
+{
+  "description": "Fail on every error. Without skip_error_messages, unittest skips a test whose error contains 'HTTP' or 'Unable to connect'. An empty list does not parse, so the list holds one message that no error contains.",
+  "skip_error_messages": ["miint: no error message is skipped"]
+}

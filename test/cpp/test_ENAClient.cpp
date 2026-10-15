@@ -457,6 +457,21 @@ TEST_CASE("BuildSearchURLBatch starts with portal base", "[ena]") {
 	CHECK(url.find("&limit=0&format=tsv") != std::string::npos);
 }
 
+// ---- PercentEncodeQueryValue ----
+
+TEST_CASE("PercentEncodeQueryValue escapes control characters, quotes, separators and non-ASCII bytes", "[ena]") {
+	// Values come from user-supplied SQL. Spliced into a URL, a value must not
+	// end its own component or start another, so every byte outside the
+	// unreserved set is escaped, including UTF-8 bytes >= 0x80. Unreserved
+	// characters pass through.
+	std::string value = "\r\n\t";
+	value.push_back('\0');
+	value += " &\"";
+	value += "\xC3\xA9"; // UTF-8 for U+00E9
+	value += "a-_.~";
+	CHECK(miint::PercentEncodeQueryValue(value) == "%0D%0A%09%00%20%26%22%C3%A9a-_.~");
+}
+
 // ---- ENAColumnIndexMap ----
 
 TEST_CASE("ENAColumnIndexMap maps column names to indices", "[ena]") {
@@ -1008,4 +1023,27 @@ TEST_CASE("ENAClient IsRetryableStatus: 4xx not retried, 5xx and 429 retried", "
 	CHECK_FALSE(miint::ENAClient::IsRetryableStatus(404));
 	CHECK_FALSE(miint::ENAClient::IsRetryableStatus(415));
 	CHECK_FALSE(miint::ENAClient::IsRetryableStatus(505));
+}
+
+TEST_CASE("ENAClient IsIncompleteResult: the Portal API's failure line in an HTTP 200", "[ena_retry]") {
+	// Captured live from the Portal API on 2026-10-14: the TSV header, then this
+	// line where the rows would go, with no trailing newline.
+	const std::string header = "run_accession\tsample_accession\n";
+	const std::string failure = "ERROR occurred. Not all results may have been written.Query: "
+	                            "{\"bool\":{\"must\":[{\"terms\":{\"run_accession\":[\"ERR1074767\"]}}]}}";
+
+	// Read as rows, this is "no such accession".
+	CHECK(miint::ENAClient::IsIncompleteResult(header + failure));
+	// Read as rows, this is a short result that looks complete.
+	CHECK(miint::ENAClient::IsIncompleteResult(header + "ERR1074767\tSAMEA3687211\n" + failure));
+	CHECK(miint::ENAClient::IsIncompleteResult("run_accession\r\nERR1074767\r\n" + failure));
+	CHECK(miint::ENAClient::IsIncompleteResult(failure));
+	// A row cut off mid-field, with the failure straight after it.
+	CHECK(miint::ENAClient::IsIncompleteResult(header + "ERR1074767\tSAMEA36" + failure));
+
+	CHECK_FALSE(miint::ENAClient::IsIncompleteResult(""));
+	CHECK_FALSE(miint::ENAClient::IsIncompleteResult(header));
+	CHECK_FALSE(miint::ENAClient::IsIncompleteResult(header + "ERR1074767\tSAMEA3687211\n"));
+	// An ordinary ERROR in a field is data; only ENA's whole sentence counts.
+	CHECK_FALSE(miint::ENAClient::IsIncompleteResult(header + "ERR1074767\tERROR occurred.\n"));
 }

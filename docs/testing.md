@@ -83,12 +83,10 @@ File not found: nonexistent.fastq
 
 `require-env` guards only what a deployment can lack: an optional embedded library, a runtime binary, a network resource or served data. The one other category is process state the `make test` pass cannot set, such as a lowered descriptor limit, which `run_tests.sh` provides in a rerun. `run_tests.sh` decides which guards are exported. A test of this repository's own C++ code is never guarded: an oracle produced by an external tool is committed as a fixture, and a missing or corrupted fixture fails the test. A checksum gate in `run_tests.sh` would turn a corrupted golden into a skip and leave the run green, so a parity test that pins its golden's checksum checks it with an assertion.
 
-A skipped file is not a passing one, and the suite's skip count is part of its result: a run that skips more files than before covers less, whatever its summary line says. `require httpfs` skips whenever the build does not include httpfs, and `extension_config.cmake` does not build it on this DuckDB version. That covers every `require httpfs` file, the ENA submission mock tests among them. Running them takes:
+A skipped file is not a passing one, and the suite's skip count is part of its result: a run that skips more files than before covers less, whatever its summary line says. Two skips are easy to miss:
 
-- `DUCKDB_TEST_AUTOLOADING=all`, so `require httpfs` resolves and `require miint` installs from the build repository;
-- a throwaway `HOME` whose `.duckdb/extensions/<version>/<platform>/` holds httpfs and json, so the install does not conflict with an existing miint and loads resolve offline;
-- `DUCKDB_TEST_ON_INIT='LOAD httpfs;'`, because `require httpfs` under autoloading does not load it, and the ENA client's POST needs httpfs;
-- a freshly built loadable extension (`ninja -C build/release extension/miint/miint.duckdb_extension`) copied over `build/release/repository/<version>/<platform>/miint.duckdb_extension`, since autoloading installs that copy rather than the statically linked one.
+- DuckDB's `unittest` skips a test whose error contains "HTTP" or "Unable to connect" unless its config names other messages. `run_tests.sh` exports `DUCKDB_TEST_CONFIG=test/configs/no_skipped_errors.json`, under which every error fails the test; set it the same way when running `unittest` by hand.
+- `require httpfs` skips whenever the build does not include httpfs, and `extension_config.cmake` does not build it on this DuckDB version, so `make test` skips every `require httpfs` file: the HTTP-reader tests, the ENA mock-server tests and the live ENA and NCBI tests. `run_tests.sh` reruns them after `make test`, in what it calls the httpfs pass, with `DUCKDB_TEST_AUTOLOADING=all`, `DUCKDB_TEST_ON_INIT='LOAD httpfs;'` and `HOME=build/release/httpfs_test_home`, into which it installs httpfs once. Autoloading runs miint from the copy installed in that `HOME`, not the linked one, so the script installs the fresh build there with `FORCE INSTALL` on every run (a file copied over an earlier install does not load, because the install records the build's version). The pass fails when httpfs or miint does not load, when any file in its list matches no test, when a file skips for anything but a `require-env` guard of the kinds above (an optional embedded library, a runtime binary, a network resource) or one on Webin credentials or an opt-in such as `MIINT_BLAST_LIVE_TEST`, or when it outlasts `MIINT_HTTPFS_TIMEOUT_SECONDS` (default 1800), since a stalled transfer otherwise hangs it. Once `run_tests.sh` has set that `HOME` up, one file runs with `HOME=$PWD/build/release/httpfs_test_home DUCKDB_TEST_AUTOLOADING=all DUCKDB_TEST_ON_INIT='LOAD httpfs;' DUCKDB_TEST_CONFIG=$PWD/test/configs/no_skipped_errors.json ./build/release/test/unittest test/sql/<file>.test`; after a rebuild, install it there first with `HOME=$PWD/build/release/httpfs_test_home ./build/release/duckdb -unsigned -c "FORCE INSTALL '$PWD/build/release/extension/miint/miint.duckdb_extension'"`. Several files go in one comma-separated argument: separate arguments join into a single filter that matches nothing, and the run reports "No tests ran" with exit status 0.
 
 ## C++ Unit Tests
 
@@ -176,6 +174,8 @@ bash test/shell/read_alignments_stdin.sh
 # All tests (SQL, C++, and shell)
 bash run_tests.sh
 ```
+
+A script that loads httpfs (`read_https.sh`, `read_ena_sequences_aspera.sh`) skips itself when the shell cannot load it, as on any machine with no httpfs under `~/.duckdb`, CI included. `run_tests.sh` runs such a script with the httpfs pass's `HOME=build/release/httpfs_test_home`, where the shell has already loaded httpfs, and picks such scripts by the text `load httpfs`, matched case-insensitively. By hand, run one with `HOME=$PWD/build/release/httpfs_test_home` once `run_tests.sh` has set that `HOME` up.
 
 **Test file structure:**
 Shell tests use simple bash scripts with conditional logic and exit codes:

@@ -78,14 +78,5 @@ FROM runs AS r,
 ----
 physical_plan	<REGEX>:(?i).*INOUT.FUNCTION.*
 
-# ---- max_sequences respected per-run in lateral mode ----
-
 statement ok
 RESET explain_output;
-
-query I
-SELECT COUNT(*) <= 5
-FROM (VALUES ('ERR1074767')) AS r(run_accession),
-     LATERAL (SELECT 1 FROM read_ena_sequences(r.run_accession, max_sequences=5)) seq;
-----
-true

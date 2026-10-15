@@ -41,6 +41,18 @@ public:
 	// Wait for child process and return exit code. -1 on signal death.
 	int WaitForExit();
 
+	// Block until the child sends its first byte or closes its stdout. Returns
+	// false when stdout closed before any data, which is how ascp fails to start
+	// a transfer (a rejected key, an unreachable host); WaitForExit then gives its
+	// exit code and StderrText its message. The byte read here is returned by the
+	// next read.
+	bool AwaitData();
+
+	// The last 4 KiB the child wrote to stderr, after "[...] " when cut, with each
+	// run of whitespace collapsed to one space. Empty when nothing was written or
+	// the capture file could not be made.
+	std::string StderrText() const;
+
 	// Check if the process is using stdio-tar:// (multiple files) vs stdio:// (single).
 	bool IsTarMode() const {
 		return tar_mode_;
@@ -54,6 +66,14 @@ private:
 	bool first_file_read_;       // has NextFile() been called yet?
 	bool pipe_eof_;              // pipe reached EOF
 	std::string file_list_path_; // temp file for --file-list (cleaned up in destructor)
+	int stderr_fd_;              // unlinked temp file holding the child's stderr; -1 if none
+	bool has_peek_;              // AwaitData() read peek_byte_ and no read has returned it yet
+	char peek_byte_;
+
+	// One read(2) of up to n bytes from the pipe, returning AwaitData's byte
+	// first and retrying on EINTR. Every read whose bytes are returned goes
+	// through here, so none can skip that byte.
+	ssize_t ReadRaw(void *dst, size_t n);
 
 	// Read exactly n bytes from pipe. Returns false on EOF/error before n bytes.
 	bool ReadExact(void *dst, size_t n);

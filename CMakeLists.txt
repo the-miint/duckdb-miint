@@ -1578,8 +1578,6 @@ set(EXTENSION_SOURCES
     src/ena_client.cpp
     src/ena_run_info_extractor.cpp
     src/ena_resolver_cache.cpp
-    src/ena_search_field_registry.cpp
-    src/ena_attributes_filter.cpp
     src/ena_secret.cpp
     src/ena_envelope_builder.cpp
     src/ena_receipt_parser.cpp
@@ -2284,14 +2282,9 @@ set(TEST_SOURCES
     src/ena_parser.cpp
     src/ena_run_info_extractor.cpp
     src/ena_resolver_cache.cpp
-    src/ena_search_field_registry.cpp
-    src/ena_attributes_filter.cpp
     test/cpp/test_ENAClient.cpp
     test/cpp/test_ENAResolverCache.cpp
     test/cpp/test_ena_md5.cpp
-    test/cpp/test_ena_search_field_registry.cpp
-    test/cpp/test_ena_attributes_filter.cpp
-    test/cpp/test_ena_attributes_pushdown.cpp
     test/cpp/test_ena_secret.cpp
     src/ena_envelope_builder.cpp
     test/cpp/test_ena_envelope.cpp

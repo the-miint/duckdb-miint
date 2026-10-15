@@ -2,8 +2,8 @@
 # description: Test read_newick from HTTP URL
 # group: [sql]
 
-# NOTE: Skipped in CI because httpfs is disabled at build time.
-# Active coverage is in test/shell/read_https.sh (uses LOAD httpfs at runtime).
+# `make test` skips this file because httpfs is not linked into unittest;
+# run_tests.sh runs it in its httpfs pass.
 
 require miint
 
@@ -13,13 +13,13 @@ require-env MIINT_HTTPS_TEST_URL
 
 # Newick via HTTP
 query I
-SELECT COUNT(*) FROM read_newick(getenv('MIINT_HTTPS_TEST_URL') || '/newick/simple.nwk');
+SELECT COUNT(*) FROM read_newick('${MIINT_HTTPS_TEST_URL}/newick/simple.nwk');
 ----
 5
 
 # Gzipped Newick via HTTP
 query I
-SELECT COUNT(*) FROM read_newick(getenv('MIINT_HTTPS_TEST_URL') || '/newick/simple.nwk.gz');
+SELECT COUNT(*) FROM read_newick('${MIINT_HTTPS_TEST_URL}/newick/simple.nwk.gz');
 ----
 5
 

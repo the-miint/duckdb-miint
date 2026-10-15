@@ -2,8 +2,8 @@
 # description: Test read_mzxml from HTTP URL
 # group: [sql]
 
-# NOTE: Skipped in CI because httpfs is disabled at build time.
-# Active coverage is in test/shell/read_https.sh (uses LOAD httpfs at runtime).
+# `make test` skips this file because httpfs is not linked into unittest;
+# run_tests.sh runs it in its httpfs pass.
 
 require miint
 
@@ -13,15 +13,15 @@ require-env MIINT_HTTPS_TEST_URL
 
 # mzXML via HTTP
 query I
-SELECT COUNT(*) FROM read_mzxml(getenv('MIINT_HTTPS_TEST_URL') || '/mzxml/basic_3spectra.mzXML');
+SELECT COUNT(*) FROM read_mzxml('${MIINT_HTTPS_TEST_URL}/mzxml/basic_3spectra.mzXML');
 ----
 3
 
 # Multiple remote mzXML files
 query I
 SELECT COUNT(*) FROM read_mzxml([
-    getenv('MIINT_HTTPS_TEST_URL') || '/mzxml/basic_3spectra.mzXML',
-    getenv('MIINT_HTTPS_TEST_URL') || '/mzxml/compressed.mzXML'
+    '${MIINT_HTTPS_TEST_URL}/mzxml/basic_3spectra.mzXML',
+    '${MIINT_HTTPS_TEST_URL}/mzxml/compressed.mzXML'
 ]);
 ----
 4
