@@ -43,16 +43,27 @@ std::string ENAClient::ExecuteGet(const std::string &url, duckdb::HTTPHeaders &h
 	for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
 		auto response = http_util.Request(get_request);
 
-		if (response->Success()) {
+		// An incomplete Portal answer (IsIncompleteResult) is retried like a 5xx.
+		// Checked on every GET rather than by URL, because tests point the Portal
+		// base at a mock; another API's body trips it only by containing the
+		// marker, and then the request fails rather than returning the body.
+		const bool incomplete = response->Success() && IsIncompleteResult(response->body);
+		if (response->Success() && !incomplete) {
 			return response->body;
 		}
 
-		if (attempt < MAX_RETRIES && !response->HasRequestError() && IsRetryableStatus(int(response->status))) {
+		const bool retryable = incomplete || (!response->HasRequestError() && IsRetryableStatus(int(response->status)));
+		if (attempt < MAX_RETRIES && retryable) {
 			std::this_thread::sleep_for(std::chrono::milliseconds(retry_delay_ms));
 			retry_delay_ms *= 2;
 			continue;
 		}
 
+		if (incomplete) {
+			throw duckdb::IOException("%s failed after %d attempts: the last response was incomplete, ENA wrote "
+			                          "\"%s\" in place of the search results (URL: %s)",
+			                          failure_label, attempt + 1, INCOMPLETE_RESULT_MARKER, url);
+		}
 		if (response->HasRequestError()) {
 			throw duckdb::IOException("%s failed: %s (URL: %s)", failure_label, response->GetRequestError(), url);
 		}
