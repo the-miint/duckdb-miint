@@ -193,10 +193,11 @@ Stream FASTA/FASTQ sequence data from EBI/ENA with run, sample, and experiment a
 
 **Parameters:**
 - `accession` (VARCHAR or VARCHAR[]): ENA/SRA accession(s). Supports study (bulk download all runs), sample, run, and experiment accessions.
-- `include_filepath` (BOOLEAN, optional, default false): Add filepath column with the HTTPS download URL(s). For paired-end runs, URLs are semicolon-separated.
+- `include_filepath` (BOOLEAN, optional, default false): Add a filepath column naming where each run was read from: its HTTPS URL(s), or `host:/path` for a run read over Aspera. For paired-end runs, the two are semicolon-separated.
 - `qual_offset` (BIGINT, optional, default 33): Quality score offset (33 for Phred+33/Sanger, 64 for Phred+64/Illumina 1.3+)
 - `max_sequences` (BIGINT, optional, default 0): If `> 0`, stop emitting from each run after this many sequences. `0` (or NULL / absent) means unlimited. For paired-end runs the cap counts **pairs** (one output row per pair), not underlying FASTQ records — `max_sequences => N` yields at most N rows and corresponds to 2N downloaded reads. When downloading via Aspera the cap tears down the `ascp` transfer early, saving real bandwidth. For SFF runs the cap applies but the full file is downloaded before any record is parsed; a loud warning is printed in that case.
 - `trim_sff` (BOOLEAN, optional, default true): For SFF runs, apply the quality and adapter clip positions from the SFF header to trim sequences and quality scores. Ignored for FASTQ runs. Named `trim_sff` rather than `trim` because `TRIM` is a SQL function keyword and this function is dual-path (supports both scalar and lateral invocation), which together prevent DuckDB's binder from accepting `trim=...`.
+- `download_method` (VARCHAR, optional, default `'auto'`): `'http'`, `'aspera'` or `'auto'`. `'auto'` uses Aspera when `ascp` is on `PATH`, an Aspera key is found or downloaded, and every FASTQ run has Aspera paths; otherwise HTTP. When `ascp` exits before sending any data (a rejected key, an unreachable host), `'auto'` warns and reads that run over HTTP, and runs of the scan that start after it go straight to HTTP; `'aspera'` raises the error with `ascp`'s message. Lateral calls always use HTTP.
 - `verify_md5` (BOOLEAN, optional, default **true**): Verify each downloaded FASTQ file's bytes against ENA's reported `fastq_md5` once the file has been read to completion, raising a hard error (`IOException`) on mismatch. On by default — it's cheap (the digest is computed incrementally over bytes already in flight) and catches silent truncation/corruption that byte- or row-count checks miss. Verification is automatically skipped (with a loud warning, never silently) when it doesn't apply:
   - ENA reported no `fastq_md5` for a given file.
   - The file is not gzip-compressed (verification hashes the raw pre-decompression bytes, matching the basis of ENA's reported digest; a non-gzip file has no such basis here).
@@ -216,7 +217,7 @@ Pass named parameters with arrow syntax (`name => value`). Because `read_ena_seq
 - `run_accession` (VARCHAR): SRR/ERR run accession
 - `sample_accession` (VARCHAR): SAMN/SAME BioSample accession
 - `experiment_accession` (VARCHAR): SRX/ERX experiment accession
-- `filepath` (VARCHAR, optional): HTTPS download URL(s)
+- `filepath` (VARCHAR, optional): HTTPS URL(s), or Aspera `host:/path`(s), the run was read from
 
 **Behavior:**
 - At bind time, queries ENA Portal API to discover runs, FASTQ URLs, and library layout (paired vs single-end)
@@ -252,7 +253,14 @@ FROM read_ena_sequences('ERR1074767', include_filepath => true) LIMIT 5;
 - For large projects, the FASTQ download can take significant time and bandwidth
 - The `run_accession` column enables easy JOIN back to metadata from `read_ena`
 - Quality scores are converted to numeric values using the specified offset (default Phred+33)
-- **Failure handling**: on a transient open failure, the run is retried once. On
+- **Failure handling**: on a transient open failure, the run is retried once.
+  If the retry also fails, a single-run literal scan raises the error; a scan
+  of several runs skips the run with a loud warning and continues. If every run
+  of such a scan fails, it raises `read_ena_sequences: every run failed (<n>):
+  <accessions>; first error: <message>` at the end rather than return no rows;
+  so does a single-run scan whose run fails mid-stream, rather than return its
+  partial rows. A lateral call skips a failed run with a warning, even when
+  every run fails. On
   a mid-stream failure (connection dropped after some rows have been emitted),
   the run is NOT retried — re-reading from scratch would emit the same reads
   again with duplicate `sequence_index` values downstream. Instead, the run is
@@ -276,14 +284,14 @@ FROM read_ena_sequences('ERR1074767', include_filepath => true) LIMIT 5;
   failure — a mid-stream read error, skipped with a warning, never an md5
   mismatch.
 
-  Who receives the raised exception depends on
-  `ShouldSkipRunIntegrityFailure`: a **single-run** literal
-  scan (`Execute`) raises the mismatch directly to the caller. A
-  **multi-run** literal scan (a `varchar[]` of accessions, or a project
-  accession that expands to many runs) and **any lateral** invocation
-  (`ExecuteInOut`) instead skip the run with a loud warning and continue,
-  the same treatment as any other completion-time integrity failure, since
-  one corrupt run should not discard rows already emitted for its siblings.
+  Who receives the raised exception: a scan of a **single run** raises the
+  mismatch directly to the caller. A scan of **several runs** (a `varchar[]`
+  of accessions, or a project accession that expands to many runs) and **any
+  lateral** call instead skip the run with a loud warning and continue, the
+  same treatment as any other completion-time integrity failure, since one
+  corrupt run should not discard rows already emitted for its siblings. If
+  every run of a scan of several runs fails, the scan raises the "every run
+  failed" error above, which quotes the first failure recorded.
 
   **Message contract**: the raised message is `read_ena_sequences: md5
   mismatch for '<label>': ENA reported <expected> but downloaded bytes hash

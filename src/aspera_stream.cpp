@@ -5,12 +5,14 @@
 #include "table_function_common.hpp"
 #include "duckdb/common/exception.hpp"
 #include <algorithm>
+#include <cctype>
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <fstream>
 #include <sstream>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -26,7 +28,7 @@ namespace miint {
 
 AsperaProcess::AsperaProcess(const AsperaConfig &config, const std::vector<std::string> &remote_paths)
     : child_pid_(-1), pipe_fd_(-1), remaining_(0), tar_mode_(remote_paths.size() > 1), first_file_read_(false),
-      pipe_eof_(false) {
+      pipe_eof_(false), stderr_fd_(-1), has_peek_(false), peek_byte_(0) {
 	if (remote_paths.empty()) {
 		throw duckdb::IOException("AsperaProcess: no remote paths provided");
 	}
@@ -42,6 +44,10 @@ AsperaProcess::AsperaProcess(const AsperaConfig &config, const std::vector<std::
 	};
 
 	push_arg(config.ascp_path);
+	// No progress or session status on stdout, which carries the data under
+	// stdio://. Without -q, a failed login still writes "Session Stop (Error:
+	// ...)" there, which reads as the start of the file.
+	push_arg("-q");
 	push_arg("-QT"); // Adaptive rate + disable encryption
 	push_arg("-l");  // Max transfer rate
 	push_arg(config.max_rate);
@@ -87,23 +93,61 @@ AsperaProcess::AsperaProcess(const AsperaConfig &config, const std::vector<std::
 
 	args.push_back(nullptr);
 
-	// Create pipe for stdout
+	// ascp's stderr goes to an unlinked temp file rather than a pipe: nothing
+	// reads it while the transfer runs, so a pipe could fill and stall ascp, and
+	// the file still holds the reason when ascp fails. Without the file, stderr
+	// goes to /dev/null. Made before the pipe, so nothing between pipe() and
+	// fork() can throw.
+	{
+		std::string tmpl_str = miint::GetTempDir() + "/miint_ascp_stderr_XXXXXX";
+		std::vector<char> tmpl_buf(tmpl_str.begin(), tmpl_str.end());
+		tmpl_buf.push_back('\0');
+		stderr_fd_ = mkostemp(tmpl_buf.data(), O_CLOEXEC);
+		if (stderr_fd_ != -1) {
+			unlink(tmpl_buf.data());
+		}
+	}
+
+	// Every descriptor made here is close-on-exec, so only this child gets them,
+	// through the dup2s below, not a process another thread forks meanwhile. A
+	// stray copy of the pipe's write end would keep it open after ascp exits,
+	// and AwaitData would wait on that process instead. pipe2 sets it at
+	// creation; without pipe2 (macOS) a fork between pipe() and fcntl() can
+	// still copy the ends.
 	int stdout_pipe[2];
-	if (pipe(stdout_pipe) == -1) {
+#ifdef __linux__
+	int pipe_rc = pipe2(stdout_pipe, O_CLOEXEC);
+#else
+	int pipe_rc = pipe(stdout_pipe);
+	if (pipe_rc == 0) {
+		fcntl(stdout_pipe[0], F_SETFD, FD_CLOEXEC);
+		fcntl(stdout_pipe[1], F_SETFD, FD_CLOEXEC);
+	}
+#endif
+	if (pipe_rc == -1) {
+		int err = errno;
+		if (stderr_fd_ != -1) {
+			close(stderr_fd_);
+			stderr_fd_ = -1;
+		}
 		if (!file_list_path_.empty()) {
 			unlink(file_list_path_.c_str());
 		}
-		throw duckdb::IOException("AsperaProcess: failed to create pipe: %s", strerror(errno));
+		throw duckdb::IOException("AsperaProcess: failed to create pipe: %s", strerror(err));
 	}
 
 	child_pid_ = fork();
 	if (child_pid_ == -1) {
+		int err = errno;
 		close(stdout_pipe[0]);
 		close(stdout_pipe[1]);
+		if (stderr_fd_ != -1) {
+			close(stderr_fd_);
+		}
 		if (!file_list_path_.empty()) {
 			unlink(file_list_path_.c_str());
 		}
-		throw duckdb::IOException("AsperaProcess: failed to fork: %s", strerror(errno));
+		throw duckdb::IOException("AsperaProcess: failed to fork: %s", strerror(err));
 	}
 
 	if (child_pid_ == 0) {
@@ -111,20 +155,28 @@ AsperaProcess::AsperaProcess(const AsperaConfig &config, const std::vector<std::
 #ifdef __linux__
 		prctl(PR_SET_PDEATHSIG, SIGTERM);
 #endif
-		// Redirect stdout to pipe
-		dup2(stdout_pipe[1], STDOUT_FILENO);
-		close(stdout_pipe[0]);
-		close(stdout_pipe[1]);
+		// When the server rejects the key, ascp asks for a password: on its
+		// controlling terminal if it has one, else on stdin, and waits for an
+		// answer. A new session has no controlling terminal, and stdin is
+		// /dev/null, never closed (a closed fd 0 goes to whatever ascp opens
+		// next), so the prompt sees end of input and ascp exits.
+		setsid();
 
-		// Redirect stderr to /dev/null
-		int devnull = open("/dev/null", O_WRONLY);
-		if (devnull != -1) {
-			dup2(devnull, STDERR_FILENO);
-			close(devnull);
+		// This process may itself run with fd 0, 1 or 2 closed, which puts a pipe
+		// end, the stderr file or /dev/null on one of them. So each source is
+		// first copied above fd 2, close-on-exec: no dup2 below then overwrites a
+		// source a later one needs, and nothing closes a standard descriptor.
+		int devnull = open("/dev/null", O_RDWR | O_CLOEXEC);
+		int in_fd = devnull == -1 ? -1 : fcntl(devnull, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
+		int out_fd = fcntl(stdout_pipe[1], F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
+		int err_src = stderr_fd_ != -1 ? stderr_fd_ : devnull;
+		int err_fd = err_src == -1 ? -1 : fcntl(err_src, F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
+		if (in_fd == -1 || out_fd == -1 || err_fd == -1) {
+			_exit(127);
 		}
-
-		// Close stdin (ascp doesn't need it for recv)
-		close(STDIN_FILENO);
+		if (dup2(in_fd, STDIN_FILENO) == -1 || dup2(out_fd, STDOUT_FILENO) == -1 || dup2(err_fd, STDERR_FILENO) == -1) {
+			_exit(127);
+		}
 
 		execv(config.ascp_path.c_str(), args.data());
 		_exit(127);
@@ -139,6 +191,10 @@ AsperaProcess::~AsperaProcess() {
 	if (pipe_fd_ >= 0) {
 		close(pipe_fd_);
 		pipe_fd_ = -1;
+	}
+	if (stderr_fd_ >= 0) {
+		close(stderr_fd_);
+		stderr_fd_ = -1;
 	}
 	if (child_pid_ > 0) {
 		kill(child_pid_, SIGTERM);
@@ -163,11 +219,24 @@ AsperaProcess::~AsperaProcess() {
 	}
 }
 
+ssize_t AsperaProcess::ReadRaw(void *dst, size_t n) {
+	if (has_peek_ && n > 0) {
+		static_cast<char *>(dst)[0] = peek_byte_;
+		has_peek_ = false;
+		return 1;
+	}
+	ssize_t r;
+	do {
+		r = read(pipe_fd_, dst, n);
+	} while (r == -1 && errno == EINTR);
+	return r;
+}
+
 bool AsperaProcess::ReadByte(char &c) {
 	if (pipe_eof_) {
 		return false;
 	}
-	ssize_t n = read(pipe_fd_, &c, 1);
+	ssize_t n = ReadRaw(&c, 1);
 	if (n <= 0) {
 		pipe_eof_ = true;
 		return false;
@@ -179,7 +248,7 @@ bool AsperaProcess::ReadExact(void *dst, size_t n) {
 	auto *buf = static_cast<char *>(dst);
 	size_t total = 0;
 	while (total < n) {
-		ssize_t r = read(pipe_fd_, buf + total, n - total);
+		ssize_t r = ReadRaw(buf + total, n - total);
 		if (r <= 0) {
 			pipe_eof_ = true;
 			return false;
@@ -282,7 +351,10 @@ bool AsperaProcess::NextFile(std::string &out_filename, size_t &out_size) {
 }
 
 int AsperaProcess::ReadBounded(void *dst, size_t len) {
-	if (pipe_eof_ || remaining_ == 0) {
+	if (remaining_ == 0) {
+		return 0;
+	}
+	if (pipe_eof_) {
 		return 0;
 	}
 
@@ -291,7 +363,7 @@ int AsperaProcess::ReadBounded(void *dst, size_t len) {
 		to_read = std::min(len, remaining_);
 	}
 
-	ssize_t n = read(pipe_fd_, dst, to_read);
+	ssize_t n = ReadRaw(dst, to_read);
 	if (n <= 0) {
 		pipe_eof_ = true;
 		return (n == 0) ? 0 : -1;
@@ -337,20 +409,72 @@ int AsperaProcess::WaitForExit() {
 	// Drain remaining pipe data to avoid blocking the child
 	if (pipe_fd_ >= 0) {
 		char discard[4096];
-		while (read(pipe_fd_, discard, sizeof(discard)) > 0) {
+		ssize_t n;
+		while ((n = read(pipe_fd_, discard, sizeof(discard))) > 0 || (n == -1 && errno == EINTR)) {
 		}
 		close(pipe_fd_);
 		pipe_fd_ = -1;
 	}
 
-	int status;
-	waitpid(child_pid_, &status, 0);
+	int status = 0;
+	pid_t reaped;
+	do {
+		reaped = waitpid(child_pid_, &status, 0);
+	} while (reaped == -1 && errno == EINTR);
 	child_pid_ = -1;
 
-	if (WIFEXITED(status)) {
+	if (reaped != -1 && WIFEXITED(status)) {
 		return WEXITSTATUS(status);
 	}
 	return -1;
+}
+
+bool AsperaProcess::AwaitData() {
+	if (has_peek_) {
+		return true;
+	}
+	char c;
+	if (!ReadByte(c)) {
+		return false;
+	}
+	peek_byte_ = c;
+	has_peek_ = true;
+	return true;
+}
+
+std::string AsperaProcess::StderrText() const {
+	if (stderr_fd_ < 0) {
+		return "";
+	}
+	// The reason ascp failed is at the end, so keep the last 4 KiB.
+	constexpr off_t KEEP = 4096;
+	struct stat st;
+	if (fstat(stderr_fd_, &st) != 0) {
+		return "";
+	}
+	off_t offset = st.st_size > KEEP ? st.st_size - KEEP : 0;
+	const bool truncated = offset > 0;
+	std::string raw;
+	char buf[4096];
+	ssize_t n;
+	while ((n = pread(stderr_fd_, buf, sizeof(buf), offset)) > 0) {
+		raw.append(buf, static_cast<size_t>(n));
+		offset += n;
+	}
+	std::string text = truncated ? "[...] " : "";
+	for (char ch : raw) {
+		if (std::isspace(static_cast<unsigned char>(ch))) {
+			if (!text.empty() && text.back() != ' ') {
+				text += ' ';
+			}
+		} else {
+			text += ch;
+		}
+	}
+	if (!text.empty() && text.back() == ' ') {
+		text.pop_back();
+	}
+	return text;
 }
 
 // ===========================================================================

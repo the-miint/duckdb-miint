@@ -16,9 +16,10 @@ namespace miint {
 
 PerRunReader::PerRunReader(duckdb::FileSystem &fs, ENARunInfo run, bool use_aspera, bool trim, bool verify_md5,
                            std::mutex &open_mutex, const AsperaConfig *aspera_config, uint64_t max_sequences,
-                           duckdb::ClientContext *log_context)
+                           duckdb::ClientContext *log_context, std::atomic<bool> *aspera_fell_back)
     : fs_(fs), run_(std::move(run)), use_aspera_(use_aspera), trim_(trim), verify_md5_(verify_md5),
-      open_mutex_(open_mutex), aspera_config_(aspera_config), max_sequences_(max_sequences), log_context_(log_context) {
+      open_mutex_(open_mutex), aspera_config_(aspera_config), max_sequences_(max_sequences), log_context_(log_context),
+      aspera_fell_back_(aspera_fell_back) {
 }
 
 PerRunReader::~PerRunReader() {
@@ -44,12 +45,28 @@ void PerRunReader::Open() {
 		OpenSFF();
 	} else {
 #if MIINT_ASPERA_SUPPORTED
+		if (use_aspera_ && aspera_fell_back_ && aspera_fell_back_->load()) {
+			use_aspera_ = false; // an earlier run of this scan already fell back
+		}
 		if (use_aspera_) {
-			if (verify_md5_) {
-				WarnMd5Skipped("Aspera downloads do not go through the md5-verification tap; use "
-				               "download_method='http' to verify");
+			auto failure = OpenAspera();
+			if (failure.empty()) {
+				if (verify_md5_) {
+					WarnMd5Skipped("Aspera downloads do not go through the md5-verification tap; use "
+					               "download_method='http' to verify");
+				}
+			} else if (aspera_config_ && aspera_config_->fall_back_to_http) {
+				Warn("read_ena_sequences: WARNING: " + failure + "; falling back to HTTP for the rest of this scan");
+				if (aspera_fell_back_) {
+					aspera_fell_back_->store(true);
+				}
+				aspera_process_.reset();
+				aspera_process_paired_.reset();
+				use_aspera_ = false;
+				OpenHTTP();
+			} else {
+				throw duckdb::IOException("read_ena_sequences: %s", failure);
 			}
-			OpenAspera();
 		} else {
 			OpenHTTP();
 		}
@@ -60,14 +77,17 @@ void PerRunReader::Open() {
 	opened_ = true;
 }
 
-void PerRunReader::WarnMd5Skipped(const std::string &reason) {
-	auto msg = duckdb::StringUtil::Format("read_ena_sequences: WARNING: md5 verification skipped for run '%s' — %s",
-	                                      run_.run_accession, reason);
+void PerRunReader::Warn(const std::string &msg) {
 	if (log_context_) {
 		miint::EmitWarning(*log_context_, msg);
 	} else {
 		duckdb::Printer::Print(msg);
 	}
+}
+
+void PerRunReader::WarnMd5Skipped(const std::string &reason) {
+	Warn(duckdb::StringUtil::Format("read_ena_sequences: WARNING: md5 verification skipped for run '%s' — %s",
+	                                run_.run_accession, reason));
 }
 
 SequenceRecordBatch PerRunReader::ReadBatch(size_t max_size) {
@@ -134,10 +154,12 @@ void PerRunReader::Finish() {
 			return {};
 		}
 		int exit_code = proc->WaitForExit();
+		auto detail = proc->StderrText();
 		proc.reset();
 		if (exit_code != 0 && exit_code != -1) {
-			return duckdb::StringUtil::Format("read_ena_sequences: %s ascp exited with code %d for run '%s'", tag,
-			                                  exit_code, run_.run_accession);
+			return duckdb::StringUtil::Format("read_ena_sequences: %s ascp exited with code %d for run '%s'%s", tag,
+			                                  exit_code, run_.run_accession,
+			                                  detail.empty() ? std::string() : ": " + detail);
 		}
 		return {};
 	};
@@ -146,11 +168,7 @@ void PerRunReader::Finish() {
 	// When both processes errored we surface R1 via the thrown exception;
 	// log R2's message first so the user doesn't lose half the story.
 	if (!err_r1.empty() && !err_r2.empty()) {
-		if (log_context_) {
-			miint::EmitWarning(*log_context_, err_r2);
-		} else {
-			duckdb::Printer::Print(err_r2);
-		}
+		Warn(err_r2);
 	}
 	if (!err_r1.empty()) {
 		throw duckdb::IOException(err_r1);
@@ -241,11 +259,7 @@ void PerRunReader::OpenSFF() {
 		                               "downloading the full file before any record can be parsed; the row cap applies "
 		                               "but bandwidth savings do not",
 		                               static_cast<unsigned long long>(max_sequences_), run_.run_accession);
-		if (log_context_) {
-			miint::EmitWarning(*log_context_, msg);
-		} else {
-			duckdb::Printer::Print(msg);
-		}
+		Warn(msg);
 	}
 
 	auto temp_dir = GetTempDir();
@@ -312,7 +326,24 @@ void PerRunReader::OpenSFF() {
 
 #if MIINT_ASPERA_SUPPORTED
 
-void PerRunReader::OpenAspera() {
+// An ascp that cannot start a transfer (a rejected key, an unreachable host)
+// closes its stdout and exits non-zero before sending a byte. Returns that
+// failure as a message, or "" once data is flowing. Exiting 0 without a byte
+// counts too: there is nothing to read, and over HTTP, where 'auto' falls back,
+// a paired run's empty second file is read as single-end.
+static std::string AsperaStartFailure(AsperaProcess &proc, const std::string &run_accession) {
+	if (proc.AwaitData()) {
+		return "";
+	}
+	int exit_code = proc.WaitForExit();
+	auto detail = proc.StderrText();
+	auto how = exit_code >= 0 ? duckdb::StringUtil::Format("exited with code %d", exit_code)
+	                          : std::string("ended without an exit code (killed by a signal, or its status was lost)");
+	return duckdb::StringUtil::Format("ascp %s before sending any data for run '%s'%s", how, run_accession,
+	                                  detail.empty() ? std::string() : ": " + detail);
+}
+
+std::string PerRunReader::OpenAspera() {
 	if (run_.aspera_paths.empty()) {
 		throw duckdb::IOException("read_ena_sequences: no Aspera paths available for run '%s'", run_.run_accession);
 	}
@@ -327,6 +358,10 @@ void PerRunReader::OpenAspera() {
 			aspera_process_ =
 			    std::make_unique<AsperaProcess>(config, std::vector<std::string> {run_.aspera_paths[0].remote_path});
 		}
+		auto failure = AsperaStartFailure(*aspera_process_, run_.run_accession);
+		if (!failure.empty()) {
+			return failure;
+		}
 		std::string filename;
 		size_t file_size;
 		if (!aspera_process_->NextFile(filename, file_size)) {
@@ -340,7 +375,7 @@ void PerRunReader::OpenAspera() {
 		AsperaSeqStreamHandle s1(CreateAsperaSeqStream(aspera_process_.get(), is_gz), aspera_seq_close);
 		fastx_reader_ =
 		    std::make_unique<SequenceReader>(std::move(s1), AsperaSeqStreamHandle(nullptr, aspera_seq_close), true);
-		return;
+		return "";
 	}
 
 	// Paired-end: two ascp processes, one per remote path, each in stdio://
@@ -357,6 +392,13 @@ void PerRunReader::OpenAspera() {
 		    std::make_unique<AsperaProcess>(config, std::vector<std::string> {run_.aspera_paths[0].remote_path});
 		aspera_process_paired_ =
 		    std::make_unique<AsperaProcess>(config, std::vector<std::string> {run_.aspera_paths[1].remote_path});
+	}
+
+	for (auto *proc : {aspera_process_.get(), aspera_process_paired_.get()}) {
+		auto failure = AsperaStartFailure(*proc, run_.run_accession);
+		if (!failure.empty()) {
+			return failure;
+		}
 	}
 
 	std::string f1;
@@ -380,6 +422,7 @@ void PerRunReader::OpenAspera() {
 	AsperaSeqStreamHandle s1(CreateAsperaSeqStream(aspera_process_.get(), is_gz1), aspera_seq_close);
 	AsperaSeqStreamHandle s2(CreateAsperaSeqStream(aspera_process_paired_.get(), is_gz2), aspera_seq_close);
 	fastx_reader_ = std::make_unique<SequenceReader>(std::move(s1), std::move(s2), true);
+	return "";
 }
 
 #endif // MIINT_ASPERA_SUPPORTED
