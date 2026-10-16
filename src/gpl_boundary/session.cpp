@@ -102,15 +102,6 @@ void AppendAvailableStderr(int fd, std::string &sink) {
 	}
 }
 
-// Trim `s` from the front to at most `cap` bytes, prefixing a marker so the
-// reader knows output was dropped. Keeps the tail — that's where the
-// failing-batch output lives.
-void TruncateHead(std::string &s, std::size_t cap) {
-	if (s.size() > cap) {
-		s = "...(truncated head)...\n" + s.substr(s.size() - cap);
-	}
-}
-
 // Compose a "why did the daemon vanish" suffix for Submit's failure paths.
 // Reaps the child to decode its termination — a SIGTERM (e.g. PR_SET_PDEATHSIG
 // firing when the DuckDB worker thread that forked the daemon unwinds) reads

@@ -44,6 +44,14 @@ SELECT typeof(install_gpl_boundary(false));
 ----
 STRUCT(installed BOOLEAN, path VARCHAR, "version" VARCHAR, message VARCHAR)
 
+# An installer has side effects: DuckDB must run it each time it is called,
+# never fold it into a plan (where EXPLAIN or PREPARE would run it) or reuse
+# its result.
+query I
+SELECT DISTINCT stability FROM duckdb_functions() WHERE function_name = 'install_gpl_boundary';
+----
+VOLATILE
+
 # =============================================================================
 # Behaviour when gpl-boundary is available (CI sets GPL_BOUNDARY_AVAILABLE=1
 # after running the upstream install.sh in the workflow)

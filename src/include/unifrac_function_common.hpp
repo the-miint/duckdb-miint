@@ -92,15 +92,20 @@ struct DenseDistanceMatrix {
 // and nothing more, so the scan itself can happen per execution. `pcoa` and
 // `unifrac_pcoa` use them for that; the readers below call them too, so the probe
 // and its wording live in one place.
+// `sample_id_type` and `feature_id_type`, when given, receive the two columns'
+// own SQL types, for a caller that sends them on as they are.
 LogicalType ProbeFeatureTableIdType(ClientContext &context, const std::string &table_name,
-                                    const std::string &caller_name);
+                                    const std::string &caller_name, LogicalType *sample_id_type = nullptr,
+                                    LogicalType *feature_id_type = nullptr);
 // `predicate_type`, when given, also receives what sample_a/sample_b can be
 // compared against natively -- VARCHAR unless the two columns share one
-// native-eligible type. It is an out-parameter rather than a second probe because
-// the raw column types are already in hand here and a second catalog lookup could
+// native-eligible type. `sample_a_type` and `sample_b_type` receive the columns'
+// own SQL types. They are out-parameters rather than a second probe because the
+// raw column types are already in hand here and a second catalog lookup could
 // disagree with the first.
 LogicalType ProbeDistanceTableIdType(ClientContext &context, const std::string &table_name,
-                                     const std::string &caller_name, LogicalType *predicate_type = nullptr);
+                                     const std::string &caller_name, LogicalType *predicate_type = nullptr,
+                                     LogicalType *sample_a_type = nullptr, LogicalType *sample_b_type = nullptr);
 
 // The type an id column can be compared against NATIVELY, or VARCHAR to mean "keep
 // the ::VARCHAR cast". See the definition for the measurement and for why only the

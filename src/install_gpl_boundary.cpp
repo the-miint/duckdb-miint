@@ -1,20 +1,15 @@
 #include "install_gpl_boundary.hpp"
 
 #include "gpl_boundary/process.hpp"
+#include "install_report.hpp"
 #include "yyjson.hpp"
 
-#include <array>
 #include <cerrno>
 #include <cstring>
 #include <mutex>
 #include <string>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <unistd.h>
-#include <vector>
-#include "duckdb/common/vector/flat_vector.hpp"
-#include "duckdb/common/vector/string_vector.hpp"
-#include "duckdb/common/vector/struct_vector.hpp"
 
 namespace duckdb {
 
@@ -76,65 +71,6 @@ std::string sh_quote(const std::string &s) {
 	return out;
 }
 
-// Drain everything from `fd` until EOF. Used to pull stdout / stderr off a
-// `gb::ChildProcess`. Robust to short reads and EINTR.
-std::string drain_fd(int fd) {
-	std::string out;
-	std::array<char, 4096> buf {};
-	for (;;) {
-		ssize_t n = ::read(fd, buf.data(), buf.size());
-		if (n > 0) {
-			out.append(buf.data(), static_cast<size_t>(n));
-			continue;
-		}
-		if (n == 0) {
-			break;
-		}
-		if (errno == EINTR) {
-			continue;
-		}
-		break; // any other error: bail with whatever we got
-	}
-	return out;
-}
-
-// Result of running a child process with separate stdout/stderr capture.
-struct ProcResult {
-	bool spawned = false;         // true iff fork+exec succeeded
-	bool exited_normally = false; // true iff child returned via exit()
-	int exit_code = -1;           // valid iff exited_normally
-	int term_signal = 0;          // non-zero iff WIFSIGNALED — child was killed
-	std::string stdout_text;
-	std::string stderr_text;
-	std::string spawn_error; // populated iff !spawned
-};
-
-// Fork+exec the binary at argv[0] with argv[1..], capture stdout and stderr
-// separately, wait, and return a structured result. No shell — no quoting
-// required. This is the injection-safe version-probe path.
-ProcResult run_argv(const std::vector<std::string> &argv) {
-	ProcResult r;
-	try {
-		gb::ChildProcess child(argv);
-		// Close stdin so the child immediately sees EOF and won't block
-		// waiting for input on a one-shot probe.
-		child.CloseStdin();
-		r.stdout_text = drain_fd(child.stdout_fd());
-		r.stderr_text = drain_fd(child.stderr_fd());
-		const int status = child.Wait();
-		r.spawned = true;
-		if (WIFEXITED(status)) {
-			r.exited_normally = true;
-			r.exit_code = WEXITSTATUS(status);
-		} else if (WIFSIGNALED(status)) {
-			r.term_signal = WTERMSIG(status);
-		}
-	} catch (const std::exception &e) {
-		r.spawn_error = e.what();
-	}
-	return r;
-}
-
 // gpl-boundary --version emits a JSON document like
 //   { "gpl_boundary": "0.1.0", "tools": [ ... ] }
 // Pull just the top-level "gpl_boundary" string. Uses yyjson (already linked
@@ -180,7 +116,7 @@ bool probe_existing(InstallReport &r) {
 	if (p.empty() || ::access(p.c_str(), X_OK) != 0) {
 		return false;
 	}
-	const ProcResult result = run_argv({p, "--version"});
+	const gb::RunResult result = gb::RunCapture({p, "--version"});
 	if (!result.spawned || !result.exited_normally || result.exit_code != 0) {
 		return false; // present but unusable; treat as missing so install can fix it
 	}
@@ -274,10 +210,10 @@ InstallReport install_impl(bool force) {
 	                           " -o " + sh_quote(install_sh) + " && " + "INSTALL_DIR=" + sh_quote(cache_dir) + " sh " +
 	                           sh_quote(install_sh);
 
-	const ProcResult install = run_argv({"/bin/sh", "-c", sh_cmd});
+	const gb::RunResult install = gb::RunCapture({"/bin/sh", "-c", sh_cmd});
 
 	// Best-effort cleanup of the tmpdir.
-	(void)run_argv({"/bin/rm", "-rf", tmpdir});
+	(void)gb::RunCapture({"/bin/rm", "-rf", tmpdir});
 
 	if (!install.spawned) {
 		r.message = "install_gpl_boundary: failed to spawn /bin/sh: " + install.spawn_error;
@@ -304,7 +240,7 @@ InstallReport install_impl(bool force) {
 
 	// 7. Probe version on the fresh binary (argv-based — no shell, no
 	//    injection risk regardless of what's in cache_bin).
-	const ProcResult ver = run_argv({cache_bin, "--version"});
+	const gb::RunResult ver = gb::RunCapture({cache_bin, "--version"});
 
 	r.installed = true;
 	r.path = cache_bin;
@@ -318,62 +254,25 @@ InstallReport install_impl(bool force) {
 // DuckDB scalar plumbing
 // =============================================================================
 
-LogicalType InstallReturnType() {
-	return LogicalType::STRUCT({{"installed", LogicalType::BOOLEAN},
-	                            {"path", LogicalType::VARCHAR},
-	                            {"version", LogicalType::VARCHAR},
-	                            {"message", LogicalType::VARCHAR}});
-}
-
-// Resolve the `force` argument from the call site. The 0-arg overload defaults
-// to false; the 1-arg overload reads a BOOLEAN. A NULL input is treated as
-// false rather than throwing — same convention as `mask_dust(seq, NULL)`.
-bool ResolveForceArg(DataChunk &args) {
-	if (args.ColumnCount() == 0) {
-		return false;
-	}
-	UnifiedVectorFormat fmt;
-	args.data[0].ToUnifiedFormat(fmt);
-	const auto idx = fmt.sel->get_index(0);
-	if (!fmt.validity.RowIsValid(idx)) {
-		return false;
-	}
-	return UnifiedVectorFormat::GetData<bool>(fmt)[idx];
-}
-
 void InstallGplBoundaryExecute(DataChunk &args, ExpressionState &state, Vector &result) {
 	(void)state;
-	// Run the install once and emit a constant vector; even if the query
-	// surface is `SELECT install_gpl_boundary() FROM range(N)`, we don't
-	// re-probe N times. We only have to write index 0 because subsequent
-	// rows are aliased through CONSTANT_VECTOR semantics.
-	const bool force = ResolveForceArg(args);
-	InstallReport report = install_impl(force);
-
-	auto &entries = StructVector::GetEntries(result);
-	FlatVector::GetDataMutable<bool>(entries[0])[0] = report.installed;
-	FlatVector::GetDataMutable<string_t>(entries[1])[0] = StringVector::AddString(entries[1], report.path);
-	FlatVector::GetDataMutable<string_t>(entries[2])[0] = StringVector::AddString(entries[2], report.version);
-	FlatVector::GetDataMutable<string_t>(entries[3])[0] = StringVector::AddString(entries[3], report.message);
-	result.SetVectorType(VectorType::CONSTANT_VECTOR);
+	const InstallReport report = install_impl(InstallForceArg(args));
+	SetInstallReport(result, report.installed, report.path, report.version, report.message);
 }
 
 } // namespace
 
 ScalarFunction InstallGplBoundaryScalar::GetFunction() {
-	return ScalarFunction("install_gpl_boundary", {}, InstallReturnType(), InstallGplBoundaryExecute);
+	return ScalarFunction("install_gpl_boundary", {}, InstallReportType(), InstallGplBoundaryExecute);
 }
 
 void InstallGplBoundaryScalar::Register(ExtensionLoader &loader) {
-	ScalarFunctionSet set("install_gpl_boundary");
 	// 0-arg: idempotent find-or-install. Short-circuits on any binary found
 	// at the override path, miint cache, or PATH.
-	set.AddFunction(ScalarFunction({}, InstallReturnType(), InstallGplBoundaryExecute));
 	// 1-arg: force=true bypasses the probe and re-downloads latest into the
 	// miint cache. Used to escape a stale binary on PATH that the probe
 	// considers "good enough".
-	set.AddFunction(ScalarFunction({LogicalType::BOOLEAN}, InstallReturnType(), InstallGplBoundaryExecute));
-	loader.RegisterFunction(set);
+	loader.RegisterFunction(InstallFunctionSet("install_gpl_boundary", InstallGplBoundaryExecute));
 }
 
 } // namespace duckdb

@@ -43,16 +43,25 @@ void ProbeFeatureTableShape(Connection &conn, const std::string &qname, const st
 } // namespace
 
 LogicalType ProbeFeatureTableIdType(ClientContext &context, const std::string &table_name,
-                                    const std::string &caller_name) {
+                                    const std::string &caller_name, LogicalType *sample_id_type,
+                                    LogicalType *feature_id_type) {
 	auto conn = MakeReadOnlyHelperConnection(context);
 	ProbeFeatureTableShape(conn, SQLIdentifier::ToString(table_name), table_name, caller_name);
+	// The probe proved both columns exist, so the lookup finds them.
+	LogicalType sample_id = LogicalType::VARCHAR;
 	auto cols = GetTableOrViewColumns(context, table_name, "feature-table");
 	for (idx_t i = 0; i < cols.names.size(); ++i) {
-		if (StringUtil::Lower(cols.names[i]) == "sample_id") {
-			return ResolveSampleIdOutputType(cols.types[i]);
+		const auto lname = StringUtil::Lower(cols.names[i]);
+		if (lname == "sample_id") {
+			sample_id = cols.types[i];
+		} else if (lname == "feature_id" && feature_id_type != nullptr) {
+			*feature_id_type = cols.types[i];
 		}
 	}
-	return LogicalType::VARCHAR; // unreachable: the probe proved sample_id exists
+	if (sample_id_type != nullptr) {
+		*sample_id_type = sample_id;
+	}
+	return ResolveSampleIdOutputType(sample_id);
 }
 
 std::vector<miint::unifrac::CooRow> ReadFeatureTable(ClientContext &context, const std::string &table_name,
@@ -179,7 +188,8 @@ std::string IdInPredicate(const std::string &column, const std::vector<std::stri
 }
 
 LogicalType ProbeDistanceTableIdType(ClientContext &context, const std::string &table_name,
-                                     const std::string &caller_name, LogicalType *predicate_type) {
+                                     const std::string &caller_name, LogicalType *predicate_type,
+                                     LogicalType *sample_a_type_out, LogicalType *sample_b_type_out) {
 	auto conn = MakeReadOnlyHelperConnection(context);
 	const auto qname = SQLIdentifier::ToString(table_name);
 
@@ -225,6 +235,12 @@ LogicalType ProbeDistanceTableIdType(ClientContext &context, const std::string &
 	if (predicate_type != nullptr) {
 		*predicate_type =
 		    (sample_a_type == sample_b_type) ? NativeIdPredicateType(sample_a_type) : LogicalType::VARCHAR;
+	}
+	if (sample_a_type_out != nullptr) {
+		*sample_a_type_out = sample_a_type;
+	}
+	if (sample_b_type_out != nullptr) {
+		*sample_b_type_out = sample_b_type;
 	}
 	return ResolveSampleIdOutputType(sample_a_type);
 }

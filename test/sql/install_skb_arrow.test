@@ -1,0 +1,92 @@
+# name: test/sql/install_skb_arrow.test
+# description: install_skb_arrow() and skb_arrow_available(): signatures, and the fast path when skb-arrow is present
+# group: [sql]
+
+# The signatures hold on every build, including WASM and Windows, where stubs
+# stand in. The install itself (uv, the network, ~700 MB) is driven against a
+# fake uv in the C++ tests and run for real by CI before the suite.
+
+require miint
+
+# =============================================================================
+# Signatures (always run)
+# =============================================================================
+
+# install_skb_arrow() and install_skb_arrow(force BOOLEAN), like install_gpl_boundary.
+query I
+SELECT count(*) FROM duckdb_functions() WHERE function_name = 'install_skb_arrow';
+----
+2
+
+# typeof() is folded at bind, so neither of these runs the installer.
+query I
+SELECT typeof(install_skb_arrow());
+----
+STRUCT(installed BOOLEAN, path VARCHAR, "version" VARCHAR, message VARCHAR)
+
+query I
+SELECT typeof(install_skb_arrow(false));
+----
+STRUCT(installed BOOLEAN, path VARCHAR, "version" VARCHAR, message VARCHAR)
+
+# An installer has side effects: DuckDB must run it each time it is called,
+# never fold it into a plan or reuse its result.
+query I
+SELECT DISTINCT stability FROM duckdb_functions() WHERE function_name = 'install_skb_arrow';
+----
+VOLATILE
+
+query I
+SELECT typeof(skb_arrow_available());
+----
+BOOLEAN
+
+# A false answer is checked again on the next call, so one folded into a plan
+# would outlive the install (and EXPLAIN would start a host).
+# test/shell/skb_mantel_host.sh checks the behaviour.
+query I
+SELECT stability FROM duckdb_functions() WHERE function_name = 'skb_arrow_available';
+----
+VOLATILE
+
+# =============================================================================
+# With skb-arrow present (run_tests.sh sets SKB_ARROW_AVAILABLE)
+# =============================================================================
+
+require-env SKB_ARROW_AVAILABLE
+
+query I
+SELECT skb_arrow_available();
+----
+true
+
+# The fast path: the binary miint finds passes the handshake, so nothing is
+# installed. version is the host's; 0.1.0 is the release miint pins.
+query IIII
+SELECT r.installed, r.path LIKE '/%', r.version, r.message LIKE 'skb-arrow 0.1.0 already available at /%; no install performed'
+FROM (SELECT install_skb_arrow() AS r);
+----
+true	true	0.1.0	true
+
+# Idempotent.
+query I
+SELECT install_skb_arrow() = install_skb_arrow();
+----
+true
+
+# force := false, and a NULL force, are the 0-arg form: nothing is installed.
+# Each is the only row, because force is read from a call's first row.
+query II
+SELECT r.installed, r.message LIKE 'skb-arrow 0.1.0 already available at /%; no install performed'
+FROM (SELECT install_skb_arrow(f) AS r FROM (VALUES (false)) t(f));
+----
+true	true
+
+query II
+SELECT r.installed, r.message LIKE 'skb-arrow 0.1.0 already available at /%; no install performed'
+FROM (SELECT install_skb_arrow(f) AS r FROM (VALUES (NULL::BOOLEAN)) t(f));
+----
+true	true
+
+# force := true reinstalls over the network, so it is checked by hand
+# (localdocs/skb-arrow/PLAN.md, Phase 3), not here.

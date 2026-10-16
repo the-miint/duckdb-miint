@@ -20,6 +20,7 @@ Methods to estimate alpha and beta diversity, and supporting statistics.
 - [Progressive PCoA (from UniFrac)](#progressive-pcoa-from-unifrac) - scalable UniFrac PCoA computing distances on the fly per batch (true-10M path)
 - [Progressive PCoA (from community distances)](#progressive-pcoa-from-community-distances) - the same, tree-free: block-wise Bray-Curtis/Jaccard/… straight from a feature table
 - [PERMANOVA (from a distance table)](#permanova-from-a-distance-table) - metric-agnostic PERMANOVA over any condensed distance table
+- [Mantel test](scikit_bio.md#skb_mantel) - `skb_mantel`: correlate two condensed distance tables, with a permutation p-value (computed by scikit-bio)
 - [Two-sample Kolmogorov-Smirnov test](#two-sample-kolmogorov-smirnov-test) - `ks_2samp` over two numeric lists, with SciPy-exact p-values
 - [Sample clustering (k-means and UPGMA)](#sample-clustering-k-means-and-upgma) - group samples from ordination coordinates or a distance table
 - [UniFrac PCoA](#unifrac-pcoa) - UniFrac distance + Principal Coordinates Analysis
@@ -376,7 +377,7 @@ SELECT corr(x.distance, y.distance) AS mantel_r
 FROM dm_weighted x JOIN dm_unweighted y USING (sample_a, sample_b);
 ```
 
-The permutation-based Mantel **p-value** is not yet implemented; it is tracked in [issue #160](https://github.com/the-miint/duckdb-miint/issues/160).
+For the permutation **p-value**, or a Spearman or Kendall's tau correlation, use [`skb_mantel`](scikit_bio.md#skb_mantel). Its Pearson `statistic` is this same correlation; only the p-value needs it.
 
 ---
 

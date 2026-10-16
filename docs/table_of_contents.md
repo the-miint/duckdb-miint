@@ -94,6 +94,7 @@ Two constraints come with it:
 - [Phylogeny estimation](phylogeny.md) - Phylogenetic estimation, placement of query sequences onto a backbone and index building (krepp), tree manipulation (shear, resolve multifurcations/placements), and comparative methods (independent contrasts, ancestral state reconstruction: Brownian-motion, parsimony, and Mk maximum likelihood).
 - [Alpha and beta diversity](diversity.md) - Methods to compute and analyze alpha and beta diversity, including rarefaction, non-phylogenetic community distances, ordination (PCoA) and Procrustes alignment, sample clustering, and the two-sample Kolmogorov-Smirnov test.
 - [Community simulation](simulation.md) - Generate synthetic gradient / clustered OTU tables with known ground truth for benchmarking resemblance and ordination methods.
+- [scikit-bio methods](scikit_bio.md) - Statistics computed by scikit-bio through skb-arrow: the Mantel test with its permutation p-value (`skb_mantel`), and ANCOM-BC differential abundance with post-hoc tests (`skb_ancombc`).
 - [Multi-omics integration](multiomics.md) - MMvec: learn which metabolites co-occur with which microbes from paired count tables, without the spurious associations correlation produces on compositional data.
 
 ## Mass spectrometry

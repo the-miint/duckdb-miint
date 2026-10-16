@@ -11,7 +11,7 @@ Odds and ends that support the main workflows: transforming sequence strings, a 
 - [Merging paired-end reads](#merging-paired-end-reads) - `merge_pairs_vsearch`
 - [Extracting linked amplicons](#extracting-linked-amplicons) - `extract_linked_amplicon`
 - [Version and diagnostics](#version-and-diagnostics) - `miint_version` / `miint_versions` / `miint_warnings`
-- [Installing optional tools](#installing-optional-tools) - `phylogeny_fasttree_available` / `bowtie2_available` / `install_gpl_boundary`
+- [Installing optional tools](#installing-optional-tools) - `phylogeny_fasttree_available` / `bowtie2_available` / `install_gpl_boundary`; for scikit-bio, `install_skb_arrow` / `skb_arrow_available`
 
 ## Reverse complement
 
@@ -415,6 +415,8 @@ SELECT timestamp, message FROM miint_warnings();
 ## Installing optional tools
 
 Some capabilities are provided by an external, GPL-licensed helper binary (`gpl-boundary`, which embeds FastTree and bowtie2) that miint keeps at arm's length to stay BSD-clean. These two functions let you probe for and install it at runtime.
+
+The scikit-bio methods (`skb_mantel`, `skb_ancombc`) run in a different helper, skb-arrow, with its own pair: [`install_skb_arrow()` and `skb_arrow_available()`](scikit_bio.md#installing).
 
 ### `phylogeny_fasttree_available()`
 

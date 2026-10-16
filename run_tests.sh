@@ -74,6 +74,16 @@ if [ -z "${MIINT_GPL_BOUNDARY_PATH:-}" ] && [ -x "$GPL_BOUNDARY_CACHED" ]; then
     export MIINT_GPL_BOUNDARY_PATH="$GPL_BOUNDARY_CACHED"
 fi
 
+# skb-arrow (process host for scikit-bio). Same $HOME problem: point at the binary install_skb_arrow() puts in
+# miint's cache unless the caller chose one, then guard on whichever binary miint will run.
+SKB_ARROW_CACHED="${XDG_CACHE_HOME:-$HOME/.cache}/miint/bin/skb-arrow"
+if [ -z "${MIINT_SKB_ARROW_PATH:-}" ] && [ -x "$SKB_ARROW_CACHED" ]; then
+    export MIINT_SKB_ARROW_PATH="$SKB_ARROW_CACHED"
+fi
+if [ -x "${MIINT_SKB_ARROW_PATH:-$(command -v skb-arrow)}" ]; then
+    export SKB_ARROW_AVAILABLE=1
+fi
+
 # Independent native FastTree binary (bioconda or built from source) used as
 # the parity oracle for phylogeny_fasttree. Distinct from gpl-boundary's
 # vendored ext/fasttree library.
@@ -417,6 +427,10 @@ if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'align_abpoa';" 
 fi
 if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'align_sortmerna_rrna';" | ./build/release/duckdb -csv -noheader 2>/dev/null | grep -q 1; then
     export SORTMERNA_AVAILABLE=1
+fi
+# The skb-arrow table functions (MIINT_HAS_GPL_BOUNDARY), for tests that need them bound but not run.
+if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'skb_mantel' AND function_type = 'table';" | ./build/release/duckdb -csv -noheader 2>/dev/null | grep -q 1; then
+    export SKB_ARROW_COMPILED=1
 fi
 if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'unifrac_pcoa' AND function_type = 'table';" | ./build/release/duckdb -csv -noheader 2>/dev/null | grep -q 1; then
     export UNIFRAC_AVAILABLE=1

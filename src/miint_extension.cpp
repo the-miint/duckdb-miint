@@ -121,7 +121,6 @@
 #include <duckdb/storage/storage_extension.hpp>
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
-#include "duckdb/common/vector/struct_vector.hpp"
 #include <htslib-1.22.1/htslib/hts.h>
 #include <kseq++/config.hpp>
 #include <zlib.h>
@@ -139,7 +138,11 @@
 #include <align_bowtie2.hpp>
 #include <align_bowtie2_sharded.hpp>
 #include <install_gpl_boundary.hpp>
+#include <install_skb_arrow.hpp>
 #include <phylogeny_fasttree.hpp>
+#include <skb_arrow_functions.hpp>
+#else
+#include <install_report.hpp>
 #endif
 
 namespace fs = std::filesystem;
@@ -439,6 +442,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	PhylogenyFastTreeTableFunction::Register(loader);
 	PhylogenyFastTreeAvailableScalar::Register(loader);
 	InstallGplBoundaryScalar::Register(loader);
+	RegisterSkbArrowInstallFunctions(loader);
+	RegisterSkbArrowFunctions(loader);
 #else
 	// Stub: phylogeny_fasttree_available() always returns false when gpl-boundary
 	// support is compiled out (e.g., on WASM/Windows).
@@ -448,38 +453,28 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                                       });
 	loader.RegisterFunction(phylogeny_fasttree_stub);
 
-	// Stub: install_gpl_boundary() reports the platform doesn't support
-	// gpl-boundary at all, so installing wouldn't help.
-	const auto install_struct = LogicalType::STRUCT({{"installed", LogicalType::BOOLEAN},
-	                                                 {"path", LogicalType::VARCHAR},
-	                                                 {"version", LogicalType::VARCHAR},
-	                                                 {"message", LogicalType::VARCHAR}});
-	const auto install_stub_exec = [](DataChunk &args, ExpressionState &state, Vector &result) {
-		auto &entries = StructVector::GetEntries(result);
-		auto installed_data = FlatVector::GetDataMutable<bool>(entries[0]);
-		auto &path_vec = entries[1];
-		auto &version_vec = entries[2];
-		auto &message_vec = entries[3];
-		const idx_t n = args.size();
-		const string msg = "install_gpl_boundary: this miint build was compiled without "
-		                   "MIINT_ENABLE_GPL_BOUNDARY (typically WASM or Windows). gpl-boundary "
-		                   "is not supported on this platform.";
-		for (idx_t i = 0; i < n; i++) {
-			installed_data[i] = false;
-			FlatVector::GetDataMutable<string_t>(path_vec)[i] = StringVector::AddString(path_vec, "");
-			FlatVector::GetDataMutable<string_t>(version_vec)[i] = StringVector::AddString(version_vec, "");
-			FlatVector::GetDataMutable<string_t>(message_vec)[i] = StringVector::AddString(message_vec, msg);
-		}
-		result.SetVectorType(VectorType::CONSTANT_VECTOR);
+	// Stubs: install_gpl_boundary() and install_skb_arrow() report that the
+	// platform can't run their tool at all, so installing wouldn't help.
+	const auto register_install_stub = [&loader](const char *name, const string &tool) {
+		const string msg = string(name) +
+		                   ": this miint build was compiled without MIINT_ENABLE_GPL_BOUNDARY (typically "
+		                   "WASM or Windows). " +
+		                   tool + " is not supported on this platform.";
+		const scalar_function_t exec = [msg](DataChunk &args, ExpressionState &state, Vector &result) {
+			SetInstallReport(result, false, "", "", msg);
+		};
+		loader.RegisterFunction(InstallFunctionSet(name, exec));
 	};
-	// Mirror the real path's 0-arg + 1-arg(BOOLEAN) overload set so SQL that
-	// passes `force` still type-checks on stub builds (returns the same
-	// "unsupported platform" payload regardless of the flag).
-	ScalarFunctionSet install_gpl_boundary_stub_set("install_gpl_boundary");
-	install_gpl_boundary_stub_set.AddFunction(ScalarFunction({}, install_struct, install_stub_exec));
-	install_gpl_boundary_stub_set.AddFunction(
-	    ScalarFunction({LogicalType::BOOLEAN}, install_struct, install_stub_exec));
-	loader.RegisterFunction(install_gpl_boundary_stub_set);
+	register_install_stub("install_gpl_boundary", "gpl-boundary");
+	register_install_stub("install_skb_arrow", "skb-arrow");
+
+	// Stub: skb_arrow_available() always returns false. Volatile, as the real one is.
+	ScalarFunction skb_arrow_available_stub("skb_arrow_available", {}, LogicalType::BOOLEAN,
+	                                        [](DataChunk &args, ExpressionState &state, Vector &result) {
+		                                        result.Reference(Value::BOOLEAN(false), count_t(args.size()));
+	                                        });
+	skb_arrow_available_stub.SetVolatile();
+	loader.RegisterFunction(skb_arrow_available_stub);
 #endif
 	DeblurTableFunction::Register(loader);
 	RegisterSimulateResemblance(loader);

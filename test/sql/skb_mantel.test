@@ -1,0 +1,324 @@
+# name: test/sql/skb_mantel.test
+# description: skb_mantel(): the Mantel test's statistic and permutation p-value, computed by skb-arrow (#160)
+# group: [sql]
+
+# Expected values come from scikit-bio 0.7.4 called directly (mantel(..., engine="numba") on the same condensed
+# matrices, in skb-arrow 0.1.0's own interpreter), not from miint. The defaults' answer is also the skb-arrow
+# handoff's recorded transcript.
+
+require miint
+
+# Bind-only checks need the function, not the binary: Bind never starts skb-arrow.
+require-env SKB_ARROW_COMPILED
+
+statement ok
+CREATE TABLE x AS SELECT sample_a, sample_b, distance::DOUBLE AS distance FROM (VALUES
+    ('a', 'b', 1), ('a', 'c', 2), ('a', 'd', 3), ('b', 'c', 4), ('b', 'd', 5), ('c', 'd', 6)) t(sample_a, sample_b, distance);
+
+statement ok
+CREATE TABLE y AS SELECT sample_a, sample_b, distance::DOUBLE AS distance FROM (VALUES
+    ('a', 'b', 1.5), ('a', 'c', 2), ('a', 'd', 3.5), ('b', 'c', 4), ('b', 'd', 6), ('c', 'd', 6.5)) t(sample_a, sample_b, distance);
+
+# =============================================================================
+# Bind (no skb-arrow needed)
+# =============================================================================
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM skb_mantel('x', 'y'));
+----
+statistic	DOUBLE
+pvalue	DOUBLE
+n	BIGINT
+
+statement error
+SELECT * FROM skb_mantel('no_such_table', 'y');
+----
+skb_mantel: distance-table 'no_such_table'
+
+statement error
+SELECT * FROM skb_mantel('x', 'no_such_table');
+----
+skb_mantel: distance-table 'no_such_table'
+
+statement ok
+CREATE TABLE no_distance AS SELECT sample_a, sample_b FROM x;
+
+statement error
+SELECT * FROM skb_mantel('x', 'no_distance');
+----
+skb_mantel: distance-table 'no_distance' must expose (sample_a, sample_b, distance DOUBLE)
+
+statement error
+SELECT * FROM skb_mantel('x', 'y', threads := -1);
+----
+skb_mantel: threads must be >= 0
+
+# sample_a and sample_b must hold one kind of ID, whichever column comes first.
+# An INTEGER sample_a beside a VARCHAR or DOUBLE sample_b would read sample_b as
+# integers: '007' as 7, 1.5 as 2, merging distinct samples.
+statement ok
+CREATE TABLE x_int_text AS SELECT 1 AS sample_a, '007' AS sample_b, 1.0::DOUBLE AS distance;
+
+statement error
+SELECT * FROM skb_mantel('x_int_text', 'y');
+----
+skb_mantel: distance-table 'x_int_text' has sample_a INTEGER and sample_b VARCHAR
+
+statement ok
+CREATE TABLE x_text_int AS SELECT '007' AS sample_a, 1 AS sample_b, 1.0::DOUBLE AS distance;
+
+statement error
+SELECT * FROM skb_mantel('x', 'x_text_int');
+----
+skb_mantel: distance-table 'x_text_int' has sample_a VARCHAR and sample_b INTEGER
+
+statement ok
+CREATE TABLE x_int_double AS SELECT 1 AS sample_a, 1.5::DOUBLE AS sample_b, 1.0::DOUBLE AS distance;
+
+statement error
+SELECT * FROM skb_mantel('x_int_double', 'y');
+----
+skb_mantel: distance-table 'x_int_double' has sample_a INTEGER and sample_b DOUBLE
+
+# skb-arrow checks params, so a bad one fails only when the query runs. EXPLAIN
+# binds without running: it succeeds, proving Bind starts no host.
+statement ok
+EXPLAIN SELECT * FROM skb_mantel('x', 'y', method := 'cosine');
+
+# =============================================================================
+# Against skb-arrow
+# =============================================================================
+
+require-env SKB_ARROW_AVAILABLE
+
+# The defaults (pearson, 999 permutations, two-sided, seed 0), exactly.
+query III
+SELECT statistic = 0.9849397709505465::DOUBLE, pvalue = 0.036::DOUBLE, n FROM skb_mantel('x', 'y');
+----
+true	true	4
+
+# The statistic is the Pearson correlation of the paired distances: the
+# corr() one-liner docs/diversity.md gives. The two routes must not drift.
+query I
+SELECT abs((SELECT statistic FROM skb_mantel('x', 'y'))
+           - (SELECT corr(x.distance, y.distance) FROM x JOIN y USING (sample_a, sample_b))) < 1e-12;
+----
+true
+
+# Each param reaches skb-arrow: every value below differs from the default's.
+statement ok
+CREATE TABLE y2 AS SELECT sample_a, sample_b, distance::DOUBLE AS distance FROM (VALUES
+    ('a', 'b', 3), ('a', 'c', 1), ('a', 'd', 2), ('b', 'c', 60), ('b', 'd', 4), ('c', 'd', 5)) t(sample_a, sample_b, distance);
+
+query II
+SELECT abs(statistic - 0.1765456124231621) < 1e-12, pvalue FROM skb_mantel('x', 'y2', method := 'pearson');
+----
+true	0.768
+
+query II
+SELECT abs(statistic - 0.6571428571428571) < 1e-12, pvalue FROM skb_mantel('x', 'y2', method := 'spearman');
+----
+true	0.375
+
+query II
+SELECT abs(statistic - 0.4666666666666666) < 1e-12, pvalue FROM skb_mantel('x', 'y2', method := 'kendalltau');
+----
+true	0.375
+
+query I
+SELECT pvalue FROM skb_mantel('x', 'y', alternative := 'less');
+----
+1.0
+
+query I
+SELECT pvalue FROM skb_mantel('x', 'y', seed := 1);
+----
+0.039
+
+query I
+SELECT pvalue FROM skb_mantel('x', 'y', seed := 7);
+----
+0.049
+
+query I
+SELECT pvalue FROM skb_mantel('x', 'y', permutations := 99);
+----
+0.06
+
+# No permutations, no p-value.
+query II
+SELECT statistic = 0.9849397709505465::DOUBLE, isnan(pvalue) FROM skb_mantel('x', 'y', permutations := 0);
+----
+true	true
+
+# Thread count changes speed, not the answer.
+query II
+SELECT statistic = 0.9849397709505465::DOUBLE, pvalue = 0.036::DOUBLE FROM skb_mantel('x', 'y', threads := 2);
+----
+true	true
+
+# A prepared statement binds once and runs each EXECUTE: both get the answer.
+statement ok
+PREPARE p AS SELECT statistic = 0.9849397709505465::DOUBLE AS ok, n FROM skb_mantel('x', 'y');
+
+query II
+EXECUTE p;
+----
+true	4
+
+query II
+EXECUTE p;
+----
+true	4
+
+# =============================================================================
+# Inputs: miint's conventions, cast for skb-arrow
+# =============================================================================
+
+# DECIMAL distances (a VALUES literal like 1.5) are cast to DOUBLE.
+statement ok
+CREATE TABLE y_decimal AS SELECT * FROM (VALUES
+    ('a', 'b', 1.5), ('a', 'c', 2.0), ('a', 'd', 3.5), ('b', 'c', 4.0), ('b', 'd', 6.0), ('c', 'd', 6.5)) t(sample_a, sample_b, distance);
+
+query II
+SELECT typeof(distance), (SELECT statistic = 0.9849397709505465::DOUBLE FROM skb_mantel('x', 'y_decimal')) FROM y_decimal LIMIT 1;
+----
+DECIMAL(2,1)	true
+
+# Integer IDs.
+statement ok
+CREATE TABLE x_int AS SELECT CASE sample_a WHEN 'a' THEN 1 WHEN 'b' THEN 2 WHEN 'c' THEN 3 END AS sample_a,
+    CASE sample_b WHEN 'b' THEN 2 WHEN 'c' THEN 3 WHEN 'd' THEN 4 END AS sample_b, distance FROM x;
+
+statement ok
+CREATE TABLE y_int AS SELECT CASE sample_a WHEN 'a' THEN 1 WHEN 'b' THEN 2 WHEN 'c' THEN 3 END AS sample_a,
+    CASE sample_b WHEN 'b' THEN 2 WHEN 'c' THEN 3 WHEN 'd' THEN 4 END AS sample_b, distance FROM y;
+
+query II
+SELECT statistic = 0.9849397709505465::DOUBLE, n FROM skb_mantel('x_int', 'y_int');
+----
+true	4
+
+# UBIGINT IDs go as BIGINT. One beyond BIGINT's range is refused by name,
+# never wrapped to a negative ID.
+statement ok
+CREATE TABLE x_ubigint AS SELECT sample_a::UBIGINT AS sample_a, sample_b::UBIGINT AS sample_b, distance FROM x_int;
+
+statement ok
+CREATE TABLE y_ubigint AS SELECT sample_a::UBIGINT AS sample_a, sample_b::UBIGINT AS sample_b, distance FROM y_int;
+
+query II
+SELECT statistic = 0.9849397709505465::DOUBLE, n FROM skb_mantel('x_ubigint', 'y_ubigint');
+----
+true	4
+
+statement ok
+CREATE TABLE y_ubigint_over AS SELECT sample_a,
+    CASE WHEN sample_b = 4 THEN 9223372036854775808::UBIGINT ELSE sample_b END AS sample_b, distance FROM y_ubigint;
+
+statement error
+SELECT * FROM skb_mantel('x_ubigint', 'y_ubigint_over');
+----
+<REGEX>:Invalid Input Error: skb_mantel: cannot read 'y_ubigint_over': .*sample_b 9223372036854775808 is beyond BIGINT.*cast.*VARCHAR.*
+
+# A square matrix (both orientations and the diagonal) is not condensed:
+# skb-arrow refuses its self pairs. Filtered to the upper triangle, it works.
+statement ok
+CREATE TABLE x_square AS
+SELECT sample_a, sample_b, distance FROM x
+UNION ALL SELECT sample_b, sample_a, distance FROM x
+UNION ALL SELECT s, s, 0.0 FROM (VALUES ('a'), ('b'), ('c'), ('d')) t(s);
+
+statement error
+SELECT * FROM skb_mantel('x_square', 'y');
+----
+<REGEX>:Invalid Input Error: skb_mantel: .*pair an ID with itself.*
+
+statement ok
+CREATE VIEW x_upper AS SELECT * FROM x_square WHERE sample_a < sample_b;
+
+query I
+SELECT statistic = 0.9849397709505465::DOUBLE FROM skb_mantel('x_upper', 'y');
+----
+true
+
+# =============================================================================
+# skb-arrow's checks and answers, surfaced
+# =============================================================================
+
+statement error
+SELECT * FROM skb_mantel('x', 'y', method := 'cosine');
+----
+<REGEX>:Invalid Input Error: skb_mantel: .*must be one of pearson, spearman, kendalltau.*
+
+statement ok
+CREATE TABLE y_missing AS SELECT * FROM y WHERE NOT (sample_a = 'c' AND sample_b = 'd');
+
+statement error
+SELECT * FROM skb_mantel('x', 'y_missing');
+----
+<REGEX>:Invalid Input Error: skb_mantel: .*1 of 6 pairs are missing.*
+
+# NULL is never "not provided": skb-arrow refuses it.
+statement ok
+CREATE TABLE y_null AS SELECT sample_a, sample_b, CASE WHEN sample_b = 'd' AND sample_a = 'c' THEN NULL ELSE distance END AS distance FROM y;
+
+statement error
+SELECT * FROM skb_mantel('x', 'y_null');
+----
+<REGEX>:Invalid Input Error: skb_mantel: .*distance is null in 1 of 6 rows.*
+
+# The two matrices must cover the same samples.
+statement ok
+CREATE TABLE y_other AS SELECT replace(sample_a, 'a', 'z') AS sample_a, sample_b, distance FROM y;
+
+statement error
+SELECT * FROM skb_mantel('x', 'y_other');
+----
+<REGEX>:Invalid Input Error: skb_mantel: .*IDs.*
+
+# A constant matrix has no correlation: NaN, with scipy's warning relayed. Its
+# category is the warning's qualified class name, as skb-arrow reports it.
+statement ok
+CREATE TABLE x_constant AS SELECT sample_a, sample_b, 1.0::DOUBLE AS distance FROM x;
+
+query II
+SELECT isnan(statistic), isnan(pvalue) FROM skb_mantel('x_constant', 'y');
+----
+true	true
+
+query I
+SELECT count(*) >= 1 FROM miint_warnings() WHERE message LIKE 'skb_mantel: scipy.%.ConstantInputWarning: All values in data are exactly equal%';
+----
+true
+
+# =============================================================================
+# Interrupts
+# =============================================================================
+
+# kendalltau over 1000 samples runs for about a minute, so the query deadline
+# interrupts it; the host is killed rather than left running.
+statement ok
+CREATE TABLE big_x AS SELECT a.i AS sample_a, b.i AS sample_b, (hash(a.i, b.i) % 1000)::DOUBLE / 1000 + 0.001 AS distance
+FROM range(1000) a(i), range(1000) b(i) WHERE a.i < b.i;
+
+statement ok
+CREATE TABLE big_y AS SELECT a.i AS sample_a, b.i AS sample_b, (hash(b.i, a.i) % 1000)::DOUBLE / 1000 + 0.001 AS distance
+FROM range(1000) a(i), range(1000) b(i) WHERE a.i < b.i;
+
+statement ok
+SET max_execution_time = 3000;
+
+statement error
+SELECT * FROM skb_mantel('big_x', 'big_y', method := 'kendalltau');
+----
+Query exceeded maximum execution time
+
+statement ok
+RESET max_execution_time;
+
+# The database is still usable, and so is skb-arrow.
+query I
+SELECT statistic = 0.9849397709505465::DOUBLE FROM skb_mantel('x', 'y');
+----
+true

@@ -19,7 +19,7 @@ Five embedding categories:
 | `MIINT_ENABLE_ABPOA` | ON | Windows (POSIX APIs) |
 | `MIINT_ENABLE_VSEARCH` | ON | Windows (autotools build not supported) |
 | `MIINT_ENABLE_SORTMERNA` | ON | Emscripten (RocksDB vcpkg port not built for wasm32), Windows/MinGW (cmph assumes POSIX `<sys/time.h>`; MSVC-on-Windows would work if anyone wires it up) |
-| `MIINT_ENABLE_GPL_BOUNDARY` | ON | Emscripten, Windows (subsystem uses POSIX shm + fork/exec) |
+| `MIINT_ENABLE_GPL_BOUNDARY` | ON | Emscripten, Windows (subsystem uses POSIX shm + fork/exec). Also gates the skb-arrow client, which shares its process plumbing |
 | `MIINT_ENABLE_UNIFRAC` | ON | Windows (libssu's inmem build assumes POSIX; first-class on Emscripten via the WASM target) |
 | `MIINT_ENABLE_SYLPH`   | ON | Emscripten (WASM-incompatible), Windows/MinGW (POSIX-only sketch indexing) |
 | `MIINT_ENABLE_KREPP` | ON | Emscripten (WASM-incompatible), Windows/MinGW (krepp's own POSIX assumptions; miint additionally opens `/dev/null` per placer) |
@@ -280,7 +280,7 @@ These are invoked via `fork`/`exec` at runtime; the extension links no code for 
 - **Why a separate process?** FastTree and bowtie2 are GPL-licensed; miint is BSD. Statically linking either into the extension would cross the license boundary. Instead, they're statically linked into [`gpl-boundary`](https://github.com/the-miint/GPL-boundary), an independent GPL-licensed binary that miint launches as a child process and communicates with over a JSON-line control channel and POSIX shared memory.
 - **Tools advertised by the daemon (v0.2.0):** `fasttree` (schema_version 2), `bowtie2-align` (schema_version 2), `bowtie2-build` (schema_version 1), `sortmerna`, `prodigal`. miint's per-tool wrappers fail loud at session boot if a required tool is missing or its schema_version doesn't match.
 - **Wrapper:** `src/gpl_boundary/`
-  - `process.{cpp,hpp}` — `FindGplBoundary` (PATH lookup), `ChildProcess` (fork/exec/wait with SIGTERM-then-SIGKILL graceful shutdown), `LineReader`/`WriteLine` (newline-framed JSON I/O over pipes).
+  - `process.{cpp,hpp}` — `FindGplBoundary` (PATH lookup), `ChildProcess` (fork/exec/wait over close-on-exec pipes, so no child inherits another's pipe ends; `ChildProcessOptions` for PDEATHSIG, a new session and process group with `KillGroup()`, and environment overrides; SIGTERM-then-SIGKILL graceful shutdown), `RunCapture` (run to completion, draining stdout and stderr together), `LineReader`/`WriteLine` (newline-framed JSON I/O over pipes).
   - `session.{cpp,hpp}` — `Session::Initialize` (handshake on `protocol_version=2`), `Session::Submit` (per-batch round trip with mandatory `shm_input_size` field), `Session::Shutdown`.
   - `shm.{cpp,hpp}` — `InputShmRegion` (created by miint, written by miint, **unlinked by miint**), `OutputShmRegion` (created by gpl-boundary, read by miint, **unlinked by miint** per gpl-boundary's README convention). Size is authoritative on both sides — neither side calls `fstat`.
   - `arrow_ipc.{cpp,hpp}` — `EncodeIpcStream` (DuckDB DataChunk → Arrow IPC stream bytes via vendored `nanoarrow_ipc`), `IpcStreamDecoder` (response bytes → `ArrowArrayWrapper`s).
@@ -300,6 +300,57 @@ These are invoked via `fork`/`exec` at runtime; the extension links no code for 
   - **Symbol namespace:** `NANOARROW_NAMESPACE=miint` set in `third_party/nanoarrow_ipc/include/nanoarrow/nanoarrow_config.h`. Mangles every `Arrow*` and `ArrowIpc*` symbol to `miint_Arrow*` so we can't collide with DuckDB's bundled `duckdb_nanoarrow` (a C++ namespace).
   - **CMake integration:** declared as an OBJECT library `miint_nanoarrow_ipc`. The main `CMakeLists.txt` wires it via `target_sources(... PRIVATE $<TARGET_OBJECTS:miint_nanoarrow_ipc>)` rather than `target_link_libraries` — the latter triggers DuckDB's export-set machinery and demands the static lib be exported, which it has no business being.
 - **Parity oracle:** `data/fasttree/{tiny,moderate}.golden.nwk` are bioconda FastTree binary outputs for committed input fixtures (`*.fa`); freshness is pinned via `*.golden.fixture.sha` (input-content hash) and `*.golden.fasttree.version` (binary version). `run_tests.sh` exports `MIINT_FASTTREE_{TINY,MODERATE}_PARITY_OK=1` only when the matching SHA matches. `test/sql/phylogeny_fasttree_parity.test` then verifies miint's daemon path produces topologically-identical trees (RF=0 via canonical bipartition multisets) with branch lengths matching within hybrid tolerance `max(1e-9, 1e-6 × max(|m|,|g|))`. Regenerate with `MIINT_FASTTREE_REGENERATE=1 bash run_tests.sh`.
+
+### skb-arrow (process host for scikit-bio)
+- **Gated by:** `MIINT_ENABLE_GPL_BOUNDARY`, the process-host subsystem. There is no separate flag: skb-arrow needs the same POSIX fork/exec and shares `gpl_boundary/process` and the vendored `nanoarrow_ipc`. It compiles `src/skb_arrow/{client,install}.cpp`, `src/install_skb_arrow.cpp` and `src/skb_arrow_functions.cpp` (`skb_mantel`, `skb_ancombc`). Where the flag is off (WASM, Windows), `install_skb_arrow()` and `skb_arrow_available()` are stubs in `src/miint_extension.cpp`, and the table functions do not exist.
+- **Why a separate process?** [skb-arrow](https://github.com/the-miint/skb-arrow) (BSD) is Python: it runs curated scikit-bio operations. An extension `.so` can't carry Python symbols, so miint runs skb-arrow as a child process. The control channel is JSON lines on stdin/stdout, and data travels as uncompressed Arrow IPC stream "segment" files in a private session directory. The contract is skb-arrow's protocol v1 docs at v0.1.0: `docs/protocol.md`, `docs/transport.md` and `docs/errors.md`.
+- **Install:** `install_skb_arrow()` runs `uv tool install --managed-python --python 3.14 skb-arrow==0.1.0`. It sets `UV_TOOL_BIN_DIR=<cache>/miint/bin` (beside gpl-boundary), `UV_TOOL_DIR=<cache>/miint/uv-tools` and `UV_PYTHON_INSTALL_DIR=<cache>/miint/uv-python`, so the tool, its environment and its interpreter all stay in miint's cache: about 850 MB (the interpreter about 110 MB, the tool environment about 745 MB, measured for 0.1.0 on Linux x86_64).
+  - uv is required; without it, the message gives uv's install command.
+  - The pin is the release miint is tested with. uv runs only when there is no working skb-arrow, and always with `--reinstall --force`: without them uv skips a tool it already has, even one whose binary is gone (measured with uv 0.10.0). `force := true` skips the check for a working one.
+  - Failures come back in `message`. Both installers are volatile, so `EXPLAIN` or `PREPARE` never runs one.
+- **Discovery and compatibility:**
+  - Lookup order: `$MIINT_SKB_ARROW_PATH`, then `<cache>/miint/bin/skb-arrow`, then PATH (`FindSkbArrow`).
+  - "Compatible" means the `init`/`ready` handshake succeeds: protocol 1, plus every capability miint calls (`MiintCapabilities()`) at the `schema_version` miint was built against.
+  - `skb_arrow_available()` and the installer both run that handshake (`Probe`). They never run `--doctor`, which exits 1 on Docker's 64 MiB `/dev/shm`.
+  - `skb_arrow_available()` caches a true answer for the process; a false one is checked again on the next call, so it can't outlive an install. It is volatile, so a false answer is never folded into a plan, and it probes without a lock, so a host that never answers holds up only its own query.
+- **Wrapper:** `src/skb_arrow/`. DuckDB-free, so the Catch2 `tests` binary drives it against fake hosts and a fake uv, and against the real host when one is installed.
+  - `client.{cpp,hpp}`:
+    - `FindSkbArrow` and `SegmentDirParent`;
+    - `SessionDir`;
+    - `SegmentWriter`, which streams batches with write(2) and rolls over to a new segment at 256 MiB;
+    - `Params`;
+    - `Host`: spawn, handshake, call, map output, shutdown, kill.
+  - `install.{cpp,hpp}`: `Probe`, `FindUv` and `Install`.
+- **SQL bridge** (`src/skb_arrow_functions.cpp`):
+  - **Bind** resolves the inputs' shape only (`RejectCTERelationName`, then `LIMIT 0` probes). It never starts a host, so `EXPLAIN` stays free and a prepared statement re-runs the call on each `EXECUTE`. The bind data implements `Copy` and `Equals`, because the base `Copy` throws an `InternalException`.
+  - **InitGlobal**, once per query, starts one host. It reads each input relation over a read-only helper connection (`SubmitStream`, then `ChunkSourceArrowStream`) into segments of 65,536-row batches. The Arrow export is pinned to 1.0 layouts with 32-bit offsets, the layout nanoarrow's IPC writer handles.
+  - It then makes the call, relays the host's warnings through `EmitWarning`, decodes the output segments with DuckDB's own Arrow conversion into a `ColumnDataCollection`, and kills the host: the answer is in, and waiting for Python's teardown (about 60 ms after a `mantel` call) would only add latency. Execute only scans the collection.
+  - Each input is cast as it is read:
+    - distances and feature-table values to DOUBLE, which absorbs DECIMAL and HUGEINT;
+    - IDs to BIGINT when they are integers of up to 64 bits, else VARCHAR (`IdExpression`). A UBIGINT beyond BIGINT fails the read, naming the value, rather than wrapping.
+    - A distance table's `sample_a` and `sample_b` must go as one kind (integer or text), or bind refuses it.
+  - A returned ID comes back in miint's convention (`ResolveSampleIdOutputType`), cast from what skb-arrow sends.
+  - **Metadata.** Only `sample_id` and the columns named in `formula` or `grouping` are sent, so an unrelated column of any type never matters.
+    - A covariate passes as BOOLEAN, an integer type, FLOAT, DOUBLE or VARCHAR; DECIMAL and HUGEINT go as DOUBLE.
+    - ENUM is refused at bind. nanoarrow's IPC writer has no dictionaries, and casting it to text would silently move the reference level.
+  - Non-finite DOUBLE params are refused at bind: NaN and Infinity are not JSON.
+  - Named params are forwarded verbatim, so skb-arrow checks them and fills its own defaults. Only `threads` is miint's.
+  - Error kinds map to `InvalidInputException` (`invalid_input`, `invalid_param`), `NotImplementedException` (`unsupported`), or `IOException` (everything else, with "internal error (please report)" and the traceback for `internal`).
+- **Lifecycle:**
+  - **Spawning.** The host starts with `ChildProcessOptions{parent_death_signal = false, new_session = true}`.
+    - No PDEATHSIG, because it fires when the spawning *thread* exits, and DuckDB runs init on worker threads.
+    - Its own process group, so an interrupt kills the host and everything it started (SIGKILL to the group). The interrupt check is polled every 100 ms.
+  - **Environment.**
+    - `PYTHONHOME` and `PYTHONPATH` are removed and `PYTHONNOUSERSITE=1` is set, so a Python-hosted DuckDB can't leak into the host.
+    - A thread cap sets `NUMBA_NUM_THREADS`, `OMP_NUM_THREADS`, `OPENBLAS_NUM_THREADS` and `VECLIB_MAXIMUM_THREADS`.
+  - **Session directory.** `mkdtemp` of `miint-skb-XXXXXX` under `/dev/shm` on Linux, else `$TMPDIR`. `$MIINT_SKB_ARROW_SEGMENT_DIR` overrides it, which is the escape from Docker's 64 MiB `/dev/shm`. The directory is removed, with anything left in it, once the host is reaped.
+  - **Shutdown.** After a call, the host's group is killed. `Host::Shutdown` (close stdin, wait up to 5 s for the host to exit, then kill the group) is the graceful path, used by the handshake-only `Probe`.
+  - **Errors.** An error response leaves the host serving. Any other failure (the host dies or breaks the protocol, or an interrupt arrives) kills it. A partial last line at EOF counts as the host's death, not a malformed response. A host that can't be started (its launcher's interpreter gone, say) is `host_incompatible`, with a reinstall hint. An `internal` error never becomes a DuckDB `InternalException`, which on v2 invalidates the whole database.
+- **Tests:**
+  - C++: the `[skb-arrow]` tag.
+  - SQL: `run_tests.sh` exports `SKB_ARROW_AVAILABLE`, and points `MIINT_SKB_ARROW_PATH` at the cached binary, because the unittest overrides `$HOME`. It also exports `SKB_ARROW_COMPILED` when `skb_mantel` is registered, for tests that only bind.
+  - Shell: `test/shell/skb_mantel_host.sh` drives `skb_mantel` against fake hosts (bash scripts). It checks that every error kind maps to the right exception and the session survives it, that `skb_arrow_available()` starts no host from `EXPLAIN`, that a query doesn't wait on a host's group after its answer (with the real host, when installed), and that SIGINT kills the host's whole process group and removes its session directory.
+  - CI (`test-with-bowtie2`) installs uv, then runs `install_skb_arrow()` itself before the suite.
 
 ### IBM Aspera ascp
 - **Gated by:** `MIINT_ASPERA_SUPPORTED` (build-time; `0` on Windows/WASM)

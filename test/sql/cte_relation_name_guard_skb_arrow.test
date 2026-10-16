@@ -1,0 +1,38 @@
+# name: test/sql/cte_relation_name_guard_skb_arrow.test
+# description: CTE relation-name guard for the skb-arrow functions
+# group: [sql]
+
+#
+# The skb-arrow half of test/sql/cte_relation_name_guard.test, split out only
+# because these functions are not registered without the process-host
+# subsystem. See that file for why a CTE passed by name must be rejected.
+#
+# SKB_ARROW_COMPILED is run_tests.sh's compile-time gate, not a runtime-binary
+# check: the guard fires in Bind, before skb-arrow is located.
+#
+# Covers: skb_ancombc, skb_mantel
+#
+
+require miint
+
+require-env SKB_ARROW_COMPILED
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM skb_mantel('c', 'nope');
+----
+skb_mantel: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM skb_mantel('nope', 'c');
+----
+skb_mantel: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM skb_ancombc('c', 'nope', 'g');
+----
+skb_ancombc: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM skb_ancombc('nope', 'c', 'g');
+----
+skb_ancombc: 'c' is a common table expression

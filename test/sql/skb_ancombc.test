@@ -1,0 +1,400 @@
+# name: test/sql/skb_ancombc.test
+# description: skb_ancombc(): ANCOM-BC differential abundance, computed by skb-arrow
+# group: [sql]
+
+# Expected values come from scikit-bio 0.7.4's ancombc called directly on the same matrix (samples and features
+# sorted, pseudocount added) in skb-arrow 0.1.0's own interpreter, not from miint. They reproduce the skb-arrow
+# handoff's recorded rows. Compared with a hybrid tolerance, max(1e-12, 1e-9 * |expected|): BLAS thread count and
+# platform can move low bits.
+
+require miint
+
+# Bind-only checks need the function, not the binary: Bind never starts skb-arrow.
+require-env SKB_ARROW_COMPILED
+
+statement ok
+CREATE MACRO close_to(a, b) AS abs(a - b) <= greatest(1e-12, 1e-9 * abs(b));
+
+# The handoff's table: 12 samples, 4 features, 4 zero cells.
+statement ok
+CREATE TABLE counts AS
+SELECT printf('s%02d', i + 1) AS sample_id, 'f' || (j + 1) AS feature_id,
+       ((i * 7 + j * 3) % 11 + CASE WHEN i % 3 = 2 AND j = 0 THEN 20 ELSE 0 END)::DOUBLE AS value
+FROM range(12) s(i), range(4) f(j);
+
+statement ok
+CREATE TYPE level AS ENUM ('c', 'b', 'a');
+
+# g is the handoff's covariate. The age_* columns hold the same numbers in four
+# types, flag and flag_str the same booleans as BOOLEAN and as text. collected
+# (DATE) and g_enum (ENUM) are types skb-arrow can't take; unnamed by a formula,
+# they must not matter.
+statement ok
+CREATE TABLE meta AS
+SELECT printf('s%02d', i + 1) AS sample_id, ['a', 'b', 'c'][i % 3 + 1] AS g,
+       (i * 5 % 7)::INTEGER AS age_int, (i * 5 % 7)::DOUBLE AS age_dbl, (i * 5 % 7)::FLOAT AS age_flt,
+       (i * 5 % 7)::DECIMAL(4, 1) AS age_dec, i % 2 = 0 AS flag,
+       CASE WHEN i % 2 = 0 THEN 'True' ELSE 'False' END AS flag_str,
+       DATE '2026-01-01' + i::INTEGER AS collected, ['a', 'b', 'c'][i % 3 + 1]::level AS g_enum
+FROM range(12) s(i);
+
+# =============================================================================
+# Bind (no skb-arrow needed)
+# =============================================================================
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM skb_ancombc('counts', 'meta', 'g'));
+----
+feature_id	VARCHAR
+test	VARCHAR
+term	VARCHAR
+lfc	DOUBLE
+se	DOUBLE
+w	DOUBLE
+pvalue	DOUBLE
+qvalue	DOUBLE
+signif	BOOLEAN
+
+statement error
+SELECT * FROM skb_ancombc('no_such_table', 'meta', 'g');
+----
+skb_ancombc: feature-table 'no_such_table'
+
+statement error
+SELECT * FROM skb_ancombc('counts', 'no_such_table', 'g');
+----
+skb_ancombc: metadata table or view 'no_such_table' does not exist
+
+statement ok
+CREATE TABLE meta_no_id AS SELECT g FROM meta;
+
+statement error
+SELECT * FROM skb_ancombc('counts', 'meta_no_id', 'g');
+----
+skb_ancombc: metadata 'meta_no_id' has no sample_id column
+
+# ENUM can't cross to skb-arrow (nanoarrow's IPC writer has no dictionaries).
+# Casting silently would move the reference level, so it is refused, by name.
+statement error
+SELECT * FROM skb_ancombc('counts', 'meta', 'g_enum');
+----
+<REGEX>:Binder Error: skb_ancombc: metadata column 'g_enum' is an ENUM.*cast it to VARCHAR.*reference level.*
+
+statement error
+SELECT * FROM skb_ancombc('counts', 'meta', 'g', grouping := 'g_enum');
+----
+skb_ancombc: metadata column 'g_enum' is an ENUM
+
+statement error
+SELECT * FROM skb_ancombc('counts', 'meta', 'g + collected');
+----
+<REGEX>:Binder Error: skb_ancombc: metadata column 'collected' is DATE.*BOOLEAN.*VARCHAR.*
+
+# NaN and Infinity aren't JSON; sent as null they would mean "the default".
+statement error
+SELECT * FROM skb_ancombc('counts', 'meta', 'g', pseudocount := 'nan'::DOUBLE);
+----
+skb_ancombc: pseudocount must be finite
+
+statement error
+SELECT * FROM skb_ancombc('counts', 'meta', 'g', tol := 'inf'::DOUBLE);
+----
+skb_ancombc: tol must be finite
+
+statement error
+SELECT * FROM skb_ancombc('counts', 'meta', 'g', grouping := 'g', posthoc := ['global', NULL]);
+----
+skb_ancombc: posthoc must not contain NULL
+
+statement error
+SELECT * FROM skb_ancombc('counts', 'meta', 'g', threads := -1);
+----
+skb_ancombc: threads must be >= 0
+
+# skb-arrow checks the formula, so a bad one fails only when the query runs.
+# EXPLAIN binds without running: it succeeds, proving Bind starts no host.
+statement ok
+EXPLAIN SELECT * FROM skb_ancombc('counts', 'meta', 'log(age_dbl)');
+
+# =============================================================================
+# Against skb-arrow
+# =============================================================================
+
+require-env SKB_ARROW_AVAILABLE
+
+# The handoff's call. Rows come in skb-arrow's order: by test (main, then
+# global), then feature, then term.
+query III
+SELECT feature_id, test, term FROM skb_ancombc('counts', 'meta', 'g', grouping := 'g', posthoc := ['global'], pseudocount := 1);
+----
+f1	main	Intercept
+f1	main	g[T.b]
+f1	main	g[T.c]
+f2	main	Intercept
+f2	main	g[T.b]
+f2	main	g[T.c]
+f3	main	Intercept
+f3	main	g[T.b]
+f3	main	g[T.c]
+f4	main	Intercept
+f4	main	g[T.b]
+f4	main	g[T.c]
+f1	global	NULL
+f2	global	NULL
+f3	global	NULL
+f4	global	NULL
+
+statement ok
+CREATE TABLE handoff AS SELECT * FROM skb_ancombc('counts', 'meta', 'g', grouping := 'g', posthoc := ['global'], pseudocount := 1);
+
+# The handoff's four recorded rows.
+query IIII
+SELECT close_to(lfc, 2.0172122213520858), close_to(w, 7.5371722020139735), close_to(qvalue, 1.9210877942321512e-13), signif
+FROM handoff WHERE feature_id = 'f2' AND test = 'main' AND term = 'g[T.b]';
+----
+true	true	true	true
+
+query IIII
+SELECT close_to(lfc, -1.3185410610555843), close_to(w, -2.995337174842958), close_to(qvalue, 0.010965664815961496), signif
+FROM handoff WHERE feature_id = 'f4' AND test = 'main' AND term = 'g[T.c]';
+----
+true	true	true	true
+
+query IIIII
+SELECT lfc IS NULL AND se IS NULL, term IS NULL, close_to(w, 103.26670422087261), close_to(qvalue, 3.013075979671624e-22), signif
+FROM handoff WHERE feature_id = 'f2' AND test = 'global';
+----
+true	true	true	true	true
+
+query III
+SELECT close_to(w, 3.7960796132217913), close_to(qvalue, 0.4094040329231856), signif
+FROM handoff WHERE feature_id = 'f1' AND test = 'global';
+----
+true	true	false
+
+# A feature table of sum()s (HUGEINT) is cast to DOUBLE.
+statement ok
+CREATE VIEW counts_hugeint AS SELECT sample_id, feature_id, sum(value::INTEGER) AS value FROM counts GROUP BY ALL;
+
+query II
+SELECT typeof(value), (SELECT close_to(lfc, 2.0172122213520858) FROM skb_ancombc('counts_hugeint', 'meta', 'g', pseudocount := 1)
+                       WHERE feature_id = 'f2' AND term = 'g[T.b]')
+FROM counts_hugeint LIMIT 1;
+----
+HUGEINT	true
+
+# =============================================================================
+# Each param reaches skb-arrow: every value below differs from the default's
+# =============================================================================
+
+query I
+SELECT close_to(qvalue, 0.9905331513028325) FROM skb_ancombc('counts', 'meta', 'g', pseudocount := 1, p_adjust := 'bh')
+WHERE feature_id = 'f1' AND term = 'Intercept';
+----
+true
+
+query II
+SELECT count(*) FILTER (signif), count(*) FROM skb_ancombc('counts', 'meta', 'g', pseudocount := 1, alpha := 0.5);
+----
+7	12
+
+query I
+SELECT close_to(lfc, 1.9768974479233772) FROM skb_ancombc('counts', 'meta', 'g', pseudocount := 1, max_iter := 1)
+WHERE feature_id = 'f2' AND term = 'g[T.b]';
+----
+true
+
+query I
+SELECT close_to(lfc, 2.01049321739991) FROM skb_ancombc('counts', 'meta', 'g', pseudocount := 1, tol := 0.5)
+WHERE feature_id = 'f2' AND term = 'g[T.b]';
+----
+true
+
+# Every post-hoc test, in skb-arrow's order. pairwise compares each level with
+# the reference, then each pair (c minus b); dunnett each with the reference.
+query II
+SELECT test, count(*) FROM (
+    SELECT test, row_number() OVER () AS position
+    FROM skb_ancombc('counts', 'meta', 'g', grouping := 'g', posthoc := ['dunnett', 'global', 'pairwise'], pseudocount := 1))
+GROUP BY test ORDER BY min(position);
+----
+main	12
+global	4
+pairwise	12
+dunnett	8
+
+query I
+SELECT close_to(lfc, -1.664032813357052) FROM skb_ancombc('counts', 'meta', 'g', grouping := 'g', posthoc := ['pairwise'], pseudocount := 1)
+WHERE feature_id = 'f2' AND test = 'pairwise' AND term = 'g[T.c]_g[T.b]';
+----
+true
+
+# dunnett is the one stochastic test: seed changes its screen.
+query I
+SELECT pvalue FROM skb_ancombc('counts', 'meta', 'g', grouping := 'g', posthoc := ['dunnett'], pseudocount := 1)
+WHERE feature_id = 'f4' AND test = 'dunnett' AND term = 'g[T.c]';
+----
+1.0
+
+query I
+SELECT close_to(pvalue, 0.002741416203990374) FROM skb_ancombc('counts', 'meta', 'g', grouping := 'g', posthoc := ['dunnett'], pseudocount := 1, seed := 1)
+WHERE feature_id = 'f4' AND test = 'dunnett' AND term = 'g[T.c]';
+----
+true
+
+query I
+SELECT count(*) FROM skb_ancombc('counts', 'meta', 'g', grouping := 'g', posthoc := ['dunnett'], pseudocount := 1, bootstraps := 50)
+WHERE test = 'dunnett';
+----
+8
+
+# Thread count changes speed, not the answer.
+query I
+SELECT close_to(lfc, 2.0172122213520858) FROM skb_ancombc('counts', 'meta', 'g', pseudocount := 1, threads := 2)
+WHERE feature_id = 'f2' AND term = 'g[T.b]';
+----
+true
+
+# A prepared statement binds once and runs each EXECUTE: both get the answer.
+statement ok
+PREPARE p AS SELECT count(*) AS n, count(*) FILTER (signif) AS s FROM skb_ancombc('counts', 'meta', 'g', pseudocount := 1);
+
+query II
+EXECUTE p;
+----
+12	4
+
+query II
+EXECUTE p;
+----
+12	4
+
+# =============================================================================
+# Covariates: each type means what it says
+# =============================================================================
+
+# INTEGER, FLOAT and DECIMAL covariates are numbers, exactly as DOUBLE is: sent
+# as anything else (text, say), patsy would make them categorical, and the
+# terms and answers would differ.
+statement ok
+CREATE TABLE by_double AS SELECT * FROM skb_ancombc('counts', 'meta', 'age_dbl', pseudocount := 1);
+
+query I
+SELECT count(*) FROM by_double;
+----
+8
+
+query I
+SELECT count(*) FROM skb_ancombc('counts', 'meta', 'age_int', pseudocount := 1) a
+JOIN by_double b ON a.feature_id = b.feature_id AND replace(a.term, 'age_int', 'age_dbl') = b.term
+WHERE close_to(a.lfc, b.lfc) AND close_to(a.se, b.se) AND close_to(a.w, b.w) AND close_to(a.qvalue, b.qvalue) AND a.signif = b.signif;
+----
+8
+
+query I
+SELECT count(*) FROM skb_ancombc('counts', 'meta', 'age_flt', pseudocount := 1) a
+JOIN by_double b ON a.feature_id = b.feature_id AND replace(a.term, 'age_flt', 'age_dbl') = b.term
+WHERE close_to(a.lfc, b.lfc) AND close_to(a.se, b.se) AND close_to(a.w, b.w) AND close_to(a.qvalue, b.qvalue) AND a.signif = b.signif;
+----
+8
+
+query I
+SELECT count(*) FROM skb_ancombc('counts', 'meta', 'age_dec', pseudocount := 1) a
+JOIN by_double b ON a.feature_id = b.feature_id AND replace(a.term, 'age_dec', 'age_dbl') = b.term
+WHERE close_to(a.lfc, b.lfc) AND close_to(a.se, b.se) AND close_to(a.w, b.w) AND close_to(a.qvalue, b.qvalue) AND a.signif = b.signif;
+----
+8
+
+# A BOOLEAN covariate is categorical, levels False then True, exactly as text.
+query I
+SELECT count(*) FROM skb_ancombc('counts', 'meta', 'flag', pseudocount := 1) a
+JOIN skb_ancombc('counts', 'meta', 'flag_str', pseudocount := 1) b
+  ON a.feature_id = b.feature_id AND replace(a.term, 'flag[', 'flag_str[') = b.term
+WHERE a.term IN ('Intercept', 'flag[T.True]')
+  AND close_to(a.lfc, b.lfc) AND close_to(a.se, b.se) AND close_to(a.w, b.w) AND close_to(a.qvalue, b.qvalue) AND a.signif = b.signif;
+----
+8
+
+# =============================================================================
+# IDs: sent as BIGINT or text; feature_id comes back as miint's id convention
+# (BIGINT and UUID mirrored, anything else VARCHAR)
+# =============================================================================
+
+statement ok
+CREATE TABLE counts_bigint AS SELECT i AS sample_id, j AS feature_id,
+       ((i * 7 + j * 3) % 11 + CASE WHEN i % 3 = 2 AND j = 0 THEN 20 ELSE 0 END)::DOUBLE AS value
+FROM range(12) s(i), range(4) f(j);
+
+statement ok
+CREATE TABLE meta_bigint AS SELECT i AS sample_id, ['a', 'b', 'c'][i % 3 + 1] AS g FROM range(12) s(i);
+
+query III
+SELECT typeof(feature_id), feature_id, close_to(lfc, 2.0172122213520858)
+FROM skb_ancombc('counts_bigint', 'meta_bigint', 'g', pseudocount := 1) WHERE term = 'g[T.b]' AND feature_id = 1;
+----
+BIGINT	1	true
+
+statement ok
+CREATE TABLE counts_integer AS SELECT sample_id::INTEGER AS sample_id, feature_id::INTEGER AS feature_id, value FROM counts_bigint;
+
+statement ok
+CREATE TABLE meta_integer AS SELECT sample_id::INTEGER AS sample_id, g FROM meta_bigint;
+
+query III
+SELECT typeof(feature_id), feature_id, close_to(lfc, 2.0172122213520858)
+FROM skb_ancombc('counts_integer', 'meta_integer', 'g', pseudocount := 1) WHERE term = 'g[T.b]' AND feature_id = '1';
+----
+VARCHAR	1	true
+
+statement ok
+CREATE TABLE counts_uuid AS SELECT sample_id, ('00000000-0000-0000-0000-00000000000' || substr(feature_id, 2))::UUID AS feature_id, value FROM counts;
+
+query II
+SELECT typeof(feature_id), close_to(lfc, 2.0172122213520858)
+FROM skb_ancombc('counts_uuid', 'meta', 'g', pseudocount := 1) WHERE term = 'g[T.b]' AND feature_id = '00000000-0000-0000-0000-000000000002';
+----
+UUID	true
+
+# UBIGINT IDs go as BIGINT; one beyond BIGINT's range is refused by name.
+statement ok
+CREATE TABLE counts_ubigint_over AS SELECT sample_id,
+    CASE WHEN feature_id = 3 THEN 18446744073709551615::UBIGINT ELSE feature_id::UBIGINT END AS feature_id, value
+FROM counts_bigint;
+
+statement error
+SELECT * FROM skb_ancombc('counts_ubigint_over', 'meta_bigint', 'g', pseudocount := 1);
+----
+<REGEX>:Invalid Input Error: skb_ancombc: cannot read 'counts_ubigint_over': .*feature_id 18446744073709551615 is beyond BIGINT.*
+
+# =============================================================================
+# skb-arrow's checks, surfaced
+# =============================================================================
+
+# Zeros need a pseudocount: skb-arrow's table contract admits no zero cell.
+statement error
+SELECT * FROM skb_ancombc('counts', 'meta', 'g');
+----
+<REGEX>:Invalid Input Error: skb_ancombc: .*4 of 48 cells are not positive and finite.*
+
+statement error
+SELECT * FROM skb_ancombc('counts', 'meta', 'log(age_dbl)', pseudocount := 1);
+----
+<REGEX>:Invalid Input Error: skb_ancombc: .*not a bare column name.*
+
+statement error
+SELECT * FROM skb_ancombc('counts', 'meta', 'g', posthoc := ['global'], pseudocount := 1);
+----
+<REGEX>:Invalid Input Error: skb_ancombc: .*'posthoc' needs 'grouping'.*
+
+statement error
+SELECT * FROM skb_ancombc('counts', 'meta', 'nope', pseudocount := 1);
+----
+<REGEX>:Invalid Input Error: skb_ancombc: .*names 'nope', not a metadata column.*
+
+statement ok
+CREATE TABLE meta_short AS SELECT * FROM meta WHERE sample_id <> 's12';
+
+statement error
+SELECT * FROM skb_ancombc('counts', 'meta_short', 'g', pseudocount := 1);
+----
+<REGEX>:Invalid Input Error: skb_ancombc: .*1 of 12 table samples are missing.*
