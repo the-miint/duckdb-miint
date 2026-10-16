@@ -59,3 +59,48 @@ query I
 SELECT COUNT(DISTINCT sample_accession) FROM sample_attrs;
 ----
 1
+
+# ---- A filter on tag only removes rows ----
+# Tags are the names the submitter wrote in the sample XML, and a WHERE on tag
+# returns exactly the matching rows of the unfiltered scan. The Portal API
+# knows the same attributes under its own names: SAMEA110746363's XML spells its
+# country attribute 'geographic location (country and/or sea)', which the
+# Portal API calls 'country'. A scan that answered tag = 'country' from the
+# Portal API would return a row the unfiltered scan does not contain.
+
+statement ok
+CREATE TEMP TABLE checklist_attrs AS SELECT * FROM read_ena_attributes('SAMEA110746363');
+
+query II
+SELECT tag, value FROM checklist_attrs WHERE tag LIKE '%country%';
+----
+geographic location (country and/or sea)	Netherlands
+
+query I
+SELECT (SELECT COUNT(*) FROM read_ena_attributes('SAMEA110746363') WHERE tag = 'country')
+     = (SELECT COUNT(*) FROM checklist_attrs WHERE tag = 'country');
+----
+true
+
+# The premise: the Portal API does know a 'country' for this sample, so the
+# equality above fails if tag filters are answered from it.
+query I
+SELECT country FROM read_ena('SAMEA110746363', result='sample', fields='sample_accession,country');
+----
+Netherlands
+
+query II
+SELECT tag, value FROM read_ena_attributes('SAMEA110746363')
+WHERE tag = 'geographic location (country and/or sea)';
+----
+geographic location (country and/or sea)	Netherlands
+
+# Tag equality is SQL equality, so it is case-sensitive. SAMEA3610311's
+# submitter wrote 'collection_date'.
+
+query II
+SELECT
+    (SELECT COUNT(*) FROM read_ena_attributes('SAMEA3610311') WHERE tag = 'collection_date'),
+    (SELECT COUNT(*) FROM read_ena_attributes('SAMEA3610311') WHERE tag = 'COLLECTION_DATE');
+----
+1	0

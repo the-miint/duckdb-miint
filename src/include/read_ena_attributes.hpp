@@ -1,13 +1,11 @@
 #pragma once
 
-#include "ena_attributes_filter.hpp"
 #include "ena_client.hpp"
 #include "ena_parser.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
-#include "duckdb/planner/operator/logical_get.hpp"
 #include <atomic>
 #include <mutex>
 #include <vector>
@@ -20,15 +18,6 @@ public:
 		std::vector<std::string> accessions;
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
-
-		// Populated by PushdownComplexFilter when the WHERE clause is pushable
-		// (tag equality / tag IN, all tags in the search-field registry, with
-		// optional value= pin). Empty => Execute uses the XML path. Guarded by
-		// its own mutex because Bind and PushdownComplexFilter run on the
-		// planner thread while Execute may run on a worker; the callback fires
-		// before Execute, so in practice the happens-before is clean, but
-		// readers cast `const Data&` so we keep the field plain.
-		miint::ENAAttributePushdown pushdown;
 
 		Data(std::vector<std::string> accessions);
 	};
@@ -56,12 +45,6 @@ public:
 		// (~3 req/s) is otherwise the wall-clock bottleneck.
 		static constexpr size_t BATCH_SIZE = 200;
 		bool resolved = false;
-		// When pushdown is active, study-type inputs stay here (drained first by
-		// FetchNextStructuredBatch as study-direct queries, one HTTP per study
-		// batch). Without pushdown this stays empty; studies get enumerated into
-		// `pending_sample_accs` via ResolveSampleAccessions as before.
-		std::vector<std::string> pending_study_accs;
-		size_t pending_study_offset = 0;
 		std::vector<std::string> pending_sample_accs;
 		size_t pending_sample_offset = 0;
 		std::vector<miint::SampleAttribute> current_batch;
@@ -79,25 +62,14 @@ public:
 
 		GlobalState(DatabaseInstance &db);
 
-		// One-time input-accession resolution. When `has_pushdown` is true, study-type
-		// inputs are routed to `pending_study_accs` (for study-direct HTTP calls);
-		// sample-type inputs stay as-is; run/experiment inputs resolve to their
-		// sample_accession. When false, all inputs flow through
-		// ResolveSampleAccessions and populate `pending_sample_accs` (unchanged
-		// legacy XML-path behavior).
-		void ResolveAccessions(const std::vector<std::string> &accessions, bool has_pushdown);
+		// One-time input-accession resolution: studies, runs and experiments
+		// resolve to their sample accessions, which populate `pending_sample_accs`.
+		void ResolveAccessions(const std::vector<std::string> &accessions);
 
 		// Pop up to BATCH_SIZE sample accessions, fetch + parse their XML, and
 		// refill `current_batch`. Sets `current_batch_offset` to 0. Returns
 		// true if a batch was fetched, false if no pending samples remain.
 		bool FetchNextBatch();
-
-		// Structured-path equivalent of FetchNextBatch. Instead of fetching
-		// per-sample XML, issues a single /search?result=sample TSV request
-		// for BATCH_SIZE samples with the pushed-down `fields` + `query`,
-		// then unpivots the TSV into (sample, tag, value) rows. The output
-		// shape matches the XML path.
-		bool FetchNextStructuredBatch(const miint::ENAAttributePushdown &pushdown);
 
 		idx_t MaxThreads() const override {
 			return 1;
@@ -115,8 +87,6 @@ public:
 	static unique_ptr<LocalTableFunctionState> InitLocal(ExecutionContext &context, TableFunctionInitInput &input,
 	                                                     GlobalTableFunctionState *global_state);
 	static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output);
-	static void PushdownComplexFilter(ClientContext &context, LogicalGet &get, FunctionData *bind_data_p,
-	                                  vector<unique_ptr<Expression>> &filters);
 	static double Progress(ClientContext &context, const FunctionData *bind_data,
 	                       const GlobalTableFunctionState *global_state);
 	static TableFunction GetFunction();

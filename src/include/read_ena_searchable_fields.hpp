@@ -19,7 +19,7 @@ namespace duckdb {
 // `/returnFields?result=<result_type>&format=tsv` endpoint and returns the
 // rows verbatim. Used as a discoverability tool: given a read_run / sample /
 // study / experiment result type, list the field names, types, and
-// descriptions that ENA's structured search accepts.
+// descriptions that ENA's Portal API can return for it.
 //
 // Exactly one HTTP call is made on the first Execute invocation (response is
 // ~60 rows, so no streaming / batching needed). Subsequent calls drain the
