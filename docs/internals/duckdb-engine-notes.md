@@ -205,6 +205,31 @@ are integers. Compare in the column's type and cast the literals instead:
 whose text round trip is exact, and keeps the cast for FLOAT, DOUBLE and DECIMAL ids, whose
 text form is not.
 
+**Validation in a table macro goes in one CASE, evaluated before any filter can drop a row.**
+Two engine behaviours decide this. The terms of `cond AND check` need not run in the order
+written: `filter_pushdown` rebuilds the conjunction, and over both a table function and a
+native table has put `check` first (observed on DuckDB v1.5.5), so a cast or `error()` that
+`cond` was meant to guard runs on rows `cond` excludes (`reorder_filter`, below, is not what
+moves it). A CASE tests its WHENs in order. And a check written in the SELECT list is pruned
+when the query does not select that column, while a WHERE, HAVING or QUALIFY clause is
+evaluated whichever columns the query selects. The plain form is therefore `WHERE CASE WHEN
+<excluded> THEN FALSE WHEN <bad> THEN error(...) ELSE TRUE END` (or the same CASE in HAVING or
+QUALIFY), with any cast placed after the WHEN that proves it safe.
+
+The plain form sees only the rows that reach its clause. A query that stops early, such as one
+with `LIMIT`, does not read the rest of the file. And the same pushdown can put a caller's own
+filter ahead of the macro's WHERE, so a malformed record that filter excludes raises nothing:
+an ungated `read_gff` did under `WHERE type IN (...)`. The gated form closes that gap. Compute
+the CASE once as a column in a subquery (`... END AS keep`), wrap every output column in
+`CASE WHEN keep THEN ... END`, and filter `WHERE keep`. In `EXPLAIN`, a caller's filter on a
+gated column stays above the projection that computes `keep`, so the check runs on every row
+the scan reads. `WHERE keep` is still needed: it drops the rows the CASE excludes, which would
+otherwise come back as rows of NULLs, and it runs the check for a query that reads no column.
+`read_gff` uses the gated form. On a 2-million-line, 189 MB GFF (8 threads, the file in the
+page cache, five interleaved runs each) its median times stayed within 2 ms of the ungated
+macro's: about 70 ms for a count, a GROUP BY or an IN filter, and about 310 ms with the
+attributes parsed. The other macros in `src/include/miint_macros.hpp` use the plain form.
+
 Passes worth knowing about for our workloads:
 - `late_materialization` — keeps rows narrow through the heavy operators, then joins wide
   payload columns back by row ID. This is exactly the shape our wide records
@@ -214,7 +239,8 @@ Passes worth knowing about for our workloads:
 - `window_self_join` — only for aggregate window functions whose frame is specified
   exclusively by `PARTITION BY`.
 - `reorder_filter` — cheap conjuncts first, with text expressions charged a +200 cost
-  penalty. Conjuncts that can throw are not reordered (that would hide a side effect).
+  penalty. Conjuncts that can throw are not reordered (that would hide a side effect), but
+  `filter_pushdown` may already have reordered them; see the validation paragraph above.
 - `in_clause` — a large `IN (…)` becomes a MARK join against a `COLUMN_DATA_SCAN`.
 
 ## Indexes

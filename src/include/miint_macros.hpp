@@ -39,11 +39,16 @@ const std::string PARSE_GFF_ATTRIBUTES = // NOLINT
 
 const std::string READ_GFF = // NOLINT
     "CREATE OR REPLACE MACRO read_gff(path) AS TABLE "
+    // Every column is gated on `keep`, the line check below, so a query that reads any column,
+    // to return it or to filter on it, runs the check on that row. `WHERE keep` drops the
+    // lines that are not features and runs the check for a query that reads no column
+    // (COUNT(*)). Why the gate: docs/internals/duckdb-engine-notes.md, "Validation in a table
+    // macro".
     "SELECT "
-    "   column0 AS seqid, "
-    "   column1 AS source, "
-    "   column2 AS type, "
-    "   column3::INTEGER AS position, "
+    "   CASE WHEN keep THEN column0 END AS seqid, "
+    "   CASE WHEN keep THEN column1 END AS source, "
+    "   CASE WHEN keep THEN column2 END AS type, "
+    "   CASE WHEN keep THEN column3::INTEGER END AS position, "
     // GFF3's `end` is 1-based CLOSED; miint's project-wide convention is 1-based HALF-OPEN
     // [position, stop_position), as used by read_alignments, align_*, alignment_slice,
     // compute_coverage_depth and genome_coverage. Normalize on read (+1) so `stop_position`
@@ -51,22 +56,58 @@ const std::string READ_GFF = // NOLINT
     // the column NAME, so composing it with any of those silently dropped the interval's
     // last base -- genome_coverage's SUM(stop - start) under-counted every feature by one.
     // The raw GFF `end` is recoverable as `stop_position - 1` (issue #196).
-    "   column4::INTEGER + 1 AS stop_position, "
-    "   CASE  "
-    "     WHEN column5 = '.' THEN NULL  "
-    "     ELSE column5::DOUBLE  "
-    "   END AS score, "
-    "   CASE  "
-    "     WHEN column6 = '.' THEN NULL  "
-    "     ELSE column6  "
-    "   END AS strand, "
-    "   CASE  "
-    "     WHEN column7 = '.' THEN NULL  "
-    "     ELSE column7::INTEGER  "
-    "   END AS phase, "
-    "   parse_gff_attributes(column8) AS attributes "
-    "FROM read_csv(path, "
-    " delim = '\t', "
+    "   CASE WHEN keep THEN column4::INTEGER + 1 END AS stop_position, "
+    "   CASE WHEN keep THEN CASE WHEN column5 = '.' THEN NULL ELSE column5::DOUBLE END END AS score, "
+    "   CASE WHEN keep THEN CASE WHEN column6 = '.' THEN NULL ELSE column6 END END AS strand, "
+    "   CASE WHEN keep THEN CASE WHEN column7 = '.' THEN NULL ELSE column7::INTEGER END END AS phase, "
+    "   CASE WHEN keep THEN parse_gff_attributes(column8) END AS attributes "
+    "FROM ( "
+    "  SELECT *, "
+    "    CASE "
+    // A comment or directive (##gff-version, ##FASTA, ###): a line that starts with '#'.
+    // GFF3 has no end-of-line comments and a seqid must escape '#', so a '#' later in a line
+    // is data. read_csv's own comment option is not used: it cuts a line at any '#'.
+    "        WHEN column0 LIKE '#%' THEN FALSE "
+    // A FASTA header line, checked before the field counts because its description may itself
+    // contain tabs (e.g. ">ctg1<TAB>some description"), which would otherwise populate
+    // column1 and trip the malformed-feature branch below on a perfectly valid file. '>' is
+    // not a legal GFF3 seqid character, so this prefix identifies FASTA unambiguously.
+    "        WHEN column0 LIKE '>%' THEN FALSE "
+    // The GFF3 sequence section (issue #186). Everything after a ##FASTA directive is
+    // FASTA, and prokka/bakta ALWAYS append the genome -- so this is the common case. Those
+    // lines contain no tabs, so with null_padding every mandatory field after column0
+    // parses as NULL. Dropped silently: appended FASTA is expected file content.
+    "        WHEN column1 IS NULL AND column2 IS NULL AND column3 IS NULL "
+    "         AND column4 IS NULL AND column5 IS NULL AND column6 IS NULL "
+    "         AND column7 IS NULL THEN FALSE "
+    // A seqid is mandatory, and an empty one parses as NULL. Other fields are present (a line
+    // of tabs alone was dropped above), so this is a broken feature line; the message shows
+    // the fields that follow, since there is no seqid to name.
+    "        WHEN column0 IS NULL "
+    "        THEN error(printf('read_gff: malformed GFF feature line (empty seqid): %s', "
+    "                          concat_ws(' ', column1, column2, column3, column4))) "
+    // Some-but-not-all mandatory fields present is a different thing -- a broken feature
+    // line -- and is raised rather than dropped, so we don't trade one silent wrong answer
+    // for another. column8 (attributes) is deliberately NOT required: a legitimate line may
+    // end with an empty attributes field, which also parses as NULL, so keying off it would
+    // reject real prokka output.
+    "        WHEN column1 IS NULL OR column2 IS NULL OR column3 IS NULL "
+    "          OR column4 IS NULL OR column5 IS NULL OR column6 IS NULL "
+    "          OR column7 IS NULL "
+    "        THEN error(printf('read_gff: malformed GFF feature line "
+    "(expected 9 tab-separated fields, found fewer): %s', column0)) "
+    // Every field is present from here. Start and end must be integers, score and phase a
+    // number or '.', so that the casts in the columns above cannot fail and a line that would
+    // fail them is refused whichever columns the query reads.
+    "        WHEN TRY_CAST(column3 AS INTEGER) IS NULL OR TRY_CAST(column4 AS INTEGER) IS NULL "
+    "          OR (column5 <> '.' AND TRY_CAST(column5 AS DOUBLE) IS NULL) "
+    "          OR (column7 <> '.' AND TRY_CAST(column7 AS INTEGER) IS NULL) "
+    "        THEN error(printf('read_gff: malformed GFF feature line (start, end, score or phase is not "
+    "a number): %s %s %s %s %s %s', column0, column2, column3, column4, column5, column7)) "
+    "        ELSE TRUE "
+    "    END AS keep "
+    "  FROM read_csv(path, "
+    "   delim = '\t', "
     "   header = false, "
     "   columns = { "
     "     'column0': 'VARCHAR', "
@@ -79,41 +120,442 @@ const std::string READ_GFF = // NOLINT
     "     'column7': 'VARCHAR', "
     "     'column8': 'VARCHAR' "
     "   }, auto_detect=false, "
-    "   comment = '#', "
     "   skip = 0, "
-    "   null_padding = true "
-    " ) "
-    "WHERE column0 NOT LIKE '##%' "
-    // The GFF3 sequence section (issue #186). Everything after a ##FASTA directive is
-    // FASTA, and prokka/bakta ALWAYS append the genome -- so this is the common case. Those
-    // lines contain no tabs, so with null_padding every mandatory field after column0
-    // parses as NULL. Dropped silently: appended FASTA is expected file content.
-    //
-    // Some-but-not-all mandatory fields present is a different thing -- a broken feature
-    // line -- and is raised rather than dropped, so we don't trade one silent wrong answer
-    // for another. column8 (attributes) is deliberately NOT required: a legitimate line may
-    // end with an empty attributes field, which also parses as NULL, so keying off it would
-    // reject real prokka output.
-    //
-    // This MUST live in the WHERE clause, not a projection: DuckDB prunes unused
-    // projections, so a check inside a SELECT expression would not fire for
-    // `SELECT type FROM read_gff(...)` -- the very shape the issue reported.
-    "  AND CASE "
-    // A FASTA header line, checked FIRST because its description may itself contain tabs
-    // (e.g. ">ctg1<TAB>some description"), which would otherwise populate column1 and trip
-    // the malformed-feature branch below on a perfectly valid file. '>' is not a legal GFF3
-    // seqid character, so this prefix identifies FASTA unambiguously.
-    "        WHEN column0 LIKE '>%' THEN FALSE "
-    "        WHEN column1 IS NULL AND column2 IS NULL AND column3 IS NULL "
-    "         AND column4 IS NULL AND column5 IS NULL AND column6 IS NULL "
-    "         AND column7 IS NULL THEN FALSE "
-    "        WHEN column1 IS NULL OR column2 IS NULL OR column3 IS NULL "
-    "          OR column4 IS NULL OR column5 IS NULL OR column6 IS NULL "
-    "          OR column7 IS NULL "
-    "        THEN error(printf('read_gff: malformed GFF feature line "
-    "(expected 9 tab-separated fields, found fewer): %s', column0)) "
+    "   null_padding = true, "
+    // GFF3 has no quoting, so '"' is an ordinary character; read_csv's default quote would
+    // otherwise join lines across an unmatched one, or reject the file.
+    "   quote = '', "
+    "   escape = '' "
+    "  ) "
+    ") "
+    "WHERE keep; ";
+
+// read_gfa_segments(path) / read_gfa_links(path)
+//
+// Typed views of the two GFA record types every assembly graph has, over read_gfa's raw
+// rows. '*' -- GFA's "not stored" -- becomes NULL so it cannot be read as a one-base
+// sequence or a CIGAR.
+const std::string READ_GFA_SEGMENTS = // NOLINT
+    "CREATE OR REPLACE MACRO read_gfa_segments(path) AS TABLE "
+    "SELECT fields[1] AS segment_id, "
+    "       CASE WHEN fields[2] = '*' THEN NULL ELSE fields[2] END AS sequence, "
+    "       tags "
+    "FROM read_gfa(path) "
+    "WHERE record_type = 'S'; ";
+
+const std::string READ_GFA_LINKS = // NOLINT
+    "CREATE OR REPLACE MACRO read_gfa_links(path) AS TABLE "
+    "SELECT fields[1] AS from_segment, "
+    "       fields[2] AS from_orientation, "
+    "       fields[3] AS to_segment, "
+    "       fields[4] AS to_orientation, "
+    "       CASE WHEN fields[5] = '*' THEN NULL ELSE fields[5] END AS overlap, "
+    "       tags "
+    // read_gfa refuses an orientation other than + or -, naming the file and line.
+    "FROM read_gfa(path) "
+    "WHERE record_type = 'L'; ";
+
+// read_myloasm_contigs / _layout / _links / _splits / _mappings / _run (dir)
+//
+// One myloasm `-o` directory as tables, over read_fastx, read_gfa, read_gfa_links, read_paf
+// and read_csv. Every format detail here was checked against myloasm 0.7.0's source and its
+// real output (data/myloasm/README.md); the user-facing caveats are in docs/reading.md. Each
+// macro reads only the member files it needs, and a missing one is the reader's file error.
+//
+// Coordinates follow miint's two axes: contig `position`/`stop_position` are 1-based
+// half-open on the unpolished contig (the GFA's and PAF's); read `query_start`/`query_stop`
+// are 0-based half-open on the original read as sequenced. myloasm gives neither directly:
+//   * '-' query intervals (PAF and GFA 'a' lines) are on the reverse complement of the read;
+//   * a chimera split renames each piece <read>+split<i> (a second cleaning round appends a
+//     second suffix) and gives coordinates on the piece. A piece's offset in the read comes
+//     from the breakpoint logs: piece i >= 1 starts at breakpoint i's stop, and +split0
+//     starts where its parent does.
+// Malformed values raise error() from one CASE in the WHERE clause; see "Validation in a
+// table macro" in docs/internals/duckdb-engine-notes.md.
+
+// The member file `member` of a myloasm directory. The readers expand globs, so a directory
+// name with a glob character would read some other directory's files; it is refused.
+const std::string MIINT_MYLOASM_PATH = // NOLINT
+    "CREATE OR REPLACE MACRO _miint_myloasm_path(dir, member) AS "
+    "CASE WHEN dir IS NULL THEN error('read_myloasm: the myloasm output directory cannot be NULL') "
+    "     WHEN contains(dir, '*') OR contains(dir, '?') OR contains(dir, '[') "
+    "     THEN error(printf('read_myloasm: the output directory ''%s'' contains a glob character (*, ? or [)', dir)) "
+    "     ELSE rtrim(dir, '/') || '/' || member END; ";
+
+// A myloasm read name is the read's first header word plus zero or more +split<i> suffixes.
+// Most reads carry none, so each helper skips its regex when the name has no '+split'.
+const std::string MIINT_MYLOASM_READ_ID = // NOLINT
+    "CREATE OR REPLACE MACRO _miint_myloasm_read_id(name) AS "
+    "CASE WHEN contains(name, '+split') THEN regexp_replace(name, '([+]split[0-9]+)+$', '') ELSE name END; ";
+
+const std::string MIINT_MYLOASM_SPLIT_SUFFIX = // NOLINT
+    "CREATE OR REPLACE MACRO _miint_myloasm_split_suffix(name) AS "
+    "CASE WHEN contains(name, '+split') THEN nullif(regexp_extract(name, '([+]split[0-9]+)+$', 0), '') END; ";
+
+const std::string MIINT_MYLOASM_SPLIT_DEPTH = // NOLINT
+    "CREATE OR REPLACE MACRO _miint_myloasm_split_depth(name) AS "
+    "coalesce(len(regexp_extract_all(_miint_myloasm_split_suffix(name), '[+]split')), 0); ";
+
+// The piece whose start in the read this piece shares. A +split0 piece starts where its
+// parent does, so trailing +split0s are dropped: R+split1+split0 starts with R+split1, and
+// R+split0 with R itself (offset 0). Any other piece is its own.
+const std::string MIINT_MYLOASM_OFFSET_PIECE = // NOLINT
+    "CREATE OR REPLACE MACRO _miint_myloasm_offset_piece(name) AS "
+    "CASE WHEN contains(name, '+split') THEN regexp_replace(name, '([+]split0)+$', '') ELSE name END; ";
+
+// A piece's interval [start, stop) moved onto the original read: myloasm writes a '-'
+// interval on the piece's reverse complement, so it is mirrored back first, then shifted by
+// where the piece starts in the read.
+const std::string MIINT_MYLOASM_QUERY_START = // NOLINT
+    "CREATE OR REPLACE MACRO _miint_myloasm_query_start(piece_offset, strand, piece_length, start, stop) AS "
+    "piece_offset + CASE WHEN strand = '+' THEN start ELSE piece_length - stop END; ";
+
+const std::string MIINT_MYLOASM_QUERY_STOP = // NOLINT
+    "CREATE OR REPLACE MACRO _miint_myloasm_query_stop(piece_offset, strand, piece_length, start, stop) AS "
+    "piece_offset + CASE WHEN strand = '+' THEN stop ELSE piece_length - start END; ";
+
+// TRUE for a piece name the breakpoint logs account for, given its looked-up `piece_offset`;
+// otherwise an error naming it after `context`. For the ELSE arm of a WHERE-clause CASE, so it
+// runs only on rows that passed the caller's own checks.
+const std::string MIINT_MYLOASM_CHECK_PIECE = // NOLINT
+    "CREATE OR REPLACE MACRO _miint_myloasm_check_piece(name, piece_offset, context) AS "
+    "CASE "
+    "  WHEN _miint_myloasm_split_depth(name) > 2 "
+    "  THEN error(context || printf('read ''%s'' has more than two +split levels', name)) "
+    "  WHEN _miint_myloasm_offset_piece(name) <> _miint_myloasm_read_id(name) AND piece_offset IS NULL "
+    "  THEN error(context || printf('piece ''%s'' has no breakpoint that starts it', name)) "
+    "  ELSE TRUE "
+    "END; ";
+
+// A text file's lines, verbatim: \x01 never occurs in these files, and no quoting applies.
+const std::string MIINT_MYLOASM_LINES = // NOLINT
+    "CREATE OR REPLACE MACRO _miint_myloasm_lines(path) AS TABLE "
+    "SELECT filename, line "
+    "FROM read_csv(path, delim = E'\\x01', quote = '', escape = '', header = false, "
+    "              columns = {'line': 'VARCHAR'}, auto_detect = false, filename = true); ";
+
+// Both cleaning rounds' breakpoint logs, one row per breakpoint, positions as written: on the
+// forward strand of the piece being split (`split_key`, the read's name when it is split).
+// myloasm logs only reads with a breakpoint, each once across both logs, as
+//   <split_key> BREAKPOINTS:<start>-<stop>-COND:<n>,<start>-<stop>-COND:<n>,
+// where COND may be negative, and [start, stop) is discarded.
+const std::string MIINT_MYLOASM_BREAKPOINTS = // NOLINT
+    "CREATE OR REPLACE MACRO _miint_myloasm_breakpoints(dir) AS TABLE "
+    "WITH logs AS ( "
+    "  SELECT 1 AS cleaning_round, filename, line "
+    "  FROM _miint_myloasm_lines(_miint_myloasm_path(dir, '0-cleaning_and_unitigs/read_coverages.txt.gz')) "
+    "  UNION ALL "
+    "  SELECT 2, filename, line "
+    "  FROM _miint_myloasm_lines(_miint_myloasm_path(dir, '0-cleaning_and_unitigs/remap_temp/read_coverages.txt.gz')) "
+    "), parsed AS ( "
+    "  SELECT cleaning_round, filename, line, "
+    "         regexp_extract(line, '^([^ ]+) BREAKPOINTS:((?:[0-9]+-[0-9]+-COND:-?[0-9]+,)+)$', "
+    "                        ['split_key', 'entries']) AS m "
+    "  FROM logs "
+    "), checked AS ( "
+    "  SELECT cleaning_round, m.split_key AS split_key, string_split(rtrim(m.entries, ','), ',') AS entries "
+    "  FROM parsed "
+    "  WHERE CASE "
+    "          WHEN line IS NULL OR m.split_key = '' "
+    "          THEN error(printf('read_myloasm: %s: not a breakpoint line "
+    "(<read> BREAKPOINTS:<start>-<stop>-COND:<n>,...): ''%s''', filename, coalesce(line, ''))) "
+    "          ELSE TRUE "
+    "        END "
+    // A second line would give the read's pieces two offsets each.
+    "  QUALIFY CASE "
+    "            WHEN count(*) OVER (PARTITION BY m.split_key) > 1 "
+    "            THEN error(printf('read_myloasm: breakpoint logs: read ''%s'' has more than one breakpoint line', "
+    "                              m.split_key)) "
+    "            ELSE TRUE "
+    "          END "
+    ") "
+    "SELECT split_key, cleaning_round, e.ordinality AS breakpoint_order, "
+    "       regexp_extract(e.unnest, '^([0-9]+)-', 1)::BIGINT AS piece_start, "
+    "       regexp_extract(e.unnest, '-([0-9]+)-COND', 1)::BIGINT AS piece_stop, "
+    "       regexp_extract(e.unnest, 'COND:(-?[0-9]+)$', 1)::INTEGER AS split_condition "
+    "FROM checked, unnest(entries) WITH ORDINALITY e; ";
+
+// read_myloasm_splits(dir): the breakpoints moved onto the original read. A round-2 line
+// splits a round-1 piece (one suffix at most: there are two rounds), whose own offset is the
+// stop of the round-1 breakpoint that starts it.
+const std::string READ_MYLOASM_SPLITS = // NOLINT
+    "CREATE OR REPLACE MACRO read_myloasm_splits(dir) AS TABLE "
+    "WITH b AS (SELECT * FROM _miint_myloasm_breakpoints(dir)) "
+    "SELECT _miint_myloasm_read_id(b.split_key) AS read_id, "
+    "       _miint_myloasm_split_suffix(b.split_key) AS parent_split_suffix, "
+    "       b.cleaning_round, "
+    "       b.breakpoint_order, "
+    "       coalesce(parent.piece_stop, 0) + b.piece_start AS query_start, "
+    "       coalesce(parent.piece_stop, 0) + b.piece_stop AS query_stop, "
+    "       b.split_condition "
+    "FROM b "
+    "LEFT JOIN b AS parent "
+    "  ON parent.split_key || '+split' || parent.breakpoint_order = _miint_myloasm_offset_piece(b.split_key) "
+    "WHERE CASE "
+    "        WHEN b.piece_start > b.piece_stop "
+    "        THEN error(printf('read_myloasm: breakpoint logs: read ''%s'': "
+    "breakpoint %d starts after it stops (%d-%d)', b.split_key, b.breakpoint_order, b.piece_start, b.piece_stop)) "
+    "        WHEN _miint_myloasm_split_depth(b.split_key) > 1 "
+    "        THEN error(printf('read_myloasm: breakpoint logs: read ''%s'' is split again after two cleaning rounds', "
+    "                          b.split_key)) "
+    "        ELSE _miint_myloasm_check_piece(b.split_key, parent.piece_stop, 'read_myloasm: breakpoint logs: ') "
+    "      END; ";
+
+// Every piece that starts at a breakpoint, with that start on the original read.
+const std::string MIINT_MYLOASM_PIECE_OFFSETS = // NOLINT
+    "CREATE OR REPLACE MACRO _miint_myloasm_piece_offsets(dir) AS TABLE "
+    "SELECT read_id || coalesce(parent_split_suffix, '') || '+split' || breakpoint_order AS piece, "
+    "       query_stop AS piece_offset "
+    "FROM read_myloasm_splits(dir); ";
+
+// read_myloasm_layout(dir): the GFA's 'a' lines, which myloasm writes in each contig's
+// backbone order (so line_number is the order), as
+//   a  <contig>,<start>-<stop>  <read index>  <contig offset>  <read>  <+|->  <slice length>
+//      DP1:..,DP2:..,DP3:..,READ_LEN:..,OL_LEN_NEXT:..,SNP_SHARE_NEXT:..,SNP_DIFF_NEXT:..
+// [start, stop) is on the piece, READ_LEN long, reverse-complemented for '-'. The offsets are
+// 0-based running sums of the slice lengths. The _NEXT values are 0 on a contig's last read,
+// which has no next read, so they are NULL there.
+const std::string READ_MYLOASM_LAYOUT = // NOLINT
+    "CREATE OR REPLACE MACRO read_myloasm_layout(dir) AS TABLE "
+    "WITH placements AS ( "
+    "  SELECT line_number, "
+    "         len(fields) AS field_count, "
+    "         fields[1] AS slice_field, "
+    "         regexp_extract(fields[1], '^(u[0-9]+ctg),([0-9]+)-([0-9]+)$', ['contig_id', 'start', 'stop']) AS slice, "
+    "         fields[3] AS contig_offset, "
+    "         fields[4] AS piece_name, "
+    "         fields[5] AS strand, "
+    "         fields[6] AS slice_length, "
+    "         regexp_extract(fields[7], "
+    "                        '^DP1:([0-9.]+),DP2:([0-9.]+),DP3:([0-9.]+),READ_LEN:([0-9]+),OL_LEN_NEXT:([0-9]+),"
+    "SNP_SHARE_NEXT:([0-9]+),SNP_DIFF_NEXT:([0-9]+)$', "
+    "                        ['dp1', 'dp2', 'dp3', 'read_len', 'ol', 'share', 'diff']) AS stats "
+    "  FROM read_gfa(_miint_myloasm_path(dir, 'final_contig_graph.gfa')) "
+    "  WHERE record_type = 'a' "
+    "), a AS ( "
+    "  SELECT *, row_number() OVER w AS layout_order, lead(line_number) OVER w IS NULL AS is_last "
+    "  FROM placements "
+    "  WINDOW w AS (PARTITION BY slice.contig_id ORDER BY line_number) "
+    ") "
+    "SELECT a.slice.contig_id AS contig_id, "
+    "       a.layout_order, "
+    "       a.contig_offset::BIGINT + 1 AS position, "
+    "       a.contig_offset::BIGINT + 1 + a.slice_length::BIGINT AS stop_position, "
+    "       _miint_myloasm_read_id(a.piece_name) AS read_id, "
+    "       _miint_myloasm_split_suffix(a.piece_name) AS split_suffix, "
+    "       coalesce(o.piece_offset, 0) AS piece_offset, "
+    "       a.stats.read_len::BIGINT AS piece_length, "
+    "       _miint_myloasm_query_start(coalesce(o.piece_offset, 0), a.strand, a.stats.read_len::BIGINT, "
+    "                                  a.slice.start::BIGINT, a.slice.stop::BIGINT) AS query_start, "
+    "       _miint_myloasm_query_stop(coalesce(o.piece_offset, 0), a.strand, a.stats.read_len::BIGINT, "
+    "                                 a.slice.start::BIGINT, a.slice.stop::BIGINT) AS query_stop, "
+    "       a.strand, "
+    "       a.stats.dp1::DOUBLE AS read_depth_identity_99, "
+    "       a.stats.dp2::DOUBLE AS read_depth_identity_99_75, "
+    "       a.stats.dp3::DOUBLE AS read_depth_identity_100, "
+    "       CASE WHEN NOT a.is_last THEN a.stats.ol::BIGINT END AS next_overlap_length, "
+    "       CASE WHEN NOT a.is_last THEN a.stats.share::BIGINT END AS next_shared_snpmers, "
+    "       CASE WHEN NOT a.is_last THEN a.stats.diff::BIGINT END AS next_differing_snpmers "
+    "FROM a "
+    "LEFT JOIN _miint_myloasm_piece_offsets(dir) o ON o.piece = _miint_myloasm_offset_piece(a.piece_name) "
+    "WHERE CASE "
+    "        WHEN a.field_count <> 7 OR a.slice.contig_id = '' OR a.stats.dp1 = '' "
+    "          OR NOT regexp_full_match(a.contig_offset, '[0-9]+') OR NOT regexp_full_match(a.slice_length, '[0-9]+') "
+    "          OR a.strand NOT IN ('+', '-') "
+    "        THEN error(printf('read_myloasm_layout: final_contig_graph.gfa line %d: "
+    "not a myloasm read-placement (a) line', a.line_number)) "
+    "        WHEN a.slice.stop::BIGINT - a.slice.start::BIGINT <> a.slice_length::BIGINT "
+    "          OR a.slice.stop::BIGINT > a.stats.read_len::BIGINT "
+    "        THEN error(printf('read_myloasm_layout: final_contig_graph.gfa line %d: "
+    "read slice %s does not fit a %s bp piece with a %s bp slice', "
+    "                          a.line_number, split_part(a.slice_field, ',', 2), a.stats.read_len, a.slice_length)) "
+    "        ELSE _miint_myloasm_check_piece(a.piece_name, o.piece_offset, "
+    "                 printf('read_myloasm_layout: final_contig_graph.gfa line %d: ', a.line_number)) "
+    "      END; ";
+
+// read_myloasm_links(dir): the GFA's L lines with myloasm's tags (described on the GFA's
+// second line). r1/r2 are the reads at the two contig ends that meet; fs is omitted when the
+// contigs share no minimizers. The overlap field is a 0M placeholder and is dropped.
+const std::string READ_MYLOASM_LINKS = // NOLINT
+    "CREATE OR REPLACE MACRO read_myloasm_links(dir) AS TABLE "
+    "SELECT from_segment AS from_contig_id, from_orientation, to_segment AS to_contig_id, to_orientation, "
+    "       tags['ol']::BIGINT AS overlap_length, "
+    "       tags['ss']::BIGINT AS shared_snpmers, "
+    "       tags['sd']::BIGINT AS differing_snpmers, "
+    "       tags['sm']::BIGINT AS shared_minimizers, "
+    "       tags['fs']::DOUBLE AS snpmer_identity_percent, "
+    "       _miint_myloasm_read_id(tags['r1']) AS from_read_id, "
+    "       _miint_myloasm_split_suffix(tags['r1']) AS from_split_suffix, "
+    "       _miint_myloasm_read_id(tags['r2']) AS to_read_id, "
+    "       _miint_myloasm_split_suffix(tags['r2']) AS to_split_suffix "
+    "FROM read_gfa_links(_miint_myloasm_path(dir, 'final_contig_graph.gfa')) "
+    "WHERE CASE "
+    "        WHEN TRY_CAST(tags['ol'] AS BIGINT) IS NULL OR TRY_CAST(tags['ss'] AS BIGINT) IS NULL "
+    "          OR TRY_CAST(tags['sd'] AS BIGINT) IS NULL OR TRY_CAST(tags['sm'] AS BIGINT) IS NULL "
+    "          OR (tags['fs'] IS NOT NULL AND TRY_CAST(tags['fs'] AS DOUBLE) IS NULL) "
+    "          OR tags['r1'] IS NULL OR tags['r2'] IS NULL "
+    "        THEN error(printf('read_myloasm_links: link %s%s -> %s%s lacks myloasm''s ol/ss/sd/sm/r1/r2 tags', "
+    "                          from_segment, from_orientation, to_segment, to_orientation)) "
     "        ELSE TRUE "
     "      END; ";
+
+// read_myloasm_mappings(dir): the final mapping of every read to the unpolished contigs.
+// Each record names r<index>-<read> (myloasm's internal read number, then the read); its
+// query length is the piece's. Columns 10 and 11 are anchor spans (last anchor's end minus
+// first anchor's start), not residue matches and block length, and MAPQ is always 255.
+const std::string READ_MYLOASM_MAPPINGS = // NOLINT
+    "CREATE OR REPLACE MACRO read_myloasm_mappings(dir) AS TABLE "
+    "WITH p AS ( "
+    "  SELECT *, regexp_extract(read_id, '^r[0-9]+-(.+)$', 1) AS name "
+    "  FROM read_paf(_miint_myloasm_path(dir, '3-mapping/map_to_unitigs.paf.gz')) "
+    ") "
+    "SELECT _miint_myloasm_read_id(p.name) AS read_id, "
+    "       _miint_myloasm_split_suffix(p.name) AS split_suffix, "
+    "       coalesce(o.piece_offset, 0) AS piece_offset, "
+    "       p.query_length AS piece_length, "
+    "       _miint_myloasm_query_start(coalesce(o.piece_offset, 0), p.strand, p.query_length, "
+    "                                  p.query_start, p.query_stop) AS query_start, "
+    "       _miint_myloasm_query_stop(coalesce(o.piece_offset, 0), p.strand, p.query_length, "
+    "                                 p.query_start, p.query_stop) AS query_stop, "
+    "       p.strand, "
+    "       p.reference AS contig_id, "
+    "       p.position, "
+    "       p.stop_position, "
+    "       p.residue_matches AS query_anchor_span, "
+    "       p.block_length AS contig_anchor_span, "
+    "       p.tags['shared_mini']::BIGINT AS shared_minimizers, "
+    "       p.tags['shared_snp']::BIGINT AS shared_snpmers, "
+    "       p.tags['diff_snp']::BIGINT AS differing_snpmers "
+    "FROM p "
+    "LEFT JOIN _miint_myloasm_piece_offsets(dir) o ON o.piece = _miint_myloasm_offset_piece(p.name) "
+    "WHERE CASE "
+    "        WHEN p.name = '' OR p.reference = '*' "
+    "          OR TRY_CAST(p.tags['shared_mini'] AS BIGINT) IS NULL "
+    "          OR TRY_CAST(p.tags['shared_snp'] AS BIGINT) IS NULL "
+    "          OR TRY_CAST(p.tags['diff_snp'] AS BIGINT) IS NULL "
+    "        THEN error(printf('read_myloasm_mappings: record for ''%s'' is not a myloasm mapping "
+    "(r<index>-<read>, mapped to a contig, with shared_mini, shared_snp and diff_snp)', p.read_id)) "
+    "        ELSE _miint_myloasm_check_piece(p.name, o.piece_offset, 'read_myloasm_mappings: ') "
+    "      END; ";
+
+// read_myloasm_contigs(dir): every contig in the GFA, joined to its FASTA header. The status
+// is the FASTA a contig is in; one in no FASTA was dropped after the GFA was written
+// ('filtered'). The header's "duplicated-" field is a k-mer multiplicity flag, not that
+// status. Polished FASTA headers:
+//   u<N>ctg_len-<polished length>_circular-<yes|possibly|no>_depth-<d1>-<d2>-<d3>_duplicated-<flag>
+//   comment: mult=<k-mer multiplicity>[ secondary_to:|<full header>| aligned_frac:<%> ani:<%>]
+// d1-d3 are the GFA's DP, DP2 and DP3: the median, over the contig's reads, of each read's
+// minimum depth counting reads at >= 99%, 99.75% and 100% SNPmer identity. MEDIAN_DP1 reads as
+// the 99% tier (DP1), but is the median of the reads' median depths at the 100% tier.
+// myloasm writes all three FASTAs whether or not it has contigs for them, hence allow_empty.
+const std::string READ_MYLOASM_CONTIGS = // NOLINT
+    "CREATE OR REPLACE MACRO read_myloasm_contigs(dir) AS TABLE "
+    "WITH fasta AS ( "
+    "  SELECT 'primary' AS dereplication_status, read_id, comment "
+    "  FROM read_fastx(_miint_myloasm_path(dir, 'assembly_primary.fa'), allow_empty := true) "
+    "  UNION ALL "
+    "  SELECT 'alternate', read_id, comment "
+    "  FROM read_fastx(_miint_myloasm_path(dir, 'alternate_assemblies/assembly_alternate.fa'), allow_empty := true) "
+    "  UNION ALL "
+    "  SELECT 'duplicated', read_id, comment "
+    "  FROM read_fastx(_miint_myloasm_path(dir, 'alternate_assemblies/duplicated_contigs.fa'), allow_empty := true) "
+    "), h AS ( "
+    "  SELECT dereplication_status, read_id AS fasta_id, comment, "
+    "         regexp_extract(read_id, '^(u[0-9]+ctg)_len-([0-9]+)_circular-(yes|possibly|no)"
+    "_depth-[0-9.]+-[0-9.]+-[0-9.]+_duplicated-(no|possibly|yes)$', "
+    "                        ['contig_id', 'len', 'circular', 'flag']) AS hdr, "
+    "         regexp_extract(coalesce(comment, ''), '^mult=([0-9.]+)(?: secondary_to:[|](u[0-9]+ctg)_[^|]*[|]"
+    " aligned_frac:([0-9.]+) ani:([0-9.]+))?$', "
+    "                        ['mult', 'secondary', 'aligned', 'ani']) AS cmt "
+    "  FROM fasta "
+    "), g AS ( "
+    "  SELECT segment_id AS contig_id, tags "
+    "  FROM read_gfa_segments(_miint_myloasm_path(dir, 'final_contig_graph.gfa')) "
+    ") "
+    "SELECT coalesce(g.contig_id, h.hdr.contig_id) AS contig_id, "
+    "       coalesce(h.dereplication_status, 'filtered') AS dereplication_status, "
+    "       h.fasta_id, "
+    "       h.hdr.len::BIGINT AS polished_length, "
+    "       g.tags['LN']::BIGINT AS unpolished_length, "
+    "       h.hdr.circular AS circularity, "
+    "       g.tags['DP']::DOUBLE AS depth_identity_99, "
+    "       g.tags['DP2']::DOUBLE AS depth_identity_99_75, "
+    "       g.tags['DP3']::DOUBLE AS depth_identity_100, "
+    "       g.tags['MEDIAN_DP1']::DOUBLE AS median_depth_identity_100, "
+    "       h.cmt.mult::DOUBLE AS kmer_multiplicity, "
+    "       h.hdr.flag AS kmer_multiplicity_flag, "
+    "       nullif(h.cmt.secondary, '') AS secondary_to_contig_id, "
+    "       nullif(h.cmt.aligned, '')::DOUBLE AS secondary_aligned_percent, "
+    "       nullif(h.cmt.ani, '')::DOUBLE AS secondary_ani_percent "
+    "FROM h "
+    "FULL OUTER JOIN g ON g.contig_id = h.hdr.contig_id "
+    "WHERE CASE "
+    "        WHEN h.fasta_id IS NOT NULL "
+    "         AND (h.hdr.contig_id = '' OR h.cmt.mult = '' "
+    "              OR (h.dereplication_status = 'primary') <> (h.cmt.secondary = '')) "
+    "        THEN error(printf('read_myloasm_contigs: %s contig header is not myloasm''s: ''%s''', "
+    "                          h.dereplication_status, concat_ws(' ', h.fasta_id, nullif(h.comment, '')))) "
+    "        WHEN g.contig_id IS NULL "
+    "        THEN error(printf('read_myloasm_contigs: contig %s is in the %s FASTA but has no S record "
+    "in final_contig_graph.gfa', h.hdr.contig_id, h.dereplication_status)) "
+    "        WHEN TRY_CAST(g.tags['LN'] AS BIGINT) IS NULL OR TRY_CAST(g.tags['DP'] AS DOUBLE) IS NULL "
+    "          OR TRY_CAST(g.tags['DP2'] AS DOUBLE) IS NULL OR TRY_CAST(g.tags['DP3'] AS DOUBLE) IS NULL "
+    "          OR TRY_CAST(g.tags['MEDIAN_DP1'] AS DOUBLE) IS NULL "
+    "        THEN error(printf('read_myloasm_contigs: S record %s lacks myloasm''s LN/DP/DP2/DP3/MEDIAN_DP1 tags', "
+    "                          g.contig_id)) "
+    "        ELSE TRUE "
+    "      END "
+    "QUALIFY CASE "
+    "          WHEN count(*) OVER (PARTITION BY coalesce(g.contig_id, h.hdr.contig_id)) > 1 "
+    "          THEN error(printf('read_myloasm_contigs: contig %s appears more than once "
+    "across the FASTA files and GFA', coalesce(g.contig_id, h.hdr.contig_id))) "
+    "          ELSE TRUE "
+    "        END; ";
+
+// read_myloasm_run(dir): one row per myloasm*.log (one per invocation; a resumed run has
+// several). myloasm logs its argv joined by spaces, not its settings, so k and c follow its
+// argument rules at 0.7.0 (cli.rs, main.rs). Without --nano-r9, k is -k/--kmer-size (default
+// 21) and c is the hidden --c (default 11). --nano-r9 sets k = 17 and c = 7, overriding -k and
+// --c. -c/--compression then sets c in every case. The "Setting -c to N" log line prints c
+// before -c is applied.
+const std::string READ_MYLOASM_RUN = // NOLINT
+    "CREATE OR REPLACE MACRO read_myloasm_run(dir) AS TABLE "
+    "WITH l AS ( "
+    "  SELECT filename, "
+    "         regexp_extract(line, '^\\(([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9:.]+)\\) INFO \\[myloasm\\] "
+    "(COMMAND|VERSION): (.*)$', ['at', 'key', 'value']) AS m "
+    "  FROM _miint_myloasm_lines(_miint_myloasm_path(dir, 'myloasm*.log')) "
+    "), r AS ( "
+    "  SELECT filename AS log_file, "
+    "         any_value(m.at) FILTER (m.key = 'COMMAND') AS started_at, "
+    "         any_value(m.value) FILTER (m.key = 'COMMAND') AS command, "
+    "         any_value(m.value) FILTER (m.key = 'VERSION') AS myloasm_version "
+    "  FROM l "
+    "  GROUP BY filename "
+    "  HAVING CASE "
+    "           WHEN count(*) FILTER (m.key = 'COMMAND') <> 1 OR count(*) FILTER (m.key = 'VERSION') <> 1 "
+    "           THEN error(printf('read_myloasm_run: %s: expected one COMMAND and one VERSION line, found %d and %d', "
+    "                             filename, count(*) FILTER (m.key = 'COMMAND'), count(*) FILTER (m.key = 'VERSION'))) "
+    "           ELSE TRUE "
+    "         END "
+    "), f AS ( "
+    "  SELECT *, "
+    "         regexp_matches(command, '(?:^| )--nano-r9(?: |$)') AS nano_r9, "
+    "         nullif(regexp_extract(command, '(?:^| )(?:-c|--compression)(?:=| )?([0-9]+)(?: |$)', 1), '')::INTEGER "
+    "           AS compression_flag, "
+    "         nullif(regexp_extract(command, '(?:^| )--c(?:=| )([0-9]+)(?: |$)', 1), '')::INTEGER AS hidden_c, "
+    "         nullif(regexp_extract(command, '(?:^| )(?:-k|--kmer-size)(?:=| )?([0-9]+)(?: |$)', 1), '')::INTEGER "
+    "           AS kmer_flag "
+    "  FROM r "
+    ") "
+    "SELECT log_file, "
+    "       started_at::TIMESTAMP AS started_at, "
+    "       myloasm_version, "
+    "       command, "
+    "       CASE WHEN nano_r9 THEN 17 ELSE coalesce(kmer_flag, 21) END AS kmer_size, "
+    "       coalesce(compression_flag, CASE WHEN nano_r9 THEN 7 ELSE coalesce(hidden_c, 11) END) AS compression, "
+    "       regexp_matches(command, '(?:^| )--hifi(?: |$)') AS hifi "
+    "FROM f; ";
 
 // read_jplace(path)
 //
@@ -792,8 +1234,8 @@ const std::string GENOME_COVERAGE = // NOLINT
     // garbage. The guard lives in WHERE rather than the projection because
     // DuckDB prunes unused projections -- inside SELECT it would not fire for
     // `SELECT covered FROM genome_coverage(...)`, the very query that would
-    // otherwise hide the problem. Same reasoning as read_gff's malformed-line
-    // check above. A genome present in subject_total_length but uncovered here
+    // otherwise hide the problem (docs/internals/duckdb-engine-notes.md, "Validation in a
+    // table macro"). A genome present in subject_total_length but uncovered here
     // simply produces no row; only a genome we must divide for and cannot is
     // fatal, so an empty result stays empty rather than raising.
     "LEFT JOIN query_table(subject_total_length) tl "
@@ -2278,6 +2720,26 @@ public:
 
 		register_macro(PARSE_GFF_ATTRIBUTES, "parse_gff_attributes");
 		register_macro(READ_GFF, "read_gff");
+		register_macro(READ_GFA_SEGMENTS, "read_gfa_segments");
+		register_macro(READ_GFA_LINKS, "read_gfa_links");
+		// The _miint_myloasm_ helpers before the read_myloasm_ macros that delegate to them.
+		register_macro(MIINT_MYLOASM_PATH, "_miint_myloasm_path");
+		register_macro(MIINT_MYLOASM_READ_ID, "_miint_myloasm_read_id");
+		register_macro(MIINT_MYLOASM_SPLIT_SUFFIX, "_miint_myloasm_split_suffix");
+		register_macro(MIINT_MYLOASM_SPLIT_DEPTH, "_miint_myloasm_split_depth");
+		register_macro(MIINT_MYLOASM_OFFSET_PIECE, "_miint_myloasm_offset_piece");
+		register_macro(MIINT_MYLOASM_QUERY_START, "_miint_myloasm_query_start");
+		register_macro(MIINT_MYLOASM_QUERY_STOP, "_miint_myloasm_query_stop");
+		register_macro(MIINT_MYLOASM_CHECK_PIECE, "_miint_myloasm_check_piece");
+		register_macro(MIINT_MYLOASM_LINES, "_miint_myloasm_lines");
+		register_macro(MIINT_MYLOASM_BREAKPOINTS, "_miint_myloasm_breakpoints");
+		register_macro(READ_MYLOASM_SPLITS, "read_myloasm_splits");
+		register_macro(MIINT_MYLOASM_PIECE_OFFSETS, "_miint_myloasm_piece_offsets");
+		register_macro(READ_MYLOASM_LAYOUT, "read_myloasm_layout");
+		register_macro(READ_MYLOASM_LINKS, "read_myloasm_links");
+		register_macro(READ_MYLOASM_MAPPINGS, "read_myloasm_mappings");
+		register_macro(READ_MYLOASM_CONTIGS, "read_myloasm_contigs");
+		register_macro(READ_MYLOASM_RUN, "read_myloasm_run");
 		register_macro(GENOME_COVERAGE, "genome_coverage");
 		register_macro(GENOME_COVERAGE_PER_SAMPLE, "genome_coverage_per_sample");
 		// _miint_bin_index must be registered before bin_of and interval_bins (they

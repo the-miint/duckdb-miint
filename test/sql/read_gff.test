@@ -308,9 +308,9 @@ SELECT COUNT(*) FROM read_gff('data/gff/withfasta.gff') WHERE source IS NULL OR 
 #
 # A line with only SOME of the 8 mandatory fields is a broken GFF line, not FASTA content,
 # and is not silently droppable: dropping it would trade one silent wrong answer for
-# another. Note the check lives in the macro's WHERE clause, not a projection -- DuckDB
-# prunes unused projections, so a check in a SELECT expression would NOT fire for
-# `SELECT type FROM read_gff(...)`, which is exactly the shape the issue reported.
+# another. The check must fire whichever columns are selected or filtered on, including
+# `SELECT type FROM read_gff(...)`, the shape the issue reported (why it can fail to:
+# docs/internals/duckdb-engine-notes.md, "Validation in a table macro").
 statement error
 SELECT COUNT(*) FROM read_gff('data/gff/malformed.gff');
 ----
@@ -341,6 +341,132 @@ statement error
 SELECT COUNT(*) FROM read_gff('data/gff/malformed.gff') WHERE position > 1000000;
 ----
 malformed GFF feature line
+
+# An IN list was one filter the ungated macro let through.
+statement error
+SELECT COUNT(*) FROM read_gff('data/gff/malformed.gff') WHERE type IN ('gene', 'mRNA');
+----
+malformed GFF feature line
+
+# A filter on any one column, here one that matches neither line, still raises: each
+# column carries the check, so removing it from any one column fails this loop.
+foreach col seqid source type position stop_position score strand phase attributes
+
+statement error
+SELECT COUNT(*) FROM read_gff('data/gff/malformed.gff') WHERE ${col}::VARCHAR = 'no_such_value';
+----
+malformed GFF feature line
+
+endloop
+
+# A last line holding only a seqid and a source, as a download cut off mid-line leaves.
+# Counting features that have an ID must not quietly leave it out.
+statement ok
+COPY (SELECT * FROM (VALUES (E'##gff-version 3'), (E'ctg1\tprodigal\tCDS\t1\t50\t.\t+\t0\tID=c1'),
+                            (E'ctg1\tprodigal')) t(line))
+TO '__TEST_DIR__/truncated.gff' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT COUNT(*) FROM read_gff('__TEST_DIR__/truncated.gff') WHERE attributes['ID'] IS NOT NULL;
+----
+malformed GFF feature line
+
+# A filter that selects other contigs still reads the malformed line, so it still raises.
+statement ok
+COPY (SELECT * FROM (VALUES (E'ctg1\tsrc\tgene\t1\t50\t.\t+\t.\tID=g1'), (E'ctg2\tsrc\tgene\t1')) t(line))
+TO '__TEST_DIR__/broken_ctg2.gff' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT COUNT(*) FROM read_gff('__TEST_DIR__/broken_ctg2.gff') WHERE seqid LIKE 'ctg1%';
+----
+malformed GFF feature line (expected 9 tab-separated fields, found fewer): ctg2
+
+# A seqid is mandatory. A line whose first field is empty is a broken feature line, raised
+# like one with missing fields, not dropped. (An empty line, or one of tabs alone, has no
+# fields at all and is skipped.)
+statement ok
+COPY (SELECT * FROM (VALUES (E'ctg1\tsrc\tgene\t1\t50\t.\t+\t.\tID=g1'), (E''), (E'\t\t\t\t\t\t\t\t'),
+                            (E'\tsrc\tgene\t60\t90\t.\t+\t.\tID=g2')) t(line))
+TO '__TEST_DIR__/empty_seqid.gff' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT COUNT(*) FROM read_gff('__TEST_DIR__/empty_seqid.gff');
+----
+malformed GFF feature line (empty seqid): src gene 60 90
+
+statement ok
+COPY (SELECT * FROM (VALUES (E'ctg1\tsrc\tgene\t1\t50\t.\t+\t.\tID=g1'), (E''), (E'\t\t\t\t\t\t\t\t'),
+                            (E'ctg1\tsrc\tgene\t60\t90\t2.5\t.\t1\tID=g2')) t(line))
+TO '__TEST_DIR__/blank_lines.gff' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+# Each column's type, and '.' as NULL for score, strand and phase.
+query TTTTTTTTTTTT
+SELECT seqid, typeof(position), typeof(stop_position), score, typeof(score), strand, typeof(strand), phase,
+       typeof(phase), attributes['ID'], typeof(attributes), typeof(seqid)
+FROM read_gff('__TEST_DIR__/blank_lines.gff') ORDER BY position;
+----
+ctg1	INTEGER	INTEGER	NULL	DOUBLE	+	VARCHAR	NULL	INTEGER	g1	MAP(VARCHAR, VARCHAR)	VARCHAR
+ctg1	INTEGER	INTEGER	2.5	DOUBLE	NULL	VARCHAR	1	INTEGER	g2	MAP(VARCHAR, VARCHAR)	VARCHAR
+
+# --- A field that is present but not a number ---
+#
+# Start and end must be integers, and score and phase numbers or '.'. A line that breaks
+# this is malformed, so it fails the scan even when no number is read (COUNT(*)), instead
+# of being counted as a feature and failing only when its position is selected.
+foreach bad E'ctg1\tsrc\tgene\tabc\t50\t.\t+\t.\tID=g1' E'ctg1\tsrc\tgene\t1\t5O\t.\t+\t.\tID=g1' E'ctg1\tsrc\tgene\t1\t50\thigh\t+\t.\tID=g1' E'ctg1\tsrc\tCDS\t1\t50\t.\t+\tx\tID=g1'
+
+statement ok
+COPY (SELECT * FROM (VALUES (E'ctg1\tsrc\tgene\t1\t50\t1e3\t+\t0\tID=g0'), (${bad})) t(line))
+TO '__TEST_DIR__/not_a_number.gff' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT COUNT(*) FROM read_gff('__TEST_DIR__/not_a_number.gff');
+----
+malformed GFF feature line (start, end, score or phase is not a number)
+
+endloop
+
+# --- '#' and '"' inside a line ---
+#
+# GFF3 has no end-of-line comments, and a seqid must escape '#', so only a line that starts
+# with '#' is a comment or directive; a '#' later in a line is data. A value holding one,
+# as an attribute value often does, comes back whole.
+statement ok
+COPY (SELECT * FROM (VALUES (E'ctg1\tsrc\tgene\t1\t50\t.\t+\t.\tID=g1;Note=see #3 for details;Name=abc')) t(line))
+TO '__TEST_DIR__/hash_attribute.gff' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+query TTTI
+SELECT attributes['ID'], attributes['Note'], attributes['Name'], cardinality(attributes)
+FROM read_gff('__TEST_DIR__/hash_attribute.gff');
+----
+g1	see #3 for details	abc	3
+
+# Comment and directive lines are skipped whatever they hold, tabs included. GFF3 has no
+# quoting either, so a '"' is an ordinary character: an unmatched one in a comment must not
+# swallow the feature lines after it, and a field that starts with one reads as written.
+statement ok
+COPY (SELECT * FROM (VALUES (E'##gff-version 3'), (E'# made by "tool"'), (E'#\twith\ttabs'), (E'#\t"open'),
+                            (E'ctg1\tsrc#2\tgene\t1\t50\t.\t+\t.\tID=g1'), (E'###'),
+                            (E'ctg1\t"quoted\tgene\t60\t90\t.\t+\t.\tID=g2;Note=x"'))
+                     t(line))
+TO '__TEST_DIR__/hash.gff' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+query ITT
+SELECT position, source, attributes['Note'] FROM read_gff('__TEST_DIR__/hash.gff') ORDER BY position;
+----
+1	src#2	NULL
+60	"quoted	x"
+
+# Every line is split into fields, comments included, so a comment line with more than the
+# nine fields a feature line may have fails the scan rather than being read in part.
+statement ok
+COPY (SELECT * FROM (VALUES (E'#\ta\tb\tc\td\te\tf\tg\th\ti'), (E'ctg1\tsrc\tgene\t1\t50\t.\t+\t.\tID=g1')) t(line))
+TO '__TEST_DIR__/wide_comment.gff' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT count(*) FROM read_gff('__TEST_DIR__/wide_comment.gff');
+----
+Expected Number of Columns: 9 Found: 10
 
 # --- Composition with genome_coverage (issue #196) ---
 #

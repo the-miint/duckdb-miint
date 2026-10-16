@@ -42,7 +42,7 @@ GROUP BY sample_id;
 
 ## Key Capabilities
 
-- **Read bioinformatics formats as tables**: FASTQ/FASTA, SAM/BAM, SFF, BIOM, GFF, Newick trees, jplace, mzML, mzXML
+- **Read bioinformatics formats as tables**: FASTQ/FASTA, SAM/BAM, PAF, GFA assembly graphs, myloasm assembly output, SFF, BIOM, GFF, Newick trees, jplace, mzML, mzXML
 - **Mass spectrometry analysis**: MassQL query language, `read_mzml`/`read_mzxml` with `UNION ALL`-compatible schemas, 30+ helper macros for peak matching, isotope patterns, and cross-level queries
 - **Align sequences in SQL**: minimap2 and Bowtie2 integration with sharded parallel alignment, MAFFT multiple sequence alignment
 - **Classify sequences**: RYpe minimizer-based sequence classification
@@ -58,7 +58,7 @@ The docs are organized by task. Full index: **[docs/table_of_contents.md](docs/t
 | Topic | Description |
 |-------|-------------|
 | [Installation & building](docs/installation.md) | Installing from community extensions, building from source, dependencies |
-| [Reading files](docs/reading.md) | FASTA/FASTQ, SAM/BAM, SFF, BIOM, mzML/mzXML, GFF, jplace, Newick |
+| [Reading files](docs/reading.md) | FASTA/FASTQ, SAM/BAM, PAF, GFA, myloasm output, SFF, BIOM, mzML/mzXML, GFF, jplace, Newick |
 | [Writing files](docs/writing.md) | Writing FASTQ, FASTA, SAM/BAM, BIOM, and Newick files |
 | Alignment | [Reference](docs/alignment_reference.md) (minimap2/bowtie2/SortMeRNA), [pairwise](docs/alignment_pairwise.md) (WFA2/KSW2), [multiple](docs/alignment_multiple.md) (MAFFT/abPOA), and [analysis](docs/alignment_analysis.md) |
 | Amplicon & community | [Quality control](docs/qc.md), [denoising](docs/denoising.md), [chimera checking](docs/chimera.md), [clustering](docs/clustering.md), [search](docs/search.md) |

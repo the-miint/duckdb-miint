@@ -1,0 +1,273 @@
+# name: test/sql/read_myloasm_mappings.test
+# description: read_myloasm_mappings returns myloasm's final read-to-contig mappings on miint's two coordinate axes
+# group: [sql]
+
+require miint
+
+# --- Schema ---
+
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM read_myloasm_mappings('data/myloasm/ecoli_sim'));
+----
+read_id	VARCHAR
+split_suffix	VARCHAR
+piece_offset	BIGINT
+piece_length	BIGINT
+query_start	BIGINT
+query_stop	BIGINT
+strand	VARCHAR
+contig_id	VARCHAR
+position	BIGINT
+stop_position	BIGINT
+query_anchor_span	BIGINT
+contig_anchor_span	BIGINT
+shared_minimizers	BIGINT
+shared_snpmers	BIGINT
+differing_snpmers	BIGINT
+
+# One row per PAF record, read independently.
+query I
+SELECT count(*) = (SELECT count(*) FROM read_paf('data/myloasm/ecoli_sim/3-mapping/map_to_unitigs.paf.gz'))
+FROM read_myloasm_mappings('data/myloasm/ecoli_sim');
+----
+true
+
+# The PAF's 'r<index>-' prefix is myloasm's internal read number, not part of the read's name.
+query TTIIIITTII
+SELECT read_id, split_suffix, piece_offset, piece_length, query_start, query_stop, strand, contig_id, position, stop_position
+FROM read_myloasm_mappings('data/myloasm/ecoli_sim')
+WHERE read_id = 's00000_lina_1000000_1008000_f';
+----
+s00000_lina_1000000_1008000_f	NULL	0	8000	487	8000	-	u491ctg	188954	196467
+
+# --- Intent: reverse-strand query coordinates are flipped onto the read as sequenced ---
+
+# myloasm writes a '-' record's query interval on the reverse complement of the read, unlike
+# standard PAF. Full-length alignments cannot show whether that is undone: the interval is
+# nearly the whole read either way. Partial ones can, and the circular contigs have them,
+# where a read crosses the point at which the unpolished contig's ends overlap.
+#
+# Every circ/circb read is a stretch of one 40 kb circle starting at offset c_start
+# (name: s<i>_circ_<c_start>_<len>_<f|r>), and both contigs run in the circle's own
+# orientation. So on each contig, contig position minus circle position must be one
+# constant (mod 40000), up to the few bases of slack at the unpolished contig's read
+# junctions. Without the flip, the partial '-' alignments land up to 40 kb away.
+query TIIT
+SELECT contig_id,
+       count(*),
+       count(*) FILTER (strand = '-' AND query_stop - query_start < piece_length - 200),
+       max(offset_on_circle) - min(offset_on_circle) < 50
+FROM (
+  SELECT contig_id, strand, query_start, query_stop, piece_length,
+         (position - 1 - CASE WHEN p[5] = 'f' THEN p[3]::BIGINT - 2000000 + query_start
+                              ELSE p[3]::BIGINT - 2000000 + p[4]::BIGINT - query_stop END + 400000) % 40000
+           AS offset_on_circle
+  FROM (SELECT *, string_split(read_id, '_') AS p FROM read_myloasm_mappings('data/myloasm/ecoli_sim'))
+  WHERE p[2] IN ('circ', 'circb')
+)
+GROUP BY contig_id ORDER BY contig_id;
+----
+u840ctg	99	16	true
+u982ctg	74	12	true
+
+# --- Intent: split pieces are placed on the original read ---
+
+# Each overhang read is 9 kb of genome joined to a 3 kb tail from a region no other read
+# covers, so only the genomic part can map: [0, 9000) when forward and [3000, 12000) when
+# reversed. myloasm cuts the tail off, so the PAF describes a piece; its coordinates must be
+# moved back onto the read by the piece's offset for this to hold.
+query III
+SELECT count(DISTINCT read_id),
+       count(*),
+       count(*) FILTER (CASE WHEN p[6] = 'f' THEN query_stop <= 9000 ELSE query_start >= 3000 END)
+FROM (SELECT *, string_split(read_id, '_') AS p FROM read_myloasm_mappings('data/myloasm/ecoli_sim'))
+WHERE p[2] = 'ovh';
+----
+20	20	20
+
+# Each chimera is strain A joined to the circle, at a junction known from its name (the name
+# fields are described in test/scripts/generate_myloasm_fixture.sh). A forward read starts
+# with its strain A part, so the junction is that part's length; a reverse read is the
+# reverse complement, so it starts with the circle part, and the junction is that part's
+# length. Every alignment must lie on the side of the junction that matches what it aligns
+# to: strain A contigs (u491ctg, u826ctg) or the circle (u840ctg, u982ctg).
+query II
+SELECT count(*),
+       count(*) FILTER (CASE WHEN (contig_id IN ('u491ctg', 'u826ctg')) = (p[7] = 'f')
+                             THEN query_stop <= junction ELSE query_start >= junction END)
+FROM (
+  SELECT *, CASE WHEN p[7] = 'f' THEN p[4]::BIGINT - p[3]::BIGINT ELSE p[6]::BIGINT END AS junction
+  FROM (SELECT *, string_split(read_id, '_') AS p FROM read_myloasm_mappings('data/myloasm/ecoli_sim'))
+  WHERE p[2] = 'chim'
+);
+----
+46	46
+
+# A piece runs from the breakpoint before it to the breakpoint after it, or to the end of the
+# read (lengths from the read names). Checked against read_myloasm_splits, every piece's
+# offset and myloasm's own piece length must agree with that span.
+query II
+SELECT count(*),
+       count(*) FILTER (m.piece_offset + m.piece_length = coalesce(next_bp.query_start, m.read_length)
+                        AND m.piece_offset = coalesce(this_bp.query_stop, 0))
+FROM (
+  SELECT *,
+         regexp_extract(split_suffix, '[0-9]+$')::BIGINT AS piece_index,
+         CASE WHEN p[2] = 'chim' THEN p[4]::BIGINT - p[3]::BIGINT + p[6]::BIGINT ELSE 12000 END AS read_length
+  FROM (SELECT *, string_split(read_id, '_') AS p FROM read_myloasm_mappings('data/myloasm/ecoli_sim'))
+  WHERE read_id IN (SELECT read_id FROM read_myloasm_splits('data/myloasm/ecoli_sim'))
+) m
+LEFT JOIN read_myloasm_splits('data/myloasm/ecoli_sim') next_bp
+  ON next_bp.read_id = m.read_id AND next_bp.breakpoint_order = m.piece_index + 1
+LEFT JOIN read_myloasm_splits('data/myloasm/ecoli_sim') this_bp
+  ON this_bp.read_id = m.read_id AND this_bp.breakpoint_order = m.piece_index;
+----
+66	66
+
+# Columns 10 and 11 are myloasm's anchor spans, not PAF's residue matches and block length,
+# and its untyped tags become integer columns. s00007's two spans differ. No real record
+# has a differing SNPmer; the constructed r2001 record below does.
+query IIIII
+SELECT query_anchor_span, contig_anchor_span, shared_minimizers, shared_snpmers, differing_snpmers
+FROM read_myloasm_mappings('data/myloasm/ecoli_sim')
+WHERE read_id = 's00007_lina_1002721_1016739_r';
+----
+13977	13979	1260	93	0
+
+# --- Two-level pieces, constructed from the real run ---
+
+# Round-2 breakpoint lines, written below, plus PAF records for the pieces they create,
+# appended to the real PAF in myloasm's format. Expected read intervals:
+#   s00913 +split1 is [6117, 12000). Round 2 cuts it at [1000, 1200) and [3000, 3100):
+#     +split1+split0  starts with its parent:  offset 6117,  [0, 1000) +  -> [6117, 7117)
+#     +split1+split1  offset 6117 + 1200:      [100, 1800) - on its 1800 bp reverse
+#                     complement is [0, 1700) forward          -> [7317, 9017)
+#     +split1+split2  offset 6117 + 3100:      [0, 2783) +     -> [9217, 12000)
+#   s00000, split only in round 2 at [4000, 4100): +split1 offset 4100, [0, 3900) -
+#                                                               -> [4100, 8000)
+#   s00914 +split0 is [0, 7807); round 2 cuts it at [2000, 2050):
+#     +split0+split1  offset 0 + 2050,         [0, 5757) -     -> [2050, 7807)
+statement ok
+COPY (SELECT 1 AS x) TO '__TEST_DIR__/mappings_round2' (FORMAT csv, PER_THREAD_OUTPUT true, OVERWRITE_OR_IGNORE true);
+
+statement ok
+COPY (SELECT 1 AS x) TO '__TEST_DIR__/mappings_round2/0-cleaning_and_unitigs' (FORMAT csv, PER_THREAD_OUTPUT true, OVERWRITE_OR_IGNORE true);
+
+statement ok
+COPY (SELECT 1 AS x) TO '__TEST_DIR__/mappings_round2/0-cleaning_and_unitigs/remap_temp' (FORMAT csv, PER_THREAD_OUTPUT true, OVERWRITE_OR_IGNORE true);
+
+statement ok
+COPY (SELECT 1 AS x) TO '__TEST_DIR__/mappings_round2/3-mapping' (FORMAT csv, PER_THREAD_OUTPUT true, OVERWRITE_OR_IGNORE true);
+
+statement ok
+COPY (SELECT line FROM read_csv('data/myloasm/ecoli_sim/0-cleaning_and_unitigs/read_coverages.txt.gz',
+                                delim = E'\x01', quote = '', escape = '', header = false,
+                                columns = {'line': 'VARCHAR'}, auto_detect = false))
+TO '__TEST_DIR__/mappings_round2/0-cleaning_and_unitigs/read_coverages.txt.gz'
+(FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01', COMPRESSION gzip);
+
+statement ok
+COPY (SELECT * FROM (VALUES
+  ('s00913_chim_1005000_1011000_2000000_6000_r+split1 BREAKPOINTS:1000-1200-COND:1,3000-3100-COND:2,'),
+  ('s00000_lina_1000000_1008000_f BREAKPOINTS:4000-4100-COND:-4,'),
+  ('s00914_chim_1014000_1021916_2001999_6677_f+split0 BREAKPOINTS:2000-2050-COND:1,')) t(line))
+TO '__TEST_DIR__/mappings_round2/0-cleaning_and_unitigs/remap_temp/read_coverages.txt.gz'
+(FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01', COMPRESSION gzip);
+
+statement ok
+CREATE TABLE constructed_paf AS
+SELECT line FROM read_csv('data/myloasm/ecoli_sim/3-mapping/map_to_unitigs.paf.gz',
+                          delim = E'\x01', quote = '', escape = '', header = false,
+                          columns = {'line': 'VARCHAR'}, auto_detect = false)
+UNION ALL
+SELECT * FROM (VALUES
+  (E'r2000-s00913_chim_1005000_1011000_2000000_6000_r+split1+split0\t1000\t0\t1000\t+\tu491ctg\t196466\t104700\t105700\t990\t990\t255\tshared_mini:90\tdiff_snp:0\tshared_snp:8'),
+  (E'r2001-s00913_chim_1005000_1011000_2000000_6000_r+split1+split1\t1800\t100\t1800\t-\tu491ctg\t196466\t102900\t104600\t1690\t1690\t255\tshared_mini:150\tdiff_snp:1\tshared_snp:12'),
+  (E'r2002-s00913_chim_1005000_1011000_2000000_6000_r+split1+split2\t2783\t0\t2783\t+\tu491ctg\t196466\t100000\t102783\t2770\t2770\t255\tshared_mini:250\tdiff_snp:0\tshared_snp:20'),
+  (E'r2003-s00000_lina_1000000_1008000_f+split1\t3900\t0\t3900\t-\tu491ctg\t196466\t189000\t192900\t3890\t3890\t255\tshared_mini:350\tdiff_snp:0\tshared_snp:25'),
+  (E'r2004-s00914_chim_1014000_1021916_2001999_6677_f+split0+split1\t5757\t0\t5757\t-\tu491ctg\t196466\t175140\t180897\t5740\t5740\t255\tshared_mini:500\tdiff_snp:0\tshared_snp:40')) t(line);
+
+statement ok
+COPY constructed_paf TO '__TEST_DIR__/mappings_round2/3-mapping/map_to_unitigs.paf.gz'
+(FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01', COMPRESSION gzip);
+
+query TTIIIIT
+SELECT read_id, split_suffix, piece_offset, piece_length, query_start, query_stop, strand
+FROM read_myloasm_mappings('__TEST_DIR__/mappings_round2')
+WHERE split_suffix LIKE '+split%+split%'
+   OR (read_id = 's00000_lina_1000000_1008000_f' AND split_suffix IS NOT NULL)
+ORDER BY query_start, read_id;
+----
+s00914_chim_1014000_1021916_2001999_6677_f	+split0+split1	2050	5757	2050	7807	-
+s00000_lina_1000000_1008000_f	+split1	4100	3900	4100	8000	-
+s00913_chim_1005000_1011000_2000000_6000_r	+split1+split0	6117	1000	6117	7117	+
+s00913_chim_1005000_1011000_2000000_6000_r	+split1+split1	7317	1800	7317	9017	-
+s00913_chim_1005000_1011000_2000000_6000_r	+split1+split2	9217	2783	9217	12000	+
+
+query III
+SELECT shared_minimizers, shared_snpmers, differing_snpmers
+FROM read_myloasm_mappings('__TEST_DIR__/mappings_round2')
+WHERE split_suffix = '+split1+split1';
+----
+150	12	1
+
+# --- Errors ---
+
+statement error
+SELECT * FROM read_myloasm_mappings(NULL);
+----
+read_myloasm: the myloasm output directory cannot be NULL
+
+statement error
+SELECT * FROM read_myloasm_mappings('data/myloasm/does_not_exist');
+----
+data/myloasm/does_not_exist/3-mapping/map_to_unitigs.paf.gz
+
+# Each case below replaces the constructed PAF with the real one plus one bad record.
+
+# +split3 of a read that was never split: nothing says where the piece starts.
+statement ok
+COPY (SELECT * FROM constructed_paf UNION ALL
+      SELECT E'r2005-s00001_lina_1000487_1016486_r+split3\t1000\t0\t1000\t+\tu491ctg\t196466\t1000\t2000\t990\t990\t255\tshared_mini:90\tdiff_snp:0\tshared_snp:8')
+TO '__TEST_DIR__/mappings_round2/3-mapping/map_to_unitigs.paf.gz'
+(FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01', COMPRESSION gzip);
+
+statement error
+SELECT read_id FROM read_myloasm_mappings('__TEST_DIR__/mappings_round2');
+----
+read_myloasm_mappings: piece 's00001_lina_1000487_1016486_r+split3' has no breakpoint that starts it
+
+statement ok
+COPY (SELECT * FROM constructed_paf UNION ALL
+      SELECT E'r2005-s00001_lina_1000487_1016486_r+split0+split0+split0\t1000\t0\t1000\t+\tu491ctg\t196466\t1000\t2000\t990\t990\t255\tshared_mini:90\tdiff_snp:0\tshared_snp:8')
+TO '__TEST_DIR__/mappings_round2/3-mapping/map_to_unitigs.paf.gz'
+(FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01', COMPRESSION gzip);
+
+statement error
+SELECT read_id FROM read_myloasm_mappings('__TEST_DIR__/mappings_round2');
+----
+read_myloasm_mappings: read 's00001_lina_1000487_1016486_r+split0+split0+split0' has more than two +split levels
+
+# Without the 'r<index>-' prefix this is not myloasm's PAF, and stripping a prefix that is not
+# there would cut into the read's name.
+statement ok
+COPY (SELECT * FROM constructed_paf UNION ALL
+      SELECT E's00001_lina_1000487_1016486_r\t1000\t0\t1000\t+\tu491ctg\t196466\t1000\t2000\t990\t990\t255\tshared_mini:90\tdiff_snp:0\tshared_snp:8')
+TO '__TEST_DIR__/mappings_round2/3-mapping/map_to_unitigs.paf.gz'
+(FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01', COMPRESSION gzip);
+
+statement error
+SELECT contig_id FROM read_myloasm_mappings('__TEST_DIR__/mappings_round2');
+----
+read_myloasm_mappings: record for 's00001_lina_1000487_1016486_r' is not a myloasm mapping
+
+statement ok
+COPY (SELECT * FROM constructed_paf UNION ALL
+      SELECT E'r2005-s00001_lina_1000487_1016486_r\t1000\t0\t1000\t+\tu491ctg\t196466\t1000\t2000\t990\t990\t255\tdiff_snp:0\tshared_snp:8')
+TO '__TEST_DIR__/mappings_round2/3-mapping/map_to_unitigs.paf.gz'
+(FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01', COMPRESSION gzip);
+
+statement error
+SELECT contig_id FROM read_myloasm_mappings('__TEST_DIR__/mappings_round2');
+----
+read_myloasm_mappings: record for 'r2005-s00001_lina_1000487_1016486_r' is not a myloasm mapping

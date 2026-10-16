@@ -1,0 +1,11 @@
+H	VN:Z:1.1
+# comment lines are skipped
+S	s1	ACGTACGT	LN:i:8	RC:i:120
+S	s2	*	LN:i:1000	ST:A:+
+S	s3	GGCCTTAA	KC:i:-42	fl:f:1.5e-3	nm:Z:segment three	js:J:{"k":[1,2]}	hx:H:1AE301	ba:B:i,1,-2,3	bf:B:f,0.5,1.25
+L	s1	+	s2	-	4M	ID:Z:link1
+L	s2	-	s3	+	*
+C	s1	+	s3	-	2	6M
+P	p1	s1+,s2-,s3+	4M,5M
+W	sample1	1	chr1	0	1016	>s1<s2>s3
+x	custom	record	with:no:tags

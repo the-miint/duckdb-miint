@@ -91,7 +91,7 @@ std::vector<klibpp::KSeq> SequenceReader::read_stream(StreamVar &var, int n) {
 }
 
 SequenceReader::SequenceReader(const std::string &path1, const std::optional<std::string> &path2,
-                               bool allow_format_mismatch)
+                               bool allow_format_mismatch, bool allow_empty)
     : first_read_(true) {
 	sequence1_reader_ = std::make_unique<SeqStreamIn>(path1);
 
@@ -100,7 +100,7 @@ SequenceReader::SequenceReader(const std::string &path1, const std::optional<std
 	bool is_empty1 = buffered_read1_.empty();
 	bool is_fasta1 = !is_empty1 && buffered_read1_[0].qual.empty();
 
-	if (is_empty1) {
+	if (is_empty1 && !allow_empty) {
 		throw std::runtime_error("Empty file: " + path1);
 	}
 
@@ -115,8 +115,11 @@ SequenceReader::SequenceReader(const std::string &path1, const std::optional<std
 		bool is_empty2 = buffered_read2_.empty();
 		bool is_fasta2 = !is_empty2 && buffered_read2_[0].qual.empty();
 
-		if (is_empty2) {
-			throw std::runtime_error("Empty file: " + path2.value());
+		if (is_empty1 != is_empty2) { // both empty only gets here with allow_empty
+			throw std::runtime_error("Empty file: " + (is_empty1 ? path1 : path2.value()));
+		}
+		if (is_empty1) {
+			return; // Both mates empty and allowed: no records, and no format to compare.
 		}
 
 		validate_format_consistency(is_fasta1, is_fasta2, allow_format_mismatch);
@@ -127,7 +130,7 @@ SequenceReader::SequenceReader(const std::string &path1, const std::optional<std
 
 #ifdef MIINT_STATIC_BUILD
 SequenceReader::SequenceReader(DuckDBSeqStreamHandle stream1, DuckDBSeqStreamHandle stream2_or_null,
-                               bool allow_format_mismatch)
+                               bool allow_format_mismatch, bool allow_empty)
     : first_read_(true) {
 	// Ownership protocol: each input handle owns its raw pointer until the
 	// matching make_unique<KStreamIn>() succeeds. Holding the kstream in a
@@ -145,7 +148,7 @@ SequenceReader::SequenceReader(DuckDBSeqStreamHandle stream1, DuckDBSeqStreamHan
 	bool is_empty1 = buffered_read1_.empty();
 	bool is_fasta1 = !is_empty1 && buffered_read1_[0].qual.empty();
 
-	if (is_empty1) {
+	if (is_empty1 && !allow_empty) {
 		throw std::runtime_error("Empty stream");
 	}
 
@@ -159,8 +162,11 @@ SequenceReader::SequenceReader(DuckDBSeqStreamHandle stream1, DuckDBSeqStreamHan
 		bool is_empty2 = buffered_read2_.empty();
 		bool is_fasta2 = !is_empty2 && buffered_read2_[0].qual.empty();
 
-		if (is_empty2) {
-			throw std::runtime_error("Empty stream (sequence2)");
+		if (is_empty1 != is_empty2) { // both empty only gets here with allow_empty
+			throw std::runtime_error(is_empty1 ? "Empty stream" : "Empty stream (sequence2)");
+		}
+		if (is_empty1) {
+			return; // Both mates empty and allowed: no records, and no format to compare.
 		}
 
 		validate_format_consistency(is_fasta1, is_fasta2, allow_format_mismatch);

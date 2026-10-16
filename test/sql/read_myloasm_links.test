@@ -1,0 +1,97 @@
+# name: test/sql/read_myloasm_links.test
+# description: read_myloasm_links returns myloasm's contig graph edges with their overlap evidence as typed columns
+# group: [sql]
+
+require miint
+
+# --- Schema ---
+
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM read_myloasm_links('data/myloasm/ecoli_sim'));
+----
+from_contig_id	VARCHAR
+from_orientation	VARCHAR
+to_contig_id	VARCHAR
+to_orientation	VARCHAR
+overlap_length	BIGINT
+shared_snpmers	BIGINT
+differing_snpmers	BIGINT
+shared_minimizers	BIGINT
+snpmer_identity_percent	DOUBLE
+from_read_id	VARCHAR
+from_split_suffix	VARCHAR
+to_read_id	VARCHAR
+to_split_suffix	VARCHAR
+
+# The fixture's two links are the circular contigs' self-loops. ol/ss/sd/sm/fs/r1/r2 are
+# myloasm's L tags (documented on the GFA's second line); the CIGAR is a 0M placeholder and
+# is dropped.
+query TTTTIIIIRTTTT
+SELECT * FROM read_myloasm_links('data/myloasm/ecoli_sim') ORDER BY from_contig_id;
+----
+u840ctg	-	u840ctg	-	11219	11	0	1018	100.0	s00840_circ_2004395_12875_f	+split0	s00834_circ_2000787_14856_f	+split0
+u982ctg	-	u982ctg	-	10847	10	0	981	100.0	s00962_circb_2004990_13717_f	+split0	s00956_circb_2000164_15698_f	+split0
+
+# --- Intent: a link joins the contigs' end reads ---
+
+# r1 and r2 are the reads at the two ends that meet. Leaving a contig on its '-' strand
+# leaves from its first read; entering one on its '-' strand enters at its last read. So for
+# these self-loops, r1 is the contig's first layout read and r2 its last, and both contigs
+# exist in read_myloasm_contigs.
+query TTTT
+SELECT k.from_contig_id,
+       f.layout_order = 1,
+       t.layout_order = (SELECT max(layout_order) FROM read_myloasm_layout('data/myloasm/ecoli_sim') x WHERE x.contig_id = k.to_contig_id),
+       k.from_contig_id IN (SELECT contig_id FROM read_myloasm_contigs('data/myloasm/ecoli_sim'))
+         AND k.to_contig_id IN (SELECT contig_id FROM read_myloasm_contigs('data/myloasm/ecoli_sim'))
+FROM read_myloasm_links('data/myloasm/ecoli_sim') k
+JOIN read_myloasm_layout('data/myloasm/ecoli_sim') f
+  ON f.contig_id = k.from_contig_id AND f.read_id = k.from_read_id AND f.split_suffix = k.from_split_suffix
+JOIN read_myloasm_layout('data/myloasm/ecoli_sim') t
+  ON t.contig_id = k.to_contig_id AND t.read_id = k.to_read_id AND t.split_suffix = k.to_split_suffix
+ORDER BY k.from_contig_id;
+----
+u840ctg	true	true	true
+u982ctg	true	true	true
+
+# --- Errors ---
+
+statement error
+SELECT * FROM read_myloasm_links(NULL);
+----
+read_myloasm: the myloasm output directory cannot be NULL
+
+statement error
+SELECT * FROM read_myloasm_links('data/myloasm/does_not_exist');
+----
+data/myloasm/does_not_exist/final_contig_graph.gfa
+
+# myloasm omits fs when the contigs share no minimizers, so a link without it is NULL there.
+# Every other tag is always written; a link without one is not myloasm's.
+statement ok
+COPY (SELECT 1 AS x) TO '__TEST_DIR__/links_constructed' (FORMAT csv, PER_THREAD_OUTPUT true, OVERWRITE_OR_IGNORE true);
+
+statement ok
+COPY (SELECT * FROM (VALUES
+  (E'S\tu1ctg\t*\tLN:i:5000'),
+  (E'S\tu2ctg\t*\tLN:i:5000'),
+  (E'L\tu1ctg\t+\tu2ctg\t+\t0M\tol:i:900\tsd:i:0\tss:i:0\tsm:i:0\tr1:Z:a+split0\tr2:Z:b')) t(line))
+TO '__TEST_DIR__/links_constructed/final_contig_graph.gfa' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+query TIRTTTT
+SELECT from_contig_id, shared_minimizers, snpmer_identity_percent, from_read_id, from_split_suffix, to_read_id, to_split_suffix
+FROM read_myloasm_links('__TEST_DIR__/links_constructed');
+----
+u1ctg	0	NULL	a	+split0	b	NULL
+
+statement ok
+COPY (SELECT * FROM (VALUES
+  (E'S\tu1ctg\t*\tLN:i:5000'),
+  (E'S\tu2ctg\t*\tLN:i:5000'),
+  (E'L\tu1ctg\t+\tu2ctg\t+\t0M\tsd:i:0\tss:i:0\tsm:i:0\tr1:Z:a\tr2:Z:b')) t(line))
+TO '__TEST_DIR__/links_constructed/final_contig_graph.gfa' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT from_contig_id FROM read_myloasm_links('__TEST_DIR__/links_constructed');
+----
+read_myloasm_links: link u1ctg+ -> u2ctg+ lacks myloasm's ol/ss/sd/sm/r1/r2 tags

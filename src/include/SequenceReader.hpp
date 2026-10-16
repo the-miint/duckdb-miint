@@ -38,8 +38,10 @@ private:
 
 class SequenceReader {
 public:
+	// An empty input is an error unless `allow_empty`, which reads it as no records. Either
+	// way, a pair with exactly one empty mate is an error: its other mate's records have no mates.
 	explicit SequenceReader(const std::string &path1, const std::optional<std::string> &path2 = std::nullopt,
-	                        bool allow_format_mismatch = false);
+	                        bool allow_format_mismatch = false, bool allow_empty = false);
 
 #ifdef MIINT_STATIC_BUILD
 	// Streaming constructor for remote files via DuckDB FileHandle. Ownership of
@@ -47,7 +49,7 @@ public:
 	// handle (still constructed with the duckdb_seq_close deleter) for the
 	// second slot when the run is single-end.
 	SequenceReader(DuckDBSeqStreamHandle stream1, DuckDBSeqStreamHandle stream2_or_null,
-	               bool allow_format_mismatch = false);
+	               bool allow_format_mismatch = false, bool allow_empty = false);
 
 #if MIINT_ASPERA_SUPPORTED
 	// Streaming constructor for Aspera pipe-backed streams.

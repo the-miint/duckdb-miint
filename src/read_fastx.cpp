@@ -7,7 +7,6 @@
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/storage/statistics/node_statistics.hpp"
-#include <filesystem>
 #include <read_fastx.hpp>
 
 namespace duckdb {
@@ -175,8 +174,14 @@ unique_ptr<FunctionData> ReadFastxTableFunction::Bind(ClientContext &context, Ta
 		max_batch_bytes = static_cast<uint64_t>(parsed);
 	}
 
+	bool allow_empty = false;
+	auto empty_param = input.named_parameters.find("allow_empty");
+	if (empty_param != input.named_parameters.end() && !empty_param->second.IsNull()) {
+		allow_empty = empty_param->second.GetValue<bool>();
+	}
+
 	auto data = duckdb::make_uniq<Data>(sequence1_paths, sequence2_paths, include_filepath, uses_stdin, qual_offset,
-	                                    max_batch_bytes);
+	                                    max_batch_bytes, allow_empty);
 	for (auto &name : data->names) {
 		names.emplace_back(name);
 	}
@@ -190,7 +195,8 @@ unique_ptr<GlobalTableFunctionState> ReadFastxTableFunction::InitGlobal(ClientCo
                                                                         TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
 	auto &fs = FileSystem::GetFileSystem(context);
-	return duckdb::make_uniq<GlobalState>(fs, data.sequence1_paths, data.sequence2_paths, data.uses_stdin);
+	return duckdb::make_uniq<GlobalState>(fs, data.sequence1_paths, data.sequence2_paths, data.uses_stdin,
+	                                      data.allow_empty);
 }
 
 unique_ptr<LocalTableFunctionState> ReadFastxTableFunction::InitLocal(ExecutionContext &context,
@@ -308,68 +314,18 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 	output.SetCardinality(batch.size());
 }
 
-// Cardinality estimate so the query optimizer knows roughly how big the scan is. Without
-// this, DuckDB defaults unknown table-function scans to a tiny cardinality, which causes
-// joins to pick read_fastx as the BUILD side -- catastrophic when the file is multi-GB of
-// genomic sequence (e.g. bacterial genome catalogs): DuckDB ends up hashing ~50 GB of
-// sequence into memory instead of streaming.
-//
-// We deliberately err on the side of OVER-estimating record count:
-//   - if the estimate is too high, the optimizer treats the scan as "large" and probes it
-//     -- always the safe choice for a streaming file source.
-//   - if it's too low (the status quo), the optimizer builds a hash table on it -> OOM.
-//
-// Heuristic: bytes-on-disk / AVG_RECORD_BYTES. 50 bytes/record is intentionally small so
-// that bacterial-genome FASTA (~5 MB/record) and short-read FASTQ (~300 B/record) both
-// resolve to "big" when the file is big. Gzipped files use a 4x expansion factor.
-// Remote files and stdin fall back to a large constant (exact record count is unknown but
-// streaming is always the right plan).
+// Cardinality estimate so joins stream read_fastx rather than hash it; see
+// EstimateFileScanCardinality. 50 bytes/record is below both bacterial-genome FASTA
+// (~5 MB/record) and short-read FASTQ (~300 B/record), so both resolve to "big" when the file
+// is big.
 static unique_ptr<NodeStatistics> ReadFastxCardinality(ClientContext &context, const FunctionData *bind_data_p) {
 	constexpr idx_t AVG_BYTES_PER_RECORD = 50;
-	constexpr idx_t GZIP_EXPANSION_FACTOR = 4;
-	constexpr idx_t REMOTE_OR_STDIN_ESTIMATE = 10'000'000; // err large
-
 	auto &bind_data = bind_data_p->Cast<ReadFastxTableFunction::Data>();
-
-	if (bind_data.uses_stdin) {
-		return make_uniq<NodeStatistics>(REMOTE_OR_STDIN_ESTIMATE);
-	}
-
-	idx_t total_bytes = 0;
-	auto accumulate = [&](const std::string &path) -> bool {
-		if (miint::RemoteFileHelper::IsRemotePath(path)) {
-			return false; // signal "unknown, fall back"
-		}
-		std::error_code ec;
-		auto sz = std::filesystem::file_size(path, ec);
-		if (ec) {
-			return false;
-		}
-		if (IsGzipped(path)) {
-			sz *= GZIP_EXPANSION_FACTOR;
-		}
-		total_bytes += sz;
-		return true;
-	};
-
-	for (const auto &path : bind_data.sequence1_paths) {
-		if (!accumulate(path)) {
-			return make_uniq<NodeStatistics>(REMOTE_OR_STDIN_ESTIMATE);
-		}
-	}
+	auto paths = bind_data.sequence1_paths;
 	if (bind_data.sequence2_paths.has_value()) {
-		for (const auto &path : bind_data.sequence2_paths.value()) {
-			if (!accumulate(path)) {
-				return make_uniq<NodeStatistics>(REMOTE_OR_STDIN_ESTIMATE);
-			}
-		}
+		paths.insert(paths.end(), bind_data.sequence2_paths->begin(), bind_data.sequence2_paths->end());
 	}
-
-	idx_t estimated = total_bytes / AVG_BYTES_PER_RECORD;
-	if (estimated < 1) {
-		estimated = 1;
-	}
-	return make_uniq<NodeStatistics>(estimated);
+	return EstimateFileScanCardinality(paths, AVG_BYTES_PER_RECORD);
 }
 
 TableFunction ReadFastxTableFunction::GetFunction() {
@@ -378,6 +334,7 @@ TableFunction ReadFastxTableFunction::GetFunction() {
 	tf.named_parameters["include_filepath"] = LogicalType::BOOLEAN;
 	tf.named_parameters["qual_offset"] = LogicalType::BIGINT;
 	tf.named_parameters["max_batch_bytes"] = LogicalType::VARCHAR;
+	tf.named_parameters["allow_empty"] = LogicalType::BOOLEAN;
 	tf.cardinality = ReadFastxCardinality;
 	return tf;
 }

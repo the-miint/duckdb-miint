@@ -38,3 +38,9 @@ SELECT COUNT(*), COUNT(sequence1), COUNT(sequence2) FROM read_fastx(
 ----
 2	2	2
 
+# allow_empty reads an empty remote file as no records
+query I
+SELECT COUNT(*) FROM read_fastx(getenv('MIINT_HTTPS_TEST_URL') || '/fastq/empty.fq', allow_empty := true);
+----
+0
+

@@ -252,6 +252,41 @@ TEST_CASE("SequenceReader empty file throws", "[SequenceReader][error]") {
 	REQUIRE_THROWS_WITH(miint::SequenceReader(path), Catch::Matchers::ContainsSubstring("Empty file"));
 }
 
+// Some tools write a FASTA file whether or not they have records for it (myloasm's
+// alternate assemblies). allow_empty reads such a file as zero records.
+TEST_CASE("SequenceReader allow_empty reads an empty file as no records", "[SequenceReader]") {
+	TempFileFixture fixture;
+	auto path = "allow_empty.fa";
+	fixture.write_temp_fastq(path, {});
+
+	miint::SequenceReader reader(path, std::nullopt, false, true);
+	REQUIRE(reader.read(10).empty());
+	REQUIRE(reader.read(10).empty());
+}
+
+TEST_CASE("SequenceReader allow_empty reads an empty pair as no records", "[SequenceReader]") {
+	TempFileFixture fixture;
+	fixture.write_temp_fastq("allow_empty_R1.fq", {});
+	fixture.write_temp_fastq("allow_empty_R2.fq", {});
+
+	miint::SequenceReader reader("allow_empty_R1.fq", std::string("allow_empty_R2.fq"), false, true);
+	REQUIRE(reader.read(10).empty());
+}
+
+// One empty mate is a broken pair, not an empty one: its partner's records would have no mates.
+TEST_CASE("SequenceReader allow_empty still rejects one empty mate", "[SequenceReader][error]") {
+	TempFileFixture fixture;
+	fixture.write_temp_fastq("one_empty_R1.fq", {});
+	fixture.write_temp_fastq("one_full_R2.fq", {fixture.simple_read("r1", "ACGT", "IIII")});
+	fixture.write_temp_fastq("one_full_R1.fq", {fixture.simple_read("r1", "ACGT", "IIII")});
+	fixture.write_temp_fastq("one_empty_R2.fq", {});
+
+	REQUIRE_THROWS_WITH(miint::SequenceReader("one_empty_R1.fq", std::string("one_full_R2.fq"), false, true),
+	                    Catch::Matchers::ContainsSubstring("Empty file: one_empty_R1.fq"));
+	REQUIRE_THROWS_WITH(miint::SequenceReader("one_full_R1.fq", std::string("one_empty_R2.fq"), false, true),
+	                    Catch::Matchers::ContainsSubstring("Empty file: one_empty_R2.fq"));
+}
+
 #if !defined(_WIN32) && !defined(__EMSCRIPTEN__)
 // kseq++'s SeqStreamIn does not check gzopen()'s return value. A NULL handle reads as a
 // stream with zero records, so before CheckedSeqStreamIn every failed open was reported as

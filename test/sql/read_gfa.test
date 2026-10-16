@@ -1,0 +1,280 @@
+# name: test/sql/read_gfa.test
+# description: read_gfa returns one row per GFA record, split at each record type's mandatory field count
+# group: [sql]
+
+require miint
+
+# --- Errors ---
+
+statement error
+SELECT * FROM read_gfa('data/gfa/does_not_exist.gfa');
+----
+File not found: data/gfa/does_not_exist.gfa
+
+statement error
+SELECT * FROM read_gfa(42);
+----
+read_gfa: first argument must be VARCHAR or VARCHAR[]
+
+statement error
+SELECT * FROM read_gfa('-');
+----
+read_gfa: stdin is not supported
+
+statement error
+SELECT * FROM read_gfa([]::VARCHAR[]);
+----
+read_gfa: at least one file path must be provided
+
+# Malformed records are written here so each defect sits beside its assertion. Every
+# message names the function, the file and the line, then the defect.
+statement ok
+COPY (SELECT * FROM (VALUES (E'H\tVN:Z:1.0'), (E'S\ts1')) t(line))
+TO '__TEST_DIR__/short_segment.gfa' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT * FROM read_gfa('__TEST_DIR__/short_segment.gfa');
+----
+short_segment.gfa: line 2: an S record needs 2 fields after the record type, found 1
+
+# GFA tags are always TAG:TYPE:VALUE; the untyped form read_paf tolerates is an error here.
+statement ok
+COPY (SELECT * FROM (VALUES (E'S\ts1\tACGT\tLN:4')) t(line))
+TO '__TEST_DIR__/untyped_tag.gfa' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT * FROM read_gfa('__TEST_DIR__/untyped_tag.gfa');
+----
+untyped_tag.gfa: line 1: 'LN:4' is not a tag (expected TAG:TYPE:VALUE)
+
+statement ok
+COPY (SELECT * FROM (VALUES (E'S\ts1\tACGT\tLN:i:4\tLN:i:4')) t(line))
+TO '__TEST_DIR__/duplicate_tag.gfa' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT * FROM read_gfa('__TEST_DIR__/duplicate_tag.gfa');
+----
+duplicate_tag.gfa: line 1: tag 'LN' appears more than once
+
+statement ok
+COPY (SELECT * FROM (VALUES (E'S\ts1\tACGT'), (''), (E'S\ts2\tACGT')) t(line))
+TO '__TEST_DIR__/blank_line.gfa' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT * FROM read_gfa('__TEST_DIR__/blank_line.gfa');
+----
+blank_line.gfa: line 2: empty line
+
+# GFA 2 redefines S and adds record types, so reading it as GFA 1 would mislabel fields.
+statement ok
+COPY (SELECT * FROM (VALUES (E'H\tVN:Z:2.0'), (E'S\ts1\t4\tACGT')) t(line))
+TO '__TEST_DIR__/gfa2.gfa' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT * FROM read_gfa('__TEST_DIR__/gfa2.gfa');
+----
+gfa2.gfa: line 1: GFA 2 is not supported
+
+# --- Schema ---
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM read_gfa('data/gfa/spec_example.gfa'));
+----
+line_number	BIGINT
+record_type	VARCHAR
+fields	VARCHAR[]
+tags	MAP(VARCHAR, VARCHAR)
+
+query TTTT
+SELECT DISTINCT typeof(line_number), typeof(record_type), typeof(fields), typeof(tags)
+FROM read_gfa('data/gfa/spec_example.gfa');
+----
+BIGINT	VARCHAR	VARCHAR[]	MAP(VARCHAR, VARCHAR)
+
+# --- Every record of the specification example (data/gfa/README.md) ---
+
+# The comment on line 2 yields no row but still counts, so line numbers match the file.
+# fields are joined with '|' so values containing commas read unambiguously.
+query ITTT
+SELECT line_number, record_type, array_to_string(fields, '|'),
+       array_to_string([e.key || '=' || e.value FOR e IN map_entries(tags)], ';')
+FROM read_gfa('data/gfa/spec_example.gfa') ORDER BY line_number;
+----
+1	H	(empty)	VN=1.1
+3	S	s1|ACGTACGT	LN=8;RC=120
+4	S	s2|*	LN=1000;ST=+
+5	S	s3|GGCCTTAA	KC=-42;fl=1.5e-3;nm=segment three;js={"k":[1,2]};hx=1AE301;ba=i,1,-2,3;bf=f,0.5,1.25
+6	L	s1|+|s2|-|4M	ID=link1
+7	L	s2|-|s3|+|*	(empty)
+8	C	s1|+|s3|-|2|6M	(empty)
+9	P	p1|s1+,s2-,s3+|4M,5M	(empty)
+10	W	sample1|1|chr1|0|1016|>s1<s2>s3	(empty)
+11	x	custom|record|with:no:tags	NULL
+
+# A known record with no tags has an empty map; an unknown record type has NULL, because
+# its fields were never split into positional fields and tags.
+query ITI
+SELECT line_number, record_type, cardinality(tags)
+FROM read_gfa('data/gfa/spec_example.gfa') WHERE line_number IN (7, 11) ORDER BY line_number;
+----
+7	L	0
+11	x	NULL
+
+# A float tag may be nan or an infinity, in each form htslib reads (why: IsFloat in
+# src/sam_style_tags.cpp). The value stays as written, and every form casts to the float it
+# names, so tags['DP']::DOUBLE works on them.
+statement ok
+COPY (SELECT printf(E'S\ts%d\t*\tDP:f:%s', i, v) FROM (VALUES (1, 'nan'), (2, 'NaN'), (3, '-nan'), (4, 'inf'),
+      (5, '-inf'), (6, '+Inf'), (7, 'INF'), (8, 'infinity'), (9, '-Infinity')) t(i, v) ORDER BY i)
+TO '__TEST_DIR__/nonfinite.gfa' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+query TTTT
+SELECT tags['DP'], isnan(tags['DP']::DOUBLE), isinf(tags['DP']::DOUBLE), tags['DP']::DOUBLE < 0
+FROM read_gfa('__TEST_DIR__/nonfinite.gfa') ORDER BY line_number;
+----
+nan	true	false	false
+NaN	true	false	false
+-nan	true	false	false
+inf	false	true	false
+-inf	false	true	true
++Inf	false	true	false
+INF	false	true	false
+infinity	false	true	false
+-Infinity	false	true	true
+
+# --- Real assembler output ---
+
+# Record counts must match a line count taken without read_gfa: myloasm's graph has a
+# header, a comment, S and L records, and its own read-placement 'a' records.
+statement ok
+CREATE TEMP TABLE myloasm_lines AS
+SELECT line FROM read_csv('data/myloasm/ecoli_sim/final_contig_graph.gfa', columns = {'line': 'VARCHAR'},
+                          header = false, delim = E'\x01', quote = '', escape = '', auto_detect = false);
+
+query TII
+SELECT g.record_type, g.n, l.n
+FROM (SELECT record_type, count(*) AS n FROM read_gfa('data/myloasm/ecoli_sim/final_contig_graph.gfa') GROUP BY ALL) g
+JOIN (SELECT split_part(line, E'\t', 1) AS record_type, count(*) AS n FROM myloasm_lines
+      WHERE NOT starts_with(line, '#') GROUP BY ALL) l USING (record_type)
+ORDER BY 1;
+----
+H	1	1
+L	2	2
+S	5	5
+a	173	173
+
+# myloasm's 'a' records keep all seven fields, including the untyped key list at the end.
+query III
+SELECT count(*), count(tags), min(len(fields))
+FROM read_gfa('data/myloasm/ecoli_sim/final_contig_graph.gfa') WHERE record_type = 'a';
+----
+173	0	7
+
+# --- Inputs ---
+
+# The scan has a row estimate that grows with the file, not DuckDB's default of one row (why:
+# EstimateFileScanCardinality in src/include/table_function_common.hpp).
+query II
+EXPLAIN SELECT * FROM read_gfa('data/myloasm/ecoli_sim/final_contig_graph.gfa');
+----
+physical_plan	<!REGEX>:.*~1 row.*
+
+statement ok
+COPY (SELECT line FROM read_csv('data/gfa/spec_example.gfa', columns = {'line': 'VARCHAR'}, header = false,
+                                delim = E'\x01', quote = '', escape = '', auto_detect = false))
+TO '__TEST_DIR__/spec_example.gfa.gz'
+(FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01', COMPRESSION gzip);
+
+query I
+SELECT count(*) FROM (
+    SELECT * FROM read_gfa('data/gfa/spec_example.gfa')
+    EXCEPT
+    SELECT * FROM read_gfa('__TEST_DIR__/spec_example.gfa.gz'));
+----
+0
+
+query I
+SELECT count(*) FROM read_gfa('__TEST_DIR__/spec_example.gfa.gz');
+----
+10
+
+query I
+SELECT count(*) FROM read_gfa(['data/gfa/spec_example.gfa', 'data/myloasm/ecoli_sim/final_contig_graph.gfa']);
+----
+191
+
+statement ok
+COPY (SELECT * FROM (VALUES (E'S\ta1\tA'), (E'S\ta2\tC')) t(line))
+TO '__TEST_DIR__/glob_a.gfa' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement ok
+COPY (SELECT * FROM (VALUES (E'S\tb1\tG'), (E'S\tb2\tT'), (E'L\tb1\t+\tb2\t+\t0M')) t(line))
+TO '__TEST_DIR__/glob_b.gfa' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+query TI
+SELECT regexp_extract(replace(filepath, '\', '/'), '[^/]+$'), count(*)
+FROM read_gfa('__TEST_DIR__/glob_*.gfa', include_filepath := true)
+GROUP BY ALL ORDER BY 1;
+----
+glob_a.gfa	2
+glob_b.gfa	3
+
+statement ok
+COPY (SELECT 'unused' AS line WHERE false) TO '__TEST_DIR__/empty.gfa'
+(FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+query I
+SELECT count(*) FROM read_gfa('__TEST_DIR__/empty.gfa');
+----
+0
+
+# More records than one output vector holds (2048), with a defect past the first vector so
+# the reported line number is checked where a per-chunk counter would reset.
+statement ok
+COPY (SELECT printf(E'S\ts%d\t*\tLN:i:%d', i, i) FROM range(3000) t(i) ORDER BY i)
+TO '__TEST_DIR__/many.gfa' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+query III
+SELECT count(*), sum(line_number), sum(tags['LN']::BIGINT) FROM read_gfa('__TEST_DIR__/many.gfa');
+----
+3000	4501500	4498500
+
+# A chunk that continues a file from the previous chunk still names that file, and a chunk
+# that reaches the end of a file stops there rather than taking rows from the next file: all
+# 3000 of many.gfa's records, and the specification example's 10. One thread reads both files
+# in order, so many.gfa's second chunk ends at its last record whatever the scheduling.
+statement ok
+SET threads = 1;
+
+query TI
+SELECT replace(filepath, '__TEST_DIR__/', ''), count(*)
+FROM read_gfa(['__TEST_DIR__/many.gfa', 'data/gfa/spec_example.gfa'], include_filepath := true)
+GROUP BY ALL ORDER BY ALL;
+----
+data/gfa/spec_example.gfa	10
+many.gfa	3000
+
+statement ok
+RESET threads;
+
+statement ok
+COPY (SELECT CASE WHEN i = 2499 THEN E'S\tdamaged' ELSE printf(E'S\ts%d\t*', i) END FROM range(3000) t(i) ORDER BY i)
+TO '__TEST_DIR__/many_damaged.gfa' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT count(*) FROM read_gfa('__TEST_DIR__/many_damaged.gfa');
+----
+many_damaged.gfa: line 2500: an S record needs 2 fields after the record type, found 1
+
+# Segments that carry megabases of sequence end a chunk on bytes, long before 2048 records
+# (src/include/line_file_scan.hpp). 20 one-megabase segments cross that limit; every record and
+# line number must survive the chunk ending mid-file.
+statement ok
+COPY (SELECT printf(E'S\ts%d\t%s', i, repeat(substr('ACGT', i % 4 + 1, 1), 1000000)) FROM range(20) t(i) ORDER BY i)
+TO '__TEST_DIR__/long_segments.gfa' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+query IIII
+SELECT count(*), sum(line_number), sum(length(sequence)), count(DISTINCT left(sequence, 1))
+FROM (SELECT line_number, fields[2] AS sequence FROM read_gfa('__TEST_DIR__/long_segments.gfa'));
+----
+20	210	20000000	4

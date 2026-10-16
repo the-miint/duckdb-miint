@@ -1,0 +1,268 @@
+# name: test/sql/read_myloasm_contigs.test
+# description: read_myloasm_contigs returns one row per myloasm contig, with its dereplication status, lengths and depths
+# group: [sql]
+
+require miint
+
+# --- Schema ---
+
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM read_myloasm_contigs('data/myloasm/ecoli_sim'));
+----
+contig_id	VARCHAR
+dereplication_status	VARCHAR
+fasta_id	VARCHAR
+polished_length	BIGINT
+unpolished_length	BIGINT
+circularity	VARCHAR
+depth_identity_99	DOUBLE
+depth_identity_99_75	DOUBLE
+depth_identity_100	DOUBLE
+median_depth_identity_100	DOUBLE
+kmer_multiplicity	DOUBLE
+kmer_multiplicity_flag	VARCHAR
+secondary_to_contig_id	VARCHAR
+secondary_aligned_percent	DOUBLE
+secondary_ani_percent	DOUBLE
+
+query TTIITRRRRRTTRR
+SELECT * EXCLUDE (fasta_id) FROM read_myloasm_contigs('data/myloasm/ecoli_sim') ORDER BY contig_id;
+----
+u491ctg	primary	196340	196466	no	51.0	30.0	30.0	33.0	1.0	no	NULL	NULL	NULL
+u826ctg	alternate	195443	195577	no	51.0	19.0	19.0	21.0	1.0	no	u491ctg	99.81	99.18
+u840ctg	duplicated	40000	51274	yes	32.0	32.0	18.0	21.0	1.0	no	u982ctg	99.99	99.91
+u912ctg	primary	55646	55666	no	2.0	2.0	2.0	3.0	1.0	no	NULL	NULL	NULL
+u982ctg	primary	40000	50902	yes	32.0	32.0	13.0	15.0	1.0	no	NULL	NULL	NULL
+
+# --- Intent: status comes from the file a contig is in ---
+
+# myloasm's own "duplicated-" header field is a k-mer multiplicity flag, not whether the
+# contig was set aside as a duplicate: u840ctg is in duplicated_contigs.fa although its header
+# says duplicated-no. So the status must come from which FASTA holds the contig. Read
+# independently with read_fastx, every record is in the result once, with that file's status,
+# and fasta_id joins back to it.
+query III
+SELECT count(*), count(c.contig_id), count(*) FILTER (c.dereplication_status = f.status)
+FROM (SELECT 'primary' AS status, * FROM read_fastx('data/myloasm/ecoli_sim/assembly_primary.fa')
+      UNION ALL SELECT 'alternate', * FROM read_fastx('data/myloasm/ecoli_sim/alternate_assemblies/assembly_alternate.fa')
+      UNION ALL SELECT 'duplicated', * FROM read_fastx('data/myloasm/ecoli_sim/alternate_assemblies/duplicated_contigs.fa')) f
+LEFT JOIN read_myloasm_contigs('data/myloasm/ecoli_sim') c ON c.fasta_id = f.read_id;
+----
+5	5	5
+
+# The polished length in the header is the length of the sequence it labels.
+query I
+SELECT count(*)
+FROM (SELECT * FROM read_fastx('data/myloasm/ecoli_sim/assembly_primary.fa')
+      UNION ALL SELECT * FROM read_fastx('data/myloasm/ecoli_sim/alternate_assemblies/assembly_alternate.fa')
+      UNION ALL SELECT * FROM read_fastx('data/myloasm/ecoli_sim/alternate_assemblies/duplicated_contigs.fa')) f
+JOIN read_myloasm_contigs('data/myloasm/ecoli_sim') c ON c.fasta_id = f.read_id
+WHERE c.polished_length = length(f.sequence1);
+----
+5
+
+# Both circular contigs came from the same 40 kb circle. Polishing trims the overlapping ends
+# myloasm's unpolished contig carries, so the polished length is the circle's.
+query TII
+SELECT contig_id, polished_length, unpolished_length > polished_length
+FROM read_myloasm_contigs('data/myloasm/ecoli_sim') WHERE circularity = 'yes' ORDER BY contig_id;
+----
+u840ctg	40000	true
+u982ctg	40000	true
+
+# Dereplication points from the strain B contig to the strain A one, and from the 'circ'
+# circle to its variant 'circb' (contig origins in data/myloasm/README.md).
+query TT
+SELECT contig_id, secondary_to_contig_id FROM read_myloasm_contigs('data/myloasm/ecoli_sim')
+WHERE secondary_to_contig_id IS NOT NULL ORDER BY contig_id;
+----
+u826ctg	u491ctg
+u840ctg	u982ctg
+
+# The depth tiers come from the GFA (which also covers contigs no FASTA holds) and the FASTA
+# header writes the same three numbers as depth-<99%>-<99.75%>-<100%>. Read from the header
+# independently, they agree, in that order.
+query I
+SELECT count(*)
+FROM read_myloasm_contigs('data/myloasm/ecoli_sim')
+WHERE string_split(regexp_extract(fasta_id, '_depth-([0-9.-]+)_', 1), '-')::DOUBLE[]
+      = [depth_identity_99, depth_identity_99_75, depth_identity_100];
+----
+5
+
+# A trailing slash on the directory reads the same run.
+query I
+SELECT count(*) FROM read_myloasm_contigs('data/myloasm/ecoli_sim/');
+----
+5
+
+# --- A filtered contig, constructed from the real run ---
+
+# myloasm writes the GFA before its last filter, so a contig it drops afterwards is in the
+# GFA and in no FASTA. The fixture has none (data/myloasm/README.md), so this copies the run
+# without u912ctg's FASTA record. That contig is then 'filtered': it keeps the GFA's length
+# and depths, and has none of the values only a FASTA header carries.
+#
+# COPY cannot create a missing directory, but a PER_THREAD_OUTPUT copy creates its target as
+# one. The data_0.csv it leaves behind is not a file any macro reads.
+statement ok
+COPY (SELECT 1 AS x) TO '__TEST_DIR__/contigs_filtered' (FORMAT csv, PER_THREAD_OUTPUT true, OVERWRITE_OR_IGNORE true);
+
+statement ok
+COPY (SELECT 1 AS x) TO '__TEST_DIR__/contigs_filtered/alternate_assemblies' (FORMAT csv, PER_THREAD_OUTPUT true, OVERWRITE_OR_IGNORE true);
+
+statement ok
+COPY (SELECT * FROM read_fastx('data/myloasm/ecoli_sim/assembly_primary.fa') WHERE read_id NOT LIKE 'u912ctg_%')
+TO '__TEST_DIR__/contigs_filtered/assembly_primary.fa' (FORMAT FASTA, INCLUDE_COMMENT true);
+
+statement ok
+COPY (SELECT * FROM read_fastx('data/myloasm/ecoli_sim/alternate_assemblies/assembly_alternate.fa'))
+TO '__TEST_DIR__/contigs_filtered/alternate_assemblies/assembly_alternate.fa' (FORMAT FASTA, INCLUDE_COMMENT true);
+
+statement ok
+COPY (SELECT * FROM read_fastx('data/myloasm/ecoli_sim/alternate_assemblies/duplicated_contigs.fa'))
+TO '__TEST_DIR__/contigs_filtered/alternate_assemblies/duplicated_contigs.fa' (FORMAT FASTA, INCLUDE_COMMENT true);
+
+statement ok
+CREATE TABLE real_gfa AS
+SELECT line FROM read_csv('data/myloasm/ecoli_sim/final_contig_graph.gfa',
+                          delim = E'\x01', quote = '', escape = '', header = false,
+                          columns = {'line': 'VARCHAR'}, auto_detect = false);
+
+statement ok
+COPY real_gfa TO '__TEST_DIR__/contigs_filtered/final_contig_graph.gfa'
+(FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+query TTTIITRRRRRTTRR
+SELECT * FROM read_myloasm_contigs('__TEST_DIR__/contigs_filtered') WHERE contig_id = 'u912ctg';
+----
+u912ctg	filtered	NULL	NULL	55666	NULL	2.0	2.0	2.0	3.0	NULL	NULL	NULL	NULL	NULL
+
+query TT
+SELECT contig_id, dereplication_status FROM read_myloasm_contigs('__TEST_DIR__/contigs_filtered') ORDER BY contig_id;
+----
+u491ctg	primary
+u826ctg	alternate
+u840ctg	duplicated
+u912ctg	filtered
+u982ctg	primary
+
+# --- A run with nothing set aside, constructed from the real run ---
+
+# myloasm writes both alternate_assemblies files even when it sets no contig aside, so they
+# can be empty. This copies the run without its alternate and duplicated contigs.
+statement ok
+COPY (SELECT 1 AS x) TO '__TEST_DIR__/contigs_no_alternates' (FORMAT csv, PER_THREAD_OUTPUT true, OVERWRITE_OR_IGNORE true);
+
+statement ok
+COPY (SELECT 1 AS x) TO '__TEST_DIR__/contigs_no_alternates/alternate_assemblies' (FORMAT csv, PER_THREAD_OUTPUT true, OVERWRITE_OR_IGNORE true);
+
+statement ok
+COPY (SELECT * FROM read_fastx('data/myloasm/ecoli_sim/assembly_primary.fa'))
+TO '__TEST_DIR__/contigs_no_alternates/assembly_primary.fa' (FORMAT FASTA, INCLUDE_COMMENT true);
+
+statement ok
+COPY (SELECT '' AS line WHERE false)
+TO '__TEST_DIR__/contigs_no_alternates/alternate_assemblies/assembly_alternate.fa' (FORMAT csv, HEADER false);
+
+statement ok
+COPY (SELECT '' AS line WHERE false)
+TO '__TEST_DIR__/contigs_no_alternates/alternate_assemblies/duplicated_contigs.fa' (FORMAT csv, HEADER false);
+
+statement ok
+COPY (SELECT * FROM real_gfa WHERE line NOT LIKE E'S\tu826ctg\t%' AND line NOT LIKE E'S\tu840ctg\t%')
+TO '__TEST_DIR__/contigs_no_alternates/final_contig_graph.gfa' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+query TT
+SELECT contig_id, dereplication_status FROM read_myloasm_contigs('__TEST_DIR__/contigs_no_alternates') ORDER BY contig_id;
+----
+u491ctg	primary
+u912ctg	primary
+u982ctg	primary
+
+# --- Errors ---
+
+statement error
+SELECT * FROM read_myloasm_contigs(NULL);
+----
+read_myloasm: the myloasm output directory cannot be NULL
+
+statement error
+SELECT * FROM read_myloasm_contigs('data/myloasm/does_not_exist');
+----
+data/myloasm/does_not_exist/assembly_primary.fa
+
+# Each case below rewrites one file of the constructed run with one defect, then restores it.
+# The checks fire even when no column they read is selected.
+
+# Every FASTA contig was written into the GFA first, so one with no S record means the files
+# are not from one run.
+statement ok
+COPY (SELECT * FROM real_gfa WHERE line NOT LIKE E'S\tu982ctg\t%')
+TO '__TEST_DIR__/contigs_filtered/final_contig_graph.gfa' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT contig_id FROM read_myloasm_contigs('__TEST_DIR__/contigs_filtered');
+----
+read_myloasm_contigs: contig u982ctg is in the primary FASTA but has no S record in final_contig_graph.gfa
+
+statement ok
+COPY real_gfa TO '__TEST_DIR__/contigs_filtered/final_contig_graph.gfa'
+(FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+# A header that is not myloasm's would otherwise turn into a row of NULLs.
+statement ok
+COPY (SELECT 'contig_1' AS read_id, 'ACGT' AS sequence1)
+TO '__TEST_DIR__/contigs_filtered/alternate_assemblies/duplicated_contigs.fa' (FORMAT FASTA);
+
+statement error
+SELECT contig_id FROM read_myloasm_contigs('__TEST_DIR__/contigs_filtered');
+----
+read_myloasm_contigs: duplicated contig header is not myloasm's: 'contig_1'
+
+# A primary contig is not secondary to anything, and an alternate or duplicate always is.
+statement ok
+COPY (SELECT read_id, 'mult=1.00' AS comment, sequence1 FROM read_fastx('data/myloasm/ecoli_sim/alternate_assemblies/duplicated_contigs.fa'))
+TO '__TEST_DIR__/contigs_filtered/alternate_assemblies/duplicated_contigs.fa' (FORMAT FASTA, INCLUDE_COMMENT true);
+
+statement error
+SELECT contig_id FROM read_myloasm_contigs('__TEST_DIR__/contigs_filtered');
+----
+read_myloasm_contigs: duplicated contig header is not myloasm's: 'u840ctg_len-40000_circular-yes_depth-32-32-18_duplicated-no mult=1.00'
+
+# A contig is in at most one FASTA.
+statement ok
+COPY (SELECT read_id, comment, sequence1 FROM read_fastx('data/myloasm/ecoli_sim/alternate_assemblies/duplicated_contigs.fa')
+      UNION ALL
+      SELECT read_id, 'mult=1.00 secondary_to:|u491ctg_x mult=1.00| aligned_frac:99.00 ani:99.00', sequence1
+      FROM read_fastx('data/myloasm/ecoli_sim/assembly_primary.fa') WHERE read_id LIKE 'u982ctg_%')
+TO '__TEST_DIR__/contigs_filtered/alternate_assemblies/duplicated_contigs.fa' (FORMAT FASTA, INCLUDE_COMMENT true);
+
+statement error
+SELECT contig_id FROM read_myloasm_contigs('__TEST_DIR__/contigs_filtered');
+----
+read_myloasm_contigs: contig u982ctg appears more than once across the FASTA files and GFA
+
+# A missing member file is an error naming it, not a run with that file's contigs left out.
+statement ok
+COPY (SELECT 1 AS x) TO '__TEST_DIR__/contigs_missing' (FORMAT csv, PER_THREAD_OUTPUT true, OVERWRITE_OR_IGNORE true);
+
+statement ok
+COPY (SELECT 1 AS x) TO '__TEST_DIR__/contigs_missing/alternate_assemblies' (FORMAT csv, PER_THREAD_OUTPUT true, OVERWRITE_OR_IGNORE true);
+
+statement ok
+COPY (SELECT * FROM read_fastx('data/myloasm/ecoli_sim/assembly_primary.fa'))
+TO '__TEST_DIR__/contigs_missing/assembly_primary.fa' (FORMAT FASTA, INCLUDE_COMMENT true);
+
+statement ok
+COPY (SELECT * FROM read_fastx('data/myloasm/ecoli_sim/alternate_assemblies/assembly_alternate.fa'))
+TO '__TEST_DIR__/contigs_missing/alternate_assemblies/assembly_alternate.fa' (FORMAT FASTA, INCLUDE_COMMENT true);
+
+statement ok
+COPY real_gfa TO '__TEST_DIR__/contigs_missing/final_contig_graph.gfa'
+(FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT * FROM read_myloasm_contigs('__TEST_DIR__/contigs_missing');
+----
+contigs_missing/alternate_assemblies/duplicated_contigs.fa

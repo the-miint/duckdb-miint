@@ -87,6 +87,38 @@ SELECT * FROM read_newick(['/tmp/a.nwk', NULL]);
 ----
 read_newick: file path list cannot contain NULL
 
+# --- read_paf ---
+statement error
+SELECT * FROM read_paf(NULL::VARCHAR);
+----
+read_paf: first argument cannot be NULL
+
+statement error
+SELECT * FROM read_paf(NULL::VARCHAR[]);
+----
+read_paf: first argument cannot be NULL
+
+statement error
+SELECT * FROM read_paf(['/tmp/a.paf', NULL]);
+----
+read_paf: file path list cannot contain NULL
+
+# --- read_gfa ---
+statement error
+SELECT * FROM read_gfa(NULL::VARCHAR);
+----
+read_gfa: first argument cannot be NULL
+
+statement error
+SELECT * FROM read_gfa(NULL::VARCHAR[]);
+----
+read_gfa: first argument cannot be NULL
+
+statement error
+SELECT * FROM read_gfa(['/tmp/a.gfa', NULL]);
+----
+read_gfa: file path list cannot contain NULL
+
 # --- read_jplace_newick ---
 statement error
 SELECT * FROM read_jplace_newick(NULL::VARCHAR);

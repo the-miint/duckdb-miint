@@ -17,6 +17,8 @@
 #include <copy_ubam.hpp>
 #include <read_jplace_newick.hpp>
 #include <read_newick.hpp>
+#include <read_paf.hpp>
+#include <read_gfa.hpp>
 #include <phylo_independent_contrasts.hpp>
 #include <phylo_ancestral_states.hpp>
 #include <phylo_ancestral_parsimony.hpp>
@@ -311,6 +313,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ReadBIOMTableFunction::Register(loader);
 #endif
 	ReadNewickTableFunction::Register(loader);
+	ReadPafTableFunction::Register(loader);
+	ReadGfaTableFunction::Register(loader);
 	ReadJplaceNewickTableFunction::Register(loader);
 	TreeResolvePlacementTableFunction::Register(loader);
 	ShearTreeTableFunction::Register(loader);

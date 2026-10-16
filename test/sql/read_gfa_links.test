@@ -1,0 +1,37 @@
+# name: test/sql/read_gfa_links.test
+# description: read_gfa_links returns a GFA file's L records as typed columns; a bad orientation fails the scan
+# group: [sql]
+
+require miint
+
+query TTTTTT
+SELECT from_segment, from_orientation, to_segment, to_orientation, overlap, array_to_string(map_keys(tags), '|')
+FROM read_gfa_links('data/gfa/spec_example.gfa') ORDER BY from_segment;
+----
+s1	+	s2	-	4M	ID
+s2	-	s3	+	NULL	(empty)
+
+# myloasm records circular contigs as self-links and names the junction reads in r1/r2.
+query TTTTTT
+SELECT from_segment, from_orientation, to_segment, to_orientation, overlap, tags['r1']
+FROM read_gfa_links('data/myloasm/ecoli_sim/final_contig_graph.gfa') ORDER BY from_segment;
+----
+u840ctg	-	u840ctg	-	0M	s00840_circ_2004395_12875_f+split0
+u982ctg	-	u982ctg	-	0M	s00962_circb_2004990_13717_f+split0
+
+# An orientation other than + or - is not a link GFA can express. read_gfa refuses the record
+# and names the file and line, so the error fires whichever columns are selected and through
+# either view. The S records before it, whose second field is a sequence, pass.
+statement ok
+COPY (SELECT * FROM (VALUES (E'S\ts1\tACGT'), (E'S\ts2\tACGT'), (E'L\ts1\t+\ts2\tx\t0M')) t(line))
+TO '__TEST_DIR__/bad_orientation.gfa' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT from_segment FROM read_gfa_links('__TEST_DIR__/bad_orientation.gfa');
+----
+bad_orientation.gfa: line 3: an L record's orientations must be + or -, found '+' and 'x'
+
+statement error
+SELECT count(*) FROM read_gfa_segments('__TEST_DIR__/bad_orientation.gfa');
+----
+bad_orientation.gfa: line 3: an L record's orientations must be + or -, found '+' and 'x'

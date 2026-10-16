@@ -44,6 +44,8 @@ For headerless SAM files and SAM writing:
 ### Shared Table Function Utilities
 `src/include/table_function_common.hpp` / `.cpp` provides `ParseFilePathsParameter`, `IsStdinPath`, `SetResultVector*`, and similar helpers. Prefer these over re-implementing per-function.
 
+A reader whose rows each come from one line of a text file (`read_paf`, `read_gfa`) builds on `src/include/line_file_scan.hpp`. `MakeLineScanFunction` declares the table function with its shared global state and a file-size row estimate; `BindLineScan` resolves the path, glob or list argument and `include_filepath`; `ScanLines` claims files per thread, reads them through DuckDB's file system (gzip, bgzip and remote paths alike), caps a chunk at 16 MiB of lines, and reports a parse error as `<function>: <file>: line N: <defect>`. The reader supplies only a DuckDB-free line parser and the code that writes one row. Its parse step is kept separate from its write step so that only parse errors are labelled with a line.
+
 ### Dual-path Table Functions (standard + lateral)
 Functions like `read_ena_sequences` set both `function` (`Execute`) and `in_out_function` (`ExecuteInOut`) on the same `TableFunction`. DuckDB routes scalar-constant calls to the standard path (parallel, byte-based progress) and correlated-column or subquery calls to the in-out path (one outer row at a time, `LIMIT`-driven short-circuit via `LocalState` destruction). Shared per-run open/read/close logic lives in `miint::PerRunReader` so both paths use the same state machine and retry policy, and shared column-fill logic lives in a `FillOutputFromBatch` helper so both paths emit identical chunk layouts. The `Bind` function detects the in-out path by an empty `input.inputs` (DuckDB's table-in-out dispatcher passes no scalar constants) and sets `Data::deferred_resolution`; the per-query LRU `ENAResolverCache` on `Data` then dedupes metadata lookups across outer rows.
 
@@ -124,6 +126,9 @@ SAM alignments compute `stop_position` using HTSlib's `bam_endpos()`:
 - Example: `10M` at position 2 → `stop_position = 12`, covering bases `[2, 12)`
 - Coverage length = `stop_position - position` (no `+1`)
 - Critical for interval operations and coverage analysis
+
+### Coordinate Axes for Readers
+A reader converts coordinates to miint's convention when it reads, and names each interval column after its axis: `position` / `stop_position` for the reference axis, `query_start` / `query_stop` for the read axis. A bare `start` / `stop` names neither (`alignment_slice` takes reference-axis ones). A column that leaves the file's convention in place, or an interval column named for neither axis, means every caller has to know the source format to use it correctly — the off-by-one this rule exists to prevent. The rule and the per-format conversions are in [Coordinate conventions](../reading.md#coordinate-conventions).
 
 ### Identifier-column Codec (`id_column_codec` / `id_column_utils`)
 Functions that accept user-supplied identifier columns (`read_id`, `reference`, `mate_reference`) may opt in to BIGINT and UUID in addition to VARCHAR; `IsAllowedIdType` in `src/include/id_column_utils.hpp` defines the accepted set. The pattern is split across two layers:

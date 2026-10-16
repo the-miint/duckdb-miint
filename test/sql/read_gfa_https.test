@@ -1,0 +1,18 @@
+# name: test/sql/read_gfa_https.test
+# description: Test read_gfa from HTTP URL
+# group: [sql]
+
+# NOTE: Skipped in CI because httpfs is disabled at build time.
+# Active coverage is in test/shell/read_https.sh (uses LOAD httpfs at runtime).
+
+require miint
+
+require httpfs
+
+require-env MIINT_HTTPS_TEST_URL
+
+# GFA via HTTP
+query I
+SELECT COUNT(*) FROM read_gfa(getenv('MIINT_HTTPS_TEST_URL') || '/gfa/spec_example.gfa');
+----
+10

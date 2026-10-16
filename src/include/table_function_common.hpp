@@ -7,6 +7,7 @@
 #include "duckdb/common/named_parameter_map.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/storage/statistics/node_statistics.hpp"
 #include "SpectrumBatch.hpp"
 #include "QualScore.hpp"
 
@@ -24,6 +25,16 @@ std::vector<std::string> ParseFilePathsParameter(const Value &input, const std::
 
 // Parse include_filepath named parameter (optional BOOLEAN, default false)
 bool ParseIncludeFilepathParameter(const named_parameter_map_t &named_parameters);
+
+// Row-count estimate for a table function that streams files, so the query optimizer knows
+// roughly how big the scan is. Without one, DuckDB assumes a tiny scan and can pick it as a
+// join's build side -- hashing a multi-GB file into memory instead of streaming it.
+//
+// It errs high: an over-estimate makes the optimizer probe the scan, always the
+// safe choice for a streaming source; an under-estimate makes it build a hash table on it.
+// Heuristic: bytes on disk / `bytes_per_row`, with gzip counted at 4x its size. A remote or
+// stdin path, or one whose size cannot be read, gives a large constant instead.
+unique_ptr<NodeStatistics> EstimateFileScanCardinality(const std::vector<std::string> &paths, idx_t bytes_per_row);
 
 // Expand a glob pattern into a sorted list of file paths
 // - If pattern contains glob characters (*, ?, []), expands and sorts alphabetically

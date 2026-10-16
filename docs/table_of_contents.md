@@ -63,7 +63,7 @@ Two constraints come with it:
 
 ## Reading & writing
 
-- [Reading files](reading.md) - File formats with read support in MIINT (FASTA/FASTQ, SAM/BAM, SFF, BIOM, mzML/mzXML, GFF, jplace, Newick).
+- [Reading files](reading.md) - File formats with read support in MIINT (FASTA/FASTQ, SAM/BAM, PAF, GFA, SFF, BIOM, mzML/mzXML, GFF, jplace, Newick), and myloasm assembly output.
 - [Writing files](writing.md) - File formats with write support in MIINT.
 
 ## Public data repositories

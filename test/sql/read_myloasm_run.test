@@ -1,0 +1,94 @@
+# name: test/sql/read_myloasm_run.test
+# description: read_myloasm_run returns each myloasm invocation's version, command and the k-mer settings it ran with
+# group: [sql]
+
+require miint
+
+# --- Schema ---
+
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM read_myloasm_run('data/myloasm/ecoli_sim'));
+----
+log_file	VARCHAR
+started_at	TIMESTAMP
+myloasm_version	VARCHAR
+command	VARCHAR
+kmer_size	INTEGER
+compression	INTEGER
+hifi	BOOLEAN
+
+query TTTTIIT
+SELECT replace(log_file, '\', '/'), started_at, myloasm_version, command, kmer_size, compression, hifi
+FROM read_myloasm_run('data/myloasm/ecoli_sim');
+----
+data/myloasm/ecoli_sim/myloasm.log	2026-10-15 12:44:45.889	0.7.0	myloasm reads.fa -o run1 --hifi -t 1	21	11	true
+
+# --- Intent: k and c are the values the run used ---
+
+# myloasm logs its command line, not its settings, so k and c follow its argument rules
+# (src/cli.rs and src/main.rs at 0.7.0; the --nano-r9 and --c precedence was also checked by
+# comparing real 0.7.0 assemblies, e.g. --nano-r9 --c 13 against --nano-r9):
+#   c: -c/--compression N if given; else 7 under --nano-r9; else the hidden --c N; else 11.
+#   k: 17 under --nano-r9, whatever -k/--kmer-size says; else -k/--kmer-size N; else 21.
+# Its "HiFi mode enabled. Setting -c to N" line prints c before -c is applied, so it is not
+# a source for c. A resumed run writes one log per invocation; each is a row.
+statement ok
+COPY (SELECT 1 AS x) TO '__TEST_DIR__/run_logs' (FORMAT csv, PER_THREAD_OUTPUT true, OVERWRITE_OR_IGNORE true);
+
+statement ok
+CREATE TABLE commands AS SELECT * FROM (VALUES
+  (1, 'myloasm r.fq -o out -c 15'),
+  (2, 'myloasm r.fq -o out --compression=9 --hifi'),
+  (3, 'myloasm r.fq -o out --c 13'),
+  (4, 'myloasm r.fq -o out --c 13 -c 5'),
+  (5, 'myloasm r.fq -o out --nano-r9'),
+  (6, 'myloasm r.fq -o out --nano-r9 -c 9 -k 19'),
+  (7, 'myloasm r.fq -o out -k19 -c9'),
+  (8, 'myloasm r.fq -o out --kmer-size=17 -t 4'),
+  (9, 'myloasm r.fq -o out --nano-r9 --c 13')) t(i, command);
+
+foreach i 1 2 3 4 5 6 7 8 9
+
+statement ok
+COPY (SELECT printf('(2026-01-01 00:00:0%d.000) INFO [myloasm] COMMAND: %s', i, command) FROM commands WHERE i = ${i}
+      UNION ALL SELECT '(2026-01-01 00:00:00.000) INFO [myloasm] VERSION: 0.7.0'
+      UNION ALL SELECT '(2026-01-01 00:00:00.000) INFO [myloasm] HiFi mode enabled. Setting -c to 11.')
+TO '__TEST_DIR__/run_logs/myloasm_${i}.log' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+endloop
+
+query TTIIT
+SELECT parse_filename(log_file), started_at, kmer_size, compression, hifi
+FROM read_myloasm_run('__TEST_DIR__/run_logs') ORDER BY started_at;
+----
+myloasm_1.log	2026-01-01 00:00:01	21	15	false
+myloasm_2.log	2026-01-01 00:00:02	21	9	true
+myloasm_3.log	2026-01-01 00:00:03	21	13	false
+myloasm_4.log	2026-01-01 00:00:04	21	5	false
+myloasm_5.log	2026-01-01 00:00:05	17	7	false
+myloasm_6.log	2026-01-01 00:00:06	17	9	false
+myloasm_7.log	2026-01-01 00:00:07	19	9	false
+myloasm_8.log	2026-01-01 00:00:08	17	11	false
+myloasm_9.log	2026-01-01 00:00:09	17	7	false
+
+# --- Errors ---
+
+statement error
+SELECT * FROM read_myloasm_run(NULL);
+----
+read_myloasm: the myloasm output directory cannot be NULL
+
+statement error
+SELECT * FROM read_myloasm_run('data/myloasm/does_not_exist');
+----
+data/myloasm/does_not_exist/myloasm*.log
+
+# A log without exactly one COMMAND and one VERSION line cannot say what produced the run.
+statement ok
+COPY (SELECT '(2026-01-01 00:00:09.000) INFO [myloasm] COMMAND: myloasm r.fq')
+TO '__TEST_DIR__/run_logs/myloasm_9.log' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT myloasm_version FROM read_myloasm_run('__TEST_DIR__/run_logs');
+----
+myloasm_9.log: expected one COMMAND and one VERSION line, found 1 and 0

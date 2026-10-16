@@ -1540,6 +1540,9 @@ set(EXTENSION_SOURCES
     src/NewickTree.cpp
     src/read_jplace_newick.cpp
     src/read_newick.cpp
+    src/line_file_scan.cpp
+    src/read_paf.cpp
+    src/read_gfa.cpp
     src/tree_table_reader.cpp
     src/phylo_traits_reader.cpp
     src/tree_resolve_placement.cpp
@@ -1563,6 +1566,10 @@ set(EXTENSION_SOURCES
     src/taxdump_archive.cpp
     src/taxonomy_lineage.cpp
     third_party/microtar/microtar.c
+    src/line_splitter.cpp
+    src/sam_style_tags.cpp
+    src/paf_parser.cpp
+    src/gfa_parser.cpp
     src/blast_parser.cpp
     src/blast_client.cpp
     src/blast_search.cpp
@@ -2279,6 +2286,14 @@ set(TEST_SOURCES
     src/taxdump_archive.cpp
     third_party/microtar/microtar.c
     test/cpp/test_taxdump_archive.cpp
+    src/line_splitter.cpp
+    test/cpp/test_line_splitter.cpp
+    src/sam_style_tags.cpp
+    test/cpp/test_sam_style_tags.cpp
+    src/paf_parser.cpp
+    test/cpp/test_paf_parser.cpp
+    src/gfa_parser.cpp
+    test/cpp/test_gfa_parser.cpp
     src/taxonomy_lineage.cpp
     test/cpp/test_taxonomy_lineage.cpp
     src/ena_parser.cpp

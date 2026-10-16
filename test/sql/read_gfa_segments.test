@@ -1,0 +1,35 @@
+# name: test/sql/read_gfa_segments.test
+# description: read_gfa_segments returns a GFA file's S records as typed columns
+# group: [sql]
+
+require miint
+
+query TTT
+SELECT segment_id, sequence, array_to_string(map_keys(tags), '|')
+FROM read_gfa_segments('data/gfa/spec_example.gfa') ORDER BY segment_id;
+----
+s1	ACGTACGT	LN|RC
+s2	NULL	LN|ST
+s3	GGCCTTAA	KC|fl|nm|js|hx|ba|bf
+
+# '*' is GFA's "sequence not stored"; it must not read as a one-base sequence.
+query I
+SELECT count(*) FROM read_gfa_segments('data/gfa/spec_example.gfa') WHERE sequence = '*';
+----
+0
+
+# myloasm stores no sequences, only lengths and depths as tags.
+query TIT
+SELECT segment_id, tags['LN']::BIGINT, tags['DP']
+FROM read_gfa_segments('data/myloasm/ecoli_sim/final_contig_graph.gfa') ORDER BY segment_id;
+----
+u491ctg	196466	51.0
+u826ctg	195577	51.0
+u840ctg	51274	32.0
+u912ctg	55666	2.0
+u982ctg	50902	32.0
+
+query I
+SELECT count(*) FROM read_gfa_segments('data/myloasm/ecoli_sim/final_contig_graph.gfa') WHERE sequence IS NOT NULL;
+----
+0

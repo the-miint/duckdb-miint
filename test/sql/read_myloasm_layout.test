@@ -1,0 +1,237 @@
+# name: test/sql/read_myloasm_layout.test
+# description: read_myloasm_layout returns the read slices each myloasm contig is built from, on miint's two coordinate axes
+# group: [sql]
+
+require miint
+
+# --- Schema ---
+
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM read_myloasm_layout('data/myloasm/ecoli_sim'));
+----
+contig_id	VARCHAR
+layout_order	BIGINT
+position	BIGINT
+stop_position	BIGINT
+read_id	VARCHAR
+split_suffix	VARCHAR
+piece_offset	BIGINT
+piece_length	BIGINT
+query_start	BIGINT
+query_stop	BIGINT
+strand	VARCHAR
+read_depth_identity_99	DOUBLE
+read_depth_identity_99_75	DOUBLE
+read_depth_identity_100	DOUBLE
+next_overlap_length	BIGINT
+next_shared_snpmers	BIGINT
+next_differing_snpmers	BIGINT
+
+# One row per GFA 'a' record, read independently.
+query I
+SELECT count(*) = (SELECT count(*) FROM read_gfa('data/myloasm/ecoli_sim/final_contig_graph.gfa') WHERE record_type = 'a')
+FROM read_myloasm_layout('data/myloasm/ecoli_sim');
+----
+true
+
+query TIIITTIIIITRRRIII
+SELECT * FROM read_myloasm_layout('data/myloasm/ecoli_sim') WHERE contig_id = 'u491ctg' AND layout_order IN (1, 64) ORDER BY layout_order;
+----
+u491ctg	1	1	2408	s00491_lina_1180941_1196827_r	+split0	0	15886	0	2407	+	5.0	4.0	4.0	13480	91	0
+u491ctg	64	180490	196467	s00001_lina_1000487_1016486_r	+split0	0	15999	22	15999	+	4.0	2.0	2.0	NULL	NULL	NULL
+
+# --- Intent: the slices tile each contig ---
+
+# An unpolished myloasm contig is its read slices laid end to end, so in layout order each
+# slice starts where the previous one stopped, the first at 1, and the last stops at the
+# contig's length (LN, read independently) + 1.
+query TTT
+SELECT l.contig_id,
+       bool_and(l.position = coalesce(l.previous_stop, 1)),
+       max(l.stop_position) = any_value(s.tags['LN']::BIGINT) + 1
+FROM (SELECT *, lag(stop_position) OVER (PARTITION BY contig_id ORDER BY layout_order) AS previous_stop
+      FROM read_myloasm_layout('data/myloasm/ecoli_sim')) l
+JOIN read_gfa_segments('data/myloasm/ecoli_sim/final_contig_graph.gfa') s ON s.segment_id = l.contig_id
+GROUP BY l.contig_id ORDER BY l.contig_id;
+----
+u491ctg	true	true
+u826ctg	true	true
+u840ctg	true	true
+u912ctg	true	true
+u982ctg	true	true
+
+# --- Intent: reverse-strand slices are flipped onto the read as sequenced ---
+
+# Each lina/linb/low read is an exact copy of genome [g_start, g_stop) (name:
+# s<i>_<kind>_<g_start>_<g_stop>_<f|r>), reversed when 'r'. Placing a slice's read interval
+# back on the genome must put it where the contig says: each of these contigs runs opposite
+# to the genome, so contig position + genome stop is one constant per contig, up to the bases
+# the unpolished contig gains at its read junctions (126, 134 and 20 here, its unpolished minus
+# polished length). Leaving myloasm's '-' slices on the reverse complement moves them by
+# thousands of bases.
+query TIT
+SELECT contig_id, count(*), max(position - 1 + genome_stop) - min(position - 1 + genome_stop) < 1000
+FROM (
+  SELECT contig_id, position,
+         CASE WHEN p[5] = 'f' THEN p[3]::BIGINT + query_stop ELSE p[4]::BIGINT - query_start END AS genome_stop
+  FROM (SELECT *, string_split(read_id, '_') AS p FROM read_myloasm_layout('data/myloasm/ecoli_sim'))
+  WHERE p[2] IN ('lina', 'linb', 'low') AND stop_position > position
+)
+GROUP BY contig_id ORDER BY contig_id;
+----
+u491ctg	64	true
+u826ctg	68	true
+u912ctg	11	true
+
+# Because those contigs run opposite to the genome, a forward read is placed '-' and a
+# reversed one '+'.
+query TT
+SELECT DISTINCT strand, string_split(read_id, '_')[5]
+FROM read_myloasm_layout('data/myloasm/ecoli_sim') WHERE contig_id IN ('u491ctg', 'u826ctg', 'u912ctg')
+ORDER BY ALL;
+----
++	r
+-	f
+
+# Every backbone read here is a whole, unsplit read (+split0), so its piece is the read: the
+# piece length equals the read length its name gives, and every slice lies inside it.
+query III
+SELECT count(*),
+       count(*) FILTER (piece_offset = 0 AND piece_length = read_length),
+       count(*) FILTER (0 <= query_start AND query_start <= query_stop AND query_stop <= read_length)
+FROM (
+  SELECT *, CASE WHEN p[2] IN ('circ', 'circb') THEN p[4]::BIGINT ELSE p[4]::BIGINT - p[3]::BIGINT END AS read_length
+  FROM (SELECT *, string_split(read_id, '_') AS p FROM read_myloasm_layout('data/myloasm/ecoli_sim'))
+);
+----
+173	173	173
+
+# myloasm writes 0 for the next-read overlap of a contig's last read, which has no next read.
+# That is not an overlap of zero bases, so it is NULL, on exactly the last read of each contig.
+query II
+SELECT count(*) FILTER (next_overlap_length IS NULL AND next_shared_snpmers IS NULL AND next_differing_snpmers IS NULL),
+       count(*) FILTER ((next_overlap_length IS NULL) = (layout_order = last_order))
+FROM (SELECT *, max(layout_order) OVER (PARTITION BY contig_id) AS last_order
+      FROM read_myloasm_layout('data/myloasm/ecoli_sim'));
+----
+5	173
+
+# --- Two-level pieces, constructed from the real run ---
+
+# Round-2 breakpoint lines, written below (s00913 +split1 cut at [1000, 1200) and
+# [3000, 3100); s00000 cut at [4000, 4100)), and a GFA with one more contig built from two of
+# the pieces they create:
+#   s00913 +split1+split1 is [7317, 9117) of its read (1800 bp). Its slice 0-1500 is on the
+#     piece's reverse complement, so [300, 1800) forward             -> [7617, 9117)
+#   s00000 +split1 is [4100, 8000) of its read. Slice 300-1500, '+'  -> [4400, 5600)
+statement ok
+COPY (SELECT 1 AS x) TO '__TEST_DIR__/layout_round2' (FORMAT csv, PER_THREAD_OUTPUT true, OVERWRITE_OR_IGNORE true);
+
+statement ok
+COPY (SELECT 1 AS x) TO '__TEST_DIR__/layout_round2/0-cleaning_and_unitigs' (FORMAT csv, PER_THREAD_OUTPUT true, OVERWRITE_OR_IGNORE true);
+
+statement ok
+COPY (SELECT 1 AS x) TO '__TEST_DIR__/layout_round2/0-cleaning_and_unitigs/remap_temp' (FORMAT csv, PER_THREAD_OUTPUT true, OVERWRITE_OR_IGNORE true);
+
+statement ok
+COPY (SELECT line FROM read_csv('data/myloasm/ecoli_sim/0-cleaning_and_unitigs/read_coverages.txt.gz',
+                                delim = E'\x01', quote = '', escape = '', header = false,
+                                columns = {'line': 'VARCHAR'}, auto_detect = false))
+TO '__TEST_DIR__/layout_round2/0-cleaning_and_unitigs/read_coverages.txt.gz'
+(FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01', COMPRESSION gzip);
+
+statement ok
+COPY (SELECT * FROM (VALUES
+  ('s00913_chim_1005000_1011000_2000000_6000_r+split1 BREAKPOINTS:1000-1200-COND:1,3000-3100-COND:2,'),
+  ('s00000_lina_1000000_1008000_f BREAKPOINTS:4000-4100-COND:-4,')) t(line))
+TO '__TEST_DIR__/layout_round2/0-cleaning_and_unitigs/remap_temp/read_coverages.txt.gz'
+(FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01', COMPRESSION gzip);
+
+statement ok
+CREATE TABLE constructed_gfa AS
+SELECT line FROM read_csv('data/myloasm/ecoli_sim/final_contig_graph.gfa',
+                          delim = E'\x01', quote = '', escape = '', header = false,
+                          columns = {'line': 'VARCHAR'}, auto_detect = false)
+UNION ALL
+SELECT * FROM (VALUES
+  (E'S\tu2000ctg\t*\tLN:i:2700\tDP:f:1.0\tDP2:f:1.0\tDP3:f:1.0\tMEDIAN_DP1:f:1.0'),
+  (E'a\tu2000ctg,0-1500\t2000\t0\ts00913_chim_1005000_1011000_2000000_6000_r+split1+split1\t-\t1500\tDP1:1,DP2:1,DP3:1,READ_LEN:1800,OL_LEN_NEXT:300,SNP_SHARE_NEXT:2,SNP_DIFF_NEXT:0'),
+  (E'a\tu2000ctg,300-1500\t2001\t1500\ts00000_lina_1000000_1008000_f+split1\t+\t1200\tDP1:1,DP2:1,DP3:1,READ_LEN:3900,OL_LEN_NEXT:0,SNP_SHARE_NEXT:0,SNP_DIFF_NEXT:0')) t(line);
+
+statement ok
+COPY constructed_gfa TO '__TEST_DIR__/layout_round2/final_contig_graph.gfa'
+(FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+query TIIITTIIIIT
+SELECT contig_id, layout_order, position, stop_position, read_id, split_suffix, piece_offset, piece_length, query_start, query_stop, strand
+FROM read_myloasm_layout('__TEST_DIR__/layout_round2') WHERE contig_id = 'u2000ctg' ORDER BY layout_order;
+----
+u2000ctg	1	1	1501	s00913_chim_1005000_1011000_2000000_6000_r	+split1+split1	7317	1800	7617	9117	-
+u2000ctg	2	1501	2701	s00000_lina_1000000_1008000_f	+split1	4100	3900	4400	5600	+
+
+# --- Errors ---
+
+statement error
+SELECT * FROM read_myloasm_layout(NULL);
+----
+read_myloasm: the myloasm output directory cannot be NULL
+
+statement error
+SELECT * FROM read_myloasm_layout('data/myloasm/does_not_exist');
+----
+data/myloasm/does_not_exist/final_contig_graph.gfa
+
+# Each case below replaces the constructed GFA with the real one plus one bad record. The
+# checks fire even when no column they read is selected.
+
+statement ok
+COPY (SELECT * FROM constructed_gfa UNION ALL
+      SELECT E'a\tu2000ctg,0-1500\t2000\t0\ts00000_lina_1000000_1008000_f\t-\tDP1:1,DP2:1,DP3:1,READ_LEN:1800,OL_LEN_NEXT:300,SNP_SHARE_NEXT:2,SNP_DIFF_NEXT:0')
+TO '__TEST_DIR__/layout_round2/final_contig_graph.gfa' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT contig_id FROM read_myloasm_layout('__TEST_DIR__/layout_round2');
+----
+read_myloasm_layout: final_contig_graph.gfa line 186: not a myloasm read-placement (a) line
+
+# The slice is the read range that contributes slice-length bases, so the two must agree, and
+# the range must fit the piece.
+statement ok
+COPY (SELECT * FROM constructed_gfa UNION ALL
+      SELECT E'a\tu2000ctg,0-1500\t2000\t0\ts00000_lina_1000000_1008000_f\t-\t1400\tDP1:1,DP2:1,DP3:1,READ_LEN:1800,OL_LEN_NEXT:300,SNP_SHARE_NEXT:2,SNP_DIFF_NEXT:0')
+TO '__TEST_DIR__/layout_round2/final_contig_graph.gfa' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT contig_id FROM read_myloasm_layout('__TEST_DIR__/layout_round2');
+----
+read_myloasm_layout: final_contig_graph.gfa line 186: read slice 0-1500 does not fit a 1800 bp piece with a 1400 bp slice
+
+statement ok
+COPY (SELECT * FROM constructed_gfa UNION ALL
+      SELECT E'a\tu2000ctg,0-1500\t2000\t0\ts00000_lina_1000000_1008000_f\t-\t1500\tDP1:1,DP2:1,DP3:1,READ_LEN:1200,OL_LEN_NEXT:300,SNP_SHARE_NEXT:2,SNP_DIFF_NEXT:0')
+TO '__TEST_DIR__/layout_round2/final_contig_graph.gfa' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT contig_id FROM read_myloasm_layout('__TEST_DIR__/layout_round2');
+----
+read_myloasm_layout: final_contig_graph.gfa line 186: read slice 0-1500 does not fit a 1200 bp piece with a 1500 bp slice
+
+statement ok
+COPY (SELECT * FROM constructed_gfa UNION ALL
+      SELECT E'a\tu2000ctg,0-1500\t2000\t0\ts00001_lina_1000487_1016486_r+split3\t-\t1500\tDP1:1,DP2:1,DP3:1,READ_LEN:1800,OL_LEN_NEXT:300,SNP_SHARE_NEXT:2,SNP_DIFF_NEXT:0')
+TO '__TEST_DIR__/layout_round2/final_contig_graph.gfa' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT contig_id FROM read_myloasm_layout('__TEST_DIR__/layout_round2');
+----
+read_myloasm_layout: final_contig_graph.gfa line 186: piece 's00001_lina_1000487_1016486_r+split3' has no breakpoint that starts it
+
+statement ok
+COPY (SELECT * FROM constructed_gfa UNION ALL
+      SELECT E'a\tu2000ctg,0-1500\t2000\t0\ts00001_lina_1000487_1016486_r+split0+split0+split0\t-\t1500\tDP1:1,DP2:1,DP3:1,READ_LEN:1800,OL_LEN_NEXT:300,SNP_SHARE_NEXT:2,SNP_DIFF_NEXT:0')
+TO '__TEST_DIR__/layout_round2/final_contig_graph.gfa' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT contig_id FROM read_myloasm_layout('__TEST_DIR__/layout_round2');
+----
+read_myloasm_layout: final_contig_graph.gfa line 186: read 's00001_lina_1000487_1016486_r+split0+split0+split0' has more than two +split levels

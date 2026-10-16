@@ -196,6 +196,39 @@ SELECT * FROM read_fastx('data/fastq/empty.fq');
 ----
 Invalid Error: Empty file
 
+# allow_empty reads an empty file as no records, for tools that write a file whether or not
+# they have records for it. Other files in the same scan are read as usual.
+query I
+SELECT count(*) FROM read_fastx('data/fastq/empty.fq', allow_empty := true);
+----
+0
+
+query I
+SELECT count(*) FROM read_fastx(['data/fastq/empty.fq', 'data/fastq/small_a.fq', 'data/fastq/empty.fq'], allow_empty := true);
+----
+2
+
+query I
+SELECT count(*) FROM read_fastx('data/fastq/empty.fq', sequence2 := 'data/fastq/empty.fq', allow_empty := true);
+----
+0
+
+statement error
+SELECT * FROM read_fastx('data/fastq/empty.fq', allow_empty := false);
+----
+Invalid Error: Empty file
+
+# One empty mate is a broken pair, not an empty one, so it is still an error.
+statement error
+SELECT * FROM read_fastx('data/fastq/empty.fq', sequence2 := 'data/fastq/small_a_r2.fq', allow_empty := true);
+----
+Empty file: data/fastq/empty.fq
+
+statement error
+SELECT * FROM read_fastx('data/fastq/small_a_r1.fq', sequence2 := 'data/fastq/empty.fq', allow_empty := true);
+----
+Empty file: data/fastq/empty.fq
+
 # Error: mismatched array lengths
 statement error
 SELECT * FROM read_fastx(['data/fastq/small_a.fq', 'data/fastq/small_b.fq'], 

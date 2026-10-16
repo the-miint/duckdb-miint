@@ -1,0 +1,339 @@
+(2026-10-15 12:44:45.889) INFO [myloasm] COMMAND: myloasm reads.fa -o run1 --hifi -t 1
+(2026-10-15 12:44:45.889) INFO [myloasm] VERSION: 0.7.0
+(2026-10-15 12:44:45.889) INFO [myloasm] SYSTEM NAME: Debian GNU/Linux
+(2026-10-15 12:44:45.889) INFO [myloasm] SYSTEM HOST NAME: redacted
+(2026-10-15 12:44:45.889) INFO [myloasm] HiFi mode enabled. Setting -c to 11.
+(2026-10-15 12:44:45.889) INFO [myloasm] Starting assembly...
+(2026-10-15 12:44:45.889) DEBUG [myloasm::seq_parse] File: reads.fa, size (Gbytes): 0.012156645
+(2026-10-15 12:44:45.889) INFO [myloasm::seq_parse] Using automatic bloom filter size: 2.00 Gbytes
+(2026-10-15 12:44:46.012) DEBUG [myloasm::seq_parse] Finished reading all reads.
+(2026-10-15 12:44:46.872) INFO [myloasm::seq_parse] Read lengths - N10: 15406, N50: 12654, N90: 9173
+(2026-10-15 12:44:46.872) INFO [myloasm::seq_parse] Total bases - 12 million bp
+(2026-10-15 12:44:46.872) INFO [myloasm::seq_parse] Finished with bloom filter processing in 983.116266ms. Round 2 - Start k-mer counting...
+(2026-10-15 12:44:46.873) INFO [myloasm::utils] Memory usage after bloom filter processing --- Memory usage: 0.11 GB
+(2026-10-15 12:44:46.873) DEBUG [myloasm::seq_parse] File: reads.fa, size (Gbytes): 0.012156645
+(2026-10-15 12:44:46.893) DEBUG [myloasm::seq_parse] Finished reading all reads.
+(2026-10-15 12:44:46.911) INFO [myloasm::seq_parse] Finished with k-mer counting in 38.292303ms. Total kmers after bloom filter: 313910
+(2026-10-15 12:44:46.912) INFO [myloasm::utils] Memory usage after second round of k-mer counting processing --- Memory usage: 0.06 GB
+(2026-10-15 12:44:46.914) INFO [myloasm::seq_parse] Removed 10359 kmers with counts < 1 in both strands and <= 3 multiplicity.
+(2026-10-15 12:44:46.914) DEBUG [myloasm::seq_parse] Final Hashmap len after vectorization: 303551
+(2026-10-15 12:44:46.914) DEBUG [myloasm::utils] Memory usage after second round of k-mer counting processing --- Memory usage: 0.06 GB
+(2026-10-15 12:44:46.914) INFO [myloasm] Time elapsed in for counting k-mers is: 1.025335658s
+(2026-10-15 12:44:46.914) DEBUG [myloasm::kmer_comp] Number of k-mers passing thresholds: 303551
+(2026-10-15 12:44:46.916) DEBUG [myloasm::kmer_comp] High frequency k-mer threshold: 172
+(2026-10-15 12:44:46.916) DEBUG [myloasm::kmer_comp] Wrote k-mer count histogram to "run1/misc/kmer_count_histogram.tsv"
+(2026-10-15 12:44:46.916) INFO [myloasm::kmer_comp] Finding snpmers...
+(2026-10-15 12:44:46.925) DEBUG [myloasm::utils] Memory usage during snpmer detection --- Memory usage: 0.06 GB
+(2026-10-15 12:44:46.929) DEBUG [myloasm::kmer_comp] Number of snpmers: 1341. 
+(2026-10-15 12:44:46.929) INFO [myloasm] Time elapsed in for parsing snpmers is: 14.409748ms
+(2026-10-15 12:44:46.930) INFO [myloasm::utils] STAGE 1: Obtained SNPmers --- Memory usage: 0.05 GB
+(2026-10-15 12:44:46.930) INFO [myloasm] Getting twin reads from snpmers...
+(2026-10-15 12:44:47.283) INFO [myloasm::kmer_comp] Building Huffman coding from 1006 reads...
+(2026-10-15 12:44:47.298) INFO [myloasm::kmer_comp] Huffman coding built and 1006 reads re-encoded.
+(2026-10-15 12:44:47.298) DEBUG [myloasm::kmer_comp] Number of reads filtered due to repetitiveness: 0
+(2026-10-15 12:44:47.298) INFO [myloasm::kmer_comp] Number of valid reads with >= 1kb - 1006. Number of reads below quality threshold - 0.
+(2026-10-15 12:44:47.298) INFO [myloasm::kmer_comp] Mean SNPmer density: 0.59%
+(2026-10-15 12:44:47.298) INFO [myloasm::kmer_comp] Time elapsed for obtaining twin reads is: 367.984903ms
+(2026-10-15 12:44:47.299) INFO [myloasm] Finished getting twin reads from snpmers and saved temporarily to disk.
+(2026-10-15 12:44:47.300) INFO [myloasm::utils] STAGE 1.5: Initially obtained dirty twin reads --- Memory usage: 0.07 GB
+(2026-10-15 12:44:47.300) INFO [myloasm] Removing contained reads - round 1...
+(2026-10-15 12:44:47.300) INFO [myloasm::twin_graph] Processing 1006 reads in 1 batches of size 50000
+(2026-10-15 12:44:47.325) DEBUG [myloasm::twin_graph] Batch 1/1: 9642 kmer indices, threshold 63. Index built in 25.317642ms
+(2026-10-15 12:44:47.528) INFO [myloasm::twin_graph] Batch 1/1 complete. 788 contained so far
+(2026-10-15 12:44:47.529) DEBUG [myloasm::utils] Memory usage after contained read removal batch 1 --- Memory usage: 0.07 GB
+(2026-10-15 12:44:47.529) INFO [myloasm::twin_graph] 788 reads are contained; 218 outer reads
+(2026-10-15 12:44:47.529) INFO [myloasm::twin_graph] Time elapsed for removing contained reads is: 229.358609ms
+(2026-10-15 12:44:47.529) INFO [myloasm] Mapping reads to non-contained (outer) reads - round 1...
+(2026-10-15 12:44:47.529) INFO [myloasm::mapping] Mapping 1006 reads to 218 outer reads. Building hash table... 
+(2026-10-15 12:44:47.529) DEBUG [myloasm::mapping] ITERATIONS: Breaking 218 reads into 1 chunks of <= 1000000
+(2026-10-15 12:44:47.540) INFO [myloasm::mapping] Built minimizer index for batch 1/1. Mapping reads...
+(2026-10-15 12:44:47.591) INFO [myloasm::utils] Mapping batch 1/1: Processed 100 / 1006 (10%) of reads... --- Memory usage: 0.07 GB
+(2026-10-15 12:44:47.649) INFO [myloasm::utils] Mapping batch 1/1: Processed 200 / 1006 (20%) of reads... --- Memory usage: 0.07 GB
+(2026-10-15 12:44:47.700) INFO [myloasm::utils] Mapping batch 1/1: Processed 300 / 1006 (30%) of reads... --- Memory usage: 0.07 GB
+(2026-10-15 12:44:47.748) INFO [myloasm::utils] Mapping batch 1/1: Processed 400 / 1006 (40%) of reads... --- Memory usage: 0.07 GB
+(2026-10-15 12:44:47.803) INFO [myloasm::utils] Mapping batch 1/1: Processed 500 / 1006 (50%) of reads... --- Memory usage: 0.07 GB
+(2026-10-15 12:44:47.855) INFO [myloasm::utils] Mapping batch 1/1: Processed 600 / 1006 (60%) of reads... --- Memory usage: 0.07 GB
+(2026-10-15 12:44:47.908) INFO [myloasm::utils] Mapping batch 1/1: Processed 700 / 1006 (70%) of reads... --- Memory usage: 0.08 GB
+(2026-10-15 12:44:47.957) INFO [myloasm::utils] Mapping batch 1/1: Processed 800 / 1006 (80%) of reads... --- Memory usage: 0.08 GB
+(2026-10-15 12:44:48.013) INFO [myloasm::utils] Mapping batch 1/1: Processed 900 / 1006 (89%) of reads... --- Memory usage: 0.08 GB
+(2026-10-15 12:44:48.063) INFO [myloasm::utils] Mapping batch 1/1: Processed 1000 / 1006 (99%) of reads... --- Memory usage: 0.08 GB
+(2026-10-15 12:44:48.066) INFO [myloasm::mapping] Finished mapping batch 1/1 to outer reads. Splitting chimeras...
+(2026-10-15 12:44:48.178) INFO [myloasm::mapping] Number of local alignments to outer reads: 22525
+(2026-10-15 12:44:48.179) INFO [myloasm::mapping] Number of maximal alignments to outer reads: 19140
+(2026-10-15 12:44:48.179) INFO [myloasm::utils] STAGE 2: Finished mapping reads to outer reads --- Memory usage: 0.08 GB
+(2026-10-15 12:44:48.179) INFO [myloasm] Processing mappings to clean and split chimeric reads...
+(2026-10-15 12:44:48.185) INFO [myloasm] Initial chimera detection: split 60 possibly chimeric or noisy reads out of 1026 total reads (5.85%)
+(2026-10-15 12:44:48.185) DEBUG [myloasm] Gained 20 reads after splitting chimeras and mapping to outer reads in 655.508606ms
+(2026-10-15 12:44:48.185) INFO [myloasm] Removing contained reads after splitting ...
+(2026-10-15 12:44:48.185) INFO [myloasm::twin_graph] Processing 1026 reads in 1 batches of size 50000
+(2026-10-15 12:44:48.210) DEBUG [myloasm::twin_graph] Batch 1/1: 8277 kmer indices, threshold 63. Index built in 25.162362ms
+(2026-10-15 12:44:48.420) INFO [myloasm::twin_graph] Batch 1/1 complete. 849 contained so far
+(2026-10-15 12:44:48.421) DEBUG [myloasm::utils] Memory usage after contained read removal batch 1 --- Memory usage: 0.08 GB
+(2026-10-15 12:44:48.421) INFO [myloasm::twin_graph] 849 reads are contained; 177 outer reads
+(2026-10-15 12:44:48.421) INFO [myloasm::twin_graph] Time elapsed for removing contained reads is: 236.527505ms
+(2026-10-15 12:44:48.422) INFO [myloasm] Round 2: Mapping reads to 0 candidate outer reads...
+(2026-10-15 12:44:48.422) INFO [myloasm::mapping] Mapping 1026 reads to 0 outer reads. Building hash table... 
+(2026-10-15 12:44:48.422) DEBUG [myloasm::mapping] ITERATIONS: Breaking 0 reads into 0 chunks of <= 1000000
+(2026-10-15 12:44:48.422) INFO [myloasm::mapping] Number of local alignments to outer reads: 0
+(2026-10-15 12:44:48.422) INFO [myloasm::mapping] Number of maximal alignments to outer reads: 0
+(2026-10-15 12:44:48.422) INFO [myloasm] Round 2: Processing mappings...
+(2026-10-15 12:44:48.422) INFO [myloasm] Round 2: Gained 0 reads after splitting chimeras and mapping to outer reads in 187.279µs
+(2026-10-15 12:44:48.422) INFO [myloasm] Round 2: Removing contained reads after splitting ...
+(2026-10-15 12:44:48.422) INFO [myloasm::twin_graph] Processing 178 reads in 1 batches of size 50000
+(2026-10-15 12:44:48.428) DEBUG [myloasm::twin_graph] Batch 1/1: 8180 kmer indices, threshold 16. Index built in 6.005185ms
+(2026-10-15 12:44:48.463) INFO [myloasm::twin_graph] Batch 1/1 complete. 1 contained so far
+(2026-10-15 12:44:48.464) DEBUG [myloasm::utils] Memory usage after contained read removal batch 1 --- Memory usage: 0.07 GB
+(2026-10-15 12:44:48.464) INFO [myloasm::twin_graph] 1 reads are contained; 177 outer reads
+(2026-10-15 12:44:48.464) INFO [myloasm::twin_graph] Time elapsed for removing contained reads is: 42.156242ms
+(2026-10-15 12:44:48.464) INFO [myloasm] Final round: Mapping reads to 0 candidate outer reads...
+(2026-10-15 12:44:48.464) INFO [myloasm::mapping] Mapping 1026 reads to 0 outer reads. Building hash table... 
+(2026-10-15 12:44:48.464) DEBUG [myloasm::mapping] ITERATIONS: Breaking 0 reads into 0 chunks of <= 1000000
+(2026-10-15 12:44:48.464) INFO [myloasm::mapping] Number of local alignments to outer reads: 0
+(2026-10-15 12:44:48.464) INFO [myloasm::mapping] Number of maximal alignments to outer reads: 0
+(2026-10-15 12:44:48.467) INFO [myloasm::utils] STAGE 3: Obtained clean twin reads --- Memory usage: 0.07 GB
+(2026-10-15 12:44:48.467) INFO [myloasm] Getting overlaps between outer reads...
+(2026-10-15 12:44:48.532) INFO [myloasm] Time elapsed for getting overlaps is: 64.810336ms
+(2026-10-15 12:44:48.533) INFO [myloasm::utils] Obtained 1539 overlaps between outer reads --- Memory usage: 0.08 GB
+(2026-10-15 12:44:48.533) DEBUG [myloasm::twin_graph] Number of singleton reads: 3
+(2026-10-15 12:44:48.537) INFO [myloasm::utils] Obtained unitig graph from overlaps --- Memory usage: 0.08 GB
+(2026-10-15 12:44:48.537) INFO [myloasm] Initial light cleaning...
+(2026-10-15 12:44:48.537) DEBUG [myloasm] LIGHT-CLEAN: Cleaning graph iteration 1
+(2026-10-15 12:44:48.537) DEBUG [myloasm] Starting first round of bubble removal...
+(2026-10-15 12:44:48.537) DEBUG [myloasm] Bubble removal done
+(2026-10-15 12:44:48.537) DEBUG [myloasm] Removing low identity edges...
+(2026-10-15 12:44:48.537) DEBUG [myloasm] Low identity edge removal doone
+(2026-10-15 12:44:48.537) DEBUG [myloasm] Finished first round of tip/bubble removal. Now iterating...
+(2026-10-15 12:44:48.537) DEBUG [myloasm] Loop 0 of tip/bubble removal...
+(2026-10-15 12:44:48.537) DEBUG [myloasm] Loop 1 of tip/bubble removal...
+(2026-10-15 12:44:48.537) DEBUG [myloasm] LIGHT-CLEAN: Resolving bridged repeats...
+(2026-10-15 12:44:48.537) DEBUG [myloasm::unitig] BRIDGED: Cutting 14 edges that have low relative confidence (0.16666666666666666)
+(2026-10-15 12:44:48.537) DEBUG [myloasm] LIGHT-CLEAN: Cleaning graph iteration 2
+(2026-10-15 12:44:48.537) DEBUG [myloasm] Starting first round of bubble removal...
+(2026-10-15 12:44:48.537) DEBUG [myloasm] Bubble removal done
+(2026-10-15 12:44:48.537) DEBUG [myloasm] Removing low identity edges...
+(2026-10-15 12:44:48.537) DEBUG [myloasm] Low identity edge removal doone
+(2026-10-15 12:44:48.537) DEBUG [myloasm] Finished first round of tip/bubble removal. Now iterating...
+(2026-10-15 12:44:48.537) DEBUG [myloasm] Loop 0 of tip/bubble removal...
+(2026-10-15 12:44:48.537) DEBUG [myloasm] LIGHT-CLEAN: Resolving bridged repeats...
+(2026-10-15 12:44:48.537) DEBUG [myloasm::unitig] BRIDGED: Cutting 0 edges that have low relative confidence (0.3333333333333333)
+(2026-10-15 12:44:48.537) DEBUG [myloasm] LIGHT-CLEAN: Cleaning graph iteration 3
+(2026-10-15 12:44:48.537) DEBUG [myloasm] Starting first round of bubble removal...
+(2026-10-15 12:44:48.538) DEBUG [myloasm] Bubble removal done
+(2026-10-15 12:44:48.538) DEBUG [myloasm] Removing low identity edges...
+(2026-10-15 12:44:48.538) DEBUG [myloasm] Low identity edge removal doone
+(2026-10-15 12:44:48.538) DEBUG [myloasm] Finished first round of tip/bubble removal. Now iterating...
+(2026-10-15 12:44:48.538) DEBUG [myloasm] Loop 0 of tip/bubble removal...
+(2026-10-15 12:44:48.538) DEBUG [myloasm] LIGHT-CLEAN: Resolving bridged repeats...
+(2026-10-15 12:44:48.538) DEBUG [myloasm::unitig] BRIDGED: Cutting 0 edges that have low relative confidence (0.5)
+(2026-10-15 12:44:48.538) INFO [myloasm] Heavy graph cleaning...
+(2026-10-15 12:44:48.539) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 417.109µs
+(2026-10-15 12:44:48.539) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 1.373µs
+(2026-10-15 12:44:48.539) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 601ns
+(2026-10-15 12:44:48.539) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 10, temperature 2, and threshold 0.125
+(2026-10-15 12:44:48.539) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 320.127µs
+(2026-10-15 12:44:48.539) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 1.142µs
+(2026-10-15 12:44:48.539) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 121ns
+(2026-10-15 12:44:48.539) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 10, temperature 2, and threshold 0.25
+(2026-10-15 12:44:48.540) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 286.535µs
+(2026-10-15 12:44:48.540) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 1.272µs
+(2026-10-15 12:44:48.540) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 260ns
+(2026-10-15 12:44:48.540) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 10, temperature 2, and threshold 0.5
+(2026-10-15 12:44:48.540) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 268.762µs
+(2026-10-15 12:44:48.540) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 1.633µs
+(2026-10-15 12:44:48.540) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 241ns
+(2026-10-15 12:44:48.540) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 15, temperature 2, and threshold 0.125
+(2026-10-15 12:44:48.541) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 260.245µs
+(2026-10-15 12:44:48.541) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 1.132µs
+(2026-10-15 12:44:48.541) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 130ns
+(2026-10-15 12:44:48.541) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 15, temperature 2, and threshold 0.25
+(2026-10-15 12:44:48.541) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 258.622µs
+(2026-10-15 12:44:48.541) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 1.092µs
+(2026-10-15 12:44:48.541) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 120ns
+(2026-10-15 12:44:48.541) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 15, temperature 2, and threshold 0.5
+(2026-10-15 12:44:48.542) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 250.357µs
+(2026-10-15 12:44:48.542) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 752ns
+(2026-10-15 12:44:48.542) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 70ns
+(2026-10-15 12:44:48.542) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 30, temperature 2, and threshold 0.125
+(2026-10-15 12:44:48.542) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 247.773µs
+(2026-10-15 12:44:48.542) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 852ns
+(2026-10-15 12:44:48.542) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 50ns
+(2026-10-15 12:44:48.542) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 30, temperature 2, and threshold 0.25
+(2026-10-15 12:44:48.542) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 247.753µs
+(2026-10-15 12:44:48.542) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 631ns
+(2026-10-15 12:44:48.542) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 50ns
+(2026-10-15 12:44:48.542) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 30, temperature 2, and threshold 0.5
+(2026-10-15 12:44:48.543) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 247.492µs
+(2026-10-15 12:44:48.543) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 531ns
+(2026-10-15 12:44:48.543) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 50ns
+(2026-10-15 12:44:48.543) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 10, temperature 1.5, and threshold 0.125
+(2026-10-15 12:44:48.543) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 248.313µs
+(2026-10-15 12:44:48.543) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 581ns
+(2026-10-15 12:44:48.543) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 50ns
+(2026-10-15 12:44:48.543) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 10, temperature 1.5, and threshold 0.25
+(2026-10-15 12:44:48.543) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 247.932µs
+(2026-10-15 12:44:48.543) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 1.112µs
+(2026-10-15 12:44:48.543) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 61ns
+(2026-10-15 12:44:48.543) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 10, temperature 1.5, and threshold 0.5
+(2026-10-15 12:44:48.544) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 249.716µs
+(2026-10-15 12:44:48.544) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 631ns
+(2026-10-15 12:44:48.544) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 130ns
+(2026-10-15 12:44:48.544) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 15, temperature 1.5, and threshold 0.125
+(2026-10-15 12:44:48.544) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 249.686µs
+(2026-10-15 12:44:48.544) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 612ns
+(2026-10-15 12:44:48.544) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 140ns
+(2026-10-15 12:44:48.544) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 15, temperature 1.5, and threshold 0.25
+(2026-10-15 12:44:48.545) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 386.521µs
+(2026-10-15 12:44:48.545) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 531ns
+(2026-10-15 12:44:48.545) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 50ns
+(2026-10-15 12:44:48.545) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 15, temperature 1.5, and threshold 0.5
+(2026-10-15 12:44:48.545) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 272.579µs
+(2026-10-15 12:44:48.545) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 892ns
+(2026-10-15 12:44:48.545) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 50ns
+(2026-10-15 12:44:48.545) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 30, temperature 1.5, and threshold 0.125
+(2026-10-15 12:44:48.545) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 249.455µs
+(2026-10-15 12:44:48.545) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 671ns
+(2026-10-15 12:44:48.545) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 50ns
+(2026-10-15 12:44:48.545) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 30, temperature 1.5, and threshold 0.25
+(2026-10-15 12:44:48.546) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 251.189µs
+(2026-10-15 12:44:48.546) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 551ns
+(2026-10-15 12:44:48.546) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 50ns
+(2026-10-15 12:44:48.546) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 30, temperature 1.5, and threshold 0.5
+(2026-10-15 12:44:48.546) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 250.628µs
+(2026-10-15 12:44:48.546) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 631ns
+(2026-10-15 12:44:48.546) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 50ns
+(2026-10-15 12:44:48.546) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 10, temperature 1, and threshold 0.125
+(2026-10-15 12:44:48.547) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 251.169µs
+(2026-10-15 12:44:48.547) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 601ns
+(2026-10-15 12:44:48.547) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 50ns
+(2026-10-15 12:44:48.547) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 10, temperature 1, and threshold 0.25
+(2026-10-15 12:44:48.547) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 249.897µs
+(2026-10-15 12:44:48.547) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 622ns
+(2026-10-15 12:44:48.547) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 140ns
+(2026-10-15 12:44:48.547) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 10, temperature 1, and threshold 0.5
+(2026-10-15 12:44:48.547) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 249.556µs
+(2026-10-15 12:44:48.547) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 601ns
+(2026-10-15 12:44:48.547) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 60ns
+(2026-10-15 12:44:48.547) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 15, temperature 1, and threshold 0.125
+(2026-10-15 12:44:48.548) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 249.997µs
+(2026-10-15 12:44:48.548) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 531ns
+(2026-10-15 12:44:48.548) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 50ns
+(2026-10-15 12:44:48.548) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 15, temperature 1, and threshold 0.25
+(2026-10-15 12:44:48.548) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 249.205µs
+(2026-10-15 12:44:48.548) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 531ns
+(2026-10-15 12:44:48.548) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 50ns
+(2026-10-15 12:44:48.548) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 15, temperature 1, and threshold 0.5
+(2026-10-15 12:44:48.548) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 249.486µs
+(2026-10-15 12:44:48.548) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 561ns
+(2026-10-15 12:44:48.548) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 50ns
+(2026-10-15 12:44:48.548) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 30, temperature 1, and threshold 0.125
+(2026-10-15 12:44:48.549) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 248.734µs
+(2026-10-15 12:44:48.549) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 571ns
+(2026-10-15 12:44:48.549) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 251ns
+(2026-10-15 12:44:48.549) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 30, temperature 1, and threshold 0.25
+(2026-10-15 12:44:48.549) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 250.387µs
+(2026-10-15 12:44:48.549) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 661ns
+(2026-10-15 12:44:48.549) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 50ns
+(2026-10-15 12:44:48.549) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 30, temperature 1, and threshold 0.5
+(2026-10-15 12:44:48.550) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 249.346µs
+(2026-10-15 12:44:48.550) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 621ns
+(2026-10-15 12:44:48.550) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 50ns
+(2026-10-15 12:44:48.550) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 10, temperature 0.5, and threshold 0.125
+(2026-10-15 12:44:48.550) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 249.816µs
+(2026-10-15 12:44:48.550) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 642ns
+(2026-10-15 12:44:48.550) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 50ns
+(2026-10-15 12:44:48.550) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 10, temperature 0.5, and threshold 0.25
+(2026-10-15 12:44:48.550) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 249.316µs
+(2026-10-15 12:44:48.550) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 601ns
+(2026-10-15 12:44:48.550) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 51ns
+(2026-10-15 12:44:48.550) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 10, temperature 0.5, and threshold 0.5
+(2026-10-15 12:44:48.551) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 249.886µs
+(2026-10-15 12:44:48.551) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 642ns
+(2026-10-15 12:44:48.551) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 50ns
+(2026-10-15 12:44:48.551) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 15, temperature 0.5, and threshold 0.125
+(2026-10-15 12:44:48.551) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 249.887µs
+(2026-10-15 12:44:48.551) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 601ns
+(2026-10-15 12:44:48.551) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 130ns
+(2026-10-15 12:44:48.551) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 15, temperature 0.5, and threshold 0.25
+(2026-10-15 12:44:48.551) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 249.285µs
+(2026-10-15 12:44:48.551) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 662ns
+(2026-10-15 12:44:48.551) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 50ns
+(2026-10-15 12:44:48.551) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 15, temperature 0.5, and threshold 0.5
+(2026-10-15 12:44:48.552) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 250.488µs
+(2026-10-15 12:44:48.552) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 571ns
+(2026-10-15 12:44:48.552) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 50ns
+(2026-10-15 12:44:48.552) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 30, temperature 0.5, and threshold 0.125
+(2026-10-15 12:44:48.552) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 249.516µs
+(2026-10-15 12:44:48.552) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 571ns
+(2026-10-15 12:44:48.552) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 50ns
+(2026-10-15 12:44:48.552) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 30, temperature 0.5, and threshold 0.25
+(2026-10-15 12:44:48.553) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 249.726µs
+(2026-10-15 12:44:48.553) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 561ns
+(2026-10-15 12:44:48.553) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 50ns
+(2026-10-15 12:44:48.553) DEBUG [myloasm] WALK-CLEAN: Cut 0 nodes at multiplier 30, temperature 0.5, and threshold 0.5
+(2026-10-15 12:44:48.553) DEBUG [myloasm::unitig] Time elapsed in random walk over graph: 23.784µs
+(2026-10-15 12:44:48.553) DEBUG [myloasm::unitig] Time elapsed in getting connected components: 752ns
+(2026-10-15 12:44:48.553) DEBUG [myloasm::unitig] Time elapsed in edge removal loop: 30ns
+(2026-10-15 12:44:48.553) INFO [myloasm::small_genomes] Small circular contig extraction...
+(2026-10-15 12:44:48.561) DEBUG [myloasm::small_genomes] Number of small cycles found: 0
+(2026-10-15 12:44:48.562) INFO [myloasm] Progressive coverage filtering...
+(2026-10-15 12:44:48.564) DEBUG [myloasm] Keeping possibly circular contig u840 with covs [32.0, 32.0, 18.0] of size 51274 at threshold 13
+(2026-10-15 12:44:48.564) DEBUG [myloasm] Keeping possibly circular contig u982 with covs [32.0, 32.0, 13.0] of size 50902 at threshold 12
+(2026-10-15 12:44:48.565) INFO [myloasm::utils] STAGE 4: Obtained unpolished contigs from graph --- Memory usage: 0.08 GB
+(2026-10-15 12:44:48.591) INFO [myloasm::utils] Dereplicating spurious contigs... --- Memory usage: 0.08 GB
+(2026-10-15 12:44:48.611) INFO [myloasm::mapping] Initializing index for dereplication. 5 unitigs with mean length 109977.00 pass abundance thresholds.
+(2026-10-15 12:44:48.612) DEBUG [myloasm::utils] MPH after partition 0 --- Memory usage: 0.08 GB
+(2026-10-15 12:44:48.613) DEBUG [myloasm::utils] MPH after partition 1 --- Memory usage: 0.08 GB
+(2026-10-15 12:44:48.613) DEBUG [myloasm::utils] MPH after partition 2 --- Memory usage: 0.08 GB
+(2026-10-15 12:44:48.613) DEBUG [myloasm::mphmap] MPH index: 5030 distinct k-mers
+(2026-10-15 12:44:48.614) DEBUG [myloasm::mapping] Built minimizer index
+(2026-10-15 12:44:48.614) INFO [myloasm::utils] Mapping unitigs to each other for dereplication... --- Memory usage: 0.08 GB
+(2026-10-15 12:44:48.617) DEBUG [myloasm::mapping] SMALL CONTIG REMOVAL: Removing 3 small contigs that are too similar to larger contigs (or singletons that have no coverage)
+(2026-10-15 12:44:48.643) INFO [myloasm::utils] STAGE 4.5: Dereplicated spurious contigs --- Memory usage: 0.08 GB
+(2026-10-15 12:44:48.643) INFO [myloasm::unitig] Unpolished assembly statistics - ROUGH ESTIMATE; NOT FINAL
+(2026-10-15 12:44:48.643) INFO [myloasm::unitig] (Estimated) N50: 195577
+(2026-10-15 12:44:48.643) INFO [myloasm::unitig] (Estimated) Largest contig has size: 196466
+(2026-10-15 12:44:48.643) INFO [myloasm::unitig] (Estimated) Number of contigs: 5
+(2026-10-15 12:44:48.643) INFO [myloasm::unitig] (Estimated) Number of possibly circular contigs >= 1M: 0
+(2026-10-15 12:44:48.643) INFO [myloasm::unitig] (Estimated) Number of contigs (circular or non-circular)>= 1M: 0
+(2026-10-15 12:44:48.643) INFO [myloasm::unitig] (Estimated) Number of contigs >= 100k: 2
+(2026-10-15 12:44:48.643) INFO [myloasm::unitig] (Estimated) Total bases within assembly is 549884
+(2026-10-15 12:44:48.648) INFO [myloasm] Beginning final alignment of reads to graph...
+(2026-10-15 12:44:48.667) INFO [myloasm::mapping] Mapping reads to 5 unitigs (after filtering) with mean length 109977.00. 
+(2026-10-15 12:44:48.669) DEBUG [myloasm::utils] MPH after partition 0 --- Memory usage: 0.08 GB
+(2026-10-15 12:44:48.671) DEBUG [myloasm::utils] MPH after partition 1 --- Memory usage: 0.08 GB
+(2026-10-15 12:44:48.673) DEBUG [myloasm::utils] MPH after partition 2 --- Memory usage: 0.08 GB
+(2026-10-15 12:44:48.673) DEBUG [myloasm::mphmap] MPH index: 29197 distinct k-mers
+(2026-10-15 12:44:48.676) INFO [myloasm::utils] Built unitig index chunk 1/1: starting alignments --- Memory usage: 0.08 GB
+(2026-10-15 12:44:48.727) INFO [myloasm::mapping] Mapped 10% of reads back to contigs
+(2026-10-15 12:44:48.781) INFO [myloasm::mapping] Mapped 20% of reads back to contigs
+(2026-10-15 12:44:48.835) INFO [myloasm::mapping] Mapped 30% of reads back to contigs
+(2026-10-15 12:44:48.888) INFO [myloasm::mapping] Mapped 40% of reads back to contigs
+(2026-10-15 12:44:48.942) INFO [myloasm::mapping] Mapped 50% of reads back to contigs
+(2026-10-15 12:44:48.994) INFO [myloasm::mapping] Mapped 60% of reads back to contigs
+(2026-10-15 12:44:49.048) INFO [myloasm::mapping] Mapped 70% of reads back to contigs
+(2026-10-15 12:44:49.101) INFO [myloasm::mapping] Mapped 80% of reads back to contigs
+(2026-10-15 12:44:49.160) INFO [myloasm::mapping] Mapped 89% of reads back to contigs
+(2026-10-15 12:44:49.207) INFO [myloasm::mapping] Mapped 99% of reads back to contigs
+(2026-10-15 12:44:49.212) DEBUG [myloasm::mapping] Number of alignments: 1085
+(2026-10-15 12:44:49.212) DEBUG [myloasm::mapping] Average cigar string length: 8.419354838709678
+(2026-10-15 12:44:49.213) INFO [myloasm::utils] STAGE 5: Mapped reads to contigs --- Memory usage: 0.08 GB
+(2026-10-15 12:44:49.213) INFO [myloasm] Time elapsed for aligning reads to graph is 565.105796ms
+(2026-10-15 12:44:49.213) INFO [myloasm] Analyzing coverage and filtering low-quality unitigs...
+(2026-10-15 12:44:49.221) INFO [myloasm::map_processing] Coverage analysis complete: flagged 0 regions, filtering 0 unitigs
+(2026-10-15 12:44:49.221) INFO [myloasm::map_processing] Poor coverage regions written to: run1/3-mapping/low_quality_regions.bed
+(2026-10-15 12:44:49.221) INFO [myloasm] Time elapsed for coverage filtering is 7.902115ms
+(2026-10-15 12:44:49.221) INFO [myloasm] Polishing final contigs...
+(2026-10-15 12:44:50.651) INFO [myloasm::polishing_mod] Polished 0% of contigs...
+(2026-10-15 12:44:52.036) INFO [myloasm] Time elapsed for polishing is 3.387923369s
+(2026-10-15 12:44:52.036) INFO [myloasm] Dereplicating polished contigs with skani...
+(2026-10-15 12:44:52.045) INFO [myloasm::skani_dereplicate] -------------- FINAL primary assembly statistics --------------
+(2026-10-15 12:44:52.045) INFO [myloasm::skani_dereplicate] N50: 196340
+(2026-10-15 12:44:52.045) INFO [myloasm::skani_dereplicate] Largest contig has size: 196340
+(2026-10-15 12:44:52.045) INFO [myloasm::skani_dereplicate] Number of primary contigs: 3
+(2026-10-15 12:44:52.045) INFO [myloasm::skani_dereplicate] Number of alt/dup contigs: 1 and 1
+(2026-10-15 12:44:52.045) INFO [myloasm::skani_dereplicate] Number of possibly circular contigs >= 1M: 0
+(2026-10-15 12:44:52.045) INFO [myloasm::skani_dereplicate] Number of contigs >= 1M: 0
+(2026-10-15 12:44:52.045) INFO [myloasm::skani_dereplicate] Number of contigs >= 100k: 2
+(2026-10-15 12:44:52.045) INFO [myloasm::skani_dereplicate] Total bases within assembly is 291986
+(2026-10-15 12:44:52.045) INFO [myloasm::skani_dereplicate] -------------------------------------------------
+(2026-10-15 12:44:52.045) INFO [myloasm] Assembly completed. Total time elapsed is 6.156285782s

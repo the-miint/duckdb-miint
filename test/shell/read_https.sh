@@ -76,6 +76,21 @@ run_test "read_fastx: paired-end gzipped FASTQ via HTTP" "2,2,2" \
 run_error_test "read_fastx: HTTP 404" "HTTP" \
     "SELECT * FROM read_fastx('$BASE/fastq/nonexistent.fq');"
 
+run_test "read_fastx: empty file with allow_empty via HTTP" "0" \
+    "SELECT COUNT(*) FROM read_fastx('$BASE/fastq/empty.fq', allow_empty := true);"
+
+run_error_test "read_fastx: empty file via HTTP" "Empty" \
+    "SELECT * FROM read_fastx('$BASE/fastq/empty.fq');"
+
+run_test "read_fastx: empty pair with allow_empty via HTTP" "0" \
+    "SELECT COUNT(*) FROM read_fastx('$BASE/fastq/empty.fq', sequence2='$BASE/fastq/empty.fq', allow_empty := true);"
+
+run_error_test "read_fastx: empty first mate with allow_empty via HTTP" "Empty" \
+    "SELECT * FROM read_fastx('$BASE/fastq/empty.fq', sequence2='$BASE/fastq/small_a_r2.fq', allow_empty := true);"
+
+run_error_test "read_fastx: empty second mate with allow_empty via HTTP" "Empty" \
+    "SELECT * FROM read_fastx('$BASE/fastq/small_a_r1.fq', sequence2='$BASE/fastq/empty.fq', allow_empty := true);"
+
 # --- read_alignments ---
 
 run_test "read_alignments: SAM via HTTP" "4" \
@@ -108,6 +123,19 @@ run_test "read_newick: Newick via HTTP" "5" \
 
 run_test "read_newick: gzipped Newick via HTTP" "5" \
     "SELECT COUNT(*) FROM read_newick('$BASE/newick/simple.nwk.gz');"
+
+# --- read_paf ---
+
+run_test "read_paf: PAF via HTTP" "7" \
+    "SELECT COUNT(*) FROM read_paf('$BASE/paf/k12_minimap2.paf');"
+
+run_test "read_paf: gzipped PAF via HTTP" "7" \
+    "SELECT COUNT(*) FROM read_paf('$BASE/paf/k12_minimap2.paf.gz');"
+
+# --- read_gfa ---
+
+run_test "read_gfa: GFA via HTTP" "10" \
+    "SELECT COUNT(*) FROM read_gfa('$BASE/gfa/spec_example.gfa');"
 
 # --- read_mzml ---
 

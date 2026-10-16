@@ -137,6 +137,7 @@ Only rules whose trigger appears in the diff can fire.
 | A guard shaped as a denylist; a check that swallows errors; a fallback or presence-probe for a state that may be unreachable | R1 |
 | SQL or C++ that concatenates or synthesizes a format string (CIGAR, MD, SAM or FASTA text) and passes it to a parser or miint scalar | R6 |
 | Logic that parses or writes a bioinformatics format, computes over sequences, alignments, intervals, trees or feature tables, or builds COO / sparse tables | R6 |
+| A coordinate or interval column in a function's output; a reader of a format that carries coordinates | R9 |
 | Two structurally similar code paths; a repeated literal or error message; a helper in a feature-named file | R6, R8 |
 | Any new or changed doc, docstring or comment; a test header comment; a `data/**/README*` | R7 |
 | A user-facing string: an exception message, a `docs/` page, a parameter description | R7, R9 |
@@ -276,6 +277,7 @@ Flag:
 - **Established field terms keep their field meaning**, and a new behaviour gets its own name instead of borrowing one that means something else. The project writes "microbial" (or "bacteria and archaea"), not "prokaryotic".
 - **Names say what they measure**, including the unit and the thing it is per (`cells_per_g_of_gdna`, not `cells_per_g`).
 - **Insider nouns in user-facing prose** are replaced with what the reader would call the thing.
+- **An interval column's name carries its axis and convention.** Reference-axis intervals are 1-based half-open `position` / `stop_position`; read-axis intervals are 0-based half-open `query_start` / `query_stop` on the read as sequenced, whatever the strand. A bare `start` / `stop` names neither axis (`cigar_query_intervals` returns read-axis ones, `alignment_slice` takes reference-axis ones), so a new interval column does not use it. A reader converts the file's convention when it reads. An interval column with another name, another convention, or the file's convention passed through is a finding (`docs/reading.md`, "Coordinate conventions").
 
 ### R10 — Performance claims are probes [soft, always handed off]
 

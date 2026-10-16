@@ -1,0 +1,209 @@
+# name: test/sql/read_myloasm_splits.test
+# description: read_myloasm_splits returns myloasm's chimera breakpoints on the original read's axis
+# group: [sql]
+
+require miint
+
+# --- Schema ---
+
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM read_myloasm_splits('data/myloasm/ecoli_sim'));
+----
+read_id	VARCHAR
+parent_split_suffix	VARCHAR
+cleaning_round	INTEGER
+breakpoint_order	BIGINT
+query_start	BIGINT
+query_stop	BIGINT
+split_condition	INTEGER
+
+# --- Intent: every junction lands where the read was joined ---
+
+# The fixture's chimeras and overhang reads were built by joining two pieces of genome, so
+# each one's junction is known from its name (see data/myloasm/README.md):
+#   chim  <a_start>_<a_stop>_<c_start>_<c_len>: strain A then circle. Forward: the junction
+#         is a_stop - a_start bases in. Reversed: the circle part comes first, so c_len.
+#   ovh   9 kb of genome then a 3 kb tail. Forward: 9000. Reversed: 3000.
+# myloasm discards [query_start, query_stop) around a breakpoint, so that interval must hold
+# the junction. Every split read is in this set; each has one breakpoint.
+query IIII
+SELECT count(*),
+       count(*) FILTER (query_start <= junction AND junction <= query_stop),
+       count(DISTINCT read_id),
+       count(*) FILTER (cleaning_round = 1 AND breakpoint_order = 1 AND parent_split_suffix IS NULL)
+FROM (
+  SELECT *,
+         CASE WHEN p[2] = 'chim' AND p[7] = 'f' THEN p[4]::BIGINT - p[3]::BIGINT
+              WHEN p[2] = 'chim' THEN p[6]::BIGINT
+              WHEN p[2] = 'ovh' AND p[6] = 'f' THEN 9000
+              WHEN p[2] = 'ovh' THEN 3000
+         END AS junction
+  FROM (SELECT *, string_split(read_id, '_') AS p FROM read_myloasm_splits('data/myloasm/ecoli_sim'))
+);
+----
+40	40	40	40
+
+# myloasm's split conditions include negative codes (-2, -3: the read's end segment is the
+# low-depth one). They must come through as signed integers.
+query II
+SELECT split_condition, count(*) FROM read_myloasm_splits('data/myloasm/ecoli_sim') GROUP BY ALL ORDER BY ALL;
+----
+-3	10
+-2	10
+1	20
+
+# A trailing slash on the directory reads the same run.
+query I
+SELECT count(*) FROM read_myloasm_splits('data/myloasm/ecoli_sim/');
+----
+40
+
+# --- Round-2 breakpoints, constructed from the real run ---
+
+# The fixture's round-2 log is empty (data/myloasm/README.md), so this builds a run whose
+# round-2 log splits three reads, in the format myloasm 0.7.0 writes:
+#   s00913 (reversed chimera) +split1: round 1 cut the read at [5895, 6117), so this piece is
+#     [6117, 12000) of the original read. Round-2 positions are on the piece, so its
+#     breakpoints 1000-1200 and 3000-3100 are [7117, 7317) and [9117, 9217) on the read.
+#   s00000: contained in round 1 (no suffix anywhere), split only in round 2, at 4000-4100.
+#   s00914 +split0: round 1's first piece starts at 0, so 2000-2050 stays [2000, 2050).
+#
+# COPY cannot create a missing directory, but a PER_THREAD_OUTPUT copy creates its target as
+# one. The data_0.csv it leaves behind is not a file any macro reads.
+statement ok
+COPY (SELECT 1 AS x) TO '__TEST_DIR__/splits_round2' (FORMAT csv, PER_THREAD_OUTPUT true, OVERWRITE_OR_IGNORE true);
+
+statement ok
+COPY (SELECT 1 AS x) TO '__TEST_DIR__/splits_round2/0-cleaning_and_unitigs' (FORMAT csv, PER_THREAD_OUTPUT true, OVERWRITE_OR_IGNORE true);
+
+statement ok
+COPY (SELECT 1 AS x) TO '__TEST_DIR__/splits_round2/0-cleaning_and_unitigs/remap_temp' (FORMAT csv, PER_THREAD_OUTPUT true, OVERWRITE_OR_IGNORE true);
+
+statement ok
+COPY (SELECT line FROM read_csv('data/myloasm/ecoli_sim/0-cleaning_and_unitigs/read_coverages.txt.gz',
+                                delim = E'\x01', quote = '', escape = '', header = false,
+                                columns = {'line': 'VARCHAR'}, auto_detect = false))
+TO '__TEST_DIR__/splits_round2/0-cleaning_and_unitigs/read_coverages.txt.gz'
+(FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01', COMPRESSION gzip);
+
+statement ok
+COPY (SELECT * FROM (VALUES
+  ('s00913_chim_1005000_1011000_2000000_6000_r+split1 BREAKPOINTS:1000-1200-COND:1,3000-3100-COND:2,'),
+  ('s00000_lina_1000000_1008000_f BREAKPOINTS:4000-4100-COND:-4,'),
+  ('s00914_chim_1014000_1021916_2001999_6677_f+split0 BREAKPOINTS:2000-2050-COND:1,')) t(line))
+TO '__TEST_DIR__/splits_round2/0-cleaning_and_unitigs/remap_temp/read_coverages.txt.gz'
+(FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01', COMPRESSION gzip);
+
+query TTIIIII
+SELECT * FROM read_myloasm_splits('__TEST_DIR__/splits_round2') WHERE cleaning_round = 2 ORDER BY read_id, breakpoint_order;
+----
+s00000_lina_1000000_1008000_f	NULL	2	1	4000	4100	-4
+s00913_chim_1005000_1011000_2000000_6000_r	+split1	2	1	7117	7317	1
+s00913_chim_1005000_1011000_2000000_6000_r	+split1	2	2	9117	9217	2
+s00914_chim_1014000_1021916_2001999_6677_f	+split0	2	1	2000	2050	1
+
+# Round 1 is unchanged by the round-2 log.
+query I
+SELECT count(*) FROM read_myloasm_splits('__TEST_DIR__/splits_round2') WHERE cleaning_round = 1;
+----
+40
+
+# --- Errors ---
+
+statement error
+SELECT * FROM read_myloasm_splits(NULL);
+----
+read_myloasm: the myloasm output directory cannot be NULL
+
+statement error
+SELECT * FROM read_myloasm_splits('data/myloasm/does_not_exist');
+----
+data/myloasm/does_not_exist/0-cleaning_and_unitigs/read_coverages.txt.gz
+
+# Every read_myloasm_ macro builds its member paths from the directory, and the readers expand
+# globs, so 'run[1]' would quietly read the files of a directory named run1. A directory
+# name with a glob character is refused instead. Each pattern below matches ecoli_sim, so
+# without the refusal each would read it.
+statement error
+SELECT * FROM read_myloasm_splits('data/myloasm/ecoli_si[m]');
+----
+read_myloasm: the output directory 'data/myloasm/ecoli_si[m]' contains a glob character (*, ? or [)
+
+statement error
+SELECT * FROM read_myloasm_splits('data/myloasm/ecoli_si*');
+----
+read_myloasm: the output directory 'data/myloasm/ecoli_si*' contains a glob character (*, ? or [)
+
+statement error
+SELECT * FROM read_myloasm_splits('data/myloasm/ecoli_si?');
+----
+read_myloasm: the output directory 'data/myloasm/ecoli_si?' contains a glob character (*, ? or [)
+
+# Each case below replaces the constructed round-2 log with one defect.
+
+# myloasm ends every breakpoint with a comma; a line that is not in its format is an error,
+# not a row with missing values.
+statement ok
+COPY (SELECT * FROM (VALUES ('s00000_lina_1000000_1008000_f BREAKPOINTS:4000-4100-COND:-4'))  t(line))
+TO '__TEST_DIR__/splits_round2/0-cleaning_and_unitigs/remap_temp/read_coverages.txt.gz'
+(FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01', COMPRESSION gzip);
+
+statement error
+SELECT * FROM read_myloasm_splits('__TEST_DIR__/splits_round2');
+----
+not a breakpoint line (<read> BREAKPOINTS:<start>-<stop>-COND:<n>,...): 's00000_lina_1000000_1008000_f BREAKPOINTS:4000-4100-COND:-4'
+
+statement ok
+COPY (SELECT * FROM (VALUES ('s00000_lina_1000000_1008000_f BREAKPOINTS:4000-4100-COND:-4,'), (NULL)) t(line))
+TO '__TEST_DIR__/splits_round2/0-cleaning_and_unitigs/remap_temp/read_coverages.txt.gz'
+(FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01', COMPRESSION gzip);
+
+statement error
+SELECT * FROM read_myloasm_splits('__TEST_DIR__/splits_round2');
+----
+not a breakpoint line
+
+# A read is split once per round it is an outer read in, so it has at most one line across
+# both logs. A second line would duplicate its pieces' offsets.
+statement ok
+COPY (SELECT * FROM (VALUES ('s00913_chim_1005000_1011000_2000000_6000_r BREAKPOINTS:100-200-COND:1,')) t(line))
+TO '__TEST_DIR__/splits_round2/0-cleaning_and_unitigs/remap_temp/read_coverages.txt.gz'
+(FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01', COMPRESSION gzip);
+
+statement error
+SELECT * FROM read_myloasm_splits('__TEST_DIR__/splits_round2');
+----
+read 's00913_chim_1005000_1011000_2000000_6000_r' has more than one breakpoint line
+
+# A round-2 line for piece +split2 needs a round-1 breakpoint 2 to say where that piece
+# starts. s00913 has only one.
+statement ok
+COPY (SELECT * FROM (VALUES ('s00913_chim_1005000_1011000_2000000_6000_r+split2 BREAKPOINTS:100-200-COND:1,')) t(line))
+TO '__TEST_DIR__/splits_round2/0-cleaning_and_unitigs/remap_temp/read_coverages.txt.gz'
+(FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01', COMPRESSION gzip);
+
+statement error
+SELECT * FROM read_myloasm_splits('__TEST_DIR__/splits_round2');
+----
+piece 's00913_chim_1005000_1011000_2000000_6000_r+split2' has no breakpoint that starts it
+
+# myloasm 0.7.0 runs two cleaning rounds, so a piece being split carries at most one suffix.
+statement ok
+COPY (SELECT * FROM (VALUES ('s00913_chim_1005000_1011000_2000000_6000_r+split1+split0 BREAKPOINTS:100-200-COND:1,')) t(line))
+TO '__TEST_DIR__/splits_round2/0-cleaning_and_unitigs/remap_temp/read_coverages.txt.gz'
+(FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01', COMPRESSION gzip);
+
+statement error
+SELECT * FROM read_myloasm_splits('__TEST_DIR__/splits_round2');
+----
+read 's00913_chim_1005000_1011000_2000000_6000_r+split1+split0' is split again after two cleaning rounds
+
+statement ok
+COPY (SELECT * FROM (VALUES ('s00000_lina_1000000_1008000_f BREAKPOINTS:4100-4000-COND:-4,')) t(line))
+TO '__TEST_DIR__/splits_round2/0-cleaning_and_unitigs/remap_temp/read_coverages.txt.gz'
+(FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01', COMPRESSION gzip);
+
+statement error
+SELECT * FROM read_myloasm_splits('__TEST_DIR__/splits_round2');
+----
+read 's00000_lina_1000000_1008000_f': breakpoint 1 starts after it stops (4100-4000)

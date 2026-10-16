@@ -1,0 +1,24 @@
+# name: test/sql/read_paf_https.test
+# description: Test read_paf from HTTP URL
+# group: [sql]
+
+# NOTE: Skipped in CI because httpfs is disabled at build time.
+# Active coverage is in test/shell/read_https.sh (uses LOAD httpfs at runtime).
+
+require miint
+
+require httpfs
+
+require-env MIINT_HTTPS_TEST_URL
+
+# PAF via HTTP
+query I
+SELECT COUNT(*) FROM read_paf(getenv('MIINT_HTTPS_TEST_URL') || '/paf/k12_minimap2.paf');
+----
+7
+
+# Gzipped PAF via HTTP
+query I
+SELECT COUNT(*) FROM read_paf(getenv('MIINT_HTTPS_TEST_URL') || '/paf/k12_minimap2.paf.gz');
+----
+7
