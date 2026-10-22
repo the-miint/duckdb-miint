@@ -96,10 +96,11 @@ jobs:
       # run in. FindGplBoundary finds it on PATH, and run_tests.sh exports
       # GPL_BOUNDARY_AVAILABLE when `command -v gpl-boundary` does. It is installed with
       # the upstream installer, which `SELECT install_gpl_boundary()` also runs, and
-      # cached by release tag, so a run downloads only when a new release has shipped.
-      # GitHub's release downloads have failed this job, with 503s and dropped
-      # connections for half an hour on 2026-08-12, so when the release lookup or the
-      # install fails, the newest cached binary is used instead, with a warning.
+      # cached by release tag. Pull requests read the cache but do not save to it, so
+      # after a new release they download it until a push or the nightly run has
+      # cached it. GitHub's release downloads have failed this job, with 503s and
+      # dropped connections for half an hour on 2026-08-12, so when the release lookup
+      # or the install fails, the newest cached binary is used instead, with a warning.
       - name: Look up the latest gpl-boundary release
         id: gplb-release
         env:
@@ -138,13 +139,10 @@ jobs:
           # restored binary in place: install.sh replaces it only after the download
           # and checksum succeed.
           #
-          # No smoke check here on purpose: install.sh already prints the version
-          # JSON, and `gpl-boundary --version | head -3` intermittently killed this
-          # step. `--version` emits a 25-line JSON document, so head closes the pipe
-          # after 3 lines; if the binary still has a write outstanding it panics on
-          # EPIPE ("failed printing to stdout: Broken pipe", exit 101), and this
-          # shell runs with pipefail, so the step fails and every later step —
-          # including the build and the whole test suite — is skipped.
+          # Do not pipe `gpl-boundary --version` into head: `--version` writes a
+          # 25-line JSON document, and when head closes the pipe early the binary
+          # panics on EPIPE ("failed printing to stdout: Broken pipe", exit 101). A
+          # `| head -3` smoke check failed this job that way on 2026-08-17.
           for attempt in 1 2 3; do
             if curl -fsSL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/install-gpl-boundary.sh" \
                  https://github.com/the-miint/GPL-boundary/releases/latest/download/install.sh &&
