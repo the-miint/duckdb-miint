@@ -92,33 +92,45 @@ jobs:
       - name: Install build dependencies
         run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build
 
-      - name: Install bowtie2 via conda
-        uses: conda-incubator/setup-miniconda@v3
+      # gpl-boundary, the FastTree process-isolation host. FindGplBoundary finds it on
+      # PATH for the parity tests, and run_tests.sh exports GPL_BOUNDARY_AVAILABLE when
+      # `command -v gpl-boundary` does. It is installed with the upstream installer,
+      # which `SELECT install_gpl_boundary()` also runs, and cached by release tag: a
+      # run downloads only when a new release has shipped. GitHub's release downloads
+      # have failed this job, with 503s for half an hour on 2026-08-12, so if the
+      # release lookup fails too, the newest cached binary is used instead.
+      - name: Look up the latest gpl-boundary release
+        id: gplb-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(gh api repos/the-miint/GPL-boundary/releases/latest --jq .tag_name) || tag=
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          # The installer and the cache both put it here.
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Restore gpl-boundary
+        id: gplb-cache
+        uses: actions/cache/restore@v4
         with:
-          auto-update-conda: true
-          channels: bioconda,conda-forge,defaults
-          channel-priority: strict
+          path: ~/.local/bin/gpl-boundary
+          key: gpl-boundary-x86_64-linux-${{ steps.gplb-release.outputs.tag || 'unresolved' }}
+          restore-keys: gpl-boundary-x86_64-linux-
 
-      - name: Install bowtie2
-        shell: bash -el {0}
+      - name: Install gpl-boundary
+        # Skipped on an exact hit, and when the lookup failed but an older binary was
+        # restored.
+        if: >-
+          steps.gplb-cache.outputs.cache-hit != 'true' &&
+          (steps.gplb-release.outputs.tag != '' || steps.gplb-cache.outputs.cache-matched-key == '')
+        env:
+          GPL_BOUNDARY_VERSION: ${{ steps.gplb-release.outputs.tag || 'latest' }}
         run: |
-          conda install -y bowtie2
-          bowtie2 --version
-          bowtie2-build --version
-
-      - name: Install gpl-boundary (FastTree process-isolation host)
-        shell: bash -el {0}
-        run: |
-          # Use the upstream installer; binary lands in $HOME/.local/bin.
-          # This is the same install ladder users hit when running
-          # `SELECT install_gpl_boundary()` interactively. We do it here so
-          # CI exercises miint's runtime path-finding (FindGplBoundary picks
-          # this up via PATH for the parity tests, and run_tests.sh detects
-          # it via `command -v gpl-boundary` and exports GPL_BOUNDARY_AVAILABLE).
-          # Pinned to "latest" per project policy; bump install.sh's release
-          # tag to lock to a specific upstream version.
-          curl -fsSL https://github.com/the-miint/GPL-boundary/releases/latest/download/install.sh | sh
-          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          # To a file, not piped to sh: a retry after part of the script was written
+          # to a pipe would run that part twice.
+          curl -fsSL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/install-gpl-boundary.sh" \
+            https://github.com/the-miint/GPL-boundary/releases/latest/download/install.sh
+          sh "$RUNNER_TEMP/install-gpl-boundary.sh"
           # No smoke check here on purpose: install.sh already prints the version
           # JSON, and `gpl-boundary --version | head -3` intermittently killed this
           # step. `--version` emits a 25-line JSON document, so head closes the pipe
@@ -126,6 +138,13 @@ jobs:
           # EPIPE ("failed printing to stdout: Broken pipe", exit 101), and this
           # shell runs with pipefail, so the step fails and every later step —
           # including the build and the whole test suite — is skipped.
+
+      - name: Save gpl-boundary
+        if: steps.gplb-release.outputs.tag != '' && steps.gplb-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.local/bin/gpl-boundary
+          key: gpl-boundary-x86_64-linux-${{ steps.gplb-release.outputs.tag }}
 
       - name: Setup vcpkg
         uses: lukka/run-vcpkg@v11.1
@@ -191,7 +210,6 @@ jobs:
           overwrite: true
 
       - name: Run all tests
-        shell: bash -el {0}
         env:
           MIINT_ENA_LIVE_TEST: ${{ github.event_name == 'schedule' && '1' || '0' }}
         run: bash run_tests.sh
