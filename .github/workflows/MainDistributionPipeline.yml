@@ -92,19 +92,23 @@ jobs:
       - name: Install build dependencies
         run: sudo apt-get update -y -qq && sudo apt-get install -y -qq ninja-build
 
-      # gpl-boundary, the FastTree process-isolation host. FindGplBoundary finds it on
-      # PATH for the parity tests, and run_tests.sh exports GPL_BOUNDARY_AVAILABLE when
-      # `command -v gpl-boundary` does. It is installed with the upstream installer,
-      # which `SELECT install_gpl_boundary()` also runs, and cached by release tag: a
-      # run downloads only when a new release has shipped. GitHub's release downloads
-      # have failed this job, with 503s for half an hour on 2026-08-12, so if the
-      # release lookup fails too, the newest cached binary is used instead.
+      # gpl-boundary, the process-isolation host this job's bowtie2 and FastTree tests
+      # run in. FindGplBoundary finds it on PATH, and run_tests.sh exports
+      # GPL_BOUNDARY_AVAILABLE when `command -v gpl-boundary` does. It is installed with
+      # the upstream installer, which `SELECT install_gpl_boundary()` also runs, and
+      # cached by release tag, so a run downloads only when a new release has shipped.
+      # GitHub's release downloads have failed this job, with 503s and dropped
+      # connections for half an hour on 2026-08-12, so when the release lookup or the
+      # install fails, the newest cached binary is used instead, with a warning.
       - name: Look up the latest gpl-boundary release
         id: gplb-release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag=$(gh api repos/the-miint/GPL-boundary/releases/latest --jq .tag_name) || tag=
+          if ! tag=$(gh api repos/the-miint/GPL-boundary/releases/latest --jq .tag_name); then
+            tag=
+            echo "::warning::Could not look up gpl-boundary's latest release; using the newest cached binary, or installing latest if none is cached."
+          fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           # The installer and the cache both put it here.
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
@@ -118,6 +122,7 @@ jobs:
           restore-keys: gpl-boundary-x86_64-linux-
 
       - name: Install gpl-boundary
+        id: gplb-install
         # Skipped on an exact hit, and when the lookup failed but an older binary was
         # restored.
         if: >-
@@ -125,12 +130,14 @@ jobs:
           (steps.gplb-release.outputs.tag != '' || steps.gplb-cache.outputs.cache-matched-key == '')
         env:
           GPL_BOUNDARY_VERSION: ${{ steps.gplb-release.outputs.tag || 'latest' }}
+          RESTORED_KEY: ${{ steps.gplb-cache.outputs.cache-matched-key }}
         run: |
-          # To a file, not piped to sh: a retry after part of the script was written
-          # to a pipe would run that part twice.
-          curl -fsSL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/install-gpl-boundary.sh" \
-            https://github.com/the-miint/GPL-boundary/releases/latest/download/install.sh
-          sh "$RUNNER_TEMP/install-gpl-boundary.sh"
+          # install.sh's own downloads do not retry, so the whole install is retried.
+          # It is fetched to a file, not piped to sh: a retry after part of the script
+          # was written to a pipe would run that part twice. A failed install leaves a
+          # restored binary in place: install.sh replaces it only after the download
+          # and checksum succeed.
+          #
           # No smoke check here on purpose: install.sh already prints the version
           # JSON, and `gpl-boundary --version | head -3` intermittently killed this
           # step. `--version` emits a 25-line JSON document, so head closes the pipe
@@ -138,9 +145,28 @@ jobs:
           # EPIPE ("failed printing to stdout: Broken pipe", exit 101), and this
           # shell runs with pipefail, so the step fails and every later step —
           # including the build and the whole test suite — is skipped.
+          for attempt in 1 2 3; do
+            if curl -fsSL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/install-gpl-boundary.sh" \
+                 https://github.com/the-miint/GPL-boundary/releases/latest/download/install.sh &&
+               sh "$RUNNER_TEMP/install-gpl-boundary.sh"; then
+              echo "installed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            [ "$attempt" = 3 ] || sleep 30
+          done
+          if [ -n "$RESTORED_KEY" ]; then
+            echo "::warning::Could not install gpl-boundary $GPL_BOUNDARY_VERSION; using the cached binary from $RESTORED_KEY."
+            exit 0
+          fi
+          exit 1
 
       - name: Save gpl-boundary
-        if: steps.gplb-release.outputs.tag != '' && steps.gplb-cache.outputs.cache-hit != 'true'
+        # Not from pull requests, like the extension builds (save_cache above): a PR's
+        # copy is readable only by that PR, and it spends the repo's cache budget.
+        if: >-
+          steps.gplb-install.outputs.installed == 'true' &&
+          steps.gplb-release.outputs.tag != '' &&
+          github.event_name != 'pull_request'
         uses: actions/cache/save@v4
         with:
           path: ~/.local/bin/gpl-boundary
