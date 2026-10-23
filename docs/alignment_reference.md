@@ -496,7 +496,7 @@ Points that matter in practice:
 - For paired-end input the filter is applied **per segment**, against that segment's own length.
 - Values outside 0.0–1.0 are rejected at bind with `min_chain_coverage must be between 0.0 and 1.0`.
 
-> This parameter is **not** a minimap2 command-line option. It is a local addition to the vendored minimap2 (`ext/minimap2`, commit *"Add min_chain_coverage pre-filter to skip DP for low-coverage chains"* on top of upstream 2.30), so it has no `-`-flag equivalent and will not be found in minimap2's own documentation.
+> This parameter is **not** a minimap2 command-line option. It is a local addition to the vendored minimap2 (`ext/minimap2`, commit *"Add min_chain_coverage pre-filter to skip DP for low-coverage chains"* on top of upstream 2.31), so it has no `-`-flag equivalent and will not be found in minimap2's own documentation.
 
 **Dense reference sets (`occ_filter`):**
 

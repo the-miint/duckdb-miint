@@ -124,6 +124,7 @@ If a test produces an **incorrect expected value**: DO NOT change the expected v
 bash run_tests.sh                                                 # all SQL tests
 MIINT_TEST_JOBS=8 bash run_tests.sh                               # the same, SQL and C++ tests on 8 workers
 ./build/release/extension/miint/tests                             # C++ unit tests
+./build/release/extension/miint/tests_duckdb                      # C++ tests that need a running DuckDB
 export DUCKDB_TEST_CONFIG=$PWD/test/configs/no_skipped_errors.json  # as run_tests.sh does
 ./build/release/test/unittest "test/sql/read_alignments.test"     # single SQL test
 ./build/release/test/unittest "[alignment]"                       # tests matching a pattern

@@ -4,13 +4,19 @@
 #include "SequenceRecord.hpp"
 #include "minimap2_part_cursor.hpp"
 #include "sequence_utils.hpp"
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <mutex>
+#include <random>
 #include <set>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -1205,4 +1211,331 @@ TEST_CASE("Coverage filter preserves full-length alignments", "[Minimap2Aligner]
 		}
 	}
 	REQUIRE(has_mapped);
+}
+
+// =============================================================================
+// any_mapped: the keep/drop decision of a host filter, without SAM output
+// =============================================================================
+
+// A filter that drops every read minimap2 maps must decide exactly as
+// align_minimap2(...) + ANTI JOIN on read_id does, or switching a pipeline to the
+// filter would change which reads survive. align() emits at least one row for a
+// query exactly when some region has a valid reference id, so any_mapped is
+// checked against align()'s rows rather than against hand-picked expectations.
+
+static std::string random_dna(std::mt19937 &rng, size_t length) {
+	static const char bases[] = "ACGT";
+	std::uniform_int_distribution<int> pick(0, 3);
+	std::string seq(length, 'A');
+	for (auto &c : seq) {
+		c = bases[pick(rng)];
+	}
+	return seq;
+}
+
+// Substitutes each base with probability `rate`, so reads range from clean hits to
+// ones minimap2 can no longer place.
+static std::string mutate(std::mt19937 &rng, std::string seq, double rate) {
+	static const char bases[] = "ACGT";
+	std::uniform_real_distribution<double> coin(0.0, 1.0);
+	std::uniform_int_distribution<int> pick(0, 3);
+	for (auto &c : seq) {
+		if (coin(rng) < rate) {
+			c = bases[pick(rng)];
+		}
+	}
+	return seq;
+}
+
+struct AnyMappedFixture {
+	std::mt19937 rng {20261021};
+	std::vector<AlignmentSubject> subjects;
+	Minimap2Config config;
+
+	AnyMappedFixture() {
+		config.preset = "sr";
+		subjects.push_back({"ref_a", random_dna(rng, 6000)});
+		subjects.push_back({"ref_b", random_dna(rng, 6000)});
+	}
+
+	// A 150-base read: drawn from a reference (either strand, mutated at `rate`), or
+	// random when `rate` is negative.
+	std::string read(double rate) {
+		if (rate < 0) {
+			return random_dna(rng, 150);
+		}
+		const auto &ref = subjects[rng() % subjects.size()].sequence;
+		std::string seq = ref.substr(rng() % (ref.size() - 150), 150);
+		if (rng() % 2) {
+			seq = dna_reverse_complement(seq);
+		}
+		return mutate(rng, seq, rate);
+	}
+
+	// A 150-base read of random flanks around `length` bases from a reference. Short matches
+	// still chain, but the aligned score can fall below the DP cutoff, which is where a decision
+	// made from chains alone would differ from align()'s.
+	std::string partial(size_t length) {
+		const auto &ref = subjects[rng() % subjects.size()].sequence;
+		const std::string core = ref.substr(rng() % (ref.size() - length), length);
+		const size_t left = (150 - length) / 2;
+		return random_dna(rng, left) + core + random_dna(rng, 150 - length - left);
+	}
+};
+
+TEST_CASE("any_mapped is true for a read from the reference and false for a random one", "[Minimap2Aligner]") {
+	AnyMappedFixture fx;
+	Minimap2Aligner aligner(fx.config);
+	aligner.build_index(fx.subjects);
+
+	const std::string hit = fx.subjects[0].sequence.substr(1000, 150);
+	const std::string miss = random_dna(fx.rng, 150);
+	REQUIRE(aligner.any_mapped(hit, "", "hit"));
+	REQUIRE_FALSE(aligner.any_mapped(miss, "", "miss"));
+}
+
+TEST_CASE("any_mapped treats a pair as mapped when either mate maps", "[Minimap2Aligner]") {
+	AnyMappedFixture fx;
+	Minimap2Aligner aligner(fx.config);
+	aligner.build_index(fx.subjects);
+
+	const std::string &ref = fx.subjects[1].sequence;
+	const std::string r1_hit = ref.substr(2000, 150);
+	const std::string r2_hit = dna_reverse_complement(ref.substr(2250, 150));
+	const std::string r1_miss = random_dna(fx.rng, 150);
+	const std::string r2_miss = random_dna(fx.rng, 150);
+
+	// A host filter drops the whole pair if any mate is host: the mate that does
+	// not map must not rescue it.
+	REQUIRE(aligner.any_mapped(r1_hit, r2_hit, "both"));
+	REQUIRE(aligner.any_mapped(r1_miss, r2_hit, "r2_only"));
+	REQUIRE(aligner.any_mapped(r1_hit, r2_miss, "r1_only"));
+	REQUIRE_FALSE(aligner.any_mapped(r1_miss, r2_miss, "neither"));
+}
+
+TEST_CASE("any_mapped routes an empty mate the way align() does", "[Minimap2Aligner]") {
+	AnyMappedFixture fx;
+	Minimap2Aligner aligner(fx.config);
+	aligner.build_index(fx.subjects);
+
+	// align() takes the single-end path when sequence2 is empty, so an empty mate
+	// is a single-end read, not a pair with a missing mate.
+	const std::string hit = fx.subjects[0].sequence.substr(300, 150);
+	REQUIRE(aligner.any_mapped(hit, "", "se") == aligner.any_mapped(hit, std::string_view(), "se"));
+	REQUIRE(aligner.any_mapped(hit, "", "se"));
+	// minimap2 is never called on an empty query; align() emits nothing for it.
+	REQUIRE_FALSE(aligner.any_mapped("", "", "empty"));
+}
+
+TEST_CASE("any_mapped requires an index", "[Minimap2Aligner]") {
+	Minimap2Config config;
+	config.preset = "sr";
+	Minimap2Aligner aligner(config);
+	REQUIRE_THROWS_AS(aligner.any_mapped("ACGTACGTACGT", "", "q"), std::runtime_error);
+}
+
+TEST_CASE("any_mapped agrees with align() on a mixed single-end batch", "[Minimap2Aligner]") {
+	AnyMappedFixture fx;
+	Minimap2Aligner aligner(fx.config);
+	aligner.build_index(fx.subjects);
+
+	// Mutation rates straddle the point where minimap2 stops placing a read, so the
+	// batch holds clear hits, clear misses and marginal reads.
+	const std::vector<double> rates = {0.0, 0.02, 0.05, 0.10, 0.15, 0.20, 0.30, -1.0};
+	SequenceRecordBatch queries(false);
+	for (int i = 0; i < 240; i++) {
+		queries.read_ids.push_back("se" + std::to_string(i));
+		queries.comments.push_back("");
+		queries.sequences1.push_back(fx.read(rates[i % rates.size()]));
+		queries.quals1.push_back(QualScore(""));
+	}
+	for (int i = 0; i < 160; i++) {
+		queries.read_ids.push_back("se_partial" + std::to_string(i));
+		queries.comments.push_back("");
+		queries.sequences1.push_back(fx.partial(16 + (i % 50)));
+		queries.quals1.push_back(QualScore(""));
+	}
+
+	SAMRecordBatch rows;
+	aligner.align(queries, rows);
+	const std::set<std::string> aligned(rows.read_ids.begin(), rows.read_ids.end());
+
+	size_t mapped = 0;
+	for (size_t i = 0; i < queries.size(); i++) {
+		const bool expected = aligned.count(queries.read_ids[i]) > 0;
+		INFO("read " << queries.read_ids[i]);
+		REQUIRE(aligner.any_mapped(queries.sequences1[i], "", queries.read_ids[i].c_str()) == expected);
+		mapped += expected;
+	}
+	// Both outcomes must be well represented, or agreement proves nothing.
+	REQUIRE(mapped >= 40);
+	REQUIRE(queries.size() - mapped >= 40);
+}
+
+TEST_CASE("any_mapped agrees with align() on a mixed paired batch", "[Minimap2Aligner]") {
+	AnyMappedFixture fx;
+	Minimap2Aligner aligner(fx.config);
+	aligner.build_index(fx.subjects);
+
+	const std::vector<double> rates = {0.0, 0.05, 0.10, 0.20, -1.0};
+	SequenceRecordBatch queries(true);
+	for (int i = 0; i < 200; i++) {
+		queries.read_ids.push_back("pe" + std::to_string(i));
+		queries.comments.push_back("");
+		queries.sequences1.push_back(fx.read(rates[i % rates.size()]));
+		queries.sequences2.push_back(fx.read(rates[(i / rates.size()) % rates.size()]));
+		queries.quals1.push_back(QualScore(""));
+		queries.quals2.push_back(QualScore(""));
+	}
+	for (int i = 0; i < 120; i++) {
+		queries.read_ids.push_back("pe_partial" + std::to_string(i));
+		queries.comments.push_back("");
+		queries.sequences1.push_back(fx.partial(16 + (i % 50)));
+		queries.sequences2.push_back(i % 2 ? fx.read(-1.0) : fx.partial(16 + ((i * 7) % 50)));
+		queries.quals1.push_back(QualScore(""));
+		queries.quals2.push_back(QualScore(""));
+	}
+
+	SAMRecordBatch rows;
+	aligner.align(queries, rows);
+	const std::set<std::string> aligned(rows.read_ids.begin(), rows.read_ids.end());
+
+	size_t mapped = 0;
+	for (size_t i = 0; i < queries.size(); i++) {
+		const bool expected = aligned.count(queries.read_ids[i]) > 0;
+		INFO("pair " << queries.read_ids[i]);
+		REQUIRE(aligner.any_mapped(queries.sequences1[i], queries.sequences2[i], queries.read_ids[i].c_str()) ==
+		        expected);
+		mapped += expected;
+	}
+	REQUIRE(mapped >= 40);
+	REQUIRE(queries.size() - mapped >= 20);
+}
+
+// A prebuilt index can be read on several threads, which build its buckets' hash tables, and must
+// come out the index read on one. mm_idx_dump writes every hash entry in table order, so two loads
+// that dump alike hold the same sequences, the same buckets and every entry in the same place: a
+// bucket built from the wrong entries, from part of them, or not at all shows as a difference.
+// The reference repeats pieces of itself, so that many minimizers occur more than once and the
+// buckets' position arrays are not empty.
+
+static std::string dump_index(const mm_idx_t *idx, const std::string &path) {
+	FILE *fp = std::fopen(path.c_str(), "wb");
+	REQUIRE(fp != nullptr);
+	mm_idx_dump(fp, idx);
+	std::fclose(fp);
+	std::ifstream in(path, std::ios::binary);
+	std::string bytes((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+	std::remove(path.c_str());
+	return bytes;
+}
+
+//! An .mmi's bytes with each bucket's hash entries put in one fixed order.
+//! mm_idx_dump writes them in the order of the hash table's slots, which depends
+//! on how the table was filled, so two dumps of one index can differ there and
+//! nowhere else. The layout is mm_idx_dump's (ext/minimap2/index.c).
+static std::string canonical_index(const std::string &bytes) {
+	// Thrown rather than REQUIREd: these run once per hash entry.
+	const auto check_within = [&](size_t end) {
+		if (end > bytes.size()) {
+			throw std::runtime_error("the index ends early");
+		}
+	};
+	size_t pos = 0;
+	const auto u32_at = [&](size_t at) {
+		check_within(at + 4);
+		uint32_t value;
+		std::memcpy(&value, bytes.data() + at, 4);
+		return value;
+	};
+	const auto take = [&](size_t n) {
+		check_within(pos + n);
+		const std::string out = bytes.substr(pos, n);
+		pos += n;
+		return out;
+	};
+	// Magic, then w, k, b, n_seq and flag.
+	const uint32_t b = u32_at(4 + 2 * 4);
+	const uint32_t n_seq = u32_at(4 + 3 * 4);
+	std::string out = take(4 + 5 * 4);
+	for (uint32_t i = 0; i < n_seq; i++) {
+		check_within(pos + 1);
+		const auto name_length = static_cast<uint8_t>(bytes[pos]);
+		out += take(1 + name_length + 4);
+	}
+	for (uint32_t bucket = 0; bucket < (1u << b); bucket++) {
+		const uint32_t n = u32_at(pos);
+		out += take(4 + 8 * static_cast<size_t>(n));
+		const uint32_t size = u32_at(pos);
+		out += take(4);
+		std::vector<std::string> entries;
+		for (uint32_t e = 0; e < size; e++) {
+			entries.push_back(take(16));
+		}
+		std::sort(entries.begin(), entries.end());
+		for (const auto &entry : entries) {
+			out += entry;
+		}
+	}
+	return out + bytes.substr(pos);
+}
+
+TEST_CASE("A minimap2 index read on several threads is the index read on one", "[Minimap2Aligner]") {
+	std::mt19937 rng {20261022};
+	Minimap2Config config;
+	config.preset = "sr";
+	const std::string repeat = random_dna(rng, 20000);
+	const std::string ref_a = repeat + random_dna(rng, 150000) + repeat;
+	const std::string ref_b = random_dna(rng, 100000) + mutate(rng, repeat, 0.01);
+
+	const std::string path = "data/shards/test_threaded_load.mmi";
+	Minimap2Aligner builder(config);
+	builder.build_index({{"ref_a", ref_a}, {"ref_b", ref_b}});
+	builder.save_index(path);
+
+	Minimap2IndexReader one(path, config, 1);
+	Minimap2IndexReader many(path, config, 4);
+	auto from_one = one.ReadNextPart();
+	auto from_many = many.ReadNextPart();
+	REQUIRE(from_one != nullptr);
+	REQUIRE(from_many != nullptr);
+	// Read to the end of the part, and no further.
+	REQUIRE(many.AtEof());
+	REQUIRE(from_many->subject_names() == from_one->subject_names());
+	const std::string dumped_one = dump_index(from_one->index(), path + ".one");
+	const std::string dumped_many = dump_index(from_many->index(), path + ".many");
+	REQUIRE(dumped_one.size() > 1000000);
+	REQUIRE(dumped_many == dumped_one);
+	// Both reads go through the same loader, so each is also held to the file it
+	// read, which the builder wrote from its own index without loading anything:
+	// equal but for the order of the hash entries, which loading refills.
+	std::ifstream saved_in(path, std::ios::binary);
+	const std::string saved((std::istreambuf_iterator<char>(saved_in)), std::istreambuf_iterator<char>());
+	REQUIRE(canonical_index(dumped_one) == canonical_index(saved));
+
+	std::remove(path.c_str());
+}
+
+TEST_CASE("A multi-part minimap2 index read on several threads stops at each part's end", "[Minimap2Aligner]") {
+	const std::string part1 = "data/shards/test_threaded_multipart_p1.mmi";
+	const std::string part2 = "data/shards/test_threaded_multipart_p2.mmi";
+	const std::string multipart = "data/shards/test_threaded_multipart.mmi";
+	build_multipart_mmi_fixture(part1, part2, multipart);
+
+	Minimap2Config config;
+	config.preset = "sr";
+	config.k = 5;
+	Minimap2IndexReader reader(multipart, config, 4);
+	auto p1 = reader.ReadNextPart();
+	REQUIRE(p1 != nullptr);
+	REQUIRE(p1->subject_names() == std::vector<std::string> {"part1_ref"});
+	REQUIRE_FALSE(reader.AtEof());
+	auto p2 = reader.ReadNextPart();
+	REQUIRE(p2 != nullptr);
+	REQUIRE(p2->subject_names() == std::vector<std::string> {"part2_ref"});
+	REQUIRE(reader.AtEof());
+
+	std::remove(part1.c_str());
+	std::remove(part2.c_str());
+	std::remove(multipart.c_str());
 }

@@ -33,7 +33,7 @@ make test
 
 `MIINT_TEST_JOBS=N` runs the files `make test` runs, each in its own `unittest` process, alongside the C++ test binary (`test/scripts/run_tests_parallel.py`). It prints a line per file as each finishes, then the output of every file that failed, and reports skips per reason as the serial pass does. A job still running after ten minutes is killed and fails the run, so a deadlocked test cannot stall it; each SQL file is one job, and so is the whole C++ test binary. The descriptor-limit rerun and the shell tests stay serial. Its SQL jobs run with `RUST_MIN_STACK=4194304` unless that is already set. Under heavy load on a many-core machine, the workers of rayon's global pool, which rype classifies on, can overflow Rust's default 2 MiB thread stack ([RYpe#28](https://github.com/the-miint/RYpe/issues/28)). The parallel jobs make that load themselves; a serial run meets it only when other heavy work shares the machine. CI leaves `MIINT_TEST_JOBS` unset and runs the serial pass.
 
-`build/release/duckdb`, `test/unittest`, `extension/miint/tests` and the loadable `miint.duckdb_extension` are separate build targets, so after an incremental `ninja` of one of them the others can be stale. Rebuild every binary you probe with, e.g. `ninja -C build/release duckdb test/unittest extension/miint/tests`.
+`build/release/duckdb`, `test/unittest`, `extension/miint/tests`, `extension/miint/tests_duckdb` and the loadable `miint.duckdb_extension` are separate build targets, so after an incremental `ninja` of one of them the others can be stale. Rebuild every binary you probe with, e.g. `ninja -C build/release duckdb test/unittest extension/miint/tests extension/miint/tests_duckdb`.
 
 **Test file structure:**
 SQL logic tests consist of statements and expected outputs. Each test file follows this format:
@@ -113,6 +113,8 @@ Core algorithms and internal utilities are tested using the Catch2 framework. C+
 # Run a specific test case
 ./build/release/extension/miint/tests "ParseCigar - Basic operations"
 ```
+
+`tests` links no DuckDB. A C++ test that needs a running database, one that opens an in-process `DuckDB` and drives miint code against it, goes in the second runner instead, `./build/release/extension/miint/tests_duckdb`, which links DuckDB and miint statically. List its file under `tests_duckdb` in `CMakeLists.txt`, not in `TEST_SOURCES`. It is built only where DuckDB builds `unittest`, so not in the WASM builds. `run_tests.sh` runs both.
 
 **Code organization for testing:**
 

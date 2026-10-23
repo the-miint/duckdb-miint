@@ -1,0 +1,493 @@
+# name: test/sql/rype_filter_parallel.test
+# description: rype_filter on many threads keeps the same rows
+# group: [sql]
+
+require miint
+
+# ---------------------------------------------------------------------------
+# rype_filter classifies a group on a background job while other background
+# jobs map the group before it and DuckDB's threads emit it, each taking one
+# held chunk's rows at a time.
+# The rows come out in no fixed order, as rype_classify's and align_minimap2's
+# do, so every check compares the rows as a set. None of the scheduling may show
+# in that set: every check below is the answer the one-thread checks in
+# rype_filter.test and rype_filter_minimap2.test pin, taken on eight threads,
+# through each kind of sink, with groups small enough that many are in flight,
+# and down the paths where a thread cannot park and must wait instead. A lost
+# wake-up hangs a check; a unit emitted twice or dropped fails one.
+#
+# The fixture is rype_filter_minimap2.test's: random host sequences no RYpe
+# bucket covers, and reads of four kinds (0, 1 host pieces; 2 random; 3 ACGT
+# repeats RYpe always matches).
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE MACRO random_dna(seed, len) AS (
+    SELECT string_agg(substr('ACGT', (hash(seed * 1000003 + j) % 4)::INTEGER + 1, 1), '' ORDER BY j)
+    FROM range(len) t(j));
+
+statement ok
+CREATE TABLE host AS SELECT 'host' || h AS read_id, random_dna(h, 3000) AS sequence1 FROM range(3) t(h);
+
+statement ok
+CREATE MACRO host_piece(seed, len) AS
+    substr((SELECT sequence1 FROM host WHERE read_id = 'host' || (seed % 3)), (seed % (3000 - len))::INTEGER + 1, len);
+
+statement ok
+CREATE MACRO read_of(kind, seed) AS CASE kind
+    WHEN 0 THEN host_piece(seed, 150)
+    WHEN 1 THEN reverse(translate(host_piece(seed, 150), 'ACGT', 'TGCA'))
+    WHEN 2 THEN random_dna(seed + 100000, 150)
+    ELSE 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT' END;
+
+query I
+SELECT success FROM save_minimap2_index('host', '{TEST_DIR}/rype_filter_host.mmi');
+----
+true
+
+# Stored in ord order, which the order checks rely on.
+statement ok
+CREATE TABLE pairs AS
+SELECT i AS ord,
+       'r' || i AS read_id,
+       (hash(i) % 4)::INTEGER AS kind,
+       read_of(hash(i) % 4, i) AS sequence1,
+       [i % 256, (i + 1) % 256]::UTINYINT[] AS qual1,
+       CASE WHEN i % 7 = 0 THEN NULL ELSE read_of(hash(i + 7919) % 4, i + 50000) END AS sequence2
+FROM range(3000) t(i)
+ORDER BY i;
+
+# What each form must return, from the composed SQL.
+statement ok
+CREATE TABLE expected_rype AS
+SELECT * FROM pairs ANTI JOIN rype_classify('data/rype/test.ryxdi', 'pairs', threshold := 0.05) c USING (read_id);
+
+statement ok
+CREATE TABLE expected_both AS
+SELECT * FROM expected_rype
+ANTI JOIN align_minimap2('expected_rype', index_path := '{TEST_DIR}/rype_filter_host.mmi') a USING (read_id);
+
+query I
+SELECT (SELECT count(*) FROM expected_both) BETWEEN 1 AND (SELECT count(*) FROM expected_rype) - 1;
+----
+true
+
+statement ok
+SET threads = 8;
+
+# ---------------------------------------------------------------------------
+# The same rows on eight threads, with DuckDB's insertion order setting on (its
+# default) and off, through a table, a file and a materialized result, at group
+# sizes inside a chunk, of one chunk, and automatic
+# ---------------------------------------------------------------------------
+
+foreach preserve true false
+
+statement ok
+SET preserve_insertion_order = {preserve};
+
+foreach group_rows 7 2048 0
+
+statement ok
+SET miint_rype_filter_group_rows = {group_rows};
+
+statement ok
+CREATE OR REPLACE TABLE got AS
+SELECT * FROM rype_filter('pairs', 'data/rype/test.ryxdi', '{TEST_DIR}/rype_filter_host.mmi', threshold := 0.05);
+
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM got EXCEPT ALL SELECT * FROM expected_both)
+    UNION ALL
+    (SELECT * FROM expected_both EXCEPT ALL SELECT * FROM got));
+----
+0
+
+statement ok
+CREATE OR REPLACE TABLE got AS SELECT * FROM rype_filter('pairs', 'data/rype/test.ryxdi', threshold := 0.05);
+
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM got EXCEPT ALL SELECT * FROM expected_rype)
+    UNION ALL
+    (SELECT * FROM expected_rype EXCEPT ALL SELECT * FROM got));
+----
+0
+
+statement ok
+COPY (SELECT ord, read_id, kind, sequence1, sequence2
+      FROM rype_filter('pairs', 'data/rype/test.ryxdi', '{TEST_DIR}/rype_filter_host.mmi', threshold := 0.05))
+TO '{TEST_DIR}/rype_filter_parallel.csv' (FORMAT CSV);
+
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM read_csv('{TEST_DIR}/rype_filter_parallel.csv', header := true,
+         columns := {'ord': 'BIGINT', 'read_id': 'VARCHAR', 'kind': 'INTEGER', 'sequence1': 'VARCHAR', 'sequence2': 'VARCHAR'})
+     EXCEPT ALL SELECT ord, read_id, kind, sequence1, sequence2 FROM expected_both)
+    UNION ALL
+    (SELECT ord, read_id, kind, sequence1, sequence2 FROM expected_both
+     EXCEPT ALL SELECT * FROM read_csv('{TEST_DIR}/rype_filter_parallel.csv', header := true,
+         columns := {'ord': 'BIGINT', 'read_id': 'VARCHAR', 'kind': 'INTEGER', 'sequence1': 'VARCHAR', 'sequence2': 'VARCHAR'})));
+----
+0
+
+query I
+SELECT count(*) = (SELECT count(*) FROM expected_both)
+FROM rype_filter('pairs', 'data/rype/test.ryxdi', '{TEST_DIR}/rype_filter_host.mmi', threshold := 0.05);
+----
+true
+
+endloop
+
+endloop
+
+# ---------------------------------------------------------------------------
+# Through FASTQ files: miint's FASTQ writer takes its rows in order, so DuckDB
+# runs the whole query on one of its threads, and rype_filter maps on jobs of
+# its own instead. Single-end, paired into an R1 and an R2 file, and paired
+# interleaved into one, with async threads to map on, with only one, and
+# without
+# ---------------------------------------------------------------------------
+
+statement ok
+RESET preserve_insertion_order;
+
+statement ok
+CREATE TABLE fq_pairs AS
+SELECT read_id, sequence1, list_transform(range(length(sequence1)), lambda x: 40)::UTINYINT[] AS qual1,
+       sequence2, list_transform(range(length(sequence2)), lambda x: 30)::UTINYINT[] AS qual2
+FROM pairs WHERE sequence2 IS NOT NULL ORDER BY ord;
+
+statement ok
+CREATE TABLE fq_single AS SELECT read_id, sequence1, qual1 FROM fq_pairs;
+
+statement ok
+CREATE TABLE fq_pairs_rype AS
+SELECT * FROM fq_pairs ANTI JOIN rype_classify('data/rype/test.ryxdi', 'fq_pairs', threshold := 0.05) c USING (read_id);
+
+statement ok
+CREATE TABLE expected_fq_pairs AS
+SELECT * FROM fq_pairs_rype
+ANTI JOIN align_minimap2('fq_pairs_rype', index_path := '{TEST_DIR}/rype_filter_host.mmi') a USING (read_id);
+
+statement ok
+CREATE TABLE fq_single_rype AS
+SELECT * FROM fq_single ANTI JOIN rype_classify('data/rype/test.ryxdi', 'fq_single', threshold := 0.05) c USING (read_id);
+
+statement ok
+CREATE TABLE expected_fq_single AS
+SELECT * FROM fq_single_rype
+ANTI JOIN align_minimap2('fq_single_rype', index_path := '{TEST_DIR}/rype_filter_host.mmi') a USING (read_id);
+
+# minimap2 removes some of what RYpe keeps, single-end and paired.
+query II
+SELECT (SELECT count(*) FROM expected_fq_single) BETWEEN 1 AND (SELECT count(*) FROM fq_single_rype) - 1,
+       (SELECT count(*) FROM expected_fq_pairs) BETWEEN 1 AND (SELECT count(*) FROM fq_pairs_rype) - 1;
+----
+true	true
+
+foreach async 8 1 0
+
+statement ok
+SET async_threads = {async};
+
+foreach group_rows 7 0
+
+statement ok
+SET miint_rype_filter_group_rows = {group_rows};
+
+statement ok
+COPY (SELECT * FROM rype_filter('fq_single', 'data/rype/test.ryxdi', '{TEST_DIR}/rype_filter_host.mmi', threshold := 0.05))
+TO '{TEST_DIR}/rype_filter_single.fq' (FORMAT FASTQ);
+
+statement ok
+CREATE OR REPLACE VIEW got_single AS
+SELECT read_id, sequence1, qual1 FROM read_fastx('{TEST_DIR}/rype_filter_single.fq');
+
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM got_single EXCEPT ALL SELECT * FROM expected_fq_single)
+    UNION ALL
+    (SELECT * FROM expected_fq_single EXCEPT ALL SELECT * FROM got_single));
+----
+0
+
+statement ok
+COPY (SELECT * FROM rype_filter('fq_pairs', 'data/rype/test.ryxdi', '{TEST_DIR}/rype_filter_host.mmi', threshold := 0.05))
+TO '{TEST_DIR}/rype_filter_split_{ORIENTATION}.fq' (FORMAT FASTQ);
+
+statement ok
+CREATE OR REPLACE VIEW got_split AS
+SELECT read_id, sequence1, qual1, sequence2, qual2
+FROM read_fastx('{TEST_DIR}/rype_filter_split_R1.fq', sequence2 := '{TEST_DIR}/rype_filter_split_R2.fq');
+
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM got_split EXCEPT ALL SELECT * FROM expected_fq_pairs)
+    UNION ALL
+    (SELECT * FROM expected_fq_pairs EXCEPT ALL SELECT * FROM got_split));
+----
+0
+
+statement ok
+COPY (SELECT * FROM rype_filter('fq_pairs', 'data/rype/test.ryxdi', '{TEST_DIR}/rype_filter_host.mmi', threshold := 0.05))
+TO '{TEST_DIR}/rype_filter_interleaved.fq' (FORMAT FASTQ, INTERLEAVE true);
+
+# Each pair is two records under its read_id, R1 then R2 straight after it.
+statement ok
+CREATE OR REPLACE VIEW got_interleaved AS
+SELECT read_id, s[1] AS sequence1, q[1] AS qual1, s[2] AS sequence2, q[2] AS qual2, len(s) AS records, span
+FROM (SELECT read_id, list(sequence1 ORDER BY sequence_index) AS s, list(qual1 ORDER BY sequence_index) AS q,
+             max(sequence_index) - min(sequence_index) AS span
+      FROM read_fastx('{TEST_DIR}/rype_filter_interleaved.fq') GROUP BY read_id);
+
+query II
+SELECT count(*) FILTER (WHERE records <> 2), count(*) FILTER (WHERE span <> 1) FROM got_interleaved;
+----
+0	0
+
+query I
+SELECT count(*) FROM (
+    (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM got_interleaved EXCEPT ALL SELECT * FROM expected_fq_pairs)
+    UNION ALL
+    (SELECT * FROM expected_fq_pairs EXCEPT ALL SELECT read_id, sequence1, qual1, sequence2, qual2 FROM got_interleaved));
+----
+0
+
+endloop
+
+endloop
+
+statement ok
+RESET async_threads;
+
+# ---------------------------------------------------------------------------
+# Under a tight memory limit, with DuckDB's insertion order setting at its
+# default: 60,000 rows through a table and a file in 24 MB (eight threads'
+# writers need about 16), whole. In groups of seven rows each held chunk yields
+# a few rows. Kept in order, each would be a batch the order-keeping sinks hold
+# until enough rows follow to merge them, which needed more than 64 MB here.
+# ---------------------------------------------------------------------------
+
+statement ok
+RESET preserve_insertion_order;
+
+statement ok
+CREATE TABLE big AS
+SELECT p.* REPLACE (p.ord * 20 + k AS ord, p.read_id || '_' || k AS read_id)
+FROM pairs p, range(20) t(k)
+ORDER BY p.ord * 20 + k;
+
+statement ok
+CREATE TABLE expected_big AS
+SELECT * FROM big ANTI JOIN rype_classify('data/rype/test.ryxdi', 'big', threshold := 0.05) c USING (read_id);
+
+foreach group_rows 7 2048 0
+
+statement ok
+SET miint_rype_filter_group_rows = {group_rows};
+
+statement ok
+SET memory_limit = '24MB';
+
+statement ok
+CREATE OR REPLACE TABLE got AS SELECT * FROM rype_filter('big', 'data/rype/test.ryxdi', threshold := 0.05);
+
+statement ok
+COPY (SELECT ord FROM rype_filter('big', 'data/rype/test.ryxdi', threshold := 0.05))
+TO '{TEST_DIR}/rype_filter_parallel_big.csv' (FORMAT CSV, HEADER false);
+
+statement ok
+RESET memory_limit;
+
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM got EXCEPT ALL SELECT * FROM expected_big)
+    UNION ALL
+    (SELECT * FROM expected_big EXCEPT ALL SELECT * FROM got));
+----
+0
+
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM read_csv('{TEST_DIR}/rype_filter_parallel_big.csv', header := false, columns := {'ord': 'BIGINT'})
+     EXCEPT ALL SELECT ord FROM expected_big)
+    UNION ALL
+    (SELECT ord FROM expected_big
+     EXCEPT ALL SELECT * FROM read_csv('{TEST_DIR}/rype_filter_parallel_big.csv', header := false, columns := {'ord': 'BIGINT'})));
+----
+0
+
+endloop
+
+# ---------------------------------------------------------------------------
+# Many groups in flight at once, every run the same answer: groups of seven, an
+# Arrow batch of one row, and tasks that yield after every chunk
+# ---------------------------------------------------------------------------
+
+statement ok
+SET miint_rype_filter_group_rows = 7;
+
+statement ok
+SET miint_rype_arrow_batch_bytes = 1;
+
+foreach partial false true
+
+statement ok
+SET scheduler_process_partial = {partial};
+
+loop i 0 10
+
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM rype_filter('pairs', 'data/rype/test.ryxdi', '{TEST_DIR}/rype_filter_host.mmi', threshold := 0.05)
+     EXCEPT ALL SELECT * FROM expected_both)
+    UNION ALL
+    (SELECT * FROM expected_both
+     EXCEPT ALL SELECT * FROM rype_filter('pairs', 'data/rype/test.ryxdi', '{TEST_DIR}/rype_filter_host.mmi', threshold := 0.05)));
+----
+0
+
+endloop
+
+endloop
+
+statement ok
+RESET scheduler_process_partial;
+
+statement ok
+RESET miint_rype_arrow_batch_bytes;
+
+# ---------------------------------------------------------------------------
+# Long stretches where nothing survives: many held chunks in a row emit no rows
+# ---------------------------------------------------------------------------
+
+# Rows 0-1499 are ACGT repeats, which RYpe matches, and 1500-2999 host pieces,
+# which minimap2 maps; every 250th row is random and survives both (at 0.5 RYpe
+# matches no random read).
+statement ok
+CREATE TABLE stretches AS
+SELECT i AS ord,
+       CASE WHEN i % 250 = 0 THEN random_dna(i + 300000, 150)
+            WHEN i < 1500 THEN read_of(3, i)
+            ELSE host_piece(i, 150) END AS sequence1
+FROM range(3000) t(i)
+ORDER BY i;
+
+foreach group_rows 7 2048
+
+statement ok
+SET miint_rype_filter_group_rows = {group_rows};
+
+statement ok
+CREATE OR REPLACE TABLE got AS
+SELECT ord FROM rype_filter('stretches', 'data/rype/test.ryxdi', '{TEST_DIR}/rype_filter_host.mmi', threshold := 0.5);
+
+query I
+SELECT list(ord ORDER BY ord) FROM got;
+----
+[0, 250, 500, 750, 1000, 1250, 1500, 1750, 2000, 2250, 2500, 2750]
+
+endloop
+
+# ---------------------------------------------------------------------------
+# LIMIT ends the query with groups still in flight. The output is unordered,
+# so a limit is a parallel streaming one, over the scan or above a filter, and
+# any surviving rows will do.
+# ---------------------------------------------------------------------------
+
+statement ok
+SET miint_rype_filter_group_rows = 7;
+
+query II
+SELECT count(DISTINCT ord), count(*) FILTER (WHERE ord NOT IN (SELECT ord FROM expected_both))
+FROM (SELECT ord FROM rype_filter('pairs', 'data/rype/test.ryxdi', '{TEST_DIR}/rype_filter_host.mmi', threshold := 0.05) LIMIT 3);
+----
+3	0
+
+query II
+SELECT count(DISTINCT ord), count(*) FILTER (WHERE ord NOT IN (SELECT ord FROM expected_both WHERE kind = 2))
+FROM (SELECT ord FROM rype_filter('pairs', 'data/rype/test.ryxdi', '{TEST_DIR}/rype_filter_host.mmi', threshold := 0.05)
+      WHERE kind = 2 LIMIT 3);
+----
+3	0
+
+# ---------------------------------------------------------------------------
+# An error in a late group fails the query every time: never a success with
+# the rows before it
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE late_null AS
+SELECT * REPLACE (CASE WHEN ord = 2900 THEN NULL ELSE sequence1 END AS sequence1) FROM pairs ORDER BY ord;
+
+loop i 0 5
+
+statement error
+SELECT count(*) FROM rype_filter('late_null', 'data/rype/test.ryxdi', '{TEST_DIR}/rype_filter_host.mmi', threshold := 0.05);
+----
+sequence1 is NULL in 'late_null' at row 2900
+
+statement error
+SELECT count(*) FROM rype_filter('late_null', 'data/rype/test.ryxdi', threshold := 0.05);
+----
+sequence1 is NULL in 'late_null' at row 2900
+
+endloop
+
+# ---------------------------------------------------------------------------
+# With no async threads the background work runs on DuckDB's own threads, the
+# one that finds a job due running it while the others park. Where a thread
+# cannot park, it waits for that work instead: a synchronous scan, and a
+# positional join, which drives the scan without a way to wake it
+# ---------------------------------------------------------------------------
+
+statement ok
+SET async_threads = 0;
+
+foreach threads 1 8
+
+statement ok
+SET threads = {threads};
+
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM rype_filter('pairs', 'data/rype/test.ryxdi', '{TEST_DIR}/rype_filter_host.mmi', threshold := 0.05)
+     EXCEPT ALL SELECT * FROM expected_both)
+    UNION ALL
+    (SELECT * FROM expected_both
+     EXCEPT ALL SELECT * FROM rype_filter('pairs', 'data/rype/test.ryxdi', '{TEST_DIR}/rype_filter_host.mmi', threshold := 0.05)));
+----
+0
+
+endloop
+
+statement ok
+RESET async_threads;
+
+statement ok
+SET threads = 8;
+
+statement ok
+SET debug_physical_table_scan_execution_strategy = 'SYNCHRONOUS';
+
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM rype_filter('pairs', 'data/rype/test.ryxdi', '{TEST_DIR}/rype_filter_host.mmi', threshold := 0.05)
+     EXCEPT ALL SELECT * FROM expected_both)
+    UNION ALL
+    (SELECT * FROM expected_both
+     EXCEPT ALL SELECT * FROM rype_filter('pairs', 'data/rype/test.ryxdi', '{TEST_DIR}/rype_filter_host.mmi', threshold := 0.05)));
+----
+0
+
+statement ok
+RESET debug_physical_table_scan_execution_strategy;
+
+# The filter's side is the longer one, so the join has one row per kept row.
+query II
+SELECT count(*) = (SELECT count(*) FROM expected_both), count(*) FILTER (WHERE i IS NOT NULL)
+FROM rype_filter('pairs', 'data/rype/test.ryxdi', '{TEST_DIR}/rype_filter_host.mmi', threshold := 0.05)
+POSITIONAL JOIN range(10) t(i);
+----
+true	10

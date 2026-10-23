@@ -219,8 +219,13 @@ void Minimap2Aligner::LoadIndexFromFile(const std::string &path, const mm_idxopt
 }
 
 // Minimap2IndexReader implementation.
-Minimap2IndexReader::Minimap2IndexReader(const std::string &index_path, const Minimap2Config &config)
-    : index_path_(index_path) {
+Minimap2IndexReader::Minimap2IndexReader(const std::string &index_path, const Minimap2Config &config, int n_threads)
+    : index_path_(index_path), n_threads_(n_threads < 1 ? 1 : n_threads) {
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+	// minimap2 would start its threads with pthread_create, which a wasm build
+	// without -pthread does not have.
+	n_threads_ = 1;
+#endif
 	mm_idxopt_t iopt;
 	Minimap2Aligner::InitOptions(config, iopt, mopt_template_);
 	reader_ = mm_idx_reader_open(index_path.c_str(), &iopt, nullptr);
@@ -240,16 +245,15 @@ bool Minimap2IndexReader::AtEof() {
 }
 
 std::shared_ptr<SharedMinimap2Index> Minimap2IndexReader::ReadNextPart() {
-	// n_threads=1: matches the existing single-part load in LoadIndexFromFile.
-	// mm_idx_load (the is_idx path mm_idx_reader_read takes for a prebuilt .mmi)
-	// doesn't parallelize on this argument regardless.
+	// For a prebuilt .mmi, n_threads_ build the part's hash tables (the
+	// is_idx path of mm_idx_reader_read, in miint's minimap2).
 	//
 	// Wrapped in the RAII deleter immediately: this is the exact memory-pressure
 	// regime (a multi-part index is only in play when a whole reference doesn't
 	// fit) where make_shared's control-block allocation below can throw
 	// bad_alloc. A raw mm_idx_t* held across that throw would leak a whole
 	// index part with nothing left to free it.
-	Minimap2IndexPtr idx(mm_idx_reader_read(reader_, 1));
+	Minimap2IndexPtr idx(mm_idx_reader_read(reader_, n_threads_));
 	if (!idx) {
 		return nullptr;
 	}
@@ -398,9 +402,7 @@ void Minimap2Aligner::align(const SequenceRecordBatch &queries, SAMRecordBatch &
 		return;
 	}
 
-	if (!active_index()) {
-		throw std::runtime_error("No index built. Call build_index() or attach_shared_index() first.");
-	}
+	require_index();
 
 	// Heuristic: ~3 alignments per query (primary + secondaries)
 	output.reserve(output.size() + queries.size() * 3);
@@ -431,8 +433,8 @@ void Minimap2Aligner::align_single(const std::string &read_id, const std::string
 	}
 
 	int n_regs = 0;
-	mm_reg1_t *regs = mm_map(active_index(), static_cast<int>(sequence.length()), sequence.c_str(), &n_regs,
-	                         tbuf_.get(), active_mapopt(), read_id.c_str());
+	mm_reg1_t *regs = map_single(sequence, read_id.c_str(), n_regs);
+	const RegionsGuard free_regs {&regs, &n_regs, 1};
 
 	int secondary_count = 0;
 
@@ -441,7 +443,7 @@ void Minimap2Aligner::align_single(const std::string &read_id, const std::string
 		mm_reg1_t *reg = &regs[j];
 
 		// Bounds check for reference ID before using it
-		if (reg->rid < 0 || static_cast<size_t>(reg->rid) >= active_subject_names().size()) {
+		if (!known_reference(reg->rid)) {
 			continue; // Skip alignments with invalid reference ID
 		}
 
@@ -468,12 +470,6 @@ void Minimap2Aligner::align_single(const std::string &read_id, const std::string
 		);
 	}
 
-	// Free results (must use MM_FREE — minimap2 may use jemalloc allocator)
-	for (int j = 0; j < n_regs; j++) {
-		MM_FREE(regs[j].p);
-	}
-	MM_FREE(regs);
-
 	// Comparing against the row count taken on entry catches every way a query can end up with no
 	// row -- no seed chain, the min_chain_coverage prefilter, or every reg rejected by the rid
 	// bounds check above -- rather than just testing n_regs == 0 and missing the other two.
@@ -492,6 +488,7 @@ void Minimap2Aligner::align_paired(const std::string &read_id, const std::string
 	int n_regs[2] = {0, 0};
 	mm_reg1_t *regs[2] = {nullptr, nullptr};
 	map_pair(sequence1, sequence2, read_id.c_str(), n_regs, regs);
+	const RegionsGuard free_regs {regs, n_regs, 2};
 
 	// Find primary alignments for each segment (with bounds checking)
 	mm_reg1_t *primary[2] = {nullptr, nullptr};
@@ -499,7 +496,7 @@ void Minimap2Aligner::align_paired(const std::string &read_id, const std::string
 		for (int j = 0; j < n_regs[seg]; j++) {
 			mm_reg1_t *reg = &regs[seg][j];
 			// Bounds check for reference ID
-			if (reg->rid < 0 || static_cast<size_t>(reg->rid) >= active_subject_names().size()) {
+			if (!known_reference(reg->rid)) {
 				continue;
 			}
 			if (reg->parent == reg->id) { // Primary
@@ -545,7 +542,7 @@ void Minimap2Aligner::align_paired(const std::string &read_id, const std::string
 			mm_reg1_t *reg = &regs[seg][j];
 
 			// Bounds check for reference ID
-			if (reg->rid < 0 || static_cast<size_t>(reg->rid) >= active_subject_names().size()) {
+			if (!known_reference(reg->rid)) {
 				continue;
 			}
 
@@ -573,9 +570,46 @@ void Minimap2Aligner::align_paired(const std::string &read_id, const std::string
 			append_unmapped(read_id, seg, mate_mapped[seg], mate_rev[seg], mate_rid[seg], mate_pos[seg], output);
 		}
 	}
+}
 
-	// Free results (must use MM_FREE — minimap2 may use jemalloc allocator)
-	for (int seg = 0; seg < 2; seg++) {
+bool Minimap2Aligner::any_mapped(std::string_view sequence1, std::string_view sequence2, const char *qname) {
+	require_index();
+	// align() emits a row for each region whose reference it knows; that is the whole test.
+	const auto any_known = [this](const mm_reg1_t *regs, int n_regs) {
+		for (int j = 0; j < n_regs; j++) {
+			if (known_reference(regs[j].rid)) {
+				return true;
+			}
+		}
+		return false;
+	};
+
+	// Routed as align() routes: an empty sequence2 is a single-end read.
+	if (sequence2.empty()) {
+		if (sequence1.empty()) {
+			return false; // align_single never calls minimap2 on an empty query
+		}
+		int n_regs = 0;
+		mm_reg1_t *regs = map_single(sequence1, qname, n_regs);
+		const RegionsGuard free_regs {&regs, &n_regs, 1};
+		return any_known(regs, n_regs);
+	}
+
+	int n_regs[2] = {0, 0};
+	mm_reg1_t *regs[2] = {nullptr, nullptr};
+	map_pair(sequence1, sequence2, qname, n_regs, regs);
+	const RegionsGuard free_regs {regs, n_regs, 2};
+	return any_known(regs[0], n_regs[0]) || any_known(regs[1], n_regs[1]);
+}
+
+mm_reg1_t *Minimap2Aligner::map_single(std::string_view sequence, const char *qname, int &n_regs) {
+	return mm_map(active_index(), static_cast<int>(sequence.size()), sequence.data(), &n_regs, tbuf_.get(),
+	              active_mapopt(), qname);
+}
+
+Minimap2Aligner::RegionsGuard::~RegionsGuard() {
+	// MM_FREE, not free: minimap2 may allocate through jemalloc.
+	for (int seg = 0; seg < segments; seg++) {
 		for (int j = 0; j < n_regs[seg]; j++) {
 			MM_FREE(regs[seg][j].p);
 		}
@@ -583,8 +617,18 @@ void Minimap2Aligner::align_paired(const std::string &read_id, const std::string
 	}
 }
 
-void Minimap2Aligner::map_pair(const std::string &sequence1, const std::string &sequence2, const char *qname,
-                               int n_regs[2], mm_reg1_t *regs[2]) {
+bool Minimap2Aligner::known_reference(int32_t rid) const {
+	return rid >= 0 && static_cast<size_t>(rid) < active_subject_names().size();
+}
+
+void Minimap2Aligner::require_index() const {
+	if (!active_index()) {
+		throw std::runtime_error("No index built. Call build_index() or attach_shared_index() first.");
+	}
+}
+
+void Minimap2Aligner::map_pair(std::string_view sequence1, std::string_view sequence2, const char *qname, int n_regs[2],
+                               mm_reg1_t *regs[2]) {
 	mm_mapopt_t mopt = *active_mapopt();
 	mopt.flag |= MM_F_FRAG_MODE;
 
@@ -596,13 +640,13 @@ void Minimap2Aligner::map_pair(const std::string &sequence1, const std::string &
 	// splice:sr); minimap2 reverse-complements those before mapping, and flips their hits
 	// back after (worker_for, map.c).
 	const bool flip[2] = {((mopt.pe_ori >> 1) & 1) != 0, (mopt.pe_ori & 1) != 0};
-	const std::string *given[2] = {&sequence1, &sequence2};
+	const std::string_view given[2] = {sequence1, sequence2};
 	int qlens[2];
 	const char *seqs[2];
 	for (int seg = 0; seg < 2; seg++) {
-		const std::string &seq = *given[seg];
+		const std::string_view seq = given[seg];
 		qlens[seg] = static_cast<int>(seq.length());
-		seqs[seg] = seq.c_str();
+		seqs[seg] = seq.data();
 		if (flip[seg]) {
 			// Complemented with minimap2's own table (bseq.h), as minimap2 complements
 			// it. Every byte is indexed unsigned, so a byte above 0x7F reads inside the

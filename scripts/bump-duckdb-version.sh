@@ -193,6 +193,7 @@ Next:
   1. bash build.sh                       # the C++ API is not stable across releases
   2. bash run_tests.sh                   # SQL suite
   3. ./build/release/extension/miint/tests   # C++ suite
+     ./build/release/extension/miint/tests_duckdb   # C++ tests that need a running DuckDB
   4. conda run -n duckdb-format make format-check
   5. WASM is only built by CI on tag pushes, so verify it locally:
        bash scripts/build_wasm.sh        # build + unresolved-import check

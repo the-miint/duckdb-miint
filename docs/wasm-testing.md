@@ -55,7 +55,9 @@ The Catch2 `tests` target (`add_executable(tests …)` in `CMakeLists.txt`) is n
 Emscripten, so `test/cpp/` is held to the same rule as `src/`: a POSIX-only call outside a
 `MIINT_ENABLE_*` or `__EMSCRIPTEN__` guard breaks the WASM build. Pull-request CI does not
 build `wasm_eh`; it builds on tag pushes, so such a break first appears at release unless
-this level is run locally.
+this level is run locally. The second C++ target, `tests_duckdb`, is the exception: DuckDB
+builds no `unittest` for WASM, and `tests_duckdb` is built only where it does, so its cases
+never run in a WASM build.
 
 ### What it does NOT catch
 

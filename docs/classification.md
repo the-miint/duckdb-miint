@@ -4,12 +4,13 @@ Assign sequencing reads to references or taxa by their minimizer/k-mer content a
 
 These functions are powered by [RYpe](https://github.com/biocore/rype), a minimizer-based sequence classification tool that uses RY-space encoding (purine/pyrimidine) for robust sequence matching. They require a RYpe index directory (`.ryxdi`), which contains a Parquet-based inverted index built from reference sequences.
 
-Most of these functions take a `sequence_table` parameter that references a DuckDB table or view containing sequence data. The table must have a `sequence1` column and an identifier column (default `read_id`). The exception is `rype_index_create`, which *builds* a `.ryxdi` index from a chunked reference table. Sequence tables are typically produced by the readers in [reading](reading.md). For turning classification hits into per-sample abundance tables, see [profiling](profiling.md). When your buckets are NCBI taxids, resolve them to ranks, names, and full lineages with the [NCBI taxonomy](insdc_ncbi.md#taxonomy) functions.
+Most of these functions take a `sequence_table` parameter that references a DuckDB table or view containing sequence data. The table must have a `sequence1` column (VARCHAR or BLOB, read byte for byte as stored) and an identifier column (default `read_id`); `rype_filter` needs only `sequence1`. The exception is `rype_index_create`, which *builds* a `.ryxdi` index from a chunked reference table. Sequence tables are typically produced by the readers in [reading](reading.md). For turning classification hits into per-sample abundance tables, see [profiling](profiling.md). When your buckets are NCBI taxids, resolve them to ranks, names, and full lineages with the [NCBI taxonomy](insdc_ncbi.md#taxonomy) functions.
 
 ## Table of Contents
 
 - [`rype_index_create`](#rype_index_create) - Build a `.ryxdi` index from a chunked sequence table
 - [`rype_classify`](#rype_classify) - Classify sequences against an index
+- [`rype_filter`](#rype_filter) - Keep the reads neither RYpe nor minimap2 assigns to a host, in one pass
 - [`rype_log_ratio`](#rype_log_ratio) - Log-ratio classification between two single-bucket indices
 - [`rype_extract_minimizer_set`](#rype_extract_minimizer_set) - Extract deduplicated minimizer hash sets
 - [`rype_extract_strand_minimizers`](#rype_extract_strand_minimizers) - Extract minimizers with positions
@@ -84,7 +85,7 @@ Classify sequences against a RYpe index, returning bucket assignments with confi
 
 **Parameters:**
 - `index_path` (VARCHAR): Path to a RYpe index directory (`.ryxdi`)
-- `sequence_table` (VARCHAR): Name of a DuckDB table or view containing sequences. Must have columns: identifier column + `sequence1` + optional `sequence2`
+- `sequence_table` (VARCHAR): Name of a DuckDB table or view containing sequences. Must have columns: identifier column + `sequence1` (VARCHAR or BLOB) + optional `sequence2` (VARCHAR or BLOB)
 - `id_column` (VARCHAR, optional, default `'read_id'`): Name of the identifier column in the sequence table
 - `threshold` (DOUBLE, optional, default 0.1): Minimum score threshold (0.0-1.0). Only matches with score >= threshold are returned
 - `negative_index` (VARCHAR, optional): Path to a second RYpe index used as a negative filter
@@ -132,9 +133,69 @@ SELECT * FROM rype_classify('my_index.ryxdi', 'paired');
 
 **Error conditions:**
 - `index_path` does not point to a valid `.ryxdi` index directory
-- `sequence_table` does not exist, or is missing the identifier column or `sequence1`
+- `sequence_table` does not exist, or is missing the identifier column or `sequence1`, or has a `sequence1` or `sequence2` that is not VARCHAR or BLOB
 - `threshold` outside the 0.0-1.0 range
 - `negative_index` does not point to a valid index
+
+### rype_filter
+
+`rype_filter(sequence_table, index_path, [minimap2_index_path], [threshold=0.1])`
+
+Host depletion in one pass: the rows of `sequence_table` that RYpe does not match against `index_path` and, given a minimap2 index, that minimap2 maps neither mate of. Each row comes back whole, every column as the relation has it. It does what these two steps do:
+
+```sql
+CREATE TABLE kept AS
+SELECT * FROM reads ANTI JOIN rype_classify('host.ryxdi', 'reads', threshold := 0.1) USING (read_id);
+
+SELECT * FROM kept ANTI JOIN align_minimap2('kept', index_path := 'host.mmi') USING (read_id);
+```
+
+but reads `sequence_table` once and stores nothing between the stages, so the relation can be a view straight over `read_fastx`. The joins keep every row whose `read_id` is NULL, since a join never matches NULL; `rype_filter` drops such a row when either stage would remove it. The relation is the first argument here, and the index the first in `rype_classify`.
+
+**Parameters:**
+- `sequence_table` (VARCHAR): Name of a DuckDB table or view. Must have `sequence1` (VARCHAR or BLOB); `sequence2` (VARCHAR or BLOB) is optional. A `read_id` column is optional too: RYpe does not need one, and minimap2 uses it only to name the reads, so with a minimap2 index it must be VARCHAR, BIGINT or UUID. Every other column is carried through untouched
+- `index_path` (VARCHAR): Path to a RYpe index directory (`.ryxdi`), typically of the host
+- `minimap2_index_path` (VARCHAR, optional): Path to a minimap2 index (`.mmi`) of the host, built as one part, as [`save_minimap2_index`](alignment_reference.md#index-creation-with-minimap2) always builds it. Omit it to filter with RYpe alone
+- `threshold` (DOUBLE, optional, default 0.1): A row is dropped when RYpe scores it at or above this for any bucket (0.0-1.0), as `rype_classify` would return a match for it. NULL takes the default
+
+**Output schema:** every column of `sequence_table`, with its name and type, for the rows kept.
+
+**Behavior:**
+- **RYpe:** a row is dropped exactly when `rype_classify(index_path, sequence_table, threshold := threshold)` returns a match for it. A pair is scored over both mates together, as `rype_classify` scores it, and a row whose `sequence2` is NULL is classified as single-end. A read shorter than the index's k has no minimizers, matches nothing, and is kept
+- **minimap2:** the rows RYpe keeps are mapped with `align_minimap2`'s defaults (the `sr` preset), and a row is dropped when `align_minimap2` would return any alignment for it, of either mate. Each read is named by its `read_id`, as `align_minimap2` names it, so that equal hits are broken the same way; with no `read_id` column, or a NULL one, the read is mapped unnamed
+- **Short reads only:** minimap2 runs when the mean `sequence1` length over the first chunk of the scan (up to 2,048 rows) is under 300, the reads its short-read preset is for. Otherwise, for long reads or an empty relation, the minimap2 index is never opened, and RYpe alone decides
+- **Rows come out in no fixed order** on more than one thread, as `rype_classify`'s and `align_minimap2`'s do, whatever `preserve_insertion_order` is set to. Add an `ORDER BY` to put them in an order, for instance `read_fastx`'s `sequence_index`
+- **Read once:** the relation is read in a single pass, so a view, including one over files still to be decompressed, or a registered Arrow relation, works
+- **Threads:** RYpe classifies and minimap2 maps as background tasks, which DuckDB's async pool (`async_threads`) runs and its idle threads take up too. RYpe works a batch of reads ahead of minimap2, and minimap2 maps on as many threads at once as `SET threads` allows. The query itself only writes the rows out, so a writer that takes them in order on one thread, as `COPY ... (FORMAT FASTQ)` does, does not hold the mapping to one. With `async_threads` set to 0, both run in the query itself instead
+- **Memory** is sized automatically, with no `max_memory` parameter; see [Memory budget](#memory-budget)
+- The minimap2 index is loaded whole, once. A multi-part index would have to be loaded part by part with every read held meanwhile, so it is refused, with an error naming the file, once its first part has loaded and before any row is returned; rebuild it as one part (`minimap2 -d` builds one part when `-I` is larger than the reference)
+
+**Examples:**
+```sql
+-- Deplete host reads from paired FASTQ files, straight to FASTQ files
+CREATE VIEW reads AS SELECT * FROM read_fastx('R1.fastq.gz', sequence2='R2.fastq.gz');
+COPY (SELECT * FROM rype_filter('reads', 'human.ryxdi', 'human.mmi'))
+TO 'depleted_{ORIENTATION}.fastq' (FORMAT FASTQ);
+
+-- RYpe alone, with a stricter threshold
+SELECT * FROM rype_filter('reads', 'human.ryxdi', threshold := 0.5);
+
+-- How many pairs survive
+SELECT count(*) FROM rype_filter('reads', 'human.ryxdi', 'human.mmi');
+
+-- The survivors in the files' order
+SELECT * FROM rype_filter('reads', 'human.ryxdi', 'human.mmi') ORDER BY sequence_index;
+```
+
+**Error conditions:**
+- A NULL `sequence_table`, `index_path` or `minimap2_index_path`, or an empty `minimap2_index_path` (omit it to filter with RYpe alone)
+- `sequence_table` does not exist, or names a common table expression (a `WITH` name; create a view or table instead)
+- `sequence_table` has no `sequence1`, or a `sequence1` or `sequence2` that is not VARCHAR or BLOB
+- With a minimap2 index, a `read_id` that is not VARCHAR, BIGINT or UUID
+- `threshold` outside the 0.0-1.0 range, or NaN
+- `index_path` does not point to a valid `.ryxdi` index directory
+- For short reads, a minimap2 index that is missing, damaged, or multi-part (for long reads it is never opened, so none of these is an error)
+- A NULL `sequence1`, which names the row it is on (`sequence1 is NULL in 'reads' at row 5`)
 
 ### rype_log_ratio
 
@@ -145,7 +206,7 @@ Compute the log-ratio of classification scores between two single-bucket RYpe in
 **Parameters:**
 - `numerator_path` (VARCHAR): Path to a single-bucket RYpe index directory (`.ryxdi`) used as the numerator
 - `denominator_path` (VARCHAR): Path to a single-bucket RYpe index directory (`.ryxdi`) used as the denominator
-- `sequence_table` (VARCHAR): Name of a DuckDB table or view containing sequences. Must have columns: identifier column + `sequence1` + optional `sequence2`
+- `sequence_table` (VARCHAR): Name of a DuckDB table or view containing sequences. Must have columns: identifier column + `sequence1` (VARCHAR or BLOB) + optional `sequence2` (VARCHAR or BLOB)
 - `id_column` (VARCHAR, optional, default `'read_id'`): Name of the identifier column in the sequence table
 - `skip_threshold` (DOUBLE, optional, default 0.5): Numerator score threshold for fast-path. Reads with numerator score >= this value skip denominator classification and get `+inf` log_ratio immediately. Set to 0 or negative to disable the fast-path
 - `max_memory` (BIGINT, optional, default 0): Byte budget for RYpe's internal batch sizing (how many reads it accumulates before each pass over the index). 0 derives one — see [Memory budget](#memory-budget) below
@@ -199,7 +260,7 @@ SELECT * FROM rype_log_ratio('host.ryxdi', 'microbe.ryxdi', 'seqs', id_column :=
 **Error conditions:**
 - Either `numerator_path` or `denominator_path` is not a valid `.ryxdi` index directory
 - Either index is not a single-bucket index (multi-bucket indices are rejected)
-- `sequence_table` does not exist, or is missing the identifier column or `sequence1`
+- `sequence_table` does not exist, or is missing the identifier column or `sequence1`, or has a `sequence1` or `sequence2` that is not VARCHAR or BLOB
 
 ### rype_extract_minimizer_set
 
@@ -208,7 +269,7 @@ SELECT * FROM rype_log_ratio('host.ryxdi', 'microbe.ryxdi', 'seqs', id_column :=
 Extract deduplicated minimizer hash sets from sequences for both forward and reverse complement strands.
 
 **Parameters:**
-- `sequence_table` (VARCHAR): Name of a DuckDB table or view with identifier column + `sequence1`
+- `sequence_table` (VARCHAR): Name of a DuckDB table or view with identifier column + `sequence1` (VARCHAR or BLOB)
 - `k` (BIGINT): K-mer size. Must be 16, 32, or 64 (constrained by RY-space 1-bit encoding fitting in uint64)
 - `w` (BIGINT): Window size for minimizer selection. Must be > 0
 - `salt` (UBIGINT, optional, default 6148914691236517205): Hash salt for reproducible but varied minimizer selection
@@ -252,7 +313,7 @@ WHERE a.read_id < b.read_id;
 ```
 
 **Error conditions:**
-- `sequence_table` does not exist, or is missing the identifier column or `sequence1`
+- `sequence_table` does not exist, or is missing the identifier column or `sequence1`, or has a `sequence1` that is not VARCHAR or BLOB
 - `k` not in {16, 32, 64}
 - `w` not greater than 0
 
@@ -263,7 +324,7 @@ WHERE a.read_id < b.read_id;
 Extract minimizer hashes with their positions for both forward and reverse complement strands. Unlike `rype_extract_minimizer_set`, this preserves positional information and may contain duplicate hashes at different positions.
 
 **Parameters:**
-- `sequence_table` (VARCHAR): Name of a DuckDB table or view with identifier column + `sequence1`
+- `sequence_table` (VARCHAR): Name of a DuckDB table or view with identifier column + `sequence1` (VARCHAR or BLOB)
 - `k` (BIGINT): K-mer size. Must be 16, 32, or 64
 - `w` (BIGINT): Window size for minimizer selection. Must be > 0
 - `salt` (UBIGINT, optional, default 6148914691236517205): Hash salt for reproducible but varied minimizer selection
@@ -303,7 +364,7 @@ ORDER BY read_id, pos;
 ```
 
 **Error conditions:**
-- `sequence_table` does not exist, or is missing the identifier column or `sequence1`
+- `sequence_table` does not exist, or is missing the identifier column or `sequence1`, or has a `sequence1` that is not VARCHAR or BLOB
 - `k` not in {16, 32, 64}
 - `w` not greater than 0
 
@@ -372,6 +433,17 @@ Two notes on what `max_memory` does **not** cover:
 - DuckDB's `memory_limit` does not bound RYpe either, in the other direction:
   RYpe allocates outside DuckDB's buffer manager, so lowering `memory_limit`
   alone will not reduce peak RSS for these functions.
+
+**rype_filter** takes no `max_memory` and no `debug`. It starts from the budget
+that 0 derives for the others, less the minimap2 index when minimap2 runs,
+counted at its file size. It holds three groups of rows at a time: one being
+mapped and written out, the next being classified, and the one after that, read
+ahead so that decoding it overlaps classifying. It sizes a group, which is one
+RYpe call, so that its classification and all three groups' rows fit.
+When that leaves RYpe no more than its 256 MiB floor, `miint_warnings()` says
+so: groups are then small, and each costs a pass over the index, so the run is
+slower the less memory there is. The `miint_rype_filter_group_rows` setting (rows,
+default 0) fixes the group size instead; it exists for testing.
 
 ### Seeing what was chosen
 

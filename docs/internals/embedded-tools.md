@@ -53,14 +53,17 @@ Run-time / conditional: `MIINT_USE_JEMALLOC` is set when DuckDB's jemalloc is li
   - **`sam_read1`'s negative returns are not all end of stream:** `-1` is end of stream, and `-3` on the first read is a rejected file format (`empty_format` for a zero-byte file, EFTYPE for anything unidentifiable, including a whitespace-only file). Within a readable file, a truncated or corrupt BAM record returns `-2`, `-3` or `-4` depending on where the damage falls (`bam_read1` in `ext/htslib-1.22.1/sam.c`), a SAM record that fails to parse returns `-2`, and `sam_read1_bam` returns `-3` for a tid or mtid outside the header. Leniency for `-3` is gated on `fp->format.format`, not on the code. A reader that treats every negative return as end of stream ends the batch, and the next `read()` resumes after the bad record, so the scan returns the records on both sides of it with no error.
   - **A BGZF file truncated exactly at a block boundary cannot be detected by reading it.** htslib and samtools both return the short count and only warn that the EOF marker is absent; `samtools quickcheck` catches it.
 
-### minimap2 (v2.30)
-- **Location:** `ext/minimap2/` (git submodule; version captured via `git describe` at configure time → `MINIMAP2_GIT_VERSION`)
+### minimap2 (v2.31-miint fork)
+- **Location:** `ext/minimap2/` (git submodule of [the-miint/minimap2](https://github.com/the-miint/minimap2), branch `v2.31-miint`; version captured via `git describe` at configure time → `MINIMAP2_GIT_VERSION`)
+- **Fork:** upstream 2.31 plus two commits:
+  - *Add min_chain_coverage pre-filter to skip DP for low-coverage chains*, behind `align_minimap2`'s `min_chain_coverage`.
+  - *Load a prebuilt index's hash tables on several threads*, which `rype_filter` uses (`Minimap2IndexReader`'s `n_threads`). Sent upstream as [lh3/minimap2#1367](https://github.com/lh3/minimap2/pull/1367); the fork commit can go once it merges. A WASM build without pthreads loads on one thread.
 - **Purpose:** Long-read / spliced alignment
 - **Build:** Makefile; produces `libminimap2.a` with `HAVE_KALLOC`
 - **SIMD / arch:**
   - Native ARM64 → `aarch64=1`
   - macOS cross → arch-specific `-arch` flag
-  - Emscripten → `sse2only=1` with SIMDe via `-msimd128 -msse -msse2` (avoids SSE4.1 runtime CPU dispatch)
+  - Emscripten → `sse2only=1` with Emscripten's SSE emulation via `-msimd128 -msse -msse2` (avoids SSE4.1 runtime CPU dispatch)
 - **Jemalloc integration:** when `DUCKDB_EXTENSION_JEMALLOC_SHOULD_LINK` is set, minimap2 is built with `-DMIINT_USE_JEMALLOC -include src/include/mm_alloc.h` so its allocations route through DuckDB's jemalloc. On loadable-extension builds, `src/mm_alloc_stubs.c` forwards to system malloc because the host DuckDB loaded via Python uses `RTLD_LOCAL` and doesn't expose `duckdb_je_*` symbols.
 
 ### WFA2-lib v2.3.6
@@ -289,7 +292,7 @@ Four Rust crates — rype, sylph, sc and st3 — are statically linked into the 
 | HDF5 | `find_package(HDF5 REQUIRED COMPONENTS CXX)` | conditional | required when `MIINT_ENABLE_HDF5=ON`; links `hdf5-static`, `hdf5_hl-static`, `hdf5_cpp-static`, `hdf5_hl_cpp-static`. For `CLANG_TIDY` builds HDF5 is optional (tidy still runs without BIOM coverage). |
 | RocksDB | `find_package(RocksDB CONFIG REQUIRED)` | conditional | required when `MIINT_ENABLE_SORTMERNA=ON`; vcpkg port gated via `"platform": "!emscripten"`. Linked against `RocksDB::rocksdb` (static archive). |
 | libcurl | `find_package(CURL CONFIG QUIET)`, falling back to the system `FindCURL` module | conditional | required when `MIINT_ENABLE_CURL=ON`; powers the streaming HTTPS-PUT / FTP / FTPS transport in `ena_upload_reads`. Reported as the `libcurl` row in `miint_versions()`. |
-| Catch2 | `FetchContent` @ v3.4.0 | yes (test) | used only for the `tests` C++ executable |
+| Catch2 | `FetchContent` @ v3.4.0 | yes (test) | used only for the `tests` and `tests_duckdb` C++ executables |
 
 `VCPKG_TOOLCHAIN_PATH` must be set before CMake configure.
 

@@ -808,8 +808,8 @@ set(MINIMAP2_ARCH_FLAGS "")
 set(MINIMAP2_ARCH_CFLAGS "")
 set(MINIMAP2_FPIC "-fPIC")
 if(EMSCRIPTEN)
-  # Emscripten: use WASM SIMD via SSE2 emulation (minimap2 has SIMDe support).
-  # sse2only=1 avoids SSE4.1 dispatch which requires runtime CPU detection.
+  # Emscripten: use WASM SIMD via Emscripten's SSE2 emulation. sse2only=1 avoids
+  # SSE4.1 dispatch which requires runtime CPU detection.
   set(MINIMAP2_ARCH_FLAGS "sse2only=1")
   set(MINIMAP2_ARCH_CFLAGS "-msimd128 -msse -msse2 ${EMSCRIPTEN_THREAD_CFLAGS}")
   # Keep -fPIC: required for WASM side module linking (-sSIDE_MODULE=2)
@@ -848,7 +848,7 @@ else()
     STATUS "DuckDB jemalloc not detected — minimap2 will use system allocator")
 endif()
 
-# Build minimap2 from source (v2.30)
+# Build minimap2 from source (v2.31)
 ExternalProject_Add(
   minimap2_build
   SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/minimap2
@@ -1884,6 +1884,7 @@ set(EXTENSION_SOURCES
     src/align_pairwise_ksw2_dual_affine_functions.cpp
     src/align_pairwise_ksw2_splice_functions.cpp
     src/rype_classify.cpp
+    src/rype_filter.cpp
     src/rype_extract.cpp
     src/rype_index_create.cpp
     src/rype_input_stream.cpp
@@ -2954,3 +2955,16 @@ if(MIINT_HAS_JEMALLOC)
   target_compile_definitions(tests PRIVATE MIINT_USE_JEMALLOC)
 endif()
 target_compile_definitions(tests PRIVATE HAVE_KALLOC)
+
+# C++ tests that need a running DuckDB: they open an in-process database and
+# drive miint code against it. `tests` above links no DuckDB, so these get a
+# binary of their own, linking DuckDB and miint statically, built only where
+# DuckDB builds its unittest runner (not in the WASM builds, for one).
+if(BUILD_UNITTESTS)
+  add_executable(
+    tests_duckdb
+    test/cpp/test_RypeInputStream.cpp test/cpp/test_RypeFilterParallel.cpp
+    test/cpp/test_RypeFilterSchedule.cpp)
+  target_link_libraries(tests_duckdb Catch2::Catch2WithMain duckdb_static)
+  link_extension_libraries(tests_duckdb "")
+endif()

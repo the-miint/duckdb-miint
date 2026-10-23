@@ -58,6 +58,31 @@ missing required column
 statement ok
 DROP TABLE bad_table2;
 
+# Test error: a sequence1 that is not a string, refused at bind with an error
+# naming it: EXPLAIN binds the query without running its scan. sequence2 is not
+# read here, so its type is not checked
+statement ok
+CREATE TABLE int_sequence1 AS SELECT 'seq1' AS read_id, 42 AS sequence1;
+
+statement error
+EXPLAIN SELECT * FROM rype_extract_minimizer_set('int_sequence1', 32, 10);
+----
+Column 'sequence1' in 'int_sequence1' must be VARCHAR or BLOB, not INTEGER
+
+statement ok
+CREATE TABLE int_sequence2 AS SELECT read_id, sequence1, 42 AS sequence2 FROM sequences;
+
+query I
+SELECT count(*) FROM rype_extract_strand_minimizers('int_sequence2', 32, 10);
+----
+3
+
+statement ok
+DROP TABLE int_sequence1;
+
+statement ok
+DROP TABLE int_sequence2;
+
 # Same errors for strand minimizers
 statement error
 SELECT * FROM rype_extract_strand_minimizers('sequences', 31, 10);
@@ -306,6 +331,54 @@ true
 
 statement ok
 DROP TABLE fastx_seqs;
+
+# A VARCHAR sequence is read as its own bytes. A cast to BLOB would read a
+# backslash escape in it ('\x47') as the byte it names, and refuse a malformed
+# one ('\z'), so the sequence RYpe saw would not be the one stored. The same
+# bytes held as a BLOB ('\x5C' is the backslash) must give the same set, and the
+# byte the escape names a different one.
+statement ok
+CREATE TABLE escaped_varchar AS SELECT * FROM (VALUES
+    ('escaped', 'ACGTTGCAAGCTTCGATCGGATCCAAGTTGCAACGTTAGC' || '\x47' || 'GCATGCATCCGGTTAAGCTAGCTTGACCGATCGTAGGCAT')
+) AS t(read_id, sequence1);
+
+statement ok
+CREATE TABLE malformed_varchar AS SELECT * FROM (VALUES
+    ('malformed', 'ACGTTGCAAGCTTCGATCGGATCCAAGTTGCAACGTTAGC' || '\z' || 'GCATGCATCCGGTTAAGCTAGCTTGACCGATCGTAGGCAT')
+) AS t(read_id, sequence1);
+
+statement ok
+CREATE TABLE escaped_blob AS SELECT * FROM (VALUES
+    ('same_bytes', ('ACGTTGCAAGCTTCGATCGGATCCAAGTTGCAACGTTAGC' || '\x5Cx47' || 'GCATGCATCCGGTTAAGCTAGCTTGACCGATCGTAGGCAT')::BLOB),
+    ('named_byte', ('ACGTTGCAAGCTTCGATCGGATCCAAGTTGCAACGTTAGC' || 'G' || 'GCATGCATCCGGTTAAGCTAGCTTGACCGATCGTAGGCAT')::BLOB),
+    ('malformed_bytes', ('ACGTTGCAAGCTTCGATCGGATCCAAGTTGCAACGTTAGC' || '\x5Cz' || 'GCATGCATCCGGTTAAGCTAGCTTGACCGATCGTAGGCAT')::BLOB)
+) AS t(read_id, sequence1);
+
+query III
+SELECT len(v.fwd_set) > 0, v.fwd_set = same.fwd_set, v.fwd_set = named.fwd_set
+FROM (SELECT * FROM rype_extract_minimizer_set('escaped_varchar', 16, 4)) v,
+     (SELECT * FROM rype_extract_minimizer_set('escaped_blob', 16, 4)) same,
+     (SELECT * FROM rype_extract_minimizer_set('escaped_blob', 16, 4)) named
+WHERE v.read_id = 'escaped' AND same.read_id = 'same_bytes' AND named.read_id = 'named_byte';
+----
+true	true	false
+
+query II
+SELECT len(m.fwd_set) > 0, m.fwd_set = same.fwd_set
+FROM (SELECT * FROM rype_extract_minimizer_set('malformed_varchar', 16, 4)) m,
+     (SELECT * FROM rype_extract_minimizer_set('escaped_blob', 16, 4)) same
+WHERE same.read_id = 'malformed_bytes';
+----
+true	true
+
+statement ok
+DROP TABLE escaped_varchar;
+
+statement ok
+DROP TABLE malformed_varchar;
+
+statement ok
+DROP TABLE escaped_blob;
 
 # =============================================================================
 # Cleanup

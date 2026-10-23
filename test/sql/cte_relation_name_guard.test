@@ -535,6 +535,16 @@ WITH c AS (SELECT 1 AS x) SELECT * FROM rype_classify('nope.ryxdi', 'c');
 rype_classify: 'c' is a common table expression
 
 statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM rype_filter('c', 'nope.ryxdi');
+----
+rype_filter: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM rype_filter('c', 'nope.ryxdi', 'nope.mmi');
+----
+rype_filter: 'c' is a common table expression
+
+statement error
 WITH c AS (SELECT 1 AS x) SELECT * FROM rype_extract_minimizer_set('c', 16, 8);
 ----
 rype_extract_minimizer_set: 'c' is a common table expression
