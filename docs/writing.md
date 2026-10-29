@@ -206,6 +206,8 @@ With `INCLUDE_HEADER=false` no `@SQ` lines are written at all, so the ordering a
 - `COMPRESSION_LEVEL` (BAM, and gzip SAM): BGZF compression level 0-9 (default: 6). Higher = better compression, slower speed. Refused for uncompressed SAM, as for FASTQ, FASTA and NEWICK.
 - **Multithreaded compression:** BAM and gzip-SAM output compress in parallel, following DuckDB's thread count (`PRAGMA threads`). Record order is preserved and the output is byte-identical to single-threaded writing. (The speedup is smaller than for FASTQ/FASTA because per-record marshalling is serialized; only the BGZF compression is parallelized.)
 
+A COPY reads `REFERENCE_LENGTHS` and `SEQUENCE_DATA` once, when it runs. With `PARTITION_BY` or `PER_THREAD_OUTPUT`, which write several files, every file gets the same `@SQ` lines and the same sequences from that one read.
+
 **SAM Format Examples:**
 ```sql
 -- Create reference table (recommended for reuse, especially with large reference sets)

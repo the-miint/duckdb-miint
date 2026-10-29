@@ -15,6 +15,7 @@
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/vector_operations/generic_executor.hpp"
 #include "duckdb/function/copy_function.hpp"
+#include "duckdb/main/client_context_state.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 #include <htslib-1.22.1/htslib/sam.h>
 #include <htslib-1.22.1/htslib/hts.h>
@@ -330,6 +331,56 @@ static unique_ptr<FunctionData> BAMCopyBind(ClientContext &context, CopyFunction
 }
 
 //===--------------------------------------------------------------------===//
+// REFERENCE_LENGTHS and SEQUENCE_DATA, read once per COPY
+//===--------------------------------------------------------------------===//
+// DuckDB initializes each output file on its own (PER_THREAD_OUTPUT, PARTITION_BY and ORDER_BY write
+// several) and gives a format no hook for the COPY as a whole. So the first file's InitializeGlobal
+// reads the relations and the COPY's other files share what it read: every file gets the same
+// header and the same sequences. What was read is kept in the client context until the query ends,
+// so a prepared COPY reads the relations again each time it is executed.
+struct SAMCopyRelations {
+	std::vector<std::pair<std::string, uint64_t>> reference_lengths;
+	std::optional<SequenceDataMap> sequence_data;
+};
+
+class SAMCopyRelationsCache : public ClientContextState {
+public:
+	shared_ptr<const SAMCopyRelations> GetOrRead(ClientContext &context, const SAMCopyBindData &fdata) {
+		// Held while reading, so the COPY's other files wait for this read instead of making their own
+		lock_guard<mutex> guard(lock);
+		auto &relations = by_copy[&fdata];
+		if (!relations) {
+			auto read = make_shared_ptr<SAMCopyRelations>();
+			if (fdata.reference_lengths_table.has_value()) {
+				// SORTED BY NAME, not the map's iteration order. A reference's index in the @SQ list IS
+				// its TID, and a BAM is coordinate-sorted by TID rather than by reference name -- so
+				// emitting @SQ in unordered_map hash order meant no ORDER BY the caller could write
+				// produced a coordinate-sorted file, and htslib consumers rejected the output (#173).
+				// Name order is deterministic regardless of scan parallelism and makes the natural
+				// `ORDER BY reference, position` correct.
+				read->reference_lengths =
+				    ReadReferenceTableSortedByName(context, fdata.reference_lengths_table.value());
+			}
+			if (fdata.sequence_data_table.has_value()) {
+				read->sequence_data = ReadSequenceDataTable(context, fdata.sequence_data_table.value());
+			}
+			relations = std::move(read);
+		}
+		return relations;
+	}
+
+	void QueryEnd(ClientContext &context) override {
+		lock_guard<mutex> guard(lock);
+		by_copy.clear();
+	}
+
+private:
+	mutex lock;
+	// Keyed by the COPY's bind data, one object for all of its files
+	unordered_map<const SAMCopyBindData *, shared_ptr<const SAMCopyRelations>> by_copy;
+};
+
+//===--------------------------------------------------------------------===//
 // Global State
 //===--------------------------------------------------------------------===//
 struct SAMCopyGlobalState : public GlobalFunctionData {
@@ -338,7 +389,8 @@ struct SAMCopyGlobalState : public GlobalFunctionData {
 	SAMHeaderPtr header;
 	std::atomic<bool> header_written {false};
 	bool include_header = true;
-	std::optional<SequenceDataMap> sequence_data;
+	// REFERENCE_LENGTHS and SEQUENCE_DATA as the COPY read them; null without either
+	shared_ptr<const SAMCopyRelations> relations;
 };
 
 static unique_ptr<GlobalFunctionData> SAMCopyInitializeGlobal(ClientContext &context, FunctionData &bind_data,
@@ -389,17 +441,14 @@ static unique_ptr<GlobalFunctionData> SAMCopyInitializeGlobal(ClientContext &con
 		throw IOException("Failed to create SAM header");
 	}
 
-	if (fdata.reference_lengths_table.has_value()) {
-		// SORTED BY NAME, not the map's iteration order. A reference's index in the @SQ list IS
-		// its TID, and a BAM is coordinate-sorted by TID rather than by reference name -- so
-		// emitting @SQ in unordered_map hash order meant no ORDER BY the caller could write
-		// produced a coordinate-sorted file, and htslib consumers rejected the output (#173).
-		// Name order is deterministic regardless of scan parallelism and makes the natural
-		// `ORDER BY reference, position` correct.
-		auto reference_lengths = ReadReferenceTableSortedByName(context, fdata.reference_lengths_table.value());
+	if (fdata.reference_lengths_table.has_value() || fdata.sequence_data_table.has_value()) {
+		gstate->relations = context.registered_state->GetOrCreate<SAMCopyRelationsCache>("miint_copy_sam_relations")
+		                        ->GetOrRead(context, fdata);
+	}
 
+	if (fdata.reference_lengths_table.has_value()) {
 		// Add each reference to header
-		for (const auto &ref : reference_lengths) {
+		for (const auto &ref : gstate->relations->reference_lengths) {
 			if (sam_hdr_add_line(gstate->header.get(), "SQ", "SN", ref.first.c_str(), "LN",
 			                     std::to_string(ref.second).c_str(), NULL) < 0) {
 				throw IOException("Failed to add reference to SAM header: %s", ref.first);
@@ -408,11 +457,6 @@ static unique_ptr<GlobalFunctionData> SAMCopyInitializeGlobal(ClientContext &con
 	}
 	// If no reference_lengths provided, header remains empty
 	// References will be added dynamically as we encounter them during writing
-
-	// Load sequence data if provided
-	if (fdata.sequence_data_table.has_value()) {
-		gstate->sequence_data = ReadSequenceDataTable(context, fdata.sequence_data_table.value());
-	}
 
 	return std::move(gstate);
 }
@@ -878,9 +922,9 @@ static void SAMCopySink(ExecutionContext &context, FunctionData &bind_data, Glob
 		const char *final_seq = nullptr;
 		const char *final_qual = nullptr;
 
-		if (gstate.sequence_data.has_value()) {
-			PrepareSeqQual(gstate.sequence_data.value(), read_id, flags, lstate.cigar_buffer, lstate.seq_buffer,
-			               lstate.qual_buffer);
+		if (gstate.relations && gstate.relations->sequence_data.has_value()) {
+			PrepareSeqQual(gstate.relations->sequence_data.value(), read_id, flags, lstate.cigar_buffer,
+			               lstate.seq_buffer, lstate.qual_buffer);
 			l_seq = lstate.seq_buffer.size();
 			final_seq = lstate.seq_buffer.c_str();
 			final_qual =

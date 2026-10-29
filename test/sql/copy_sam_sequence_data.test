@@ -347,3 +347,78 @@ AAACCCGGGT	[40, 40, 40, 40, 40, 37, 37, 37, 37, 37]
 
 statement ok
 DROP VIEW csv_seqs;
+
+# ===================================================================
+# A COPY reads REFERENCE_LENGTHS and SEQUENCE_DATA once, whatever the number of files
+# ===================================================================
+# A partitioned COPY writes a file per partition. Every file must get its header and its sequences
+# from one read of each relation, or files of the same COPY disagree. Views whose rows differ on
+# each read show it: each read of random_refs gives other lengths, each read of random_seqs other
+# qualities. Every alignment is written to both partitions.
+statement ok
+CREATE VIEW random_refs AS SELECT name, length + (random() * 1000000)::BIGINT AS length FROM ref_lens;
+
+statement ok
+CREATE VIEW random_seqs AS
+SELECT read_id, sequence1, list_transform(qual1, lambda q: (q + r)::UTINYINT) AS qual1, sequence2,
+       list_transform(qual2, lambda q: (q + r)::UTINYINT) AS qual2
+FROM (SELECT *, (random() * 50)::UTINYINT AS r FROM seq_data);
+
+statement ok
+COPY (SELECT *, 0 AS part FROM alignments UNION ALL SELECT *, 1 AS part FROM alignments)
+TO '{TEST_DIR}/read_once' (FORMAT SAM, REFERENCE_LENGTHS 'random_refs', SEQUENCE_DATA 'random_seqs', PARTITION_BY (part));
+
+# Two files, and one length for each reference across them
+query III
+SELECT count(*), count(DISTINCT regexp_extract(content, 'SN:chr1\tLN:(\d+)', 1)),
+       count(DISTINCT regexp_extract(content, 'SN:chr2\tLN:(\d+)', 1))
+FROM read_text('{TEST_DIR}/read_once/*/*.sam');
+----
+2	1	1
+
+# Each record is in both files with the same qualities
+query I
+SELECT count(*) FROM (
+    SELECT read_id, flags, count(*) AS records, count(DISTINCT qual) AS quals
+    FROM read_alignments('{TEST_DIR}/read_once/*/*.sam', include_seq_qual=true)
+    GROUP BY read_id, flags)
+WHERE records <> 2 OR quals <> 1;
+----
+0
+
+# What a COPY read is not kept for the next one: a prepared COPY reads the relations again each
+# time it is executed, so a reference added in between is in the header the second time.
+statement ok
+CREATE TABLE growing_refs AS SELECT * FROM ref_lens;
+
+statement ok
+PREPARE copy_growing AS
+COPY alignments TO '{TEST_DIR}/growing_refs.sam' (FORMAT SAM, REFERENCE_LENGTHS 'growing_refs');
+
+statement ok
+EXECUTE copy_growing;
+
+query I
+SELECT content LIKE '%SN:chr3%' FROM read_text('{TEST_DIR}/growing_refs.sam');
+----
+false
+
+statement ok
+INSERT INTO growing_refs VALUES ('chr3', 3000);
+
+statement ok
+EXECUTE copy_growing;
+
+query I
+SELECT content LIKE '%SN:chr3%' FROM read_text('{TEST_DIR}/growing_refs.sam');
+----
+true
+
+statement ok
+DROP TABLE growing_refs;
+
+statement ok
+DROP VIEW random_seqs;
+
+statement ok
+DROP VIEW random_refs;
