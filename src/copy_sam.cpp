@@ -19,6 +19,7 @@
 #include "duckdb/parallel/task_scheduler.hpp"
 #include <htslib-1.22.1/htslib/sam.h>
 #include <htslib-1.22.1/htslib/hts.h>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -333,11 +334,11 @@ static unique_ptr<FunctionData> BAMCopyBind(ClientContext &context, CopyFunction
 //===--------------------------------------------------------------------===//
 // REFERENCE_LENGTHS and SEQUENCE_DATA, read once per COPY
 //===--------------------------------------------------------------------===//
-// DuckDB initializes each output file on its own (PER_THREAD_OUTPUT, PARTITION_BY and ORDER_BY write
-// several) and gives a format no hook for the COPY as a whole. So the first file's InitializeGlobal
-// reads the relations and the COPY's other files share what it read: every file gets the same
-// header and the same sequences. What was read is kept in the client context until the query ends,
-// so a prepared COPY reads the relations again each time it is executed.
+// DuckDB initializes each output file of a COPY on its own and gives a format no execution-time hook
+// for the COPY as a whole. So the first file's InitializeGlobal reads the relations and the COPY's
+// other files share what it read: every file gets the same header and the same sequences. What was
+// read is kept in the client context until the query ends, so a prepared COPY reads the relations
+// again each time it is executed.
 struct SAMCopyRelations {
 	std::vector<std::pair<std::string, uint64_t>> reference_lengths;
 	std::optional<SequenceDataMap> sequence_data;
@@ -346,9 +347,10 @@ struct SAMCopyRelations {
 class SAMCopyRelationsCache : public ClientContextState {
 public:
 	shared_ptr<const SAMCopyRelations> GetOrRead(ClientContext &context, const SAMCopyBindData &fdata) {
+		const CopyExecution copy {&fdata, context.transaction.GetActiveQuery()};
 		// Held while reading, so the COPY's other files wait for this read instead of making their own
 		lock_guard<mutex> guard(lock);
-		auto &relations = by_copy[&fdata];
+		auto &relations = by_copy[copy];
 		if (!relations) {
 			auto read = make_shared_ptr<SAMCopyRelations>();
 			if (fdata.reference_lengths_table.has_value()) {
@@ -375,9 +377,13 @@ public:
 	}
 
 private:
+	// The COPY's bind data, one object for all of its files, and the statement running it. A query can
+	// run several statements (IMPORT DATABASE runs its load.sql's), freeing each one's bind data
+	// before the next is planned, so the address alone can repeat within a query.
+	using CopyExecution = std::pair<const SAMCopyBindData *, transaction_t>;
+
 	mutex lock;
-	// Keyed by the COPY's bind data, one object for all of its files
-	unordered_map<const SAMCopyBindData *, shared_ptr<const SAMCopyRelations>> by_copy;
+	std::map<CopyExecution, shared_ptr<const SAMCopyRelations>> by_copy;
 };
 
 //===--------------------------------------------------------------------===//

@@ -685,6 +685,12 @@ statement ok
 COPY (SELECT 42 AS fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length FROM single_placement)
 TO '{TEST_DIR}/changing_placements.csv';
 
+# read_csv now detects the column as BIGINT
+query T
+SELECT typeof(fragment_id) FROM read_csv('{TEST_DIR}/changing_placements.csv') LIMIT 1;
+----
+BIGINT
+
 statement ok
 EXECUTE copy_csv;
 

@@ -13,26 +13,18 @@ namespace duckdb {
 
 SequenceDataSchema ValidateSequenceDataSchema(ClientContext &context, const std::string &table_name) {
 	auto info = GetTableOrViewColumns(context, table_name, "Sequence data table");
-	auto &col_names = info.names;
 
-	// Build case-insensitive name-to-index map
-	std::unordered_map<string, idx_t> name_to_idx;
-	for (idx_t i = 0; i < col_names.size(); i++) {
-		name_to_idx[StringUtil::Lower(col_names[i])] = i;
-	}
-
-	// Only which columns there are: their types are checked on what ReadSequenceDataTable reads,
-	// as the catalog's types for a view can lag behind a file it reads
+	// Only which columns there are: ReadSequenceDataTable checks their types on what it reads
 	for (const char *required : {"read_id", "sequence1", "qual1"}) {
-		if (name_to_idx.find(required) == name_to_idx.end()) {
+		if (!HasColumn(info, required)) {
 			throw BinderException("Sequence data table '%s' missing required column '%s'", table_name, required);
 		}
 	}
 
 	// Optional columns (for paired-end)
 	SequenceDataSchema schema;
-	schema.has_sequence2 = name_to_idx.find("sequence2") != name_to_idx.end();
-	schema.has_qual2 = name_to_idx.find("qual2") != name_to_idx.end();
+	schema.has_sequence2 = HasColumn(info, "sequence2");
+	schema.has_qual2 = HasColumn(info, "qual2");
 
 	return schema;
 }

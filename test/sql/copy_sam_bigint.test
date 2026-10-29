@@ -207,7 +207,7 @@ Column 'mate_reference' must be VARCHAR, BIGINT, or UUID
 # ---------------------------------------------------------------------------
 # REFERENCE_LENGTHS' name and SEQUENCE_DATA's read_id are ids, so they take
 # BIGINT too: a BIGINT-keyed reference or sequence table is matched against
-# the BIGINT reference and read_id columns with no cast to text.
+# the BIGINT reference and read_id columns with no cast in the query.
 # ---------------------------------------------------------------------------
 
 statement ok
@@ -242,9 +242,10 @@ FROM read_alignments('{TEST_DIR}/bigint_names_headerless.sam', reference_lengths
 2001	2002
 
 # @SQ follows the names' own order, numeric for BIGINT, so that `ORDER BY reference, position`
-# gives a coordinate-sorted file: 2 comes before 10, though '10' sorts before '2' as text.
+# gives a coordinate-sorted file: 2 comes before 10, though '10' sorts before '2' as text, and -5,
+# signed, comes first.
 statement ok
-CREATE TABLE ref_numeric_names AS SELECT * FROM (VALUES (10::BIGINT, 1000), (2::BIGINT, 1000), (1::BIGINT, 1000)) t(name, length);
+CREATE TABLE ref_numeric_names AS SELECT * FROM (VALUES (10::BIGINT, 1000), (2::BIGINT, 1000), (-5::BIGINT, 1000), (1::BIGINT, 1000)) t(name, length);
 
 statement ok
 COPY (SELECT * FROM result_all_bigint WHERE false) TO '{TEST_DIR}/numeric_sq.sam'
@@ -256,6 +257,7 @@ FROM read_csv('{TEST_DIR}/numeric_sq.sam', delim='\x1f', header=false,
               columns={'line':'VARCHAR'}, auto_detect=false, quote='', escape='')
 WHERE line LIKE '@SQ%';
 ----
+-5
 1
 2
 10

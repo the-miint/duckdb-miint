@@ -370,7 +370,7 @@ rows each within tolerance of the next walks the pass down to the lowest
 `pendant_length` in the chain, which may sit outside tolerance of the maximum.
 
 Edge grouping and chain order are then keyed on the data itself — edges in
-`edge_id` order, placements within an edge by `distal_length` then `fragment_id`
+`edge_id` order, placements within an edge by `distal_length` then `fragment_id`'s text
 — rather than on `std::unordered_map` iteration, whose order is unspecified and
 varies with insertion order and standard-library implementation. The
 `fragment_id` tiebreak matters because a placer reporting one position per edge

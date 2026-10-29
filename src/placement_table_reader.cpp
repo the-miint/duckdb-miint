@@ -32,17 +32,15 @@ static bool IsPlacementEdgeIdType(const LogicalType &type) {
 	}
 }
 
-static bool IsPlacementLengthType(const LogicalType &type) {
+static bool IsDoubleOrFloat(const LogicalType &type) {
 	return type.id() == LogicalTypeId::DOUBLE || type.id() == LogicalTypeId::FLOAT;
 }
 
 static const PlacementColumn PLACEMENT_COLUMNS[] = {
     // A fragment is a read, so its id takes the id types
-    {"fragment_id", IsAllowedIdType, AllowedIdTypeList()},
-    {"edge_id", IsPlacementEdgeIdType, "an integer type"},
-    {"like_weight_ratio", IsPlacementLengthType, "DOUBLE or FLOAT"},
-    {"distal_length", IsPlacementLengthType, "DOUBLE or FLOAT"},
-    {"pendant_length", IsPlacementLengthType, "DOUBLE or FLOAT"},
+    {"fragment_id", IsAllowedIdType, AllowedIdTypeList()},     {"edge_id", IsPlacementEdgeIdType, "an integer type"},
+    {"like_weight_ratio", IsDoubleOrFloat, "DOUBLE or FLOAT"}, {"distal_length", IsDoubleOrFloat, "DOUBLE or FLOAT"},
+    {"pendant_length", IsDoubleOrFloat, "DOUBLE or FLOAT"},
 };
 
 void ValidatePlacementTableSchema(ClientContext &context, const std::string &table_name) {

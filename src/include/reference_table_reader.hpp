@@ -16,13 +16,13 @@ namespace duckdb {
 // either tables or views.
 //
 // Required columns (by position):
-//   - Column 0: reference name (VARCHAR, BIGINT or UUID; returned as its text) - must not be NULL
+//   - Column 0: reference name (an id type, IsAllowedIdType; returned as its text) - must not be NULL
 //   - Column 1: reference length (BIGINT, INTEGER, UBIGINT, or UINTEGER) - must not be NULL
 //
 // Throws InvalidInputException if:
 //   - Table/view doesn't exist
 //   - Table/view has fewer than 2 columns
-//   - Column types are incorrect (the types the read returns, which a view's catalog entry can lag)
+//   - Column types are incorrect (checked on the types the read returns)
 //   - Table/view is empty
 //   - NULL value in name or length column
 //   - Negative length value

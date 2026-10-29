@@ -32,7 +32,7 @@ struct NewickCopyBindData : public FunctionData {
 	idx_t branch_length_idx = DConstants::INVALID_INDEX;
 	idx_t edge_id_idx = DConstants::INVALID_INDEX;
 
-	// The name column's type: VARCHAR, BIGINT or UUID
+	// The name column's type, an id type (IsAllowedIdType)
 	LogicalType name_type = LogicalType::VARCHAR;
 
 	unique_ptr<FunctionData> Copy() const override {
@@ -266,7 +266,7 @@ static void NewickCopySink(ExecutionContext &context, FunctionData &bind_data, G
 	auto &fdata = bind_data.Cast<NewickCopyBindData>();
 	auto &lstate = lstate_p.Cast<NewickCopyLocalState>();
 
-	// Get unified formats for all columns
+	// Unified formats for the numeric columns; names are extracted as text below
 	UnifiedVectorFormat node_index_data, parent_index_data;
 	UnifiedVectorFormat branch_length_data, edge_id_data;
 

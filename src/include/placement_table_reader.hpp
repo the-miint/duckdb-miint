@@ -13,8 +13,8 @@ namespace duckdb {
 // connection (docs/internals/reading-tables-views.md).
 //
 // Required columns (by name, case-insensitive):
-//   - fragment_id (VARCHAR, BIGINT or UUID) - NULL values are silently skipped; a BIGINT or UUID
-//     id is returned as its text
+//   - fragment_id (an id type, IsAllowedIdType) - NULL values are silently skipped; returned as
+//     its text
 //   - edge_id (BIGINT, INTEGER, UBIGINT, or UINTEGER) - must not be NULL
 //   - like_weight_ratio (DOUBLE or FLOAT) - must not be NULL
 //   - distal_length (DOUBLE or FLOAT) - must not be NULL

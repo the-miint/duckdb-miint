@@ -154,10 +154,10 @@ DROP TABLE missing_parent;
 # Column types
 # =============================================================================
 
-# Each tree column takes one type, as COPY SAM's columns do: node_index, parent_index and edge_id
-# BIGINT, branch_length DOUBLE. A column of another type is refused when the COPY is planned,
-# naming the column and the type it needs, and the database stays usable. A tree built from
-# untyped literals has INTEGER indices and DECIMAL branch lengths (#375), so it is refused.
+# Each tree column takes one type: node_index, parent_index and edge_id BIGINT, branch_length
+# DOUBLE. A column of another type is refused when the COPY is planned, naming the column and the
+# type it needs, and the database stays usable. A tree built from untyped literals has INTEGER
+# indices and DECIMAL branch lengths, so it is refused.
 statement ok
 CREATE TABLE literal_tree AS
 SELECT * FROM (VALUES (0, NULL, NULL, NULL), (1, 0, 'a', 0.1), (2, 0, 'b', 0.2))

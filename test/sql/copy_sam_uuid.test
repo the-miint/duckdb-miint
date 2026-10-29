@@ -186,7 +186,7 @@ Column 'read_id' must be VARCHAR, BIGINT, or UUID
 
 # ---------------------------------------------------------------------------
 # REFERENCE_LENGTHS' name and SEQUENCE_DATA's read_id take UUID too, matched
-# against the UUID reference and read_id columns with no cast to text.
+# against the UUID reference and read_id columns with no cast in the query.
 # ---------------------------------------------------------------------------
 
 statement ok
@@ -208,3 +208,33 @@ SELECT read_id, reference, mate_reference, sequence
 FROM read_alignments('{TEST_DIR}/uuid_names.sam', include_seq_qual=true);
 ----
 11111111-1111-1111-1111-111111111111	aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa	bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb	CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+
+# @SQ is in the names' order, which for UUIDs is their text's order, so that `ORDER BY reference,
+# position` gives a coordinate-sorted file. These names sit on either side of the top bit, which
+# DuckDB flips in its UUID storage so that UUIDs sort as their text.
+statement ok
+CREATE TABLE ref_uuid_order AS SELECT * FROM (VALUES
+    ('80000000-0000-0000-0000-000000000000'::UUID, 1000),
+    ('7fffffff-ffff-ffff-ffff-ffffffffffff'::UUID, 1000),
+    ('00000000-0000-0000-0000-000000000001'::UUID, 1000)) t(name, length);
+
+statement ok
+COPY (SELECT * FROM result_all_uuid WHERE false) TO '{TEST_DIR}/uuid_sq.sam'
+(FORMAT SAM, REFERENCE_LENGTHS 'ref_uuid_order');
+
+query T
+SELECT regexp_extract(line, 'SN:([^\t]+)', 1) AS sn
+FROM read_csv('{TEST_DIR}/uuid_sq.sam', delim='\x1f', header=false,
+              columns={'line':'VARCHAR'}, auto_detect=false, quote='', escape='')
+WHERE line LIKE '@SQ%';
+----
+00000000-0000-0000-0000-000000000001
+7fffffff-ffff-ffff-ffff-ffffffffffff
+80000000-0000-0000-0000-000000000000
+
+query T
+SELECT name::VARCHAR FROM ref_uuid_order ORDER BY name;
+----
+00000000-0000-0000-0000-000000000001
+7fffffff-ffff-ffff-ffff-ffffffffffff
+80000000-0000-0000-0000-000000000000

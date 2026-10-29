@@ -12,9 +12,7 @@
 
 namespace duckdb {
 
-// Check the types the read returned. Not the catalog's: a view's types there are those of its last
-// binding, which can lag behind a file it reads whose detected types changed
-// (docs/internals/reading-tables-views.md).
+// Check the types the read returned, not the catalog's (docs/internals/reading-tables-views.md)
 static void CheckReferenceColumnTypes(const vector<LogicalType> &types, const std::string &table_name) {
 	if (types.size() < 2) {
 		throw InvalidInputException("Reference table '%s' must have at least 2 columns (name, length)", table_name);
@@ -37,9 +35,9 @@ static void CheckReferenceColumnTypes(const vector<LogicalType> &types, const st
 // Shared core: read the table/view into (name, length) pairs in the order the scan produced
 // them, collapsing duplicate names to their FIRST occurrence. Both public entry points are thin
 // wrappers over this so the validation, error messages and duplicate handling live in one place.
-// `name_type` receives the name column's type; its names are returned as their text.
+// The names are returned as their text; `name_type`, when given, receives the name column's type.
 static std::vector<std::pair<std::string, uint64_t>>
-ReadReferenceRows(ClientContext &context, const std::string &table_name, LogicalType &name_type) {
+ReadReferenceRows(ClientContext &context, const std::string &table_name, optional_ptr<LogicalType> name_type) {
 	std::vector<std::pair<std::string, uint64_t>> result;
 	std::unordered_set<std::string> seen;
 
@@ -64,7 +62,9 @@ ReadReferenceRows(ClientContext &context, const std::string &table_name, Logical
 	auto &materialized = *query_result;
 	auto &result_types = materialized.GetTypes();
 	CheckReferenceColumnTypes(result_types, table_name);
-	name_type = result_types[0];
+	if (name_type) {
+		*name_type = result_types[0];
+	}
 	std::vector<std::string> names;
 	std::vector<bool> name_nulls;
 
@@ -86,7 +86,7 @@ ReadReferenceRows(ClientContext &context, const std::string &table_name, Logical
 		UnifiedVectorFormat length_data;
 		length_vector.ToUnifiedFormat(length_data);
 
-		ExtractIdColumnAsStrings(*chunk, 0, name_type, names, name_nulls);
+		ExtractIdColumnAsStrings(*chunk, 0, result_types[0], names, name_nulls);
 
 		for (idx_t i = 0; i < chunk->size(); i++) {
 			row_number++;
@@ -147,8 +147,7 @@ ReadReferenceRows(ClientContext &context, const std::string &table_name, Logical
 }
 
 std::unordered_map<std::string, uint64_t> ReadReferenceTable(ClientContext &context, const std::string &table_name) {
-	LogicalType name_type;
-	auto rows = ReadReferenceRows(context, table_name, name_type);
+	auto rows = ReadReferenceRows(context, table_name, nullptr);
 
 	std::unordered_map<std::string, uint64_t> result;
 	result.reserve(rows.size());
@@ -170,7 +169,7 @@ std::vector<std::pair<std::string, uint64_t>> ReadReferenceTableSortedByName(Cli
 		std::vector<std::pair<int64_t, std::pair<std::string, uint64_t>>> keyed;
 		keyed.reserve(rows.size());
 		for (auto &row : rows) {
-			const auto key = std::stoll(row.first);
+			const auto key = *::miint::ParseIdAsInt64(row.first);
 			keyed.emplace_back(key, std::move(row));
 		}
 		std::sort(keyed.begin(), keyed.end(),

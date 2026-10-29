@@ -227,8 +227,8 @@ statement ok
 PREPARE read_csv_refs AS
 SELECT COUNT(*) FROM read_alignments('data/sam/foo_no_header.sam', reference_lengths='csv_refs');
 
-# A name that becomes a type ids do not take is refused, not read as text (which took the
-# database down).
+# A name that becomes a type ids do not take is refused: read as text, it would be an
+# internal error that invalidates the database.
 statement ok
 COPY (SELECT 4.5 AS name, length FROM ref_lengths_table) TO '{TEST_DIR}/changing_refs.csv';
 

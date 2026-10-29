@@ -242,6 +242,23 @@ COPY alignments TO '{TEST_DIR}/err_qualtype.sam' (FORMAT SAM, REFERENCE_LENGTHS 
 ----
 must be LIST(UTINYINT)
 
+# The paired-end columns' types are checked too.
+statement ok
+CREATE TABLE bad_seq2_type AS SELECT read_id, sequence1, qual1, length(sequence2) AS sequence2, qual2 FROM seq_data;
+
+statement error
+COPY alignments TO '{TEST_DIR}/err_seq2type.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'bad_seq2_type');
+----
+Column 'sequence2' in sequence data table 'bad_seq2_type' must be VARCHAR
+
+statement ok
+CREATE TABLE bad_qual2_type AS SELECT read_id, sequence1, qual1, sequence2, qual2::INTEGER[] AS qual2 FROM seq_data;
+
+statement error
+COPY alignments TO '{TEST_DIR}/err_qual2type.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'bad_qual2_type');
+----
+Column 'qual2' in sequence data table 'bad_qual2_type' must be LIST(UTINYINT)
+
 # ===================================================================
 # Test 21: Empty SEQUENCE_DATA table throws error
 # ===================================================================
@@ -312,8 +329,8 @@ statement ok
 PREPARE copy_csv_seqs AS
 COPY alignments TO '{TEST_DIR}/csv_seqs.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'csv_seqs');
 
-# A read_id that becomes a type ids do not take is refused, not read as text (which took the
-# database down).
+# A read_id that becomes a type ids do not take is refused: read as text, it would be an
+# internal error that invalidates the database.
 statement ok
 COPY (SELECT row_number() OVER () + 0.5 AS read_id, sequence1, qual1, sequence2, qual2 FROM seq_data)
 TO '{TEST_DIR}/changing_seqs.csv';
@@ -323,7 +340,7 @@ EXECUTE copy_csv_seqs;
 ----
 <REGEX>:Invalid Input Error: Column 'read_id' in sequence data table 'csv_seqs' must be VARCHAR, BIGINT, or UUID.*
 
-# Every column is checked: here sequence1 becomes an integer.
+# Not only read_id is checked: here sequence1 becomes an integer.
 statement ok
 COPY (SELECT read_id, length(sequence1) AS sequence1, qual1, sequence2, qual2 FROM seq_data)
 TO '{TEST_DIR}/changing_seqs.csv';
@@ -417,6 +434,39 @@ true
 
 statement ok
 DROP TABLE growing_refs;
+
+# Each COPY gets its own read even when one query runs several: IMPORT DATABASE runs every COPY in
+# its load.sql in one query, and frees each COPY's plan before planning the next, so the next can
+# be given the same memory. Here the second COPY must get refs_b's lengths, not refs_a's.
+statement ok
+CREATE TABLE refs_a AS SELECT name, 1111 AS length FROM ref_lens;
+
+statement ok
+CREATE TABLE refs_b AS SELECT name, 3333 AS length FROM ref_lens;
+
+statement ok
+COPY (SELECT 1 WHERE false) TO '{TEST_DIR}/schema.sql' (HEADER false);
+
+statement ok
+COPY (SELECT 'COPY alignments TO ''import_a.sam'' (FORMAT SAM, REFERENCE_LENGTHS ''refs_a'');'
+      UNION ALL SELECT 'COPY alignments TO ''import_b.sam'' (FORMAT SAM, REFERENCE_LENGTHS ''refs_b'');')
+TO '{TEST_DIR}/load.sql' (HEADER false, DELIMITER '|');
+
+statement ok
+IMPORT DATABASE '{TEST_DIR}';
+
+query II
+SELECT regexp_extract(filename, 'import_([ab])\.sam$', 1) AS file, regexp_extract(content, 'SN:chr1\tLN:(\d+)', 1) AS chr1_length
+FROM read_text(['{TEST_DIR}/import_a.sam', '{TEST_DIR}/import_b.sam']) ORDER BY file;
+----
+a	1111
+b	3333
+
+statement ok
+DROP TABLE refs_a;
+
+statement ok
+DROP TABLE refs_b;
 
 statement ok
 DROP VIEW random_seqs;
