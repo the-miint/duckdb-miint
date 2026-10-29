@@ -548,6 +548,57 @@ statement ok
 DROP TABLE jplace_style_placements;
 
 # =============================================================================
+# The placements are read when the COPY runs, not when it is planned
+# =============================================================================
+
+# A prepared COPY writes the placements as they are when it is executed, so a fragment added
+# after PREPARE is in the tree.
+statement ok
+CREATE TABLE growing_placements AS SELECT * FROM single_placement;
+
+statement ok
+PREPARE copy_growing AS
+COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
+TO '{TEST_DIR}/prepared_placements.nwk' (FORMAT NEWICK, PLACEMENTS 'growing_placements');
+
+statement ok
+INSERT INTO growing_placements VALUES ('late_frag', 1::BIGINT, 0.80::DOUBLE, 0.10::DOUBLE, 0.002::DOUBLE);
+
+statement ok
+EXECUTE copy_growing;
+
+query T
+SELECT name FROM read_newick('{TEST_DIR}/prepared_placements.nwk')
+WHERE name IN ('single_frag', 'late_frag') ORDER BY name;
+----
+late_frag
+single_frag
+
+statement ok
+DROP TABLE growing_placements;
+
+# Planning the COPY reads no placement rows: EXPLAIN succeeds with a view whose rows cannot be
+# read, and the COPY fails only when it runs.
+statement ok
+CREATE VIEW unreadable_placements AS
+SELECT fragment_id, edge_id, like_weight_ratio, distal_length,
+       CAST(error('placement rows were read') AS DOUBLE) AS pendant_length
+FROM single_placement;
+
+statement ok
+EXPLAIN COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
+TO '{TEST_DIR}/explain_placements.nwk' (FORMAT NEWICK, PLACEMENTS 'unreadable_placements');
+
+statement error
+COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
+TO '{TEST_DIR}/unreadable_placements.nwk' (FORMAT NEWICK, PLACEMENTS 'unreadable_placements');
+----
+placement rows were read
+
+statement ok
+DROP VIEW unreadable_placements;
+
+# =============================================================================
 # Cleanup
 # =============================================================================
 

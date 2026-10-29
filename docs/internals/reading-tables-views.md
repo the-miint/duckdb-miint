@@ -94,17 +94,17 @@ pass a connection they created a TEMP view on, so it deliberately does not inher
 
 ## Helper connections at EXECUTION time
 
-Most callers open a helper connection during `Bind`. It also works from `InitGlobal`
-(`DeblurInitGlobal`) and from `Execute` — the progressive PCoA functions run their whole
-wave-fill (`CREATE TEMPORARY TABLE`, an `Appender`, and three large joins) from inside
-`ProgressivePcoaExecute`, once per wave, so a run can emit rows as it goes instead of
-computing everything up front. That means the queries run on a task-scheduler worker
-thread rather than the client thread, and it is fine for the same reason the recipe works
-at all: the helper has its own `ClientContext`, so there is no re-entrant lock, and a
-nested query drives its own execution on the calling thread rather than waiting for a free
-worker. Verified by `test/sql/temp_table_resolution_unifrac.test`, which reads a TEMP
-distance table through that path and then asserts no `_miint_wave_%` staging table
-survived.
+A helper connection works in `Bind`, for a schema probe, and at execution, where the rows
+are read: from `InitGlobal` (`DeblurInitGlobal`) and from `Execute` — the progressive PCoA
+functions run their whole wave-fill (`CREATE TEMPORARY TABLE`, an `Appender`, and three
+large joins) from inside `ProgressivePcoaExecute`, once per wave, so a run can emit rows
+as it goes instead of computing everything up front. That means the queries run on a
+task-scheduler worker thread rather than the client thread, and it is fine for the same
+reason the recipe works at all: the helper has its own `ClientContext`, so there is no
+re-entrant lock, and a nested query drives its own execution on the calling thread rather
+than waiting for a free worker. Verified by `test/sql/temp_table_resolution_unifrac.test`,
+which reads a TEMP distance table through that path and then asserts no `_miint_wave_%`
+staging table survived.
 
 Two things to keep in mind if you do this:
 
@@ -314,5 +314,5 @@ if (entry->type == CatalogType::TABLE_ENTRY) {
 - The caller's catalog **search path** (`SET search_path`) is not inherited either, so a bare name that resolves for the user through a non-default schema will not resolve on the helper connection.
 - **Session variables (`SET VARIABLE`, `getvariable()`) are not visible in the separate connection.** Views that use `getvariable()` will see NULL values. This is a fundamental limitation — each connection has its own session state. Document this in user-facing docs when relevant.
 - For most use cases (reading from persistent tables/views), this is fine
-- Read placements/references at bind time if possible, storing results in bind data to avoid issues during finalize
+- Read the relation's rows when the query runs, in `InitGlobal` (for a COPY format, its `copy_to_initialize_global`, where COPY SAM reads `REFERENCE_LENGTHS` and COPY NEWICK reads `PLACEMENTS`), and check only its schema in `Bind` ([no work in `Bind`](architecture.md#no-work-in-bind)). Rows read in `Bind` are what every later `EXECUTE` of a prepared statement writes, however the relation has changed, and `EXPLAIN` reads them for a query it never runs.
 - See `src/placement_table_reader.cpp` for a complete example
