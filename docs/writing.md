@@ -492,7 +492,7 @@ Write query results to Newick phylogenetic tree format. Reconstructs a tree from
 - `branch_length` (DOUBLE): Branch length
 - `edge_id` (BIGINT): Edge identifier for jplace format
 
-An index column of another integer type is cast to BIGINT, and a `branch_length` of another numeric type (DECIMAL, as untyped literals such as `0.1` are) to DOUBLE. A column of any other type is refused when the COPY is planned.
+An index column of another integer type is cast to BIGINT, and a `branch_length` of another numeric type (DECIMAL, as untyped literals such as `0.1` are) to DOUBLE. An untyped `NULL` column is cast to the column's type, so `NULL AS name` writes no names. A column of any other type is refused when the COPY is planned.
 
 **Parameters:**
 - `EDGE_IDS` (BOOLEAN, default: auto): Include edge identifiers `{n}` in output
@@ -516,7 +516,7 @@ An index column of another integer type is cast to BIGINT, and a `branch_length`
   - All nodes connected
 - Serializes to standard Newick format with semicolon terminator
 - Extra columns (e.g., `is_tip`, `filepath`) are ignored
-- Writes one tree to one file: `PER_THREAD_OUTPUT`, `PARTITION_BY` and `ORDER_BY` are refused, as each file would hold a fragment of the tree
+- Writes one tree to one file: `PER_THREAD_OUTPUT`, `PARTITION_BY` and `ORDER_BY` are refused, as each file would hold a fragment of the tree. The refusal comes when a file is opened for rows, so a partitioned or ordered COPY of no rows succeeds and writes no file
 
 **Examples:**
 ```sql

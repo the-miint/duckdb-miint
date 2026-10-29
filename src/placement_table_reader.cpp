@@ -6,9 +6,34 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/query_result.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
+#include <algorithm>
 #include <limits>
 
 namespace duckdb {
+
+// The placement columns, in the order ReadPlacementTable selects them, and the types each may
+// have. Both the bind-time check and the read check them: a relation's types can change after a
+// statement is bound with no change to the catalog (a view over a file whose detected types
+// change), and a prepared statement is then not bound again.
+struct PlacementColumn {
+	const char *name;
+	vector<LogicalTypeId> types;
+	const char *description;
+};
+
+static const PlacementColumn PLACEMENT_COLUMNS[] = {
+    {"fragment_id", {LogicalTypeId::VARCHAR}, "VARCHAR"},
+    {"edge_id",
+     {LogicalTypeId::BIGINT, LogicalTypeId::INTEGER, LogicalTypeId::UBIGINT, LogicalTypeId::UINTEGER},
+     "an integer type"},
+    {"like_weight_ratio", {LogicalTypeId::DOUBLE, LogicalTypeId::FLOAT}, "DOUBLE or FLOAT"},
+    {"distal_length", {LogicalTypeId::DOUBLE, LogicalTypeId::FLOAT}, "DOUBLE or FLOAT"},
+    {"pendant_length", {LogicalTypeId::DOUBLE, LogicalTypeId::FLOAT}, "DOUBLE or FLOAT"},
+};
+
+static bool PlacementColumnAccepts(const PlacementColumn &column, const LogicalType &type) {
+	return std::find(column.types.begin(), column.types.end(), type.id()) != column.types.end();
+}
 
 void ValidatePlacementTableSchema(ClientContext &context, const std::string &table_name) {
 	auto info = GetTableOrViewColumns(context, table_name, "Placement table");
@@ -22,32 +47,15 @@ void ValidatePlacementTableSchema(ClientContext &context, const std::string &tab
 	}
 
 	// Check required columns exist and have correct types
-	auto check_column = [&](const string &col_name, const vector<LogicalTypeId> &allowed_types,
-	                        const string &type_desc) {
-		auto it = name_to_idx.find(col_name);
+	for (auto &column : PLACEMENT_COLUMNS) {
+		auto it = name_to_idx.find(column.name);
 		if (it == name_to_idx.end()) {
-			throw BinderException("Placement table '%s' missing required column '%s'", table_name, col_name);
+			throw BinderException("Placement table '%s' missing required column '%s'", table_name, column.name);
 		}
-		auto &col_type = col_types[it->second];
-		bool valid = false;
-		for (auto &allowed : allowed_types) {
-			if (col_type.id() == allowed) {
-				valid = true;
-				break;
-			}
+		if (!PlacementColumnAccepts(column, col_types[it->second])) {
+			throw BinderException("Column '%s' in table '%s' must be %s", column.name, table_name, column.description);
 		}
-		if (!valid) {
-			throw BinderException("Column '%s' in table '%s' must be %s", col_name, table_name, type_desc);
-		}
-	};
-
-	check_column("fragment_id", {LogicalTypeId::VARCHAR}, "VARCHAR");
-	check_column("edge_id",
-	             {LogicalTypeId::BIGINT, LogicalTypeId::INTEGER, LogicalTypeId::UBIGINT, LogicalTypeId::UINTEGER},
-	             "an integer type");
-	check_column("like_weight_ratio", {LogicalTypeId::DOUBLE, LogicalTypeId::FLOAT}, "DOUBLE or FLOAT");
-	check_column("distal_length", {LogicalTypeId::DOUBLE, LogicalTypeId::FLOAT}, "DOUBLE or FLOAT");
-	check_column("pendant_length", {LogicalTypeId::DOUBLE, LogicalTypeId::FLOAT}, "DOUBLE or FLOAT");
+	}
 }
 
 std::vector<miint::Placement> ReadPlacementTable(ClientContext &context, const std::string &table_name) {
@@ -84,6 +92,14 @@ std::vector<miint::Placement> ReadPlacementTable(ClientContext &context, const s
 
 	auto &materialized = *query_result;
 	auto &result_types = materialized.GetTypes();
+	D_ASSERT(result_types.size() == sizeof(PLACEMENT_COLUMNS) / sizeof(PLACEMENT_COLUMNS[0]));
+	for (idx_t i = 0; i < result_types.size(); i++) {
+		auto &column = PLACEMENT_COLUMNS[i];
+		if (!PlacementColumnAccepts(column, result_types[i])) {
+			throw InvalidInputException("Column '%s' in table '%s' must be %s", column.name, table_name,
+			                            column.description);
+		}
+	}
 
 	// Get column types for proper data extraction
 	// Column order: fragment_id(0), edge_id(1), like_weight_ratio(2), distal_length(3), pendant_length(4)

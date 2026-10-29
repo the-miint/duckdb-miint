@@ -212,6 +212,38 @@ SELECT node_index, name, branch_length, edge_id, parent_index, is_tip
 FROM tree_resolve_placement('ref_tree', 'single_placement');
 
 # =============================================================================
+# Placement types are checked when the rows are read
+# =============================================================================
+
+# A prepared call is not bound again when a view's types change with no change to the catalog,
+# as a view over a CSV file does when the file is rewritten.
+statement ok
+COPY single_placement TO '{TEST_DIR}/changing_placements.csv';
+
+statement ok
+CREATE VIEW csv_placements AS SELECT * FROM read_csv('{TEST_DIR}/changing_placements.csv');
+
+statement ok
+PREPARE resolve_csv AS SELECT * FROM tree_resolve_placement('ref_tree', 'csv_placements');
+
+statement ok
+COPY (SELECT 42 AS fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length FROM single_placement)
+TO '{TEST_DIR}/changing_placements.csv';
+
+statement error
+EXECUTE resolve_csv;
+----
+<REGEX>:Invalid Input Error: Column 'fragment_id' in table 'csv_placements' must be VARCHAR.*
+
+query I
+SELECT 1;
+----
+1
+
+statement ok
+DROP VIEW csv_placements;
+
+# =============================================================================
 # Cleanup
 # =============================================================================
 

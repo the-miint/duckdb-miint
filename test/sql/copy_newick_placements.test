@@ -598,6 +598,37 @@ placement rows were read
 statement ok
 DROP VIEW unreadable_placements;
 
+# The placement columns' types are checked again when the rows are read. A relation's types can
+# change after the COPY is planned with no change to the catalog, so a prepared COPY is not bound
+# again: here a view over a CSV file whose fragment_id becomes an integer.
+statement ok
+COPY single_placement TO '{TEST_DIR}/changing_placements.csv';
+
+statement ok
+CREATE VIEW csv_placements AS SELECT * FROM read_csv('{TEST_DIR}/changing_placements.csv');
+
+statement ok
+PREPARE copy_csv AS
+COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
+TO '{TEST_DIR}/csv_placements.nwk' (FORMAT NEWICK, PLACEMENTS 'csv_placements');
+
+statement ok
+COPY (SELECT 42 AS fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length FROM single_placement)
+TO '{TEST_DIR}/changing_placements.csv';
+
+statement error
+EXECUTE copy_csv;
+----
+<REGEX>:Invalid Input Error: Column 'fragment_id' in table 'csv_placements' must be VARCHAR.*
+
+query I
+SELECT 1;
+----
+1
+
+statement ok
+DROP VIEW csv_placements;
+
 # =============================================================================
 # Cleanup
 # =============================================================================

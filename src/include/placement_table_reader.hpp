@@ -26,6 +26,8 @@ namespace duckdb {
 //   - Table is empty (after skipping NULL fragment_ids)
 //   - NULL value in edge_id, like_weight_ratio, distal_length, or pendant_length
 //   - UBIGINT edge_id exceeds INT64_MAX
+//   - A column's type is not one listed above (it can change after ValidatePlacementTableSchema
+//     ran without a change to the catalog, as for a view over a file)
 std::vector<miint::Placement> ReadPlacementTable(ClientContext &context, const std::string &table_name);
 
 // Validate that a placement table or view has the required columns with correct types.

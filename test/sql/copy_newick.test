@@ -191,6 +191,18 @@ WHERE r.edge_id IS NOT DISTINCT FROM o.edge_id AND r.name IS NOT DISTINCT FROM o
 ----
 5
 
+# An untyped NULL column is cast to the column's type too, so a tree can be written without
+# names, branch lengths or edge ids.
+statement ok
+COPY (SELECT node_index, parent_index, NULL AS name, NULL AS branch_length, NULL AS edge_id
+      FROM read_newick('data/newick/simple.nwk'))
+TO '{TEST_DIR}/null_columns.nwk' (FORMAT NEWICK);
+
+query T
+SELECT trim(content) FROM read_text('{TEST_DIR}/null_columns.nwk');
+----
+((,),);
+
 # A column that cannot be cast is refused when the COPY is planned, naming the column and the
 # type it needs, and the database stays usable.
 statement error
@@ -254,6 +266,17 @@ COPY FORMAT NEWICK writes one tree to one file
 
 query I
 SELECT count(*) FROM glob('{TEST_DIR}/*_tree/**');
+----
+0
+
+# The refusal comes when a file is opened for the rows, so a partitioned or ordered COPY of no
+# rows, which opens none, is not refused and writes no file.
+statement ok
+COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk') WHERE false)
+TO '{TEST_DIR}/empty_partitioned' (FORMAT NEWICK, PARTITION_BY (is_tip));
+
+query I
+SELECT count(*) FROM glob('{TEST_DIR}/empty_partitioned/**');
 ----
 0
 

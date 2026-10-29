@@ -94,24 +94,55 @@ struct NewickCopyLocalState : public LocalFunctionData {
 //===--------------------------------------------------------------------===//
 // Select: cast the columns the sink reads to the types it reads them as
 //===--------------------------------------------------------------------===//
+// The columns the sink reads, the one type it reads each as, and the types NewickCopySelect
+// casts to it. An untyped NULL column is cast too, so `NULL AS name` writes no names.
+struct NewickColumnType {
+	const char *name;
+	LogicalTypeId type;
+	bool (*castable)(const LogicalType &type);
+	const char *description;
+};
+
+static bool IsIntegralType(const LogicalType &type) {
+	return type.IsIntegral();
+}
+
+static bool IsNumericType(const LogicalType &type) {
+	return type.IsNumeric();
+}
+
+static const NewickColumnType NEWICK_COLUMN_TYPES[] = {
+    {"node_index", LogicalTypeId::BIGINT, IsIntegralType, "an integer type"},
+    {"parent_index", LogicalTypeId::BIGINT, IsIntegralType, "an integer type"},
+    {"edge_id", LogicalTypeId::BIGINT, IsIntegralType, "an integer type"},
+    {"branch_length", LogicalTypeId::DOUBLE, IsNumericType, "a numeric type"},
+    {"name", LogicalTypeId::VARCHAR, nullptr, "VARCHAR"},
+};
+
+static const NewickColumnType *FindNewickColumnType(const Identifier &name) {
+	for (auto &column : NEWICK_COLUMN_TYPES) {
+		if (name == column.name) {
+			return &column;
+		}
+	}
+	return nullptr;
+}
+
 static vector<unique_ptr<Expression>> NewickCopySelect(CopyToSelectInput &input) {
 	vector<unique_ptr<Expression>> result;
 	bool any_cast = false;
 	for (auto &expr : input.select_list) {
 		const auto &type = expr->GetReturnType();
 		const auto name = expr->GetAlias();
-		LogicalType target;
-		if ((name == "node_index" || name == "parent_index" || name == "edge_id") && type.IsIntegral() &&
-		    type.id() != LogicalTypeId::BIGINT) {
-			target = LogicalType::BIGINT;
-		} else if (name == "branch_length" && type.IsNumeric() && type.id() != LogicalTypeId::DOUBLE) {
-			target = LogicalType::DOUBLE;
-		}
-		if (target.id() == LogicalTypeId::INVALID) {
+		auto column = FindNewickColumnType(name);
+		const bool cast = column && type.id() != column->type &&
+		                  (type.id() == LogicalTypeId::SQLNULL || (column->castable && column->castable(type)));
+		if (!cast) {
 			result.push_back(std::move(expr));
 			continue;
 		}
-		auto cast_expr = BoundCastExpression::AddCastToType(input.context, std::move(expr), target, false);
+		auto cast_expr =
+		    BoundCastExpression::AddCastToType(input.context, std::move(expr), LogicalType(column->type), false);
 		cast_expr->SetAlias(name);
 		result.push_back(std::move(cast_expr));
 		any_cast = true;
@@ -121,15 +152,6 @@ static vector<unique_ptr<Expression>> NewickCopySelect(CopyToSelectInput &input)
 		result.clear();
 	}
 	return result;
-}
-
-// A column the sink reads, in the one type NewickCopySelect leaves it as
-static void CheckNewickColumnType(const vector<Identifier> &names, const vector<LogicalType> &sql_types, idx_t idx,
-                                  LogicalTypeId expected, const char *expected_desc) {
-	if (idx != DConstants::INVALID_INDEX && sql_types[idx].id() != expected) {
-		throw BinderException("COPY FORMAT NEWICK: column '%s' must be %s, got %s", names[idx].GetIdentifierName(),
-		                      expected_desc, sql_types[idx].ToString());
-	}
 }
 
 //===--------------------------------------------------------------------===//
@@ -164,11 +186,14 @@ static unique_ptr<FunctionData> NewickCopyBind(ClientContext &context, CopyFunct
 	if (result->parent_index_idx == DConstants::INVALID_INDEX) {
 		throw BinderException("COPY FORMAT NEWICK requires 'parent_index' column");
 	}
-	CheckNewickColumnType(names, sql_types, result->node_index_idx, LogicalTypeId::BIGINT, "an integer type");
-	CheckNewickColumnType(names, sql_types, result->parent_index_idx, LogicalTypeId::BIGINT, "an integer type");
-	CheckNewickColumnType(names, sql_types, result->edge_id_idx, LogicalTypeId::BIGINT, "an integer type");
-	CheckNewickColumnType(names, sql_types, result->branch_length_idx, LogicalTypeId::DOUBLE, "a numeric type");
-	CheckNewickColumnType(names, sql_types, result->name_idx, LogicalTypeId::VARCHAR, "VARCHAR");
+	// A column NewickCopySelect did not cast is one the sink cannot read
+	for (idx_t i = 0; i < names.size(); i++) {
+		auto column = FindNewickColumnType(names[i]);
+		if (column && sql_types[i].id() != column->type) {
+			throw BinderException("COPY FORMAT NEWICK: column '%s' must be %s, got %s", names[i].GetIdentifierName(),
+			                      column->description, sql_types[i].ToString());
+		}
+	}
 
 	// Parse parameters
 	Value compression_param;
