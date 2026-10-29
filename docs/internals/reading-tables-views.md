@@ -199,6 +199,7 @@ before trusting it. `test/sql/rype_single_read.test` documents both forms.
 | `align_minimap2_sharded` | query once; routing once in the scan, plus a separate bind-time scan for shard discovery | fixed, remedy (2) on both relations |
 | `align_bowtie2_sharded` | once per shard | fixed by remedy (3) — fails loud |
 | `rype_classify`, `rype_log_ratio`, `rype_extract_*` | once | fixed, remedy (1) — guarded by `test/sql/rype_single_read.test` |
+| `rype_filter` | once | remedy (1) by design: the scan's chunks are held for minimap2 and the output, never re-read — guarded by `test/sql/rype_filter.test` and `test/sql/rype_filter_minimap2.test` |
 | `per_sample_table_function` (`DiscoverSamples` + per-sample re-read) | once per sample | **exposed** — shared by `woltka_ogu`, `sylph_profile`, `detect_chimera_uchime`, `align_abpoa`, `consensus_abpoa`, `align_mafft`, `uchime_denovo`, `deblur`, `massql` |
 | `ena_upload_reads` | plan scan + per-sample scan | **exposed** |
 | sc: `fit_*`, `cross_validate_*`, `predict`, `predict_proba`, `shap` | counts once, streamed; `fit_*` and `cross_validate_*` also read the metadata once, materialized (one row per sample). Each after a `LIMIT 0` probe at bind | fixed, remedy (1) for the counts; guarded by `test/sql/sc_model_relation_reads.test` |

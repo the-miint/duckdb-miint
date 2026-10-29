@@ -22,6 +22,12 @@ SELECT * FROM read_fastx('foo://miint-test/x.fq');
 ----
 Cannot open file "foo://miint-test/x.fq"
 
+# read_newick labels only a tree it cannot parse; a file it cannot open fails as DuckDB reports it.
+statement error
+SELECT * FROM read_newick('foo://miint-test/t.nwk');
+----
+<REGEX>:IO Error: Cannot open file "foo://miint-test/t\.nwk".*
+
 # Readers that name the file give DuckDB's reason as plain text rather than DuckDB's serialized error.
 statement error
 SELECT * FROM read_alignments('foo://miint-test/x.sam');
@@ -32,11 +38,6 @@ statement error
 SELECT * FROM read_sequences_sam('foo://miint-test/x.sam');
 ----
 Error opening 'foo://miint-test/x.sam': Cannot open file "foo://miint-test/x.sam"
-
-statement error
-SELECT * FROM read_newick('foo://miint-test/t.nwk');
-----
-Error parsing newick file 'foo://miint-test/t.nwk': Cannot open file "foo://miint-test/t.nwk"
 
 # SAM, BAM and UBAM are written by htslib, which writes local files only, so a remote target is
 # refused at bind rather than failing inside htslib.

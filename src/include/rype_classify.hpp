@@ -40,7 +40,8 @@ public:
 		std::vector<LogicalType> types;
 
 		Data()
-		    : id_column("read_id"), threshold(0.1), names({"read_id", "bucket_id", "bucket_name", "score"}),
+		    : id_column("read_id"), threshold(RYPE_DEFAULT_THRESHOLD),
+		      names({"read_id", "bucket_id", "bucket_name", "score"}),
 		      types({LogicalType::VARCHAR,  // read_id (original identifier)
 		             LogicalType::UINTEGER, // bucket_id (UInt32)
 		             LogicalType::VARCHAR,  // bucket_name

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace miint {
@@ -112,7 +113,9 @@ private:
 // underlying mm_idx_reader_t at a time.
 class Minimap2IndexReader {
 public:
-	Minimap2IndexReader(const std::string &index_path, const Minimap2Config &config);
+	// n_threads build each part's hash tables, which is most of reading a part:
+	// the file is still read in order, on the calling thread.
+	Minimap2IndexReader(const std::string &index_path, const Minimap2Config &config, int n_threads = 1);
 	~Minimap2IndexReader();
 
 	Minimap2IndexReader(const Minimap2IndexReader &) = delete;
@@ -134,6 +137,7 @@ public:
 private:
 	mm_idx_reader_t *reader_ = nullptr;
 	std::string index_path_; // for error messages
+	int n_threads_ = 1;
 	// Built once at construction (preset/k/w parsed and validated there, not
 	// per part) and copied into a fresh mm_mapopt_t for each ReadNextPart call,
 	// which then runs only mm_mapopt_update against that part's own minimizer
@@ -198,6 +202,12 @@ public:
 	// Uses SequenceRecordBatch which matches read_fastx output schema
 	void align(const SequenceRecordBatch &queries, SAMRecordBatch &output);
 
+	// Whether align() would emit at least one row for this query, without building any: an empty
+	// sequence2 means a single-end read, otherwise the pair maps when either mate does. Same
+	// options, routing and reference-id check as align(). qname seeds minimap2's tie-breaking hash,
+	// as the read id does in align(), so pass the same name for the same decision.
+	bool any_mapped(std::string_view sequence1, std::string_view sequence2, const char *qname);
+
 private:
 	Minimap2Config config_;
 	std::unique_ptr<mm_idxopt_t> iopt_;
@@ -235,8 +245,14 @@ private:
 	void align_paired(const std::string &read_id, const std::string &sequence1, const std::string &sequence2,
 	                  SAMRecordBatch &output);
 	// Map a pair as minimap2 does: the hits of each segment come back against that segment as
-	// given.
-	void map_pair(const std::string &sequence1, const std::string &sequence2, const char *qname, MappedHits hits[2]);
+	// given. Throws for a pair without mate 1, or one too long for minimap2.
+	void map_pair(std::string_view sequence1, std::string_view sequence2, const char *qname, MappedHits hits[2]);
+	// Map a single-end query as minimap2 does.
+	void map_single(std::string_view sequence, const char *qname, MappedHits &hits);
+	// Whether a region's reference is one of the index's subjects: align() emits a row for a
+	// region only when it is.
+	bool known_reference(int32_t rid) const;
+	void require_index() const;
 
 	// Convert minimap2 result to SAM fields
 	void reg_to_sam(const mm_reg1_t *reg, const std::string &read_id, const std::string &query_seq,

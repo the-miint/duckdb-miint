@@ -14,6 +14,7 @@
 
 #include "catalog_utils.hpp"
 #include "id_column_utils.hpp"
+#include "miint_parallel.hpp"
 #include "sequence_table_reader.hpp"
 #include "sylph.h"
 
@@ -27,10 +28,10 @@
 #include "duckdb/parser/keyword_helper.hpp"
 
 #include <atomic>
+#include <exception>
 #include <limits>
 #include <mutex>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -235,12 +236,14 @@ unique_ptr<GlobalTableFunctionState> SylphIndexCreateTableFunction::InitGlobal(C
 	}
 
 	// One builder per worker thread (mirrors `sylph sketch -t <cores>`; `threads`
-	// overrides). Merged into the first before the single write. Freed on any throw.
+	// overrides; a process at its thread limit gets fewer). Merged into the first
+	// before the single write. Freed on any throw.
 	const idx_t db_threads = static_cast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads());
 	idx_t nthreads = data.user_threads != 0 ? static_cast<idx_t>(data.user_threads) : db_threads;
 	nthreads = std::max<idx_t>(1, std::min<idx_t>(nthreads, ids.size()));
+	miint::WorkerPool pool(static_cast<int>(nthreads));
 
-	std::vector<::SylphIndexBuilder *> builders(nthreads, nullptr);
+	std::vector<::SylphIndexBuilder *> builders(static_cast<idx_t>(pool.Threads()), nullptr);
 	struct BuildersGuard {
 		std::vector<::SylphIndexBuilder *> *v;
 		~BuildersGuard() {
@@ -262,101 +265,100 @@ unique_ptr<GlobalTableFunctionState> SylphIndexCreateTableFunction::InitGlobal(C
 
 	std::atomic<size_t> next_genome {0};
 	std::atomic<bool> failed {false};
+	// The error of the lowest-numbered genome that failed. Genomes are claimed in order and
+	// a claimed genome is always finished, so every genome below the first to fail has been
+	// read, and a rerun reports the same genome.
 	std::mutex err_mutex;
-	std::string err_msg;
+	size_t failed_genome = 0;
+	std::exception_ptr genome_error;
 
 	// Each worker claims genome ids off the counter and sketches one at a time: a
 	// `WHERE genome_id = <id>` query reads just that genome. Within it, consecutive
 	// rows sharing the contig name are one contig (so a read_fastx whole-contig row
 	// and Qiita's 64 KB chunk rows both work); first_contig_name is the lowest-
 	// order_by contig.
-	auto worker = [&](idx_t tid) {
+	auto sketch_genome = [&](::SylphIndexBuilder *b, Connection &conn, size_t i) {
+		const std::string name = ids[i].ToString();   // genome id / file_name
+		const std::string lit = ids[i].ToSQLString(); // typed literal → prune-friendly
+		auto res =
+		    conn.Query("SELECT CAST(" + ocol + " AS BIGINT) AS ord, " + contig_expr + " AS nm, sequence1 AS seq FROM " +
+		               src + " WHERE " + gcol + " = " + lit + " AND sequence1 IS NOT NULL ORDER BY nm, ord");
+		if (res->HasError()) {
+			throw InvalidInputException("sylph_index_create: failed to read genome %s: %s", name.c_str(),
+			                            res->GetError());
+		}
+
+		// Reassemble contigs (consecutive rows sharing nm) and sketch each.
+		std::string cur_name, cur_seq;
+		int64_t cur_order = 0;
+		bool have_contig = false;
+		auto flush = [&]() {
+			if (sylph_index_builder_add_contig(b, name.c_str(), cur_order, cur_name.c_str(),
+			                                   reinterpret_cast<const unsigned char *>(cur_seq.data()),
+			                                   cur_seq.size()) != 0) {
+				ThrowFFI("add_contig failed");
+			}
+		};
+		auto rows = res->Collection().GetRows();
+		for (idx_t r = 0; r < rows.size(); r++) {
+			auto ordv = rows.GetValue(0, r);
+			int64_t ord = ordv.IsNull() ? std::numeric_limits<int64_t>::max() : ordv.GetValue<int64_t>();
+			std::string nm = rows.GetValue(1, r).ToString();
+			std::string seq = rows.GetValue(2, r).ToString();
+			if (!have_contig || nm != cur_name) {
+				if (have_contig) {
+					flush();
+				}
+				cur_name = std::move(nm);
+				cur_seq = std::move(seq);
+				cur_order = ord;
+				have_contig = true;
+			} else {
+				cur_seq += seq;
+				if (ord < cur_order) {
+					cur_order = ord;
+				}
+			}
+		}
+		if (have_contig) {
+			flush();
+		}
+		if (sylph_index_builder_end_genome(b, name.c_str()) != 0) {
+			ThrowFFI("end_genome failed");
+		}
+	};
+
+	auto worker = [&](int tid) {
 		try {
-			::SylphIndexBuilder *b = builders[tid];
 			auto conn = MakeReadOnlyHelperConnection(context);
 			size_t i;
 			while (!failed.load(std::memory_order_relaxed) &&
 			       (i = next_genome.fetch_add(1, std::memory_order_relaxed)) < ids.size()) {
-				const std::string name = ids[i].ToString();   // genome id / file_name
-				const std::string lit = ids[i].ToSQLString(); // typed literal → prune-friendly
-				auto res = conn.Query("SELECT CAST(" + ocol + " AS BIGINT) AS ord, " + contig_expr +
-				                      " AS nm, sequence1 AS seq FROM " + src + " WHERE " + gcol + " = " + lit +
-				                      " AND sequence1 IS NOT NULL ORDER BY nm, ord");
-				if (res->HasError()) {
-					throw InvalidInputException("sylph_index_create: failed to read genome %s: %s", name.c_str(),
-					                            res->GetError());
-				}
-
-				// Reassemble contigs (consecutive rows sharing nm) and sketch each.
-				std::string cur_name, cur_seq;
-				int64_t cur_order = 0;
-				bool have_contig = false;
-				auto flush = [&]() {
-					if (sylph_index_builder_add_contig(b, name.c_str(), cur_order, cur_name.c_str(),
-					                                   reinterpret_cast<const unsigned char *>(cur_seq.data()),
-					                                   cur_seq.size()) != 0) {
-						ThrowFFI("add_contig failed");
+				try {
+					sketch_genome(builders[tid], conn, i);
+				} catch (...) {
+					failed.store(true, std::memory_order_relaxed);
+					std::lock_guard<std::mutex> lk(err_mutex);
+					if (!genome_error || i < failed_genome) {
+						genome_error = std::current_exception();
+						failed_genome = i;
 					}
-				};
-				auto rows = res->Collection().GetRows();
-				for (idx_t r = 0; r < rows.size(); r++) {
-					auto ordv = rows.GetValue(0, r);
-					int64_t ord = ordv.IsNull() ? std::numeric_limits<int64_t>::max() : ordv.GetValue<int64_t>();
-					std::string nm = rows.GetValue(1, r).ToString();
-					std::string seq = rows.GetValue(2, r).ToString();
-					if (!have_contig || nm != cur_name) {
-						if (have_contig) {
-							flush();
-						}
-						cur_name = std::move(nm);
-						cur_seq = std::move(seq);
-						cur_order = ord;
-						have_contig = true;
-					} else {
-						cur_seq += seq;
-						if (ord < cur_order) {
-							cur_order = ord;
-						}
-					}
-				}
-				if (have_contig) {
-					flush();
-				}
-				if (sylph_index_builder_end_genome(b, name.c_str()) != 0) {
-					ThrowFFI("end_genome failed");
 				}
 			}
-		} catch (const std::exception &e) {
+		} catch (...) {
+			// No genome is at fault (the helper connection did not open): stop the other
+			// workers, and the pool reports it
 			failed.store(true, std::memory_order_relaxed);
-			std::lock_guard<std::mutex> lk(err_mutex);
-			if (err_msg.empty()) {
-				err_msg = e.what();
-			}
+			throw;
 		}
 	};
-
-	std::vector<std::thread> pool;
-	pool.reserve(nthreads);
-	try {
-		for (idx_t t = 0; t < nthreads; t++) {
-			pool.emplace_back(worker, t);
-		}
-	} catch (...) {
-		// A thread that cannot start (a process or thread limit, or no memory for its state)
-		// must not unwind past the joinable threads already in `pool`, whose destructors would
-		// end the process. This thread takes the slot of the first thread that did not start,
-		// so the genomes are sketched on the threads that did and on this one.
-		worker(pool.size());
-	}
-	for (auto &th : pool) {
-		th.join();
-	}
-	if (failed.load()) {
-		throw IOException("sylph_index_create: %s", err_msg.c_str());
+	pool.Dispatch(static_cast<int>(builders.size()), worker);
+	if (genome_error) {
+		std::rethrow_exception(genome_error);
 	}
 
 	// Merge all per-thread builders into the first, then write once.
-	for (idx_t t = 1; t < nthreads; t++) {
+	for (idx_t t = 1; t < builders.size(); t++) {
 		if (sylph_index_builder_merge(builders[0], builders[t]) != 0) {
 			ThrowFFI("merge failed");
 		}

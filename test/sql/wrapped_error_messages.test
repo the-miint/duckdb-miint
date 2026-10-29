@@ -1,0 +1,101 @@
+# name: test/sql/wrapped_error_messages.test
+# description: An error that wraps a DuckDB error gives that error's message as text, not DuckDB's serialized form of it, and a reader that cannot open a file reports DuckDB's error as itself
+# group: [sql]
+
+require miint
+
+# With external access disabled, every remote open and HTTP request fails with DuckDB's Permission
+# Error before any connection is made, so these cases need neither network nor httpfs. The setting
+# cannot be turned back on, so the ENA secret and catalog are created first.
+statement ok
+CREATE SECRET ena_dummy (TYPE ENA, USER 'Webin-00000', PASSWORD 'x');
+
+statement ok
+ATTACH '' AS ena (TYPE ENA, SECRET 'ena_dummy');
+
+statement ok
+SET enable_external_access = false;
+
+# read_newick and read_jplace_newick wrap only a failure to parse the tree, so a failure to open
+# the file, here a Permission Error rather than an IO Error, comes through as itself instead of as
+# a parse error. Bind skips the existence check for a remote path, so the open fails in the scan.
+statement error
+SELECT * FROM read_jplace_newick(['https://example.invalid/t.jplace']);
+----
+<REGEX>:Permission Error: Cannot access file "https://example\.invalid/t\.jplace" - file system operations are disabled by configuration.*
+
+statement error
+SELECT * FROM read_newick(['https://example.invalid/t.nwk']);
+----
+<REGEX>:Permission Error: Cannot access file "https://example\.invalid/t\.nwk" - file system operations are disabled by configuration.*
+
+# ENA submissions: the Webin request fails, and the function names the failure.
+statement error
+SELECT * FROM ena_cancel(secret => 'ena_dummy', accession => 'ERS000001');
+----
+<REGEX>:.*ena_cancel: Cannot access ".*" - file system operations are disabled by configuration.*
+
+statement error
+SELECT * FROM ena_cancel(secret => 'ena_dummy', refname => 'x', kind => 'samples');
+----
+<REGEX>:.*ena_cancel: Reports API lookup for refname 'x' \(kind=samples\) failed: Cannot access ".*" - file system operations are disabled by configuration.*
+
+statement error
+DELETE FROM ena.samples WHERE samea_accession = 'ERS000001';
+----
+<REGEX>:.*DELETE FROM ena.samples: Cannot access ".*" - file system operations are disabled by configuration.*
+
+statement error
+DELETE FROM ena.samples WHERE alias = 'x';
+----
+<REGEX>:.*DELETE FROM ena.samples: Reports API lookup for alias 'x' failed: Cannot access ".*" - file system operations are disabled by configuration.*
+
+statement error
+SELECT * FROM ena_modify_project(secret => 'ena_dummy', accession => 'PRJEB777001', alias => 'a', title => 't',
+                                 description => 'd', project_type => 'METAGENOMIC');
+----
+<REGEX>:.*ena_modify_project: Cannot access ".*" - file system operations are disabled by configuration.*
+
+statement error
+SELECT * FROM ena_modify_sample(secret => 'ena_dummy', accession => 'ERS9000002', alias => 'a', taxon_id => 408170);
+----
+<REGEX>:.*ena_modify_sample: Cannot access ".*" - file system operations are disabled by configuration.*
+
+statement error
+SELECT * FROM ena_modify_experiment(secret => 'ena_dummy', accession => 'ERX9000001', alias => 'a',
+                                    study_ref => 'PRJEB42', sample_descriptor => 'SAMEA42', library_strategy => 'WGS',
+                                    library_source => 'METAGENOMIC', library_selection => 'RANDOM',
+                                    library_layout => 'PAIRED', platform => 'ILLUMINA',
+                                    instrument_model => 'Illumina NovaSeq 6000', title => 't');
+----
+<REGEX>:.*ena_modify_experiment: Cannot access ".*" - file system operations are disabled by configuration.*
+
+statement error
+SELECT * FROM ena_modify_run(secret => 'ena_dummy', accession => 'ERR9000001', alias => 'a', experiment_ref => 'ERX42',
+                             files => [{'filename': 'r1_1.fastq.gz', 'filetype': 'fastq',
+                                        'md5': '9b8932f85caa54e687eba62fca3edce2'}],
+                             title => 't');
+----
+<REGEX>:.*ena_modify_run: Cannot access ".*" - file system operations are disabled by configuration.*
+
+# validate_only skips the Portal alias check, which would fail first with an error of its own,
+# so the INSERT reaches its Webin request.
+statement ok
+SET miint_ena_validate_only = true;
+
+statement error
+INSERT INTO ena.projects (alias, title, project_type) VALUES ('a', 't', 'METAGENOMIC');
+----
+<REGEX>:.*INSERT INTO ena.projects failed: Cannot access ".*" - file system operations are disabled by configuration.*
+
+# read_ena_sequences in a lateral join resolves each accession as it runs, and skips one whose
+# metadata it cannot fetch, with a warning that says why.
+query II
+SELECT * FROM (VALUES ('ERR1074767')) t(acc), LATERAL (SELECT read_id FROM read_ena_sequences(t.acc)) s;
+----
+
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE '%skipped outer accession ''ERR1074767''%metadata resolution failed: Cannot access "%';
+----
+true

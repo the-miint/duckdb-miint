@@ -13,6 +13,7 @@
 #include "ena_reports_client.hpp"
 #include "ena_storage.hpp"
 
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
@@ -246,9 +247,9 @@ protected:
 
 		miint::ENAClient client(*client_context.db);
 
-		// L5: alias-targeted DELETE — translate refname → accession via the
+		// Alias-targeted DELETE — translate refname → accession via the
 		// Webin Reports API before envelope build. The envelope-builder
-		// rejection of `target_refname` (decision #12) stays as defense-in-
+		// rejection of `target_refname` stays as defense-in-
 		// depth; by the time we hand the spec over, target.accession is set
 		// and target.refname is empty. The kind is implicit from the table
 		// being DELETEd from (vs. the lifecycle table fns where the kind is
@@ -257,8 +258,8 @@ protected:
 		if (!resolved_target.refname.empty() && resolved_target.accession.empty()) {
 			const auto kind = miint::AliasObjectKindFromTableName(object_type);
 			// Reports base must match the endpoint the lifecycle POST will hit
-			// (each server only sees its own account's records); see decision
-			// notes in ena_reports_client.hpp.
+			// (each server only sees its own account's records); see
+			// ena_reports_client.hpp.
 			const auto reports_base = miint::ResolveReportsBaseForEndpoint(creds.endpoint);
 			// Lifetime contract for the fetcher closure: `client` lives on
 			// this stack frame and the fetcher is invoked synchronously by
@@ -277,7 +278,7 @@ protected:
 				accession = miint::LookupAccessionByAlias(reports_base, kind, resolved_target.refname, fetcher);
 			} catch (const std::exception &e) {
 				throw InvalidInputException("DELETE FROM ena.%s: Reports API lookup for alias '%s' failed: %s",
-				                            object_type, resolved_target.refname, e.what());
+				                            object_type, resolved_target.refname, ErrorData(e).RawMessage());
 			}
 			if (accession.empty()) {
 				throw InvalidInputException("DELETE FROM ena.%s: alias '%s' not found in this submission account",
@@ -302,13 +303,9 @@ protected:
 		};
 
 		miint::LifecycleOutcome outcome;
-		bool transport_failure = false;
-		string transport_error;
-		try {
-			outcome = miint::SubmitLifecycle(miint::ENAAction::CANCEL, opts, post_fn);
-		} catch (const std::exception &e) {
-			transport_failure = true;
-			transport_error = e.what();
+		const auto submitted = SubmitCapturingTransportFailure(
+		    outcome, [&] { return miint::SubmitLifecycle(miint::ENAAction::CANCEL, opts, post_fn); });
+		if (submitted.transport_failure) {
 			outcome.action = miint::ENAAction::CANCEL;
 			// `resolved_target.accession` is the post-Reports-translation
 			// value on the alias path and the user-supplied accession on the
@@ -320,43 +317,32 @@ protected:
 			outcome.target = resolved_target.accession;
 		}
 
-		const bool success = !transport_failure && outcome.success;
-		auto error_messages = outcome.error_messages;
-		if (transport_failure && error_messages.empty()) {
-			error_messages.push_back(transport_error);
-		}
-
 		// Always log — even on failure — so the audit trail captures every
-		// attempted CANCEL. The submit + log + error-aggregation block below
-		// duplicates the equivalent block in
-		// `ena_lifecycle_functions.cpp::ExecuteLifecycle`. We don't share a
-		// helper because the two call sites disagree on catalog plumbing —
-		// the table-fn version resolves the catalog by user-supplied name
-		// (and silently skips logging when not attached); here the catalog
-		// is baked into the operator at plan time. A shared helper would
-		// require parameterising over both shapes and isn't worth it for
-		// a ~30-line block. See L1b reviewer-fixes in
-		// localdocs/ena-lifecycle-plan.md.
+		// attempted CANCEL. The log and error reporting below match
+		// `ena_lifecycle_functions.cpp::ExecuteLifecycle`, but the two find
+		// the catalog differently: the table function resolves it by the
+		// user-supplied name (and skips logging when it is not attached),
+		// while here the catalog is fixed in the operator at plan time.
 		SubmissionLogPayload payload;
 		payload.object_type = object_type;
 		payload.action = miint::ActionName(outcome.action);
 		payload.n_objects = 1;
-		payload.success = success;
+		payload.success = submitted.success;
 		payload.duration_ms = outcome.duration_ms;
 		payload.envelope_payload = outcome.envelope_payload;
 		payload.raw_receipt = outcome.raw_receipt;
 		payload.era_accession = outcome.era_accession;
-		payload.error_messages = error_messages;
+		payload.error_messages = submitted.error_messages;
 		payload.target = outcome.target;
 		RecordSubmissionLog(catalog, creds, payload);
 
 		gs.emitted = true;
-		if (transport_failure) {
-			throw InvalidInputException("DELETE FROM ena.%s: %s", object_type, transport_error);
+		if (submitted.transport_failure) {
+			throw InvalidInputException("DELETE FROM ena.%s: %s", object_type, submitted.transport_error);
 		}
-		if (!success) {
+		if (!submitted.success) {
 			string detail;
-			for (const auto &m : error_messages) {
+			for (const auto &m : submitted.error_messages) {
 				if (!detail.empty()) {
 					detail += "; ";
 				}

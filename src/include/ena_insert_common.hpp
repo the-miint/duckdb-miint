@@ -12,6 +12,7 @@
 
 #include "ena_envelope_builder.hpp"
 
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/common/index_vector.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/types/value.hpp"
@@ -87,6 +88,36 @@ struct SubmissionLogPayload {
 };
 
 void RecordSubmissionLog(ENACatalog &catalog, const ResolvedENACredentials &creds, const SubmissionLogPayload &payload);
+
+// What a submission logs and reports. `transport_error` is set when the submit threw.
+struct SubmissionResult {
+	bool transport_failure = false;
+	string transport_error;
+	bool success = false;
+	std::vector<std::string> error_messages;
+};
+
+// Runs `submit`, which returns the submission's outcome or throws on a transport failure
+// (network, a 5xx after the retries, a malformed POST), and stores the outcome in `outcome`.
+// The throw is caught so the caller can log the attempt before reporting it: `outcome` is left
+// as it was, and the error's message, as text rather than DuckDB's JSON, is the one error
+// message when the outcome has none.
+template <class OutcomeT, class SubmitFn>
+SubmissionResult SubmitCapturingTransportFailure(OutcomeT &outcome, SubmitFn &&submit) {
+	SubmissionResult result;
+	try {
+		outcome = submit();
+	} catch (const std::exception &e) {
+		result.transport_failure = true;
+		result.transport_error = ErrorData(e).RawMessage();
+	}
+	result.success = !result.transport_failure && outcome.success;
+	result.error_messages = outcome.error_messages;
+	if (result.transport_failure && result.error_messages.empty()) {
+		result.error_messages.push_back(result.transport_error);
+	}
+	return result;
+}
 
 // Look up the named ATTACHed database and return it iff its catalog is an
 // ENACatalog. Behaviour depends on whether the catalog name was the

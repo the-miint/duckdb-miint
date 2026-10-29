@@ -219,6 +219,15 @@ SELECT * FROM read_newick([]);
 ----
 at least one
 
+# A tree that does not parse is reported with the file it came from
+statement ok
+COPY (SELECT '(A,B;' AS t) TO '__TEST_DIR__/unclosed.nwk' (FORMAT CSV, HEADER false, QUOTE '');
+
+statement error
+SELECT * FROM read_newick('__TEST_DIR__/unclosed.nwk');
+----
+<REGEX>:IO Error: Error parsing newick file '.*unclosed\.nwk': Unmatched opening parenthesis in Newick string.*
+
 # =============================================================================
 # Creating table from read_newick
 # =============================================================================

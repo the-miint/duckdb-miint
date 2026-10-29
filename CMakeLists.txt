@@ -349,6 +349,7 @@ list(
   src/remote_file_helper.cpp
   src/rype_classify.cpp
   src/rype_extract.cpp
+  src/rype_filter.cpp
   src/rype_index_create.cpp
   src/rype_input_stream.cpp
   src/rype_log_ratio.cpp
@@ -639,4 +640,17 @@ if((MIINT_ENABLE_VSEARCH
                       "-Wl,--allow-multiple-definition")
   target_link_options(${LOADABLE_EXTENSION_NAME} PRIVATE
                       "-Wl,--allow-multiple-definition")
+endif()
+
+# C++ tests that need a running DuckDB: they open an in-process database and
+# drive miint code against it. `tests` above links no DuckDB, so these get a
+# binary of their own, linking DuckDB and miint statically, built only where
+# DuckDB builds its unittest runner (not in the WASM builds, for one).
+if(BUILD_UNITTESTS)
+  add_executable(
+    tests_duckdb
+    test/cpp/test_RypeInputStream.cpp test/cpp/test_RypeFilterParallel.cpp
+    test/cpp/test_RypeFilterSchedule.cpp)
+  target_link_libraries(tests_duckdb Catch2::Catch2WithMain duckdb_static)
+  link_extension_libraries(tests_duckdb "")
 endif()

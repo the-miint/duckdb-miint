@@ -34,9 +34,9 @@ struct ENAInsertOptions {
 	std::string hold_until_date; // optional, "YYYY-MM-DD"
 	// Wire-format action. ADD is the registration path (assigns accessions);
 	// VALIDATE is a server-side dry-run that returns a receipt with no
-	// per-object children. MODIFY will follow the same envelope shape as ADD
-	// once L4 ships. Lifecycle ops (CANCEL/RELEASE/HOLD) go through
-	// SubmitLifecycle and never touch this struct.
+	// per-object children. MODIFY uses the same envelope shape as ADD.
+	// Lifecycle ops (CANCEL/RELEASE/HOLD) go through SubmitLifecycle and
+	// never touch this struct.
 	ENAAction action = ENAAction::ADD;
 };
 
@@ -112,14 +112,12 @@ struct RefDescriptor {
 // canonical accession prefixes followed by digits only; everything else
 // (including aliases shaped like `ERPmycoolstudy`) routes to
 // `RefDescriptor::refname`. The "digits only" suffix matters: real ENA
-// accessions are always `<PREFIX><NUMERIC>` (see
-// localdocs/ena-research-webin-v2-deep.md §1.1), and a user alias that
+// accessions are always `<PREFIX><NUMERIC>`, and a user alias that
 // happens to start with an accession prefix would otherwise be silently
 // misclassified — the server then can't find it.
 //
-// The named wrappers below (`ResolveENAStudyRef`, `ResolveENASampleRef`,
-// future `ResolveENAExperimentRef` for L4d) carry the canonical prefix lists
-// per object kind so callers don't repeat them. Use the wrappers; expose the
+// The named wrappers below carry the canonical prefix lists per object kind
+// so callers don't repeat them. Use the wrappers; expose the
 // generic primitive only for tests + future kinds where the wrapper hasn't
 // landed yet.
 RefDescriptor ResolveENARefDescriptor(const std::string &value, std::initializer_list<const char *> accession_prefixes);
@@ -143,8 +141,8 @@ enum class ENALibraryLayout { SINGLE, PAIRED };
 
 // One file referenced by a Run's <DATA_BLOCK><FILES>. The server re-computes
 // MD5 after upload and compares against `checksum`; mismatch → validation
-// error. `filetype` is one of the SRA.run.xsd enum (see
-// localdocs/ena-research-webin-v2-deep.md §6.1) — `fastq` is the common case.
+// error. `filetype` is one of the SRA.run.xsd enum — `fastq` is the
+// common case.
 struct RunFile {
 	std::string filename;
 	std::string filetype; // "fastq", "bam", "cram", ...
@@ -222,14 +220,14 @@ struct SubmissionSpec {
 // `projects`. Samples were on the JSON path until 2026-05-07, when a live
 // wwwdev probe surfaced an XSD-ordering bug in V2's JSON-to-XML dispatcher
 // (`<DESCRIPTION>` was emitted before `<SAMPLE_NAME>`, violating
-// `SRA.sample.xsd`). L4b-fix flipped samples to `BuildEnvelopeXML`. The
+// `SRA.sample.xsd`), so samples go through `BuildEnvelopeXML`. The
 // `samples` / `experiments` / `runs` array emitters remain here and are still
 // exercised by unit tests, but no production caller routes those object kinds
 // through this path.
 std::string BuildEnvelopeJSON(const SubmissionSpec &env);
 
-// Build the V2 XML envelope. Production wire format for samples (post
-// L4b-fix) + experiments + runs. Same `SubmissionSpec` input shape as
+// Build the V2 XML envelope. Production wire format for samples +
+// experiments + runs. Same `SubmissionSpec` input shape as
 // `BuildEnvelopeJSON`; populated `samples` / `experiments` / `runs` arrays
 // are emitted under `<SAMPLE_SET>` / `<EXPERIMENT_SET>` / `<RUN_SET>` in
 // SRA.submission.xsd order. `projects` in the spec are ignored here — submit

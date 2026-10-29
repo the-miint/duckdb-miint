@@ -1,6 +1,7 @@
 #include "read_jplace_newick.hpp"
 #include "remote_file_helper.hpp"
 #include "table_function_common.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 
@@ -196,17 +197,16 @@ void ReadJplaceNewickTableFunction::Execute(ClientContext &context, TableFunctio
 		local_state.current_filepath = path;
 
 		// Read jplace file as text, extract tree string, parse newick
+		std::string content = ReadNewickTableFunction::ReadNewickFile(global_state.fs, path);
+		std::string newick_str = ExtractTreeFromJplaceContent(content, path);
+		miint::NewickTree tree;
 		try {
-			std::string content = ReadNewickTableFunction::ReadNewickFile(global_state.fs, path);
-			std::string newick_str = ExtractTreeFromJplaceContent(content, path);
-			auto tree = miint::NewickTree::parse(newick_str);
-			local_state.current_rows = ReadNewickTableFunction::TreeToRows(tree);
-			local_state.current_row_idx = 0;
-		} catch (const IOException &) {
-			throw;
+			tree = miint::NewickTree::parse(newick_str);
 		} catch (const std::exception &e) {
-			throw IOException("Error parsing tree from jplace file '%s': %s", path, e.what());
+			throw IOException("Error parsing tree from jplace file '%s': %s", path, ErrorData(e).RawMessage());
 		}
+		local_state.current_rows = ReadNewickTableFunction::TreeToRows(tree);
+		local_state.current_row_idx = 0;
 	}
 
 	output.SetChildCardinality(output_idx);

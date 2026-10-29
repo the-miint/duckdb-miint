@@ -372,9 +372,8 @@ unique_ptr<GlobalTableFunctionState> RypeIndexCreateTableFunction::InitGlobal(Cl
 	(void)mapping_wrapper.release();
 
 	if (rc != 0) {
-		const char *err = rype_get_last_error();
 		throw IOException("rype_index_create failed to build '%s': %s", bind_data.output_path,
-		                  err ? err : "unknown error");
+		                  RypeErrorText(rype_get_last_error()));
 	}
 
 	return gstate;

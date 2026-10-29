@@ -338,3 +338,18 @@ pressure, DB shutdown). See `FlushThisThreadsFreedMemory` in `align_common.hpp` 
 concrete use: `align_minimap2` calls it after the corpus-snapshot materialization, and both
 `align_minimap2` and `align_minimap2_sharded` hand it to `Minimap2PartCursor`, which calls it
 after every point where a multi-part index transition may have freed a part.
+
+## Exceptions
+
+**`what()` is DuckDB's serialized form of the error.** `duckdb::Exception` derives from
+`std::runtime_error`, and its constructor stores the type, the message and any extra fields
+(an HTTP error's status, headers and response body) as JSON, `{"exception_type":"IO",
+"exception_message":"..."}`, in `what()` (`Exception::ToJSON`,
+`duckdb/src/common/exception.cpp`). DuckDB parses it back when it reports the error, so users
+see the JSON only when extension code builds a new message from `what()`.
+`ErrorData(e).RawMessage()` gives the message alone and passes a `what()` that is not JSON
+through unchanged, except `std::bad_alloc`'s, which becomes "Allocation failure"
+(`duckdb/src/common/error_data.cpp`); `Message()` adds the type prefix
+("IO Error: ...") and, for an internal error, DuckDB's assertion notice and stack trace. A
+catch of `std::exception` or `std::runtime_error` can receive a DuckDB exception; a catch of
+`std::invalid_argument` or another `std::logic_error` cannot.

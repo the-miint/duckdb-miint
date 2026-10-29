@@ -99,7 +99,7 @@ unique_ptr<FunctionData> RypeLogRatioTableFunction::Bind(ClientContext &context,
 	// Validate sequence table exists and has required columns. Capture the id
 	// column's storage type so read_id mirrors it on output (BIGINT/UUID/VARCHAR)
 	// instead of always VARCHAR.
-	auto table_info = ValidateSequenceTable(context, data->sequence_table, data->id_column);
+	auto table_info = ValidateSequenceTable(context, data->sequence_table, data->id_column, /*reads_sequence2=*/true);
 	data->has_sequence2 = table_info.has_sequence2;
 	data->id_type = table_info.id_type;
 	data->types[0] = data->id_type;
@@ -126,24 +126,21 @@ unique_ptr<GlobalTableFunctionState> RypeLogRatioTableFunction::InitGlobal(Clien
 	// Step 1: Load numerator index
 	gstate->numerator_index = rype_index_load(bind_data.numerator_path.c_str());
 	if (!gstate->numerator_index) {
-		const char *err = rype_get_last_error();
 		throw IOException("Failed to load numerator index '%s': %s", bind_data.numerator_path,
-		                  err ? err : "unknown error");
+		                  RypeErrorText(rype_get_last_error()));
 	}
 
 	// Step 2: Load denominator index
 	gstate->denominator_index = rype_index_load(bind_data.denominator_path.c_str());
 	if (!gstate->denominator_index) {
-		const char *err = rype_get_last_error();
 		throw IOException("Failed to load denominator index '%s': %s", bind_data.denominator_path,
-		                  err ? err : "unknown error");
+		                  RypeErrorText(rype_get_last_error()));
 	}
 
 	// Step 3: Validate indices are compatible for log-ratio
 	int validate_result = rype_validate_log_ratio_indices(gstate->numerator_index, gstate->denominator_index);
 	if (validate_result != 0) {
-		const char *err = rype_get_last_error();
-		throw IOException("Log-ratio index validation failed: %s", err ? err : "unknown error");
+		throw IOException("Log-ratio index validation failed: %s", RypeErrorText(rype_get_last_error()));
 	}
 
 	// Step 4: Build read_id mapping and query sequence data for RYpe
@@ -202,14 +199,13 @@ unique_ptr<GlobalTableFunctionState> RypeLogRatioTableFunction::InitGlobal(Clien
 	                                              &gstate->output_stream);
 
 	if (result != 0) {
-		const char *err = rype_get_last_error();
-		throw IOException("RYpe log-ratio classification failed: %s", err ? err : "unknown error");
+		throw IOException("RYpe log-ratio classification failed: %s", RypeErrorText(rype_get_last_error()));
 	}
 
 	// Step 8: Get output schema
 	if (gstate->output_stream.get_schema(&gstate->output_stream, &gstate->output_schema) != 0) {
-		const char *err = gstate->output_stream.get_last_error(&gstate->output_stream);
-		throw IOException("Failed to get RYpe output schema: %s", err ? err : "unknown error");
+		throw IOException("Failed to get RYpe output schema: %s",
+		                  RypeErrorText(gstate->output_stream.get_last_error(&gstate->output_stream)));
 	}
 
 	// Step 9: Parse Arrow schema for conversion
@@ -254,8 +250,8 @@ void RypeLogRatioTableFunction::Execute(ClientContext &context, TableFunctionInp
 		// Get next batch from RYpe
 		auto wrapper = make_shared_ptr<ArrowArrayWrapper>();
 		if (gstate.output_stream.get_next(&gstate.output_stream, &wrapper->arrow_array) != 0) {
-			const char *err = gstate.output_stream.get_last_error(&gstate.output_stream);
-			throw IOException("Error getting next batch from RYpe: %s", err ? err : "unknown error");
+			throw IOException("Error getting next batch from RYpe: %s",
+			                  RypeErrorText(gstate.output_stream.get_last_error(&gstate.output_stream)));
 		}
 
 		// Check if stream is exhausted

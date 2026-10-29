@@ -37,8 +37,9 @@ namespace duckdb {
 // sharing read_id are reassembled into one contig (so it handles read_fastx's one
 // whole contig per row AND Qiita's sequence split into 64 KB rows), and
 // first_contig_name is the genome's lowest-`order_by` contig (default order_by:
-// sequence_index, i.e. FASTA order). Clustering the source by genome_id is not
-// required but lets DuckDB prune each per-genome read to its row group(s) (faster).
+// sequence_index, i.e. FASTA order within one file). Clustering the source by
+// genome_id is not required but lets DuckDB prune each per-genome read to its row
+// group(s) (faster).
 // Results are content-identical to `sylph sketch` (verified in
 // test/sql/sylph_index_create.test and ext/sylph's builder tests) — but not
 // byte-identical: sylph orders genomes in the file by parallel-completion, so its
@@ -47,9 +48,10 @@ namespace duckdb {
 // The build is a synchronous side effect performed in InitGlobal: the distinct
 // genome ids are enumerated, then N worker threads claim genomes off a shared
 // counter and sketch one at a time (a per-genome query materializes only that
-// genome) into per-thread builders (`threads` controls the count, default = all
-// cores); the builders are merged and written once. Peak memory is ~one genome
-// per worker plus the finalized sketches (the output size), not the corpus.
+// genome) into per-thread builders (`threads` controls the count, default =
+// DuckDB's threads setting); the builders are merged and written once. Peak memory
+// is ~one genome per worker plus the finalized sketches (the output size), not the
+// corpus.
 // Execute only emits the status row.
 class SylphIndexCreateTableFunction {
 public:

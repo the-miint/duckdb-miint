@@ -37,7 +37,7 @@ A deps file builds its library, then appends to these lists. `include()` shares 
 
 **Add a source that belongs to an optional feature.** Append it in that feature's deps file, never in the core list: there it would compile with the feature off. `miint_check_unique()` stops configure if a source is in both.
 
-**Add a C++ unit test.** Append `test/cpp/test_<Name>.cpp`, plus the `src/` files it exercises, to `MIINT_TEST_SOURCES`: in `CMakeLists.txt`, or in the feature's deps file if it needs that feature.
+**Add a C++ unit test.** Append `test/cpp/test_<Name>.cpp`, plus the `src/` files it exercises, to `MIINT_TEST_SOURCES`: in `CMakeLists.txt`, or in the feature's deps file if it needs that feature. A test that needs a running DuckDB goes in the `tests_duckdb` executable at the end of `CMakeLists.txt` instead.
 
 **Add an embedded dependency.**
 1. Write `cmake/deps/<name>.cmake`: build or import the library, then append to the lists above. Call `miint_git_version(<NAME> ext/<dir>)` if it is a submodule.

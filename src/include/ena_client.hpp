@@ -119,8 +119,7 @@ public:
 	// POST a JSON or XML body with HTTP Basic authentication. Returns the
 	// response body on success. Retries 429/5xx with exponential backoff
 	// matching the GET path. Throws on auth failure (401/403), other 4xx,
-	// or transport error. The Webin V2 endpoints all use Basic auth (see
-	// localdocs/ena-research-webin-v2-deep.md §3).
+	// or transport error. The Webin V2 endpoints all use Basic auth.
 	//
 	// `accept_type` is the response format we ask for. Webin V2 honours the
 	// Accept header to select XML vs JSON response shape regardless of the

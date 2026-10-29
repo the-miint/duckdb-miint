@@ -1,0 +1,30 @@
+# name: test/sql/rype_filter_multipart.test
+# description: rype_filter refuses a multi-part minimap2 index before it returns a row
+# group: [sql]
+
+require miint
+
+# data/shards/README.md describes the multi-part fixture and its two parts.
+
+statement ok
+CREATE TABLE short_reads AS
+SELECT i AS ord, 'TTGACCATGGCATTCAGGTACCGATTGCAAGTCCTAGGCTAACGGTTCAAGCTTAGCCGATCGGTACCATG' AS sequence1
+FROM range(10) t(i);
+
+statement error
+SELECT * FROM rype_filter('short_reads', 'data/rype/test.ryxdi', 'data/shards/multipart_fixture.mmi');
+----
+'data/shards/multipart_fixture.mmi' is a multi-part minimap2 index
+
+# Each of its parts is single-part, and loads.
+statement ok
+SELECT * FROM rype_filter('short_reads', 'data/rype/test.ryxdi', 'data/shards/multipart_fixture_part1.mmi');
+
+# Long reads never open the index, so its parts do not matter.
+statement ok
+CREATE TABLE long_reads AS SELECT i AS ord, repeat('TTGACCATGGCA', 40) AS sequence1 FROM range(10) t(i);
+
+query I
+SELECT count(*) FROM rype_filter('long_reads', 'data/rype/test.ryxdi', 'data/shards/multipart_fixture.mmi');
+----
+10

@@ -69,6 +69,32 @@ missing required column
 statement ok
 DROP TABLE bad_table2;
 
+# Test error: RYpe is handed a sequence column's own bytes, not a cast of them,
+# so a column that is not a string is refused, with an error naming it, at bind:
+# no index is there to load. A column of NULLs typed NULL, as `NULL AS sequence2`
+# makes one, is refused too; NULL::VARCHAR is accepted (rype_paired_detection)
+statement ok
+CREATE TABLE int_sequence1 AS SELECT 'seq1' AS read_id, 42 AS sequence1;
+
+statement error
+SELECT * FROM rype_classify('nonexistent.ryxdi', 'int_sequence1');
+----
+Column 'sequence1' in 'int_sequence1' must be VARCHAR or BLOB, not INTEGER
+
+statement ok
+CREATE TABLE null_sequence2 AS SELECT 'seq1' AS read_id, 'ACGTACGTACGTACGTACGTACGTACGTACGT' AS sequence1, NULL AS sequence2;
+
+statement error
+SELECT * FROM rype_classify('nonexistent.ryxdi', 'null_sequence2');
+----
+Column 'sequence2' in 'null_sequence2' must be VARCHAR or BLOB, not "NULL"
+
+statement ok
+DROP TABLE int_sequence1;
+
+statement ok
+DROP TABLE null_sequence2;
+
 # Test error: invalid threshold (too low)
 statement error
 SELECT * FROM rype_classify('data/rype/test.ryxdi', 'sequences', threshold := -0.1);
@@ -78,6 +104,13 @@ threshold must be between
 # Test error: invalid threshold (too high)
 statement error
 SELECT * FROM rype_classify('data/rype/test.ryxdi', 'sequences', threshold := 1.5);
+----
+threshold must be between
+
+# Test error: NaN, which compares false with both ends of the range, refused as
+# rype_filter refuses it, before the index is loaded: no index is there to load
+statement error
+SELECT * FROM rype_classify('nonexistent.ryxdi', 'sequences', threshold := 'nan'::DOUBLE);
 ----
 threshold must be between
 
@@ -262,6 +295,36 @@ WHERE read_id IN ('no_match', 'homopolymer');
 
 statement ok
 DROP TABLE varied_sequences;
+
+# The relation's name and the id column's go into the scan's SQL. Each holds a
+# double quote and a second statement, so each is one identifier only when it is
+# quoted: the call then gives what the plain names give. The victim's count shows
+# nothing else ran, should the scan ever go through a call that runs several
+# statements.
+statement ok
+CREATE TABLE injection_victim AS SELECT 1 AS x;
+
+statement ok
+CREATE TABLE "sequences""; DROP TABLE injection_victim; --" AS
+SELECT read_id AS "id""; DROP TABLE injection_victim; --", sequence1 FROM sequences;
+
+query II
+WITH evil AS (
+    SELECT read_id, bucket_name, score
+    FROM rype_classify('data/rype/test.ryxdi', 'sequences"; DROP TABLE injection_victim; --',
+                       id_column := 'id"; DROP TABLE injection_victim; --', threshold := 0.05)),
+plain AS (
+    SELECT read_id, bucket_name, score FROM rype_classify('data/rype/test.ryxdi', 'sequences', threshold := 0.05))
+SELECT (SELECT count(*) FROM evil) > 0,
+       (SELECT count(*) FROM ((SELECT * FROM evil EXCEPT ALL SELECT * FROM plain)
+                              UNION ALL (SELECT * FROM plain EXCEPT ALL SELECT * FROM evil)));
+----
+true	0
+
+query I
+SELECT count(*) FROM injection_victim;
+----
+1
 
 # Clean up
 statement ok

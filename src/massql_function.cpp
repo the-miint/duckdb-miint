@@ -296,13 +296,14 @@ static void MassQLExecute(ClientContext &context, TableFunctionInput &input, Dat
 static void MassQLToSQLFunction(DataChunk &args, ExpressionState &state, Vector &result) {
 	BinaryExecutor::Execute<string_t, string_t, string_t>(
 	    args.data[0], args.data[1], result, args.size(), [&](string_t query_str, string_t source_str) {
+		    std::string sql;
 		    try {
 			    auto parsed = miint::MassQLParser::parse(query_str.GetString());
-			    auto sql = miint::MassQLTranspiler::to_sql(parsed, source_str.GetString());
-			    return StringVector::AddString(result, sql);
+			    sql = miint::MassQLTranspiler::to_sql(parsed, source_str.GetString());
 		    } catch (const std::exception &e) {
 			    throw InvalidInputException(e.what());
 		    }
+		    return StringVector::AddString(result, sql);
 	    });
 }
 

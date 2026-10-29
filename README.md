@@ -108,6 +108,7 @@ make test
 
 # C++ unit tests only
 ./build/release/extension/miint/tests
+./build/release/extension/miint/tests_duckdb
 ```
 
 See [Testing](docs/testing.md) for details.

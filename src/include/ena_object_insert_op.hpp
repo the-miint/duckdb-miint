@@ -214,9 +214,8 @@ public:
 		if (!validate_only) {
 			RunAliasCollisionCheck(built.specs, client, opts);
 		}
-		// Dispatch by Content-Type. Post L4b-fix (2026-05-07), V2 JSON is
-		// used only for projects; samples + experiment + run + analysis go
-		// through XML. Samples were on JSON until live wwwdev surfaced an
+		// Dispatch by Content-Type. V2 JSON is used only for projects; samples,
+		// experiments, runs and analyses go through XML. Samples were on JSON until live wwwdev surfaced an
 		// XSD-ordering bug in V2's JSON-to-XML dispatcher (DESCRIPTION
 		// emitted before SAMPLE_NAME); experiment/run/analysis already
 		// required XML because the JSON dispatcher NPEs for SRA-side
@@ -236,31 +235,19 @@ public:
 		// server response even when parsing failed. Transport failures (network,
 		// 5xx after exhausted retries, malformed POST) come back as exceptions.
 		OutcomeT outcome;
-		bool transport_failure = false;
-		std::string transport_error;
-		try {
-			outcome = Derived::Submit(built.specs, opts, post_fn);
-		} catch (const std::exception &e) {
-			transport_failure = true;
-			transport_error = e.what();
-		}
-
-		const bool success = !transport_failure && outcome.success;
-		auto error_messages = outcome.error_messages;
-		if (transport_failure && error_messages.empty()) {
-			error_messages.push_back(transport_error);
-		}
+		const auto submitted =
+		    SubmitCapturingTransportFailure(outcome, [&] { return Derived::Submit(built.specs, opts, post_fn); });
 
 		SubmissionLogPayload log_payload;
 		log_payload.object_type = Derived::ObjectName();
 		log_payload.action = miint::ActionName(opts.action);
 		log_payload.n_objects = static_cast<int32_t>(built.specs.size());
-		log_payload.success = success;
+		log_payload.success = submitted.success;
 		log_payload.duration_ms = outcome.duration_ms;
 		log_payload.envelope_payload = outcome.envelope_payload;
 		log_payload.raw_receipt = outcome.raw_receipt;
 		log_payload.era_accession = outcome.era_accession;
-		log_payload.error_messages = error_messages;
+		log_payload.error_messages = submitted.error_messages;
 		// Capture per-object alias / primary accession into the audit log so
 		// users can recover an accession from an alias within the session
 		// (cross-submission lifecycle ops on Webin V2 require accession
@@ -274,15 +261,15 @@ public:
 		}
 		RecordSubmissionLog(catalog, creds, log_payload);
 
-		if (transport_failure) {
-			throw InvalidInputException("%s failed: %s", Derived::ThrowPrefix(), transport_error);
+		if (submitted.transport_failure) {
+			throw InvalidInputException("%s failed: %s", Derived::ThrowPrefix(), submitted.transport_error);
 		}
 		if (!outcome.success) {
 			std::string detail;
-			if (error_messages.empty()) {
+			if (submitted.error_messages.empty()) {
 				detail = "no error detail";
 			} else {
-				for (const auto &m : error_messages) {
+				for (const auto &m : submitted.error_messages) {
 					if (!detail.empty()) {
 						detail += "; ";
 					}
@@ -294,8 +281,8 @@ public:
 
 		// VALIDATE leaves outcome.rows empty (no per-object accessions in the
 		// receipt). AppendReturningRows asserts rows.size() == specs.size() in
-		// debug builds, so guard the call rather than weaken that invariant —
-		// it's load-bearing for the ADD path.
+		// debug builds, so guard the call rather than weaken that invariant,
+		// which the ADD path relies on.
 		if (return_chunk && !outcome.rows.empty()) {
 			Derived::AppendReturningRows(state.return_collection, state.return_types, built.specs, outcome);
 		}

@@ -17,7 +17,7 @@
 //     encodes the object kind.
 //   - `refname` — user-supplied alias from the original registration.
 //     Translated to the server-assigned accession at execute time via the
-//     Webin Reports API (L5). Requires the sibling `kind` named parameter
+//     Webin Reports API. Requires the sibling `kind` named parameter
 //     (one of 'projects' / 'samples' / 'experiments' / 'runs') because the
 //     Reports API URL is kind-tagged and aliases are unique per-account-per-
 //     kind.

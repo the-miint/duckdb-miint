@@ -49,8 +49,8 @@ class ExtensionLoader;
 namespace miint {
 
 // Register every shipped ena_modify_* table function with the loader. Wires
-// the four MODIFY family members: project (L4a), sample (L4b), experiment
-// (L4c), run (L4d). The registration site is one function so
+// the four MODIFY family members: project, sample, experiment and run. The
+// registration site is one function so
 // miint_extension.cpp doesn't grow a new line per object kind.
 void RegisterENAModifyTableFunctions(duckdb::ExtensionLoader &loader);
 

@@ -1,0 +1,14 @@
+# name: test/sql/wrapped_error_messages_linux.test
+# description: A read error raised by DuckDB's file system mid-stream is reported as text, not DuckDB's serialized form of it
+# group: [sql]
+
+require miint
+
+# /proc/self/mem opens as a regular file, and reading its first page fails with EIO, so the
+# read fails inside the stream after the open succeeded.
+require linux
+
+statement error
+SELECT * FROM read_paf(['/proc/self/mem']);
+----
+read_paf: /proc/self/mem: duckdb_seq_read: Could not read from file "/proc/self/mem"
