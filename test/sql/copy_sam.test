@@ -288,14 +288,15 @@ statement ok
 PREPARE copy_csv_refs AS
 COPY sam_test TO '{TEST_DIR}/csv_refs.sam' (FORMAT SAM, REFERENCE_LENGTHS 'csv_refs');
 
-# A name that becomes an integer is refused, not read as text (which took the database down).
+# A name that becomes a type ids do not take is refused, not read as text (which took the
+# database down).
 statement ok
-COPY (SELECT 42 AS name, length FROM ref_table) TO '{TEST_DIR}/changing_refs.csv';
+COPY (SELECT 4.5 AS name, length FROM ref_table) TO '{TEST_DIR}/changing_refs.csv';
 
 statement error
 EXECUTE copy_csv_refs;
 ----
-<REGEX>:Invalid Input Error: First column of reference table 'csv_refs' must be VARCHAR \(reference name\).*
+<REGEX>:Invalid Input Error: First column of reference table 'csv_refs' must be VARCHAR, BIGINT, or UUID \(reference name\).*
 
 # A length that is no longer an integer is refused the same way.
 statement ok

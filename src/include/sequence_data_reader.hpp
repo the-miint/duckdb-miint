@@ -24,7 +24,8 @@ struct SequenceDataSchema {
 };
 
 // Validate that a table/view has the required read_fastx schema columns:
-// Required: read_id (VARCHAR), sequence1 (VARCHAR), qual1 (LIST(UTINYINT)).
+// Required: read_id (VARCHAR, BIGINT or UUID; keyed by its text), sequence1 (VARCHAR),
+// qual1 (LIST(UTINYINT)).
 // Optional: sequence2 (VARCHAR), qual2 (LIST(UTINYINT)) — only needed for paired-end.
 // Throws BinderException on missing required columns. The types are checked by
 // ReadSequenceDataTable on the rows it reads, as the catalog's types for a view can lag behind

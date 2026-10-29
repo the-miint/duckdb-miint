@@ -1,5 +1,6 @@
 #include "reference_table_reader.hpp"
 #include "catalog_utils.hpp"
+#include "id_column_utils.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
@@ -19,9 +20,10 @@ static void CheckReferenceColumnTypes(const vector<LogicalType> &types, const st
 		throw InvalidInputException("Reference table '%s' must have at least 2 columns (name, length)", table_name);
 	}
 
-	if (types[0].id() != LogicalTypeId::VARCHAR) {
-		throw InvalidInputException("First column of reference table '%s' must be VARCHAR (reference name)",
-		                            table_name);
+	// A reference name is an id, so it takes the id types
+	if (!IsAllowedIdType(types[0])) {
+		throw InvalidInputException("First column of reference table '%s' must be %s (reference name)", table_name,
+		                            AllowedIdTypeList());
 	}
 
 	auto length_type = types[1].id();
@@ -35,8 +37,9 @@ static void CheckReferenceColumnTypes(const vector<LogicalType> &types, const st
 // Shared core: read the table/view into (name, length) pairs in the order the scan produced
 // them, collapsing duplicate names to their FIRST occurrence. Both public entry points are thin
 // wrappers over this so the validation, error messages and duplicate handling live in one place.
-static std::vector<std::pair<std::string, uint64_t>> ReadReferenceRows(ClientContext &context,
-                                                                       const std::string &table_name) {
+// `name_type` receives the name column's type; its names are returned as their text.
+static std::vector<std::pair<std::string, uint64_t>>
+ReadReferenceRows(ClientContext &context, const std::string &table_name, LogicalType &name_type) {
 	std::vector<std::pair<std::string, uint64_t>> result;
 	std::unordered_set<std::string> seen;
 
@@ -61,6 +64,9 @@ static std::vector<std::pair<std::string, uint64_t>> ReadReferenceRows(ClientCon
 	auto &materialized = *query_result;
 	auto &result_types = materialized.GetTypes();
 	CheckReferenceColumnTypes(result_types, table_name);
+	name_type = result_types[0];
+	std::vector<std::string> names;
+	std::vector<bool> name_nulls;
 
 	// Get the length column type for proper extraction
 	auto &length_type = result_types[1];
@@ -74,31 +80,28 @@ static std::vector<std::pair<std::string, uint64_t>> ReadReferenceRows(ClientCon
 			break;
 		}
 
-		auto &name_vector = chunk->data[0];
 		auto &length_vector = chunk->data[1];
 
 		// Convert to unified format for proper NULL handling
-		UnifiedVectorFormat name_data, length_data;
-		name_vector.ToUnifiedFormat(name_data);
+		UnifiedVectorFormat length_data;
 		length_vector.ToUnifiedFormat(length_data);
 
-		auto name_ptr = UnifiedVectorFormat::GetData<string_t>(name_data);
+		ExtractIdColumnAsStrings(*chunk, 0, name_type, names, name_nulls);
 
 		for (idx_t i = 0; i < chunk->size(); i++) {
 			row_number++;
 
-			auto name_idx = name_data.sel->get_index(i);
 			auto length_idx = length_data.sel->get_index(i);
 
 			// Check for NULL values
-			if (!name_data.validity.RowIsValid(name_idx)) {
+			if (name_nulls[i]) {
 				throw InvalidInputException("NULL reference name at row %llu in table '%s'", row_number, table_name);
 			}
 			if (!length_data.validity.RowIsValid(length_idx)) {
 				throw InvalidInputException("NULL reference length at row %llu in table '%s'", row_number, table_name);
 			}
 
-			auto name = name_ptr[name_idx].GetString();
+			auto &name = names[i];
 
 			// Get length value - handle different integer types
 			int64_t length;
@@ -144,7 +147,8 @@ static std::vector<std::pair<std::string, uint64_t>> ReadReferenceRows(ClientCon
 }
 
 std::unordered_map<std::string, uint64_t> ReadReferenceTable(ClientContext &context, const std::string &table_name) {
-	auto rows = ReadReferenceRows(context, table_name);
+	LogicalType name_type;
+	auto rows = ReadReferenceRows(context, table_name, name_type);
 
 	std::unordered_map<std::string, uint64_t> result;
 	result.reserve(rows.size());
@@ -156,10 +160,28 @@ std::unordered_map<std::string, uint64_t> ReadReferenceTable(ClientContext &cont
 
 std::vector<std::pair<std::string, uint64_t>> ReadReferenceTableSortedByName(ClientContext &context,
                                                                              const std::string &table_name) {
-	auto rows = ReadReferenceRows(context, table_name);
+	LogicalType name_type;
+	auto rows = ReadReferenceRows(context, table_name, name_type);
 
-	// Byte-wise name order. See the header for why name order is the contract rather than the
-	// table's row order, and why this must agree with DuckDB's VARCHAR comparison.
+	// The names' own order: see the header for why name order is the contract rather than the
+	// table's row order, and why this must agree with DuckDB's comparison of the name column.
+	if (name_type.id() == LogicalTypeId::BIGINT) {
+		// Numeric: as text, '10' would sort before '2'
+		std::vector<std::pair<int64_t, std::pair<std::string, uint64_t>>> keyed;
+		keyed.reserve(rows.size());
+		for (auto &row : rows) {
+			const auto key = std::stoll(row.first);
+			keyed.emplace_back(key, std::move(row));
+		}
+		std::sort(keyed.begin(), keyed.end(),
+		          [](const std::pair<int64_t, std::pair<std::string, uint64_t>> &a,
+		             const std::pair<int64_t, std::pair<std::string, uint64_t>> &b) { return a.first < b.first; });
+		for (idx_t i = 0; i < rows.size(); i++) {
+			rows[i] = std::move(keyed[i].second);
+		}
+		return rows;
+	}
+	// Byte-wise for VARCHAR, and for UUID, which DuckDB orders as its text
 	std::sort(rows.begin(), rows.end(),
 	          [](const std::pair<std::string, uint64_t> &a, const std::pair<std::string, uint64_t> &b) {
 		          return a.first < b.first;

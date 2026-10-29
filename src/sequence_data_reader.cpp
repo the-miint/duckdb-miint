@@ -1,5 +1,6 @@
 #include "sequence_data_reader.hpp"
 #include "catalog_utils.hpp"
+#include "id_column_utils.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
 #include "duckdb/main/connection.hpp"
@@ -99,30 +100,36 @@ SequenceDataMap ReadSequenceDataTable(ClientContext &context, const std::string 
 
 	// Check the types the read returned, not the catalog's (docs/internals/reading-tables-views.md)
 	auto &result_types = materialized.GetTypes();
-	auto check_type = [&](idx_t col, const char *col_name, bool is_qual) {
+	auto is_varchar = [&](idx_t col) {
+		return result_types[col].id() == LogicalTypeId::VARCHAR;
+	};
+	auto is_qual = [&](idx_t col) {
 		auto &type = result_types[col];
-		const bool accepted =
-		    is_qual ? type.id() == LogicalTypeId::LIST && ListType::GetChildType(type).id() == LogicalTypeId::UTINYINT
-		            : type.id() == LogicalTypeId::VARCHAR;
+		return type.id() == LogicalTypeId::LIST && ListType::GetChildType(type).id() == LogicalTypeId::UTINYINT;
+	};
+	auto require = [&](bool accepted, const char *col_name, const char *description) {
 		if (!accepted) {
 			throw InvalidInputException("Column '%s' in sequence data table '%s' must be %s", col_name, table_name,
-			                            is_qual ? "LIST(UTINYINT)" : "VARCHAR");
+			                            description);
 		}
 	};
-	check_type(COL_READ_ID, "read_id", false);
-	check_type(COL_SEQ1, "sequence1", false);
-	check_type(COL_QUAL1, "qual1", true);
+	// A read_id is an id, so it takes the id types
+	const auto &read_id_type = result_types[COL_READ_ID];
+	require(IsAllowedIdType(read_id_type), "read_id", AllowedIdTypeList());
+	require(is_varchar(COL_SEQ1), "sequence1", "VARCHAR");
+	require(is_qual(COL_QUAL1), "qual1", "LIST(UTINYINT)");
 	if (schema.has_sequence2) {
-		check_type(col_seq2, "sequence2", false);
+		require(is_varchar(col_seq2), "sequence2", "VARCHAR");
 	}
 	if (schema.has_qual2) {
-		check_type(col_qual2, "qual2", true);
+		require(is_qual(col_qual2), "qual2", "LIST(UTINYINT)");
 	}
 
 	// Temp vectors for two-pass extraction (strings first, then lists).
 	// ListVector::GetChildMutable() can corrupt string pointers, so all strings
 	// must be copied to std::string before any list extraction.
 	std::vector<std::string> temp_read_ids;
+	std::vector<bool> read_id_nulls;
 	std::vector<std::string> temp_seq1;
 	std::vector<std::string> temp_seq2;
 	std::vector<bool> temp_seq2_valid;
@@ -133,8 +140,7 @@ SequenceDataMap ReadSequenceDataTable(ClientContext &context, const std::string 
 			break;
 		}
 
-		UnifiedVectorFormat read_id_data, seq1_data, qual1_data;
-		chunk->data[COL_READ_ID].ToUnifiedFormat(read_id_data);
+		UnifiedVectorFormat seq1_data, qual1_data;
 		chunk->data[COL_SEQ1].ToUnifiedFormat(seq1_data);
 		chunk->data[COL_QUAL1].ToUnifiedFormat(qual1_data);
 
@@ -148,21 +154,19 @@ SequenceDataMap ReadSequenceDataTable(ClientContext &context, const std::string 
 			chunk->data[col_qual2].ToUnifiedFormat(qual2_data);
 		}
 
-		auto read_id_ptr = UnifiedVectorFormat::GetData<string_t>(read_id_data);
 		auto seq1_ptr = UnifiedVectorFormat::GetData<string_t>(seq1_data);
 
 		// Pass 1: extract all strings
-		temp_read_ids.clear();
+		ExtractIdColumnAsStrings(*chunk, COL_READ_ID, read_id_type, temp_read_ids, read_id_nulls);
 		temp_seq1.clear();
 		temp_seq2.clear();
 		temp_seq2_valid.clear();
 
 		for (idx_t i = 0; i < chunk->size(); i++) {
 			row_number++;
-			auto rid_idx = read_id_data.sel->get_index(i);
 			auto s1_idx = seq1_data.sel->get_index(i);
 
-			if (!read_id_data.validity.RowIsValid(rid_idx)) {
+			if (read_id_nulls[i]) {
 				throw InvalidInputException("NULL read_id at row %llu in sequence data table '%s'", row_number,
 				                            table_name);
 			}
@@ -171,7 +175,6 @@ SequenceDataMap ReadSequenceDataTable(ClientContext &context, const std::string 
 				                            table_name);
 			}
 
-			temp_read_ids.push_back(read_id_ptr[rid_idx].GetString());
 			temp_seq1.push_back(seq1_ptr[s1_idx].GetString());
 
 			if (schema.has_sequence2) {

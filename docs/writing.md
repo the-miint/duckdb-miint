@@ -178,11 +178,11 @@ SAM and BAM are written to local files only; a remote target (`s3://...`) is ref
 **Parameters:**
 - `INCLUDE_HEADER` (default: true): Include header with reference sequences
   - **Note:** BAM format requires `INCLUDE_HEADER=true` (headers are mandatory in BAM files)
-- `REFERENCE_LENGTHS` (VARCHAR, required if INCLUDE_HEADER=true): Table or view name containing reference sequences. Must have at least 2 columns: first column = reference name (VARCHAR), second column = reference length (INTEGER/BIGINT). Column names don't matter. Views are fully supported and can include computed columns. Duplicate reference names are collapsed, keeping the first occurrence.
+- `REFERENCE_LENGTHS` (VARCHAR, required if INCLUDE_HEADER=true): Table or view name containing reference sequences. Must have at least 2 columns: first column = reference name (VARCHAR, BIGINT or UUID, as `reference` takes, matched as text), second column = reference length (INTEGER/BIGINT). Column names don't matter. Views are fully supported and can include computed columns. Duplicate reference names are collapsed, keeping the first occurrence.
 
 **`@SQ` order, and how to write a coordinate-sorted BAM:**
 
-`@SQ` lines are emitted **sorted by reference name**, regardless of the order of rows in `REFERENCE_LENGTHS`. This matters because a reference's index in the `@SQ` list *is* its TID, and a BAM is coordinate-sorted by **TID**, not by reference name — so the header order determines what "sorted" means.
+`@SQ` lines are emitted **sorted by reference name**, in the name column's own order (numeric for BIGINT names), regardless of the order of rows in `REFERENCE_LENGTHS`. This matters because a reference's index in the `@SQ` list *is* its TID, and a BAM is coordinate-sorted by **TID**, not by reference name — so the header order determines what "sorted" means.
 
 Because the order is name-sorted, sorting your records the obvious way produces a genuinely coordinate-sorted file:
 
@@ -276,7 +276,7 @@ The `SEQUENCE_DATA` parameter allows writing actual SEQ and QUAL fields into SAM
 This design avoids duplicating immutable sequence data across alignment records. The original FASTQ sequences are stored once and joined at write time.
 
 **Required columns in the SEQUENCE_DATA table:**
-- `read_id` (VARCHAR): Read identifier (must match alignment read_id values)
+- `read_id` (VARCHAR, BIGINT or UUID): Read identifier, matched as text against the alignment's read_id values, so a BIGINT or UUID read_id needs no cast
 - `sequence1` (VARCHAR): Forward-strand DNA sequence for read 1
 - `qual1` (LIST(UTINYINT)): Phred quality scores for read 1 (raw values 0-93, no ASCII offset)
 

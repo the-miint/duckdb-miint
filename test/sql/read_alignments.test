@@ -227,14 +227,15 @@ statement ok
 PREPARE read_csv_refs AS
 SELECT COUNT(*) FROM read_alignments('data/sam/foo_no_header.sam', reference_lengths='csv_refs');
 
-# A name that becomes an integer is refused, not read as text (which took the database down).
+# A name that becomes a type ids do not take is refused, not read as text (which took the
+# database down).
 statement ok
-COPY (SELECT 42 AS name, length FROM ref_lengths_table) TO '{TEST_DIR}/changing_refs.csv';
+COPY (SELECT 4.5 AS name, length FROM ref_lengths_table) TO '{TEST_DIR}/changing_refs.csv';
 
 statement error
 EXECUTE read_csv_refs;
 ----
-<REGEX>:Invalid Input Error: First column of reference table 'csv_refs' must be VARCHAR \(reference name\).*
+<REGEX>:Invalid Input Error: First column of reference table 'csv_refs' must be VARCHAR, BIGINT, or UUID \(reference name\).*
 
 # A length that is no longer an integer is refused the same way.
 statement ok

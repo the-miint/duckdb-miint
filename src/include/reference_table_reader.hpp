@@ -16,7 +16,7 @@ namespace duckdb {
 // either tables or views.
 //
 // Required columns (by position):
-//   - Column 0: reference name (VARCHAR) - must not be NULL
+//   - Column 0: reference name (VARCHAR, BIGINT or UUID; returned as its text) - must not be NULL
 //   - Column 1: reference length (BIGINT, INTEGER, UBIGINT, or UINTEGER) - must not be NULL
 //
 // Throws InvalidInputException if:
@@ -42,8 +42,10 @@ std::unordered_map<std::string, uint64_t> ReadReferenceTable(ClientContext &cont
 // Name order (not table row order) is the contract deliberately: DuckDB does not guarantee the
 // row order of a parallel table scan, so row order could not be reproducible. It also makes the
 // natural `ORDER BY reference, position` actually yield a coordinate-sorted file -- which
-// depends on this sort agreeing with DuckDB's VARCHAR comparison. Both are plain byte-wise
-// comparisons (DuckDB's default collation is binary), so they agree.
+// depends on this sort agreeing with DuckDB's comparison of the name column. For VARCHAR both
+// are plain byte-wise comparisons (DuckDB's default collation is binary), so they agree; UUIDs
+// are compared byte-wise as their text too, which is how DuckDB orders them; BIGINT names are
+// sorted numerically, as DuckDB orders them, not as their text.
 //
 // Karyotype order (chr1..chr9, chr10) is NOT expressible this way, since 'chr10' sorts before
 // 'chr2'. That needs an explicit ordinal column and is a recorded follow-up on #173.

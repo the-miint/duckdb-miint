@@ -312,15 +312,16 @@ statement ok
 PREPARE copy_csv_seqs AS
 COPY alignments TO '{TEST_DIR}/csv_seqs.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'csv_seqs');
 
-# A read_id that becomes an integer is refused, not read as text (which took the database down).
+# A read_id that becomes a type ids do not take is refused, not read as text (which took the
+# database down).
 statement ok
-COPY (SELECT row_number() OVER () AS read_id, sequence1, qual1, sequence2, qual2 FROM seq_data)
+COPY (SELECT row_number() OVER () + 0.5 AS read_id, sequence1, qual1, sequence2, qual2 FROM seq_data)
 TO '{TEST_DIR}/changing_seqs.csv';
 
 statement error
 EXECUTE copy_csv_seqs;
 ----
-<REGEX>:Invalid Input Error: Column 'read_id' in sequence data table 'csv_seqs' must be VARCHAR.*
+<REGEX>:Invalid Input Error: Column 'read_id' in sequence data table 'csv_seqs' must be VARCHAR, BIGINT, or UUID.*
 
 # Every column is checked: here sequence1 becomes an integer.
 statement ok
