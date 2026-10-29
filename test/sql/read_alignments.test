@@ -214,6 +214,50 @@ SELECT COUNT(*) FROM read_alignments('data/sam/foo_no_header.sam', reference_len
 ----
 4
 
+# The reference_lengths types are checked against the types the read returns. A relation's types
+# can change with no change to the catalog, and a prepared query is then not bound again: here a
+# view over a CSV file.
+statement ok
+COPY ref_lengths_table TO '{TEST_DIR}/changing_refs.csv';
+
+statement ok
+CREATE VIEW csv_refs AS SELECT * FROM read_csv('{TEST_DIR}/changing_refs.csv');
+
+statement ok
+PREPARE read_csv_refs AS
+SELECT COUNT(*) FROM read_alignments('data/sam/foo_no_header.sam', reference_lengths='csv_refs');
+
+# A name that becomes an integer is refused, not read as text (which took the database down).
+statement ok
+COPY (SELECT 42 AS name, length FROM ref_lengths_table) TO '{TEST_DIR}/changing_refs.csv';
+
+statement error
+EXECUTE read_csv_refs;
+----
+<REGEX>:Invalid Input Error: First column of reference table 'csv_refs' must be VARCHAR \(reference name\).*
+
+# A length that is no longer an integer is refused the same way.
+statement ok
+COPY (SELECT name, 1.5 AS length FROM ref_lengths_table) TO '{TEST_DIR}/changing_refs.csv';
+
+statement error
+EXECUTE read_csv_refs;
+----
+<REGEX>:Invalid Input Error: Second column of reference table 'csv_refs' must be an integer type \(reference length\).*
+
+# Valid again, the file is read: the catalog's types for the view lag behind the file, so a check
+# against them would refuse it.
+statement ok
+COPY ref_lengths_table TO '{TEST_DIR}/changing_refs.csv';
+
+query I
+EXECUTE read_csv_refs;
+----
+4
+
+statement ok
+DROP VIEW csv_refs;
+
 # Cleanup
 statement ok
 DROP VIEW ref_lengths_computed;

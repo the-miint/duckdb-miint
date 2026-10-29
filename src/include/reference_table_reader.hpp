@@ -22,7 +22,7 @@ namespace duckdb {
 // Throws InvalidInputException if:
 //   - Table/view doesn't exist
 //   - Table/view has fewer than 2 columns
-//   - Column types are incorrect
+//   - Column types are incorrect (the types the read returns, which a view's catalog entry can lag)
 //   - Table/view is empty
 //   - NULL value in name or length column
 //   - Negative length value

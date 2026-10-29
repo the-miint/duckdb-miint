@@ -11,22 +11,24 @@
 
 namespace duckdb {
 
-static void ValidateReferenceTableSchema(ClientContext &context, const std::string &table_name) {
-	auto info = GetTableOrViewColumns(context, table_name, "Reference table");
-	auto &col_types = info.types;
-
-	if (col_types.size() < 2) {
+// Check the types the read returned. Not the catalog's: a view's types there are those of its last
+// binding, which can lag behind a file it reads whose detected types changed
+// (docs/internals/reading-tables-views.md).
+static void CheckReferenceColumnTypes(const vector<LogicalType> &types, const std::string &table_name) {
+	if (types.size() < 2) {
 		throw InvalidInputException("Reference table '%s' must have at least 2 columns (name, length)", table_name);
 	}
 
-	if (col_types[0].id() != LogicalTypeId::VARCHAR) {
-		throw InvalidInputException("First column of reference table must be VARCHAR (reference name)");
+	if (types[0].id() != LogicalTypeId::VARCHAR) {
+		throw InvalidInputException("First column of reference table '%s' must be VARCHAR (reference name)",
+		                            table_name);
 	}
 
-	auto length_type = col_types[1].id();
+	auto length_type = types[1].id();
 	if (length_type != LogicalTypeId::BIGINT && length_type != LogicalTypeId::INTEGER &&
 	    length_type != LogicalTypeId::UBIGINT && length_type != LogicalTypeId::UINTEGER) {
-		throw InvalidInputException("Second column of reference table must be an integer type (reference length)");
+		throw InvalidInputException("Second column of reference table '%s' must be an integer type (reference length)",
+		                            table_name);
 	}
 }
 
@@ -37,9 +39,6 @@ static std::vector<std::pair<std::string, uint64_t>> ReadReferenceRows(ClientCon
                                                                        const std::string &table_name) {
 	std::vector<std::pair<std::string, uint64_t>> result;
 	std::unordered_set<std::string> seen;
-
-	// Validate schema first
-	ValidateReferenceTableSchema(context, table_name);
 
 	// Create a new connection to avoid deadlocking the current context.
 	// This is necessary because context.Query() requires locking the context,
@@ -61,6 +60,7 @@ static std::vector<std::pair<std::string, uint64_t>> ReadReferenceRows(ClientCon
 
 	auto &materialized = *query_result;
 	auto &result_types = materialized.GetTypes();
+	CheckReferenceColumnTypes(result_types, table_name);
 
 	// Get the length column type for proper extraction
 	auto &length_type = result_types[1];
