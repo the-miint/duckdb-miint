@@ -6,7 +6,9 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/vector_operations/generic_executor.hpp"
+#include "duckdb/execution/operator/persistent/physical_copy_to_file.hpp"
 #include "duckdb/function/copy_function.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
 
 namespace duckdb {
 
@@ -90,6 +92,47 @@ struct NewickCopyLocalState : public LocalFunctionData {
 };
 
 //===--------------------------------------------------------------------===//
+// Select: cast the columns the sink reads to the types it reads them as
+//===--------------------------------------------------------------------===//
+static vector<unique_ptr<Expression>> NewickCopySelect(CopyToSelectInput &input) {
+	vector<unique_ptr<Expression>> result;
+	bool any_cast = false;
+	for (auto &expr : input.select_list) {
+		const auto &type = expr->GetReturnType();
+		const auto name = expr->GetAlias();
+		LogicalType target;
+		if ((name == "node_index" || name == "parent_index" || name == "edge_id") && type.IsIntegral() &&
+		    type.id() != LogicalTypeId::BIGINT) {
+			target = LogicalType::BIGINT;
+		} else if (name == "branch_length" && type.IsNumeric() && type.id() != LogicalTypeId::DOUBLE) {
+			target = LogicalType::DOUBLE;
+		}
+		if (target.id() == LogicalTypeId::INVALID) {
+			result.push_back(std::move(expr));
+			continue;
+		}
+		auto cast_expr = BoundCastExpression::AddCastToType(input.context, std::move(expr), target, false);
+		cast_expr->SetAlias(name);
+		result.push_back(std::move(cast_expr));
+		any_cast = true;
+	}
+	// An empty list leaves the input as it is
+	if (!any_cast) {
+		result.clear();
+	}
+	return result;
+}
+
+// A column the sink reads, in the one type NewickCopySelect leaves it as
+static void CheckNewickColumnType(const vector<Identifier> &names, const vector<LogicalType> &sql_types, idx_t idx,
+                                  LogicalTypeId expected, const char *expected_desc) {
+	if (idx != DConstants::INVALID_INDEX && sql_types[idx].id() != expected) {
+		throw BinderException("COPY FORMAT NEWICK: column '%s' must be %s, got %s", names[idx].GetIdentifierName(),
+		                      expected_desc, sql_types[idx].ToString());
+	}
+}
+
+//===--------------------------------------------------------------------===//
 // Bind
 //===--------------------------------------------------------------------===//
 static unique_ptr<FunctionData> NewickCopyBind(ClientContext &context, CopyFunctionBindInput &input,
@@ -121,6 +164,11 @@ static unique_ptr<FunctionData> NewickCopyBind(ClientContext &context, CopyFunct
 	if (result->parent_index_idx == DConstants::INVALID_INDEX) {
 		throw BinderException("COPY FORMAT NEWICK requires 'parent_index' column");
 	}
+	CheckNewickColumnType(names, sql_types, result->node_index_idx, LogicalTypeId::BIGINT, "an integer type");
+	CheckNewickColumnType(names, sql_types, result->parent_index_idx, LogicalTypeId::BIGINT, "an integer type");
+	CheckNewickColumnType(names, sql_types, result->edge_id_idx, LogicalTypeId::BIGINT, "an integer type");
+	CheckNewickColumnType(names, sql_types, result->branch_length_idx, LogicalTypeId::DOUBLE, "a numeric type");
+	CheckNewickColumnType(names, sql_types, result->name_idx, LogicalTypeId::VARCHAR, "VARCHAR");
 
 	// Parse parameters
 	Value compression_param;
@@ -365,6 +413,18 @@ static void NewickCopyFinalize(ClientContext &context, FunctionData &bind_data, 
 }
 
 //===--------------------------------------------------------------------===//
+// Initialize Operator: one tree, one file
+//===--------------------------------------------------------------------===//
+static void NewickCopyInitializeOperator(GlobalFunctionData &gstate, const PhysicalOperator &op) {
+	auto &copy = op.Cast<PhysicalCopyToFile>();
+	// Each file would get only the rows sent to it, a fragment of the tree
+	if (copy.per_thread_output || copy.partition_output) {
+		throw InvalidInputException("COPY FORMAT NEWICK writes one tree to one file, so it takes no PER_THREAD_OUTPUT, "
+		                            "PARTITION_BY or ORDER_BY");
+	}
+}
+
+//===--------------------------------------------------------------------===//
 // Register Function
 //===--------------------------------------------------------------------===//
 static void NewickCopyOptions(ClientContext &context, CopyOptionsInput &input) {
@@ -377,12 +437,14 @@ static void NewickCopyOptions(ClientContext &context, CopyOptionsInput &input) {
 CopyFunction CopyNewickFunction::GetFunction() {
 	CopyFunction func("newick");
 	func.copy_options = NewickCopyOptions;
+	func.copy_to_select = NewickCopySelect;
 	func.copy_to_bind = NewickCopyBind;
 	func.copy_to_initialize_local = NewickCopyInitializeLocal;
 	func.copy_to_initialize_global = NewickCopyInitializeGlobal;
 	func.copy_to_sink = NewickCopySink;
 	func.copy_to_combine = NewickCopyCombine;
 	func.copy_to_finalize = NewickCopyFinalize;
+	func.initialize_operator = NewickCopyInitializeOperator;
 	return func;
 }
 

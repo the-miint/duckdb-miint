@@ -492,6 +492,8 @@ Write query results to Newick phylogenetic tree format. Reconstructs a tree from
 - `branch_length` (DOUBLE): Branch length
 - `edge_id` (BIGINT): Edge identifier for jplace format
 
+An index column of another integer type is cast to BIGINT, and a `branch_length` of another numeric type (DECIMAL, as untyped literals such as `0.1` are) to DOUBLE. A column of any other type is refused when the COPY is planned.
+
 **Parameters:**
 - `EDGE_IDS` (BOOLEAN, default: auto): Include edge identifiers `{n}` in output
   - Default: true if `edge_id` column exists, false otherwise
@@ -514,6 +516,7 @@ Write query results to Newick phylogenetic tree format. Reconstructs a tree from
   - All nodes connected
 - Serializes to standard Newick format with semicolon terminator
 - Extra columns (e.g., `is_tip`, `filepath`) are ignored
+- Writes one tree to one file: `PER_THREAD_OUTPUT`, `PARTITION_BY` and `ORDER_BY` are refused, as each file would hold a fragment of the tree
 
 **Examples:**
 ```sql

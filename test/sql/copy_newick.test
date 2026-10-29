@@ -151,6 +151,113 @@ statement ok
 DROP TABLE missing_parent;
 
 # =============================================================================
+# Column types
+# =============================================================================
+
+# A tree built from untyped literals has INTEGER indices and DECIMAL branch lengths. Integer
+# indices of any width are cast to BIGINT and numeric branch lengths to DOUBLE.
+statement ok
+CREATE TABLE literal_tree AS
+SELECT * FROM (VALUES (0, NULL, NULL, NULL), (1, 0, 'a', 0.1), (2, 0, 'b', 0.2))
+    AS t(node_index, parent_index, name, branch_length);
+
+query TTTT
+SELECT typeof(node_index), typeof(parent_index), typeof(name), typeof(branch_length) FROM literal_tree LIMIT 1;
+----
+INTEGER	INTEGER	VARCHAR	DECIMAL(2,1)
+
+statement ok
+COPY literal_tree TO '{TEST_DIR}/literal_tree.nwk' (FORMAT NEWICK);
+
+query TR
+SELECT name, branch_length FROM read_newick('{TEST_DIR}/literal_tree.nwk') WHERE is_tip ORDER BY name;
+----
+a	0.1
+b	0.2
+
+statement ok
+DROP TABLE literal_tree;
+
+# An INTEGER edge_id is cast the same way.
+statement ok
+COPY (SELECT node_index, parent_index, name, branch_length, edge_id::INTEGER AS edge_id
+      FROM read_newick('data/newick/with_edge_ids.nwk'))
+TO '{TEST_DIR}/integer_edge_ids.nwk' (FORMAT NEWICK);
+
+query I
+SELECT count(*) FROM read_newick('{TEST_DIR}/integer_edge_ids.nwk') r
+JOIN read_newick('data/newick/with_edge_ids.nwk') o USING (node_index)
+WHERE r.edge_id IS NOT DISTINCT FROM o.edge_id AND r.name IS NOT DISTINCT FROM o.name;
+----
+5
+
+# A column that cannot be cast is refused when the COPY is planned, naming the column and the
+# type it needs, and the database stays usable.
+statement error
+COPY (SELECT node_index::VARCHAR AS node_index, parent_index FROM read_newick('data/newick/simple.nwk'))
+TO '{TEST_DIR}/varchar_node_index.nwk' (FORMAT NEWICK);
+----
+Binder Error: COPY FORMAT NEWICK: column 'node_index' must be an integer type, got VARCHAR
+
+statement error
+COPY (SELECT node_index, parent_index::VARCHAR AS parent_index FROM read_newick('data/newick/simple.nwk'))
+TO '{TEST_DIR}/varchar_parent_index.nwk' (FORMAT NEWICK);
+----
+Binder Error: COPY FORMAT NEWICK: column 'parent_index' must be an integer type, got VARCHAR
+
+statement error
+COPY (SELECT node_index, parent_index, branch_length::VARCHAR AS branch_length FROM read_newick('data/newick/simple.nwk'))
+TO '{TEST_DIR}/varchar_branch_length.nwk' (FORMAT NEWICK);
+----
+Binder Error: COPY FORMAT NEWICK: column 'branch_length' must be a numeric type, got VARCHAR
+
+statement error
+COPY (SELECT node_index, parent_index, node_index AS name FROM read_newick('data/newick/simple.nwk'))
+TO '{TEST_DIR}/bigint_name.nwk' (FORMAT NEWICK);
+----
+Binder Error: COPY FORMAT NEWICK: column 'name' must be VARCHAR, got BIGINT
+
+statement error
+COPY (SELECT node_index, parent_index, name::VARCHAR AS edge_id FROM read_newick('data/newick/simple.nwk'))
+TO '{TEST_DIR}/varchar_edge_id.nwk' (FORMAT NEWICK);
+----
+Binder Error: COPY FORMAT NEWICK: column 'edge_id' must be an integer type, got VARCHAR
+
+query I
+SELECT 1;
+----
+1
+
+# =============================================================================
+# One tree, one file
+# =============================================================================
+
+# Output split across files would hold fragments of the tree, so per-thread, partitioned and
+# ordered output (which writes a directory of files) are refused, and nothing is written.
+statement error
+COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
+TO '{TEST_DIR}/per_thread_tree' (FORMAT NEWICK, PER_THREAD_OUTPUT true);
+----
+COPY FORMAT NEWICK writes one tree to one file
+
+statement error
+COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
+TO '{TEST_DIR}/partitioned_tree' (FORMAT NEWICK, PARTITION_BY (is_tip));
+----
+COPY FORMAT NEWICK writes one tree to one file
+
+statement error
+COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
+TO '{TEST_DIR}/ordered_tree' (FORMAT NEWICK, ORDER_BY (node_index));
+----
+COPY FORMAT NEWICK writes one tree to one file
+
+query I
+SELECT count(*) FROM glob('{TEST_DIR}/*_tree/**');
+----
+0
+
+# =============================================================================
 # Tree structure validation
 # =============================================================================
 
