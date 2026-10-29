@@ -50,7 +50,8 @@ SELECT * FROM align_sortmerna('smr_q', ref_paths := []);
 ----
 ref_paths
 
-# --- ref_paths takes exactly one file (see align_sortmerna_rrna.test) ---
+# --- ref_paths takes exactly one file: ignoring a second would leave reads that
+# match only it unaligned, with no error ---
 statement error
 SELECT * FROM align_sortmerna('smr_q', ref_paths := [
     'ext/sortmerna/test_data/test_ref.fasta', 'ext/sortmerna/test_data/gg_13_8_ref_set.fasta']);
@@ -162,8 +163,8 @@ FROM align_sortmerna(
 ----
 1	1	1	1	1
 
-# --- evalue: a hit above the threshold is an unmapped record (see
-# align_sortmerna_rrna.test for the e-values of these reads) ---
+# --- evalue: a hit above the threshold is an unmapped record. len40's e-value
+# is ~5e-10 and len32's ~3e-7 ---
 statement ok
 CREATE TABLE smr_ev AS
   SELECT 'len' || len AS read_id, substr(sequence1, 300, len) AS sequence1

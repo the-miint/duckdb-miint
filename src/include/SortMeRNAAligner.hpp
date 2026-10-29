@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -19,7 +20,7 @@ struct SortMeRNAConfig {
 	int32_t gap_ext = 2;
 	int32_t score_N = -3;
 	// A hit with a larger e-value is reported unaligned; negative keeps every
-	// hit. The library leaves this to its caller (smr_api.h).
+	// hit.
 	double evalue = -1.0;
 	uint32_t seed_win_len = 18;
 	uint32_t num_alignments = 1;
@@ -101,11 +102,20 @@ private:
 	// Create ctx_ from cfg; throws if the library returns no context.
 	void create_context(const SortMeRNAConfig &cfg);
 	// Keep the handle an smr_index_load* call returned, or, if it is NULL,
-	// destroy ctx_ and throw with the library's error. `loader` names the call.
+	// throw with the library's error. `loader` names the call.
 	void adopt_index(smr_index *idx, const char *loader);
 
-	smr_context *ctx_ = nullptr;
-	smr_index *idx_ = nullptr;
+	struct ContextDeleter {
+		void operator()(smr_context *ctx) const noexcept;
+	};
+	struct IndexDeleter {
+		void operator()(smr_index *idx) const noexcept;
+	};
+	// Owned from the moment they are set, so a constructor that throws still
+	// frees them. idx_ is declared after ctx_ so it is freed first: the
+	// context must outlive the index (smr_api.h).
+	std::unique_ptr<smr_context, ContextDeleter> ctx_;
+	std::unique_ptr<smr_index, IndexDeleter> idx_;
 	bool paired_ = false;
 	double evalue_ = -1.0;
 };

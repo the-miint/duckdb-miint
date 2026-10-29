@@ -5,7 +5,7 @@
 #
 # The companion to test/sql/temp_table_resolution.test, which explains the defect
 # in full. Split off only because these functions need SortMeRNA, and DuckDB
-# processes `require-env` while PARSING -- a guard part-way down a file skips
+# processes `require-env` while parsing the file -- a guard part-way down a file skips
 # the whole file, so the ungated cases have to live somewhere else.
 #
 # Site covered: subject_table, read in InitGlobal through ReadSubjectTable

@@ -16,8 +16,8 @@
 #
 # The workdir is a fresh temp directory and is removed on exit. The oracle
 # intentionally uses native (not library) sortmerna so its output is
-# independent of the code under test. `-e 1` matches run_tests.sh: the library
-# applies no e-value filter, and the CLI default has been 1e-5 since 7.0.
+# independent of the code under test. `-e 1` as in run_tests.sh, which says
+# why.
 set -euo pipefail
 
 if [[ $# -ne 4 ]]; then

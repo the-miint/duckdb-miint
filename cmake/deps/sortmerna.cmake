@@ -64,10 +64,10 @@ endif()
 # does). Left to search, they find the SDK/system zlib -- a forwarded vcpkg
 # toolchain has no vcpkg_installed tree in the sub-build -- and v8's smr_api
 # bundle step then fails configure on a zlib that is not a static archive.
-# ZLIB_LIBRARY_RELEASE is what ZLIB::ZLIB's location comes from, and a build
-# tree configured before this change has the system zlib cached there.
-# system_deps.cmake warns and leaves ZLIB_LIBRARY_FILE empty when it cannot name
-# the archive; the sub-builds then search on their own rather than cache "".
+# ZLIB_LIBRARY_RELEASE is what ZLIB::ZLIB's location comes from, and an existing
+# sub-build tree may have the system zlib cached there. system_deps.cmake warns
+# and leaves ZLIB_LIBRARY_FILE empty when it cannot name the archive; the
+# sub-builds then search on their own rather than cache "".
 set(SORTMERNA_ZLIB_ARGS "")
 if(ZLIB_LIBRARY_FILE)
   set(SORTMERNA_ZLIB_ARGS
@@ -155,6 +155,8 @@ set_target_properties(sortmerna_parasail PROPERTIES IMPORTED_LOCATION
 add_dependencies(sortmerna_parasail parasail_build)
 
 list(APPEND MIINT_DEFINITIONS MIINT_HAS_SORTMERNA)
+miint_git_version(SORTMERNA ext/sortmerna)
+miint_git_version(PARASAIL ext/sortmerna/3rdparty/parasail)
 list(APPEND MIINT_EXTENSION_SOURCES src/SortMeRNAAligner.cpp
      src/align_sortmerna.cpp src/align_sortmerna_rrna.cpp)
 list(APPEND MIINT_TEST_SOURCES src/SortMeRNAAligner.cpp

@@ -1,12 +1,10 @@
 #pragma once
 /*
- * Shared parameter parsing for align_sortmerna / align_sortmerna_rrna.
- *
- * Both functions bind from the same parameter set; only the output schema
- * differs. Keep Bind/InitGlobal/Execute in each table function's .cpp — they
- * are simple enough that pulling them behind a second layer would hurt more
- * than it helps — but factor the parameter parsing here so each function
- * parses identically.
+ * What align_sortmerna and align_sortmerna_rrna share: their named
+ * parameters, the Bind-time check of where the references come from, and the
+ * InitGlobal-time construction of the aligner from them. Only the output
+ * schema differs, so Bind/InitGlobal/Execute themselves stay in each table
+ * function's .cpp and call these.
  */
 
 #include "SortMeRNAAligner.hpp"

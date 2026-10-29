@@ -194,6 +194,142 @@ LIMIT 1;
 ----
 VARCHAR	VARCHAR
 
+# --- Several references: each hit names the reference it hit ---
+# The fixtures above hold one reference, so they cannot tell a hit named for
+# the reference it hit from one named for the first reference. gg_13_8 holds 19
+# references, and these reads hit many of them.
+statement ok
+CREATE TABLE smr_gg AS
+SELECT read_id, sequence1 FROM read_fastx('ext/sortmerna/test_data/gg_13_8_ref_set.fasta');
+
+statement ok
+CREATE TABLE smr_set2 AS
+SELECT read_id, sequence1
+FROM read_fastx('ext/sortmerna/test_data/set2_environmental_study_550_amplicon.fasta')
+ORDER BY read_id LIMIT 400;
+
+# Neighbouring reads as mates, so many pairs hit two different references.
+statement ok
+CREATE TABLE smr_set2_pe AS
+SELECT read_id, sequence1, lead(sequence1) OVER (ORDER BY read_id) AS sequence2
+FROM smr_set2 QUALIFY sequence2 IS NOT NULL;
+
+# Positive control: several references are hit, and some pairs straddle two.
+query II
+SELECT (SELECT COUNT(DISTINCT ref_name) > 1
+        FROM align_sortmerna_rrna('smr_set2', subject_table := 'smr_gg', num_threads := 1)
+        WHERE aligned = 1),
+       (SELECT COUNT(*) > 0
+        FROM align_sortmerna('smr_set2_pe', subject_table := 'smr_gg', paired := true, num_threads := 1)
+        WHERE NOT alignment_is_unmapped(flags) AND NOT alignment_is_mate_unmapped(flags)
+          AND mate_reference <> '=');
+----
+true	true
+
+query I
+SELECT COUNT(*) FROM (
+    (SELECT * FROM align_sortmerna_rrna('smr_set2', ref_paths := ['ext/sortmerna/test_data/gg_13_8_ref_set.fasta'], num_threads := 1)
+     EXCEPT ALL
+     SELECT * FROM align_sortmerna_rrna('smr_set2', subject_table := 'smr_gg', num_threads := 1))
+    UNION ALL
+    (SELECT * FROM align_sortmerna_rrna('smr_set2', subject_table := 'smr_gg', num_threads := 1)
+     EXCEPT ALL
+     SELECT * FROM align_sortmerna_rrna('smr_set2', ref_paths := ['ext/sortmerna/test_data/gg_13_8_ref_set.fasta'], num_threads := 1))
+);
+----
+0
+
+query I
+SELECT COUNT(*) FROM (
+    (SELECT * FROM align_sortmerna('smr_set2_pe', ref_paths := ['ext/sortmerna/test_data/gg_13_8_ref_set.fasta'], paired := true, num_threads := 1)
+     EXCEPT ALL
+     SELECT * FROM align_sortmerna('smr_set2_pe', subject_table := 'smr_gg', paired := true, num_threads := 1))
+    UNION ALL
+    (SELECT * FROM align_sortmerna('smr_set2_pe', subject_table := 'smr_gg', paired := true, num_threads := 1)
+     EXCEPT ALL
+     SELECT * FROM align_sortmerna('smr_set2_pe', ref_paths := ['ext/sortmerna/test_data/gg_13_8_ref_set.fasta'], paired := true, num_threads := 1))
+);
+----
+0
+
+# BIGINT ids numbered in reverse name order, so they match neither the FASTA
+# order nor the order of the names: a hit mapped back by position, not by id,
+# names the wrong reference here.
+statement ok
+CREATE TABLE smr_gg_names AS
+SELECT row_number() OVER (ORDER BY read_id DESC)::BIGINT AS id, read_id AS name FROM smr_gg;
+
+statement ok
+CREATE TABLE smr_gg_big AS
+SELECT n.id AS read_id, g.sequence1 FROM smr_gg g JOIN smr_gg_names n ON g.read_id = n.name;
+
+query I
+SELECT COUNT(*) FROM (
+    (SELECT a.read_id, n.name, a.cigar, a.score
+     FROM align_sortmerna_rrna('smr_set2', subject_table := 'smr_gg_big', num_threads := 1) a
+     JOIN smr_gg_names n ON a.ref_name = n.id
+     EXCEPT ALL
+     SELECT read_id, ref_name, cigar, score
+     FROM align_sortmerna_rrna('smr_set2', ref_paths := ['ext/sortmerna/test_data/gg_13_8_ref_set.fasta'], num_threads := 1)
+     WHERE aligned = 1)
+    UNION ALL
+    (SELECT read_id, ref_name, cigar, score
+     FROM align_sortmerna_rrna('smr_set2', ref_paths := ['ext/sortmerna/test_data/gg_13_8_ref_set.fasta'], num_threads := 1)
+     WHERE aligned = 1
+     EXCEPT ALL
+     SELECT a.read_id, n.name, a.cigar, a.score
+     FROM align_sortmerna_rrna('smr_set2', subject_table := 'smr_gg_big', num_threads := 1) a
+     JOIN smr_gg_names n ON a.ref_name = n.id)
+);
+----
+0
+
+# Paired, mapped on both sides: reference and mate_reference name the right
+# references, with '=' resolved to the reference itself.
+query I
+SELECT COUNT(*) FROM (
+    (SELECT a.read_id, a.flags, r.name, m.name
+     FROM align_sortmerna('smr_set2_pe', subject_table := 'smr_gg_big', paired := true, num_threads := 1) a
+     JOIN smr_gg_names r ON a.reference = r.id
+     JOIN smr_gg_names m ON a.mate_reference = m.id
+     EXCEPT ALL
+     SELECT read_id, flags, reference, CASE WHEN mate_reference = '=' THEN reference ELSE mate_reference END
+     FROM align_sortmerna('smr_set2_pe', ref_paths := ['ext/sortmerna/test_data/gg_13_8_ref_set.fasta'], paired := true, num_threads := 1)
+     WHERE NOT alignment_is_unmapped(flags) AND NOT alignment_is_mate_unmapped(flags))
+    UNION ALL
+    (SELECT read_id, flags, reference, CASE WHEN mate_reference = '=' THEN reference ELSE mate_reference END
+     FROM align_sortmerna('smr_set2_pe', ref_paths := ['ext/sortmerna/test_data/gg_13_8_ref_set.fasta'], paired := true, num_threads := 1)
+     WHERE NOT alignment_is_unmapped(flags) AND NOT alignment_is_mate_unmapped(flags)
+     EXCEPT ALL
+     SELECT a.read_id, a.flags, r.name, m.name
+     FROM align_sortmerna('smr_set2_pe', subject_table := 'smr_gg_big', paired := true, num_threads := 1) a
+     JOIN smr_gg_names r ON a.reference = r.id
+     JOIN smr_gg_names m ON a.mate_reference = m.id)
+);
+----
+0
+
+# --- Rows with a NULL read_id or sequence1 are skipped ---
+# Such a row is not a reference, so adding it changes nothing.
+statement ok
+CREATE TABLE smr_refs_nulls AS
+SELECT * FROM smr_refs
+UNION ALL SELECT NULL, 'ACGTACGTACGTACGTACGTACGTACGT'
+UNION ALL SELECT 'no_sequence', NULL;
+
+query I
+SELECT COUNT(*) FROM (
+    (SELECT * FROM align_sortmerna_rrna('smr_q', subject_table := 'smr_refs', num_threads := 1)
+     EXCEPT ALL
+     SELECT * FROM align_sortmerna_rrna('smr_q', subject_table := 'smr_refs_nulls', num_threads := 1))
+    UNION ALL
+    (SELECT * FROM align_sortmerna_rrna('smr_q', subject_table := 'smr_refs_nulls', num_threads := 1)
+     EXCEPT ALL
+     SELECT * FROM align_sortmerna_rrna('smr_q', subject_table := 'smr_refs', num_threads := 1))
+);
+----
+0
+
 # --- Exactly one of ref_paths / subject_table ---
 statement error
 SELECT * FROM align_sortmerna('smr_q');

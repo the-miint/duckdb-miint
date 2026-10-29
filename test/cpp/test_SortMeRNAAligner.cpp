@@ -2,21 +2,21 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include "Minimap2Aligner.hpp"
+#include "SequenceReader.hpp"
 #include "SortMeRNAAligner.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
-#include <fstream>
 #include <stdexcept>
 #include <string>
 #include <tuple>
 
-// Test-local constants and helpers. All golden values below are regenerated
-// from the native sortmerna CLI via tools/sortmerna_oracle.sh — do NOT
-// edit by hand; rerun the script if test inputs or the embedded sortmerna
-// version change. Identity/coverage match native exactly at CLI's 1-decimal
+// Test-local constants and helpers. All golden values below come from the
+// native sortmerna CLI via tools/sortmerna_oracle.sh, not from the code under
+// test; rerun the script if test inputs or the embedded sortmerna version
+// change. Identity/coverage match native exactly at CLI's 1-decimal
 // display precision; e_value is the only field we expect to differ (documented
 // per-query Karlin-Altschul divergence in smr_api.h).
 namespace {
@@ -32,20 +32,14 @@ int64_t round_1dp(double v) {
 	return static_cast<int64_t>(std::llround(v * 10.0));
 }
 
-// The one record of a FASTA file, id cut at the first whitespace as sortmerna
-// does, sequence lines joined.
+// The one record of a FASTA file, read as read_fastx reads it.
 miint::AlignmentSubject ReadSingleFasta(const std::string &path) {
-	std::ifstream in(path);
-	REQUIRE(in.good());
+	miint::SequenceReader reader(path);
+	auto batch = reader.read(2);
+	REQUIRE(batch.size() == 1);
 	miint::AlignmentSubject subject;
-	std::string line;
-	while (std::getline(in, line)) {
-		if (!line.empty() && line[0] == '>') {
-			subject.read_id = line.substr(1, line.find_first_of(" \t") - 1);
-		} else {
-			subject.sequence += line;
-		}
-	}
+	subject.read_id = batch.read_ids[0];
+	subject.sequence = batch.sequences1[0];
 	return subject;
 }
 
@@ -117,9 +111,9 @@ TEST_CASE("SortMeRNAAligner throws on empty ref_paths", "[sortmerna][wrapper]") 
 	REQUIRE_THROWS_AS(miint::SortMeRNAAligner(cfg, std::vector<std::string> {}), std::invalid_argument);
 }
 
-// The library holds one index per handle, built from one file. Before 8.0.1 a
-// second path was accepted and silently ignored, so reads matching only it came
-// back unaligned. It must be refused, not dropped.
+// The library holds one index per handle, built from one file. A second path
+// must be refused: ignoring it would leave reads that match only it unaligned,
+// with no error.
 TEST_CASE("SortMeRNAAligner refuses more than one reference file", "[sortmerna][wrapper]") {
 	miint::SortMeRNAConfig cfg;
 	cfg.num_threads = 1;

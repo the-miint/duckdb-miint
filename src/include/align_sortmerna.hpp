@@ -26,9 +26,8 @@ public:
 		miint::SortMeRNAConfig config;
 
 		// Output schema. Names are constant; types are rebuilt by Bind once
-		// the query and reference id types are known: reference and
-		// mate_reference are VARCHAR for ref_paths and mirror read_id for
-		// subject_table (SortMeRNAReferences::IdType).
+		// the query and reference id types are known
+		// (SortMeRNAReferences::IdType).
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 

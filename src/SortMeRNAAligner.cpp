@@ -54,7 +54,7 @@ SortMeRNAAligner::SortMeRNAAligner(const SortMeRNAConfig &cfg, const std::vector
 	for (const auto &p : ref_paths) {
 		ref_ptrs.push_back(p.c_str());
 	}
-	adopt_index(smr_index_load(ctx_, ref_ptrs.data(), static_cast<int32_t>(ref_ptrs.size())), "smr_index_load");
+	adopt_index(smr_index_load(ctx_.get(), ref_ptrs.data(), static_cast<int32_t>(ref_ptrs.size())), "smr_index_load");
 }
 
 SortMeRNAAligner::SortMeRNAAligner(const SortMeRNAConfig &cfg, const std::vector<AlignmentSubject> &refs)
@@ -70,43 +70,44 @@ SortMeRNAAligner::SortMeRNAAligner(const SortMeRNAConfig &cfg, const std::vector
 		seqs[i].sequence = refs[i].sequence.c_str();
 		seqs[i].quality = nullptr;
 	}
-	adopt_index(smr_index_load_seqs(ctx_, seqs.data(), static_cast<int32_t>(seqs.size())), "smr_index_load_seqs");
+	adopt_index(smr_index_load_seqs(ctx_.get(), seqs.data(), static_cast<int32_t>(seqs.size())), "smr_index_load_seqs");
 }
 
 void SortMeRNAAligner::create_context(const SortMeRNAConfig &cfg) {
 	smr_config_t c_cfg;
 	apply_config(cfg, c_cfg);
 
-	ctx_ = smr_ctx_create(&c_cfg);
+	ctx_.reset(smr_ctx_create(&c_cfg));
 	if (!ctx_) {
 		throw std::runtime_error("SortMeRNAAligner: smr_ctx_create returned NULL");
 	}
 }
 
 void SortMeRNAAligner::adopt_index(smr_index *idx, const char *loader) {
-	idx_ = idx;
+	idx_.reset(idx);
 	if (idx_) {
 		return;
 	}
-	int rc = smr_last_error_code(ctx_);
-	const char *last = smr_last_error(ctx_);
+	int rc = smr_last_error_code(ctx_.get());
+	const char *last = smr_last_error(ctx_.get());
 	std::string msg = std::string(loader) + ": ";
 	msg += smr_strerror(rc ? rc : SMR_ERR_IO);
 	if (last && *last) {
 		msg += ": ";
 		msg += last;
 	}
-	smr_ctx_destroy(ctx_);
-	ctx_ = nullptr;
 	throw std::runtime_error(msg);
 }
 
-SortMeRNAAligner::~SortMeRNAAligner() {
-	if (idx_)
-		smr_index_free(idx_);
-	if (ctx_)
-		smr_ctx_destroy(ctx_);
+void SortMeRNAAligner::ContextDeleter::operator()(smr_context *ctx) const noexcept {
+	smr_ctx_destroy(ctx);
 }
+
+void SortMeRNAAligner::IndexDeleter::operator()(smr_index *idx) const noexcept {
+	smr_index_free(idx);
+}
+
+SortMeRNAAligner::~SortMeRNAAligner() = default;
 
 void SortMeRNAAligner::align(const SortMeRNAQueryBatch &queries, SortMeRNAResultBatch &out) {
 	if (queries.empty()) {
@@ -154,9 +155,9 @@ void SortMeRNAAligner::align(const SortMeRNAQueryBatch &queries, SortMeRNAResult
 
 	smr_output_t *raw = nullptr;
 	smr_stats_t stats = {};
-	int rc = smr_run_seqs_with_index(idx_, smr_seqs.data(), static_cast<int32_t>(n_seqs), &raw, &stats);
+	int rc = smr_run_seqs_with_index(idx_.get(), smr_seqs.data(), static_cast<int32_t>(n_seqs), &raw, &stats);
 	if (rc != SMR_OK) {
-		const char *last = smr_last_error(ctx_);
+		const char *last = smr_last_error(ctx_.get());
 		std::string msg = "smr_run_seqs_with_index: ";
 		msg += smr_strerror(rc);
 		if (last && *last) {

@@ -603,7 +603,7 @@ source-availability requirement for distributed binaries that link
 against it.
 
 - Repository (upstream): https://github.com/sortmerna/sortmerna
-- Repository (fork used here): https://github.com/the-miint/sortmerna — branch `v8.0.1-miint` (upstream `v8.0.1` plus dependency pins and a CIGAR fix), pinned at the submodule SHA recorded in `.gitmodules` / `git submodule status`
+- Repository (fork used here): https://github.com/the-miint/sortmerna — branch `v8.0.1-miint` (upstream `v8.0.1` plus the commits listed under SortMeRNA in `docs/internals/embedded-tools.md`), pinned at the submodule SHA recorded in `.gitmodules` / `git submodule status`
 - Version: 8.0.1
 - License: LGPL-3.0-or-later (SPDX)
 
@@ -652,9 +652,9 @@ permissions and limitations under the License.
 
 ## parasail
 
-SIMD pairwise sequence alignment. SortMeRNA's Smith-Waterman aligner
-(replacing SSW). Built from source as a static library by the
-`parasail_build` ExternalProject and linked into the extension.
+SIMD pairwise sequence alignment: SortMeRNA's Smith-Waterman aligner.
+Built from source as a static library by the `parasail_build`
+ExternalProject and linked into the extension.
 
 - Repository: https://github.com/jeffdaily/parasail
 - Vendored location in this repo: `ext/sortmerna/3rdparty/parasail/` (submodule of the SortMeRNA fork)
@@ -714,8 +714,7 @@ Copyright (c) 2015, Battelle Memorial Institute
 
 ## BBHash
 
-Minimal perfect hash functions for SortMeRNA's reference index
-(replacing cmph). Header-only; compiled into `libsmr_api.a`.
+Minimal perfect hash functions for SortMeRNA's reference index. Header-only; compiled into `libsmr_api.a`.
 
 - Repository: https://github.com/rizkg/BBHash
 - Vendored location in this repo: `ext/sortmerna/3rdparty/bbhash/` (submodule of the SortMeRNA fork)

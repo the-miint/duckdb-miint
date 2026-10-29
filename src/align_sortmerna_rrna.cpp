@@ -30,8 +30,7 @@ unique_ptr<FunctionData> AlignSortMeRNARRNATableFunction::Bind(ClientContext &co
 	}
 
 	// Output schema: read_id mirrors the query column type and ref_name follows
-	// the reference source (SortMeRNAReferences::IdType); the other 11 columns
-	// have fixed types.
+	// the reference source (SortMeRNAReferences::IdType).
 	data->types = GetSortMeRNARRNAOutputTypes(data->query_schema.id_type, data->refs.IdType());
 
 	for (const auto &n : data->names)

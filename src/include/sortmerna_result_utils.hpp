@@ -21,11 +21,10 @@ inline std::vector<std::string> GetSortMeRNARRNAOutputNames() {
 	        "score",   "e_value", "identity", "coverage", "edit_distance", "segment_idx"};
 }
 
-// `query_id_type` drives `read_id` and `ref_id_type` drives `ref_name`; each
-// must be VARCHAR, BIGINT, or UUID. No defaults — every caller must commit to
-// the types so the audit can't slip. ref_name is VARCHAR for ref_paths (FASTA
-// header ids) and mirrors read_id for subject_table. The other 11 columns
-// have fixed types.
+// `query_id_type` drives `read_id` and `ref_id_type` drives `ref_name`
+// (SortMeRNAReferences::IdType); each must be VARCHAR, BIGINT, or UUID. There
+// are no defaults: every caller passes both types. The other columns have fixed
+// types.
 inline std::vector<LogicalType> GetSortMeRNARRNAOutputTypes(const LogicalType &query_id_type,
                                                             const LogicalType &ref_id_type) {
 	return {query_id_type,        LogicalType::INTEGER, LogicalType::INTEGER, ref_id_type,         LogicalType::INTEGER,
@@ -66,10 +65,9 @@ inline void OutputSortMeRNARRNABatch(DataChunk &output, const miint::SortMeRNARe
 // row j can be read from batch[j ^ 1] without cross-chunk lookups.
 //
 // `query_id_type` drives `read_id`; `subject_id_type` drives `reference` and
-// `mate_reference`. Both must be VARCHAR, BIGINT, or UUID, mirroring
-// OutputSAMRecordBatch (align_common.hpp). `subject_id_type` is VARCHAR for
-// `ref_paths` (FASTA header ids) and the subject table's read_id type for
-// `subject_table`. The SAM `=` mate-reference sentinel is emitted verbatim for
+// `mate_reference` (SortMeRNAReferences::IdType). Both must be VARCHAR, BIGINT,
+// or UUID, mirroring OutputSAMRecordBatch (align_common.hpp). The SAM `=`
+// mate-reference sentinel is emitted verbatim for
 // VARCHAR and resolved to the row's own reference otherwise, as
 // OutputSAMRecordBatch does: a BIGINT/UUID column cannot carry `=`.
 inline void OutputSortMeRNASamBatch(DataChunk &output, const miint::SortMeRNAResultBatch &batch, idx_t offset,

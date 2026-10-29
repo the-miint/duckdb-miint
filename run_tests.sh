@@ -622,10 +622,9 @@ fi
 # submodule SHA that produced it is recorded alongside so we can detect when
 # the oracle has gone stale.
 #
-# `-e 1` is deliberate: the library reports every hit and applies no e-value
-# filter, while the CLI's default threshold became 1e-5 in sortmerna 7.0.
-# Pinning the CLI to its old default of 1 keeps this a comparison of
-# alignments rather than of filtering.
+# `-e 1`: the library reports every hit (the regression test passes no
+# evalue), while the CLI's default threshold is 1e-5. A threshold of 1 keeps
+# this a comparison of alignments rather than of filtering.
 #
 # To regenerate after bumping ext/sortmerna: remove both files and rerun
 # run_tests.sh with MIINT_SORTMERNA_REAL_DATA=1. That rebuilds the oracle

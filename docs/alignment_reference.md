@@ -824,7 +824,7 @@ Emits the standard 21-column SAM schema shared with `align_minimap2` / `align_bo
 **Parameters:**
 - `query_table` (VARCHAR, positional): Name of a table or view with columns `read_id` (VARCHAR, BIGINT, or UUID — see *Identifier-column types* below), `sequence1` (VARCHAR), and optionally `sequence2` (VARCHAR) when `paired := true`.
 - `ref_paths` (VARCHAR[]): A one-element list holding the path of the reference FASTA file. More than one path is an error: SortMeRNA builds one index from one file, so concatenate the files, or load them into a table and pass `subject_table`.
-- `subject_table` (VARCHAR): Name of a table or view holding the references, with columns `read_id` (VARCHAR, BIGINT, or UUID; no whitespace) and `sequence1` (VARCHAR). Rows with a NULL `read_id` or `sequence1` are skipped; a non-NULL `sequence2` is an error.
+- `subject_table` (VARCHAR): Name of a table or view holding the references, with columns `read_id` (VARCHAR, BIGINT, or UUID) and `sequence1` (VARCHAR). A VARCHAR id containing whitespace is an error when the query runs. Rows with a NULL `read_id` or `sequence1` are skipped; a non-NULL `sequence2` is an error.
 - **Exactly one of `ref_paths` or `subject_table` must be given.** Either way the index is built once per query — re-using references across queries rebuilds the index each time.
 - `num_threads` (INTEGER, default = DuckDB's thread count): Number of threads SortMeRNA's internal pool uses. The DuckDB function runs on a single DuckDB thread; parallelism is inside SortMeRNA.
 - `match`, `mismatch`, `gap_open`, `gap_ext`, `score_N` (INTEGER): SW scoring. Defaults `2 / -3 / 5 / 2 / -3`.
@@ -850,7 +850,7 @@ Emits the standard 21-column SAM schema shared with `align_minimap2` / `align_bo
 
 **Caveats:**
 - **No minimum-score filter by default:** without `evalue`, every positive Smith-Waterman hit is reported. The `sortmerna` CLI keeps only hits above a minimum score derived from its `-e` (default 1e-5). The library's e-values are not computed the way the CLI's are (see below), so neither `evalue` nor a filter on `e_value` or `score` (`tag_as`) in SQL is guaranteed to reproduce the CLI's row set exactly.
-- **E-value divergence from the CLI:** the library computes per-query Karlin-Altschul e-values; the CLI sums / corrects across the full database. Identity, coverage, score, CIGAR, ref_start, ref_end, and edit_distance are bit-identical between the two.
+- **E-value divergence from the CLI:** the library computes per-query Karlin-Altschul e-values; the CLI sums / corrects across the full database. The reference, ref_start, ref_end and CIGAR match the CLI's exactly, and identity and coverage match to the CLI's one decimal.
 - **Process-wide serialization:** SortMeRNA's `g_run_mutex` serializes calls process-wide. Concurrent `align_sortmerna` / `align_sortmerna_rrna` queries will block on each other at the library level. The DuckDB function deliberately runs on a single DuckDB thread (`MaxThreads() == 1`) to avoid queueing behind the mutex twice.
 
 **Examples:**

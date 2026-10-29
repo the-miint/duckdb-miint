@@ -44,9 +44,9 @@ SELECT * FROM align_sortmerna_rrna('smr_q', ref_paths := []);
 ref_paths
 
 # --- ref_paths takes exactly one file ---
-# SortMeRNA builds one index from one reference file. The library before 8.0.1
-# accepted more and silently used only the first, so reads matching only the
-# later files came back unaligned with no error. Reject at bind instead.
+# SortMeRNA builds one index from one reference file. A second file must be
+# refused at bind: ignoring it would leave reads that match only it unaligned,
+# with no error.
 statement error
 SELECT * FROM align_sortmerna_rrna('smr_q', ref_paths := [
     'ext/sortmerna/test_data/test_ref.fasta', 'ext/sortmerna/test_data/gg_13_8_ref_set.fasta']);
@@ -54,7 +54,7 @@ SELECT * FROM align_sortmerna_rrna('smr_q', ref_paths := [
 ref_paths accepts one FASTA path (got 2)
 
 # --- Single-end forward alignment against golden values ---
-# Goldens regenerated via tools/sortmerna_oracle.sh on 2026-04-18
+# Goldens from tools/sortmerna_oracle.sh, the native CLI
 # (AB271211 vs ext/sortmerna/test_data/test_ref.fasta). Identity/coverage are
 # library full-precision values equivalent to BLAST's rounded 93.5 / 96.2.
 statement ok
@@ -181,6 +181,23 @@ len200	1	1	Unc49508	6S194M	333	11
 len32	0	-1	(empty)	(empty)	-1	-1
 len40	1	1	Unc49508	6S34M	53	3
 len60	1	1	Unc49508	6S54M	88	4
+
+# evalue := 0 keeps only a hit whose e-value is exactly 0: AB271211's
+# full-length hit underflows to 0, its pieces do not.
+statement ok
+CREATE TABLE smr_ev0 AS SELECT * FROM smr_fwd UNION ALL SELECT * FROM smr_ev;
+
+query III
+SELECT read_id, aligned, e_value
+FROM align_sortmerna_rrna(
+    'smr_ev0', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], num_threads := 1, evalue := 0)
+ORDER BY read_id;
+----
+AB271211	1	0.0
+len200	0	0.0
+len32	0	0.0
+len40	0	0.0
+len60	0	0.0
 
 # A negative or NaN evalue would keep every hit, as if none were given, so it
 # is refused rather than silently ignored.
