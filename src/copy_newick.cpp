@@ -32,6 +32,9 @@ struct NewickCopyBindData : public FunctionData {
 	idx_t branch_length_idx = DConstants::INVALID_INDEX;
 	idx_t edge_id_idx = DConstants::INVALID_INDEX;
 
+	// The name column's type: VARCHAR, BIGINT or UUID
+	LogicalType name_type = LogicalType::VARCHAR;
+
 	unique_ptr<FunctionData> Copy() const override {
 		auto result = make_uniq<NewickCopyBindData>();
 		result->file_path = file_path;
@@ -44,6 +47,7 @@ struct NewickCopyBindData : public FunctionData {
 		result->name_idx = name_idx;
 		result->branch_length_idx = branch_length_idx;
 		result->edge_id_idx = edge_id_idx;
+		result->name_type = name_type;
 		return result;
 	}
 
@@ -53,7 +57,8 @@ struct NewickCopyBindData : public FunctionData {
 		       compression == other.compression && compression_level == other.compression_level &&
 		       placements_table == other.placements_table && node_index_idx == other.node_index_idx &&
 		       parent_index_idx == other.parent_index_idx && name_idx == other.name_idx &&
-		       branch_length_idx == other.branch_length_idx && edge_id_idx == other.edge_id_idx;
+		       branch_length_idx == other.branch_length_idx && edge_id_idx == other.edge_id_idx &&
+		       name_type == other.name_type;
 	}
 };
 
@@ -92,34 +97,31 @@ struct NewickCopyLocalState : public LocalFunctionData {
 };
 
 //===--------------------------------------------------------------------===//
-// Select: cast the columns the sink reads to the types it reads them as
+// Select: cast untyped NULL columns to the types the sink reads
 //===--------------------------------------------------------------------===//
-// The columns the sink reads, where bind records each, the one type the sink reads it as, and the
-// types NewickCopySelect casts to it. An untyped NULL column is cast too, so `NULL AS name` writes
-// no names.
+// The columns the sink reads, where bind records each, and the types each takes: `type` alone, or
+// what `accepts` takes when it is set. An untyped NULL column is cast to `type`, so `NULL AS name`
+// writes no names.
 struct NewickColumnType {
 	const char *name;
 	idx_t NewickCopyBindData::*index;
 	LogicalTypeId type;
-	bool (*castable)(const LogicalType &type);
+	bool (*accepts)(const LogicalType &type);
 	const char *description;
 };
 
-static bool IsIntegralType(const LogicalType &type) {
-	return type.IsIntegral();
-}
-
-static bool IsNumericType(const LogicalType &type) {
-	return type.IsNumeric();
-}
-
 static const NewickColumnType NEWICK_COLUMN_TYPES[] = {
-    {"node_index", &NewickCopyBindData::node_index_idx, LogicalTypeId::BIGINT, IsIntegralType, "an integer type"},
-    {"parent_index", &NewickCopyBindData::parent_index_idx, LogicalTypeId::BIGINT, IsIntegralType, "an integer type"},
-    {"edge_id", &NewickCopyBindData::edge_id_idx, LogicalTypeId::BIGINT, IsIntegralType, "an integer type"},
-    {"branch_length", &NewickCopyBindData::branch_length_idx, LogicalTypeId::DOUBLE, IsNumericType, "a numeric type"},
-    {"name", &NewickCopyBindData::name_idx, LogicalTypeId::VARCHAR, nullptr, "VARCHAR"},
+    {"node_index", &NewickCopyBindData::node_index_idx, LogicalTypeId::BIGINT, nullptr, "BIGINT"},
+    {"parent_index", &NewickCopyBindData::parent_index_idx, LogicalTypeId::BIGINT, nullptr, "BIGINT"},
+    {"edge_id", &NewickCopyBindData::edge_id_idx, LogicalTypeId::BIGINT, nullptr, "BIGINT"},
+    {"branch_length", &NewickCopyBindData::branch_length_idx, LogicalTypeId::DOUBLE, nullptr, "DOUBLE"},
+    // A node's label is an id, so it takes the id types
+    {"name", &NewickCopyBindData::name_idx, LogicalTypeId::VARCHAR, IsAllowedIdType, AllowedIdTypeList()},
 };
+
+static bool NewickColumnAccepts(const NewickColumnType &column, const LogicalType &type) {
+	return column.accepts ? column.accepts(type) : type.id() == column.type;
+}
 
 static const NewickColumnType *FindNewickColumnType(const Identifier &name) {
 	for (auto &column : NEWICK_COLUMN_TYPES) {
@@ -137,9 +139,7 @@ static vector<unique_ptr<Expression>> NewickCopySelect(CopyToSelectInput &input)
 		const auto &type = expr->GetReturnType();
 		const auto name = expr->GetAlias();
 		auto column = FindNewickColumnType(name);
-		const bool cast = column && type.id() != column->type &&
-		                  (type.id() == LogicalTypeId::SQLNULL || (column->castable && column->castable(type)));
-		if (!cast) {
+		if (!column || type.id() != LogicalTypeId::SQLNULL) {
 			result.push_back(std::move(expr));
 			continue;
 		}
@@ -164,18 +164,21 @@ static unique_ptr<FunctionData> NewickCopyBind(ClientContext &context, CopyFunct
 	auto result = make_uniq<NewickCopyBindData>();
 	result->file_path = input.info.file_path;
 
-	// Find the columns the sink reads. One still not of the sink's type is one NewickCopySelect could
-	// not cast; other columns (like is_tip, filepath) are ignored.
+	// Find the columns the sink reads and check their types; other columns (like is_tip, filepath)
+	// are ignored.
 	for (idx_t i = 0; i < names.size(); i++) {
 		auto column = FindNewickColumnType(names[i]);
 		if (!column) {
 			continue;
 		}
-		if (sql_types[i].id() != column->type) {
+		if (!NewickColumnAccepts(*column, sql_types[i])) {
 			throw BinderException("COPY FORMAT NEWICK: column '%s' must be %s, got %s", names[i].GetIdentifierName(),
 			                      column->description, sql_types[i].ToString());
 		}
 		(*result).*(column->index) = i;
+	}
+	if (result->name_idx != DConstants::INVALID_INDEX) {
+		result->name_type = sql_types[result->name_idx];
 	}
 
 	// Validate required columns
@@ -265,7 +268,7 @@ static void NewickCopySink(ExecutionContext &context, FunctionData &bind_data, G
 
 	// Get unified formats for all columns
 	UnifiedVectorFormat node_index_data, parent_index_data;
-	UnifiedVectorFormat name_data, branch_length_data, edge_id_data;
+	UnifiedVectorFormat branch_length_data, edge_id_data;
 
 	input.data[fdata.node_index_idx].ToUnifiedFormat(node_index_data);
 	input.data[fdata.parent_index_idx].ToUnifiedFormat(parent_index_data);
@@ -277,13 +280,13 @@ static void NewickCopySink(ExecutionContext &context, FunctionData &bind_data, G
 	bool has_branch_length = fdata.branch_length_idx != DConstants::INVALID_INDEX;
 	bool has_edge_id = fdata.edge_id_idx != DConstants::INVALID_INDEX;
 
-	const string_t *names_ptr = nullptr;
+	std::vector<std::string> names;
+	std::vector<bool> name_nulls;
 	const double *branch_lengths_ptr = nullptr;
 	const int64_t *edge_ids_ptr = nullptr;
 
 	if (has_name) {
-		input.data[fdata.name_idx].ToUnifiedFormat(name_data);
-		names_ptr = UnifiedVectorFormat::GetData<string_t>(name_data);
+		ExtractIdColumnAsStrings(input, fdata.name_idx, fdata.name_type, names, name_nulls);
 	}
 	if (has_branch_length) {
 		input.data[fdata.branch_length_idx].ToUnifiedFormat(branch_length_data);
@@ -316,11 +319,8 @@ static void NewickCopySink(ExecutionContext &context, FunctionData &bind_data, G
 		}
 
 		// name (optional)
-		if (has_name) {
-			auto name_row = name_data.sel->get_index(row);
-			if (name_data.validity.RowIsValid(name_row)) {
-				node.name = names_ptr[name_row].GetString();
-			}
+		if (has_name && !name_nulls[row]) {
+			node.name = std::move(names[row]);
 		}
 
 		// branch_length (optional, default to NaN)

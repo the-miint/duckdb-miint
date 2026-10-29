@@ -1,12 +1,12 @@
 #include "placement_table_reader.hpp"
 #include "catalog_utils.hpp"
+#include "id_column_utils.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/query_result.hpp"
 #include "duckdb/common/types/data_chunk.hpp"
-#include <algorithm>
 #include <limits>
 
 namespace duckdb {
@@ -16,23 +16,34 @@ namespace duckdb {
 // says to.
 struct PlacementColumn {
 	const char *name;
-	vector<LogicalTypeId> types;
+	bool (*accepts)(const LogicalType &type);
 	const char *description;
 };
 
-static const PlacementColumn PLACEMENT_COLUMNS[] = {
-    {"fragment_id", {LogicalTypeId::VARCHAR}, "VARCHAR"},
-    {"edge_id",
-     {LogicalTypeId::BIGINT, LogicalTypeId::INTEGER, LogicalTypeId::UBIGINT, LogicalTypeId::UINTEGER},
-     "an integer type"},
-    {"like_weight_ratio", {LogicalTypeId::DOUBLE, LogicalTypeId::FLOAT}, "DOUBLE or FLOAT"},
-    {"distal_length", {LogicalTypeId::DOUBLE, LogicalTypeId::FLOAT}, "DOUBLE or FLOAT"},
-    {"pendant_length", {LogicalTypeId::DOUBLE, LogicalTypeId::FLOAT}, "DOUBLE or FLOAT"},
-};
-
-static bool PlacementColumnAccepts(const PlacementColumn &column, const LogicalType &type) {
-	return std::find(column.types.begin(), column.types.end(), type.id()) != column.types.end();
+static bool IsPlacementEdgeIdType(const LogicalType &type) {
+	switch (type.id()) {
+	case LogicalTypeId::BIGINT:
+	case LogicalTypeId::INTEGER:
+	case LogicalTypeId::UBIGINT:
+	case LogicalTypeId::UINTEGER:
+		return true;
+	default:
+		return false;
+	}
 }
+
+static bool IsPlacementLengthType(const LogicalType &type) {
+	return type.id() == LogicalTypeId::DOUBLE || type.id() == LogicalTypeId::FLOAT;
+}
+
+static const PlacementColumn PLACEMENT_COLUMNS[] = {
+    // A fragment is a read, so its id takes the id types
+    {"fragment_id", IsAllowedIdType, AllowedIdTypeList()},
+    {"edge_id", IsPlacementEdgeIdType, "an integer type"},
+    {"like_weight_ratio", IsPlacementLengthType, "DOUBLE or FLOAT"},
+    {"distal_length", IsPlacementLengthType, "DOUBLE or FLOAT"},
+    {"pendant_length", IsPlacementLengthType, "DOUBLE or FLOAT"},
+};
 
 void ValidatePlacementTableSchema(ClientContext &context, const std::string &table_name) {
 	auto info = GetTableOrViewColumns(context, table_name, "Placement table");
@@ -51,7 +62,7 @@ void ValidatePlacementTableSchema(ClientContext &context, const std::string &tab
 		if (it == name_to_idx.end()) {
 			throw BinderException("Placement table '%s' missing required column '%s'", table_name, column.name);
 		}
-		if (!PlacementColumnAccepts(column, col_types[it->second])) {
+		if (!column.accepts(col_types[it->second])) {
 			throw BinderException("Column '%s' in table '%s' must be %s", column.name, table_name, column.description);
 		}
 	}
@@ -92,7 +103,7 @@ std::vector<miint::Placement> ReadPlacementTable(ClientContext &context, const s
 	D_ASSERT(result_types.size() == sizeof(PLACEMENT_COLUMNS) / sizeof(PLACEMENT_COLUMNS[0]));
 	for (idx_t i = 0; i < result_types.size(); i++) {
 		auto &column = PLACEMENT_COLUMNS[i];
-		if (!PlacementColumnAccepts(column, result_types[i])) {
+		if (!column.accepts(result_types[i])) {
 			throw InvalidInputException("Column '%s' in table '%s' must be %s", column.name, table_name,
 			                            column.description);
 		}
@@ -100,12 +111,15 @@ std::vector<miint::Placement> ReadPlacementTable(ClientContext &context, const s
 
 	// Get column types for proper data extraction
 	// Column order: fragment_id(0), edge_id(1), like_weight_ratio(2), distal_length(3), pendant_length(4)
+	auto &fragment_id_type = result_types[0];
 	auto &edge_id_type = result_types[1];
 	auto &lwr_type = result_types[2];
 	auto &distal_type = result_types[3];
 	auto &pendant_type = result_types[4];
 
 	idx_t row_number = 0;
+	std::vector<std::string> fragment_ids;
+	std::vector<bool> fragment_nulls;
 
 	// Process all chunks from the result
 	while (true) {
@@ -114,33 +128,30 @@ std::vector<miint::Placement> ReadPlacementTable(ClientContext &context, const s
 			break;
 		}
 
-		auto &fragment_id_vec = chunk->data[0];
 		auto &edge_id_vec = chunk->data[1];
 		auto &lwr_vec = chunk->data[2];
 		auto &distal_vec = chunk->data[3];
 		auto &pendant_vec = chunk->data[4];
 
 		// Convert to unified format for proper NULL handling
-		UnifiedVectorFormat fragment_data, edge_data, lwr_data, distal_data, pendant_data;
-		fragment_id_vec.ToUnifiedFormat(fragment_data);
+		UnifiedVectorFormat edge_data, lwr_data, distal_data, pendant_data;
 		edge_id_vec.ToUnifiedFormat(edge_data);
 		lwr_vec.ToUnifiedFormat(lwr_data);
 		distal_vec.ToUnifiedFormat(distal_data);
 		pendant_vec.ToUnifiedFormat(pendant_data);
 
-		auto fragment_ids = UnifiedVectorFormat::GetData<string_t>(fragment_data);
+		ExtractIdColumnAsStrings(*chunk, 0, fragment_id_type, fragment_ids, fragment_nulls);
 
 		for (idx_t i = 0; i < chunk->size(); i++) {
 			row_number++;
 
-			auto frag_idx = fragment_data.sel->get_index(i);
 			auto edge_idx = edge_data.sel->get_index(i);
 			auto lwr_idx = lwr_data.sel->get_index(i);
 			auto distal_idx = distal_data.sel->get_index(i);
 			auto pendant_idx = pendant_data.sel->get_index(i);
 
 			// Skip rows with NULL fragment_id
-			if (!fragment_data.validity.RowIsValid(frag_idx)) {
+			if (fragment_nulls[i]) {
 				continue;
 			}
 
@@ -162,7 +173,7 @@ std::vector<miint::Placement> ReadPlacementTable(ClientContext &context, const s
 			}
 
 			miint::Placement p;
-			p.fragment_id = fragment_ids[frag_idx].GetString();
+			p.fragment_id = std::move(fragment_ids[i]);
 
 			// Get edge_id (handle different integer types)
 			switch (edge_id_type.id()) {

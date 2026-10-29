@@ -548,6 +548,74 @@ statement ok
 DROP TABLE jplace_style_placements;
 
 # =============================================================================
+# fragment_id types
+# =============================================================================
+
+# fragment_id is a read id, so it takes the types read_id does (VARCHAR, BIGINT or UUID), as
+# place_krepp's fragment column has, and the placed tip is named with its text.
+statement ok
+CREATE TABLE typed_placements AS
+SELECT 42::BIGINT AS bigint_id, '00000000-0000-0000-0000-000000000042'::UUID AS uuid_id,
+       edge_id, like_weight_ratio, distal_length, pendant_length
+FROM single_placement;
+
+statement ok
+CREATE VIEW bigint_placements AS
+SELECT bigint_id AS fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length FROM typed_placements;
+
+statement ok
+COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
+TO '{TEST_DIR}/bigint_fragment.nwk' (FORMAT NEWICK, PLACEMENTS 'bigint_placements');
+
+query T
+SELECT name FROM read_newick('{TEST_DIR}/bigint_fragment.nwk') WHERE is_tip ORDER BY name;
+----
+42
+A
+B
+C
+
+statement ok
+CREATE VIEW uuid_placements AS
+SELECT uuid_id AS fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length FROM typed_placements;
+
+statement ok
+COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
+TO '{TEST_DIR}/uuid_fragment.nwk' (FORMAT NEWICK, PLACEMENTS 'uuid_placements');
+
+query T
+SELECT name FROM read_newick('{TEST_DIR}/uuid_fragment.nwk') WHERE is_tip ORDER BY name;
+----
+00000000-0000-0000-0000-000000000042
+A
+B
+C
+
+# Any other type is refused when the COPY is planned.
+statement ok
+CREATE VIEW integer_placements AS
+SELECT bigint_id::INTEGER AS fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length
+FROM typed_placements;
+
+statement error
+COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
+TO '{TEST_DIR}/integer_fragment.nwk' (FORMAT NEWICK, PLACEMENTS 'integer_placements');
+----
+Binder Error: Column 'fragment_id' in table 'integer_placements' must be VARCHAR, BIGINT, or UUID
+
+statement ok
+DROP VIEW integer_placements;
+
+statement ok
+DROP VIEW uuid_placements;
+
+statement ok
+DROP VIEW bigint_placements;
+
+statement ok
+DROP TABLE typed_placements;
+
+# =============================================================================
 # The placements are read when the COPY runs, not when it is planned
 # =============================================================================
 
@@ -600,7 +668,7 @@ DROP VIEW unreadable_placements;
 
 # The placement columns' types are checked again when the rows are read. A relation's types can
 # change after the COPY is planned with no change to the catalog, so a prepared COPY is not bound
-# again: here a view over a CSV file whose fragment_id becomes an integer.
+# again: here a view over a CSV file whose fragment_id changes type.
 statement ok
 COPY single_placement TO '{TEST_DIR}/changing_placements.csv';
 
@@ -612,14 +680,28 @@ PREPARE copy_csv AS
 COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
 TO '{TEST_DIR}/csv_placements.nwk' (FORMAT NEWICK, PLACEMENTS 'csv_placements');
 
+# A fragment_id that becomes another id type is read as the type it now has.
 statement ok
 COPY (SELECT 42 AS fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length FROM single_placement)
+TO '{TEST_DIR}/changing_placements.csv';
+
+statement ok
+EXECUTE copy_csv;
+
+query T
+SELECT name FROM read_newick('{TEST_DIR}/csv_placements.nwk') WHERE name = '42';
+----
+42
+
+# One that becomes a type ids do not take is refused.
+statement ok
+COPY (SELECT 4.5 AS fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length FROM single_placement)
 TO '{TEST_DIR}/changing_placements.csv';
 
 statement error
 EXECUTE copy_csv;
 ----
-<REGEX>:Invalid Input Error: Column 'fragment_id' in table 'csv_placements' must be VARCHAR.*
+<REGEX>:Invalid Input Error: Column 'fragment_id' in table 'csv_placements' must be VARCHAR, BIGINT, or UUID.*
 
 # Every column is checked, not only the first: here like_weight_ratio becomes an integer.
 statement ok

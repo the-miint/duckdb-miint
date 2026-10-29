@@ -488,11 +488,11 @@ Write query results to Newick phylogenetic tree format. Reconstructs a tree from
 - `parent_index` (BIGINT, nullable): Parent node's node_index (NULL for root)
 
 **Optional columns:**
-- `name` (VARCHAR): Node label
+- `name` (VARCHAR, BIGINT or UUID): Node label, written as its text
 - `branch_length` (DOUBLE): Branch length
 - `edge_id` (BIGINT): Edge identifier for jplace format
 
-A `node_index`, `parent_index` or `edge_id` of another integer type is cast to BIGINT, and a `branch_length` of another numeric type (DECIMAL, as untyped literals such as `0.1` are) to DOUBLE. An untyped `NULL` column is cast to the column's type, so `NULL AS name` writes no names. A column of any other type is refused when the COPY is planned.
+Each column takes only the types listed, as COPY SAM's columns do: a column of another type, such as the INTEGER and DECIMAL that untyped literals like `1` and `0.1` are, is refused when the COPY is planned, and is cast in the query (`node_index::BIGINT`). `name` takes the types a `read_id` does. An untyped `NULL` column is cast to the column's type, so `NULL AS name` writes no names.
 
 **Parameters:**
 - `EDGE_IDS` (BOOLEAN, default: auto): Include edge identifiers `{n}` in output
@@ -503,7 +503,7 @@ A `node_index`, `parent_index` or `edge_id` of another integer type is cast to B
 - `PLACEMENTS` (VARCHAR): Name of a table containing phylogenetic placement data to insert
   - Inserts fragment sequences into the tree at their placement locations
   - Requires tree to have `edge_id` column with valid edge identifiers
-  - Required table columns: `fragment_id` (VARCHAR), `edge_id` (BIGINT, INTEGER, UBIGINT or UINTEGER), `like_weight_ratio`, `distal_length` and `pendant_length` (each DOUBLE or FLOAT). A column of another type is refused, when the COPY is planned and again when the placements are read
+  - Required table columns: `fragment_id` (VARCHAR, BIGINT or UUID, as a `read_id`; the placed tip is named with its text), `edge_id` (BIGINT, INTEGER, UBIGINT or UINTEGER), `like_weight_ratio`, `distal_length` and `pendant_length` (each DOUBLE or FLOAT). A column of another type is refused, when the COPY is planned and again when the placements are read
   - Duplicate fragment_ids are deduplicated (keeps highest like_weight_ratio)
   - Multiple placements on same edge are handled correctly
 
@@ -547,12 +547,12 @@ COPY (
     FROM read_newick('input.nwk')
 ) TO 'scaled.nwk' (FORMAT NEWICK);
 
--- Create tree from scratch
+-- Create tree from scratch (the casts give each column its type)
 CREATE TABLE my_tree AS
 SELECT * FROM (VALUES
-    (0, NULL::BIGINT, '', NULL),     -- root
-    (1, 0, 'A', 0.1),                 -- tip A
-    (2, 0, 'B', 0.2)                  -- tip B
+    (0::BIGINT, NULL::BIGINT, '', NULL::DOUBLE),  -- root
+    (1, 0, 'A', 0.1),                              -- tip A
+    (2, 0, 'B', 0.2)                               -- tip B
 ) AS t(node_index, parent_index, name, branch_length);
 
 COPY (SELECT * FROM my_tree)

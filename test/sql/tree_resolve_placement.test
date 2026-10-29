@@ -224,16 +224,32 @@ statement ok
 CREATE VIEW csv_placements AS SELECT * FROM read_csv('{TEST_DIR}/changing_placements.csv');
 
 statement ok
-PREPARE resolve_csv AS SELECT * FROM tree_resolve_placement('ref_tree', 'csv_placements');
+PREPARE resolve_csv AS
+SELECT name FROM tree_resolve_placement('ref_tree', 'csv_placements') WHERE is_tip ORDER BY name;
 
+# A fragment_id that becomes another id type is read as the type it now has, and the placed tip
+# is named with its text.
 statement ok
 COPY (SELECT 42 AS fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length FROM single_placement)
+TO '{TEST_DIR}/changing_placements.csv';
+
+query T
+EXECUTE resolve_csv;
+----
+42
+A
+B
+C
+
+# One that becomes a type ids do not take is refused.
+statement ok
+COPY (SELECT 4.5 AS fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length FROM single_placement)
 TO '{TEST_DIR}/changing_placements.csv';
 
 statement error
 EXECUTE resolve_csv;
 ----
-<REGEX>:Invalid Input Error: Column 'fragment_id' in table 'csv_placements' must be VARCHAR.*
+<REGEX>:Invalid Input Error: Column 'fragment_id' in table 'csv_placements' must be VARCHAR, BIGINT, or UUID.*
 
 query I
 SELECT 1;

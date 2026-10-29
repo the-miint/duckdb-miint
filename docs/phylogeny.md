@@ -337,7 +337,7 @@ Resolve phylogenetic placements into a reference tree, returning a fully resolve
 
 **Parameters:**
 - `tree_table` (VARCHAR): Name of a table or view containing tree data in `read_newick` schema (requires `node_index` and `parent_index` columns; `name`, `branch_length`, `edge_id` are optional)
-- `placements_table` (VARCHAR): Name of a table or view containing placement data: `fragment_id` (VARCHAR), `edge_id` (BIGINT, INTEGER, UBIGINT or UINTEGER), and `like_weight_ratio`, `distal_length` and `pendant_length` (each DOUBLE or FLOAT)
+- `placements_table` (VARCHAR): Name of a table or view containing placement data: `fragment_id` (VARCHAR, BIGINT or UUID, as a `read_id`, so `place_krepp`'s `fragment` of any id type can be used; the placed tip is named with its text), `edge_id` (BIGINT, INTEGER, UBIGINT or UINTEGER), and `like_weight_ratio`, `distal_length` and `pendant_length` (each DOUBLE or FLOAT)
 
 **Output schema:** Same as [`read_newick`](reading.md#newick) (without filepath):
 - `node_index` (BIGINT): 0-based index of node in resolved tree
