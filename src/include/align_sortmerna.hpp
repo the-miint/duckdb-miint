@@ -2,6 +2,7 @@
 
 #include "SortMeRNAAligner.hpp"
 #include "align_common.hpp"
+#include "align_sortmerna_common.hpp"
 #include "sequence_table_reader.hpp"
 #include "duckdb/function/function.hpp"
 #include "duckdb/function/table_function.hpp"
@@ -20,14 +21,14 @@ class AlignSortMeRNATableFunction {
 public:
 	struct Data : public TableFunctionData {
 		std::string query_table;
-		std::vector<std::string> ref_paths;
+		SortMeRNAReferences refs;
 		SequenceTableSchema query_schema;
 		miint::SortMeRNAConfig config;
 
 		// Output schema. Names are constant; types are rebuilt by Bind once
-		// the query id type is known. SortMeRNA's subject side is always
-		// VARCHAR — reference and mate_reference come from FASTA files on disk
-		// (ref_paths), never from a user-provided table.
+		// the query and reference id types are known: reference and
+		// mate_reference are VARCHAR for ref_paths and mirror read_id for
+		// subject_table (SortMeRNAReferences::IdType).
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 

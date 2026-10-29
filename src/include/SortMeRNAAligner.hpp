@@ -9,6 +9,8 @@ struct smr_index;
 
 namespace miint {
 
+struct AlignmentSubject; // Minimap2Aligner.hpp
+
 struct SortMeRNAConfig {
 	int32_t num_threads = 0;
 	int32_t match = 2;
@@ -75,7 +77,12 @@ struct SortMeRNAResultBatch {
 
 class SortMeRNAAligner {
 public:
+	// Index one FASTA file. The library refuses more than one: a handle holds a
+	// single index.
 	SortMeRNAAligner(const SortMeRNAConfig &cfg, const std::vector<std::string> &ref_paths);
+	// Index reference sequences held in memory; each read_id is reported as the
+	// ref_name of its hits. The library copies them during the call.
+	SortMeRNAAligner(const SortMeRNAConfig &cfg, const std::vector<AlignmentSubject> &refs);
 	~SortMeRNAAligner();
 
 	SortMeRNAAligner(const SortMeRNAAligner &) = delete;
@@ -89,6 +96,12 @@ public:
 	static std::string version();
 
 private:
+	// Create ctx_ from cfg; throws if the library returns no context.
+	void create_context(const SortMeRNAConfig &cfg);
+	// Keep the handle an smr_index_load* call returned, or, if it is NULL,
+	// destroy ctx_ and throw with the library's error. `loader` names the call.
+	void adopt_index(smr_index *idx, const char *loader);
+
 	smr_context *ctx_ = nullptr;
 	smr_index *idx_ = nullptr;
 	bool paired_ = false;

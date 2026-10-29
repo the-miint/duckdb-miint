@@ -21,28 +21,31 @@ inline std::vector<std::string> GetSortMeRNARRNAOutputNames() {
 	        "score",   "e_value", "identity", "coverage", "edit_distance", "segment_idx"};
 }
 
-// `query_id_type` drives `read_id`. Must be VARCHAR or BIGINT. No default —
-// every caller must commit to a type so the audit can't slip. The other 12
-// columns have fixed types (ref_name is free-form FASTA header text, never
-// an id column).
-inline std::vector<LogicalType> GetSortMeRNARRNAOutputTypes(const LogicalType &query_id_type) {
-	return {query_id_type,        LogicalType::INTEGER, LogicalType::INTEGER, LogicalType::VARCHAR,
-	        LogicalType::INTEGER, LogicalType::INTEGER, LogicalType::VARCHAR, LogicalType::INTEGER,
-	        LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::DOUBLE,  LogicalType::INTEGER,
-	        LogicalType::INTEGER};
+// `query_id_type` drives `read_id` and `ref_id_type` drives `ref_name`; each
+// must be VARCHAR, BIGINT, or UUID. No defaults — every caller must commit to
+// the types so the audit can't slip. ref_name is VARCHAR for ref_paths (FASTA
+// header ids) and mirrors read_id for subject_table. The other 11 columns
+// have fixed types.
+inline std::vector<LogicalType> GetSortMeRNARRNAOutputTypes(const LogicalType &query_id_type,
+                                                            const LogicalType &ref_id_type) {
+	return {query_id_type,        LogicalType::INTEGER, LogicalType::INTEGER, ref_id_type,         LogicalType::INTEGER,
+	        LogicalType::INTEGER, LogicalType::VARCHAR, LogicalType::INTEGER, LogicalType::DOUBLE, LogicalType::DOUBLE,
+	        LogicalType::DOUBLE,  LogicalType::INTEGER, LogicalType::INTEGER};
 }
 
 // Emit [offset, offset+count) rows of `batch` into the output DataChunk.
-// `query_id_type` (VARCHAR or BIGINT) drives the read_id column; the other
-// 12 columns have fixed types matching GetSortMeRNARRNAOutputTypes.
+// `query_id_type` drives the read_id column and `ref_id_type` the ref_name
+// column, as in GetSortMeRNARRNAOutputTypes. Unaligned rows carry an empty
+// ref_name, which stays "" for VARCHAR and becomes NULL for BIGINT/UUID.
 inline void OutputSortMeRNARRNABatch(DataChunk &output, const miint::SortMeRNAResultBatch &batch, idx_t offset,
-                                     idx_t count, const LogicalType &query_id_type) {
+                                     idx_t count, const LogicalType &query_id_type, const LogicalType &ref_id_type) {
 	D_ASSERT(IsAllowedIdType(query_id_type));
+	D_ASSERT(IsAllowedIdType(ref_id_type));
 	idx_t col = 0;
 	EmitIdColumnFromStrings(output.data[col++], batch.read_ids, offset, count, query_id_type);
 	SetAlignResultInt32(output.data[col++], batch.aligned, offset, count);
 	SetAlignResultInt32(output.data[col++], batch.strands, offset, count);
-	SetAlignResultString(output.data[col++], batch.ref_names, offset, count);
+	EmitIdColumnFromStrings(output.data[col++], batch.ref_names, offset, count, ref_id_type);
 	SetAlignResultInt32(output.data[col++], batch.ref_starts, offset, count);
 	SetAlignResultInt32(output.data[col++], batch.ref_ends, offset, count);
 	SetAlignResultString(output.data[col++], batch.cigars, offset, count);
@@ -63,13 +66,12 @@ inline void OutputSortMeRNARRNABatch(DataChunk &output, const miint::SortMeRNARe
 // row j can be read from batch[j ^ 1] without cross-chunk lookups.
 //
 // `query_id_type` drives `read_id`; `subject_id_type` drives `reference` and
-// `mate_reference`. Both must be VARCHAR, BIGINT, or UUID. The parameter mirrors the
-// shape of OutputSAMRecordBatch (align_common.hpp) and lets the entry-point
-// asserts catch a forgetful caller, but for sortmerna `subject_id_type` is
-// always VARCHAR — subject names come from FASTA files on disk via
-// `ref_paths`, never a user-provided table. The body therefore emits the SAM
-// `=` mate-reference sentinel verbatim (VARCHAR carries `=` in-band); there
-// is no BIGINT-subject resolution path because there is no BIGINT subject.
+// `mate_reference`. Both must be VARCHAR, BIGINT, or UUID, mirroring
+// OutputSAMRecordBatch (align_common.hpp). `subject_id_type` is VARCHAR for
+// `ref_paths` (FASTA header ids) and the subject table's read_id type for
+// `subject_table`. The SAM `=` mate-reference sentinel is emitted verbatim for
+// VARCHAR and resolved to the row's own reference otherwise, as
+// OutputSAMRecordBatch does: a BIGINT/UUID column cannot carry `=`.
 inline void OutputSortMeRNASamBatch(DataChunk &output, const miint::SortMeRNAResultBatch &batch, idx_t offset,
                                     idx_t count, bool is_paired, const LogicalType &query_id_type,
                                     const LogicalType &subject_id_type) {
@@ -138,9 +140,10 @@ inline void OutputSortMeRNASamBatch(DataChunk &output, const miint::SortMeRNARes
 	FlatVector::ValidityMutable(tag_sa_vec).SetAllInvalid(count);
 
 	// Stage id-typed columns into vector<string> slices and bulk-emit via
-	// EmitIdColumnFromStrings after the row loop — supports VARCHAR and BIGINT
-	// uniformly. The "*" sentinel for unaligned rows encodes NULL through the
-	// BIGINT codec (read_id only — subject side is always VARCHAR here).
+	// EmitIdColumnFromStrings after the row loop — supports VARCHAR, BIGINT and
+	// UUID uniformly. The "*" sentinel for unaligned rows encodes NULL through
+	// the BIGINT/UUID codecs and stays "*" for VARCHAR.
+	const bool subject_is_varchar = subject_id_type.id() == LogicalTypeId::VARCHAR;
 	std::vector<std::string> emit_read_ids(count);
 	std::vector<std::string> emit_references(count);
 	std::vector<std::string> emit_mate_references(count);
@@ -212,9 +215,8 @@ inline void OutputSortMeRNASamBatch(DataChunk &output, const miint::SortMeRNARes
 			const idx_t mate_j = j ^ 1;
 			const bool mate_aligned = batch.aligned[mate_j] != 0;
 			if (aligned && mate_aligned && batch.ref_names[j] == batch.ref_names[mate_j]) {
-				// VARCHAR-only subject side (see helper docstring), so `=`
-				// passes through verbatim — no BIGINT resolution needed.
-				emit_mate_references[i] = "=";
+				// See the helper docstring: `=` only fits a VARCHAR column.
+				emit_mate_references[i] = subject_is_varchar ? std::string("=") : batch.ref_names[j];
 				mate_position_data[i] = batch.ref_starts[mate_j];
 			} else if (mate_aligned) {
 				emit_mate_references[i] = batch.ref_names[mate_j];

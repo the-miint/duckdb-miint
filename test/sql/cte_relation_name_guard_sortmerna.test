@@ -7,7 +7,7 @@
 # because these functions are not registered without it. See that file for
 # why a CTE passed by name must be rejected.
 #
-# Covers: align_sortmerna, align_sortmerna_rrna
+# Covers: align_sortmerna, align_sortmerna_rrna (query_table and subject_table)
 #
 
 require miint
@@ -21,5 +21,16 @@ align_sortmerna: 'c' is a common table expression
 
 statement error
 WITH c AS (SELECT 1 AS x) SELECT * FROM align_sortmerna_rrna('c');
+----
+align_sortmerna_rrna: 'c' is a common table expression
+
+# subject_table names a relation too, so it gets the same guard.
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM align_sortmerna('nope', subject_table := 'c');
+----
+align_sortmerna: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM align_sortmerna_rrna('nope', subject_table := 'c');
 ----
 align_sortmerna_rrna: 'c' is a common table expression

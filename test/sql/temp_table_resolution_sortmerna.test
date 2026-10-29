@@ -1,0 +1,64 @@
+# name: test/sql/temp_table_resolution_sortmerna.test
+# description: Regression: align_sortmerna's subject_table must resolve TEMP tables and views (#193, continued)
+# group: [sql]
+
+#
+# The companion to test/sql/temp_table_resolution.test, which explains the defect
+# in full. Split off only because these functions need SortMeRNA, and DuckDB
+# processes `require-env` while PARSING -- a guard part-way down a file skips
+# the whole file, so the ungated cases have to live somewhere else.
+#
+# Site covered: subject_table, read in InitGlobal through ReadSubjectTable
+# (src/sequence_table_reader.cpp). The query table goes through
+# QuerySequenceStream, which align_minimap2's cases already reach.
+#
+# Every TEMP case is paired with an identical non-TEMP control, so a failure
+# means "TEMP is the discriminator", not "the fixture is wrong", and the
+# assertions are exact values rather than row counts.
+
+require miint
+
+require-env SORTMERNA_AVAILABLE
+
+statement ok
+CREATE TABLE reg_queries AS
+SELECT read_id, sequence1 FROM read_fastx('ext/sortmerna/test_data/test_read.fasta');
+
+statement ok
+CREATE TABLE reg_subjects AS
+SELECT read_id, sequence1 FROM read_fastx('ext/sortmerna/test_data/test_ref.fasta');
+
+statement ok
+CREATE TEMP TABLE tmp_subjects AS SELECT * FROM reg_subjects;
+
+statement ok
+CREATE TEMP VIEW tmp_subjects_view AS SELECT * FROM reg_subjects;
+
+# Control: persistent subject table.
+query III
+SELECT read_id, reference, position
+FROM align_sortmerna('reg_queries', subject_table := 'reg_subjects', num_threads := 1);
+----
+AB271211	Unc49508	1
+
+# TEMP subject table.
+query III
+SELECT read_id, reference, position
+FROM align_sortmerna('reg_queries', subject_table := 'tmp_subjects', num_threads := 1);
+----
+AB271211	Unc49508	1
+
+# TEMP view: temporary_objects holds views as well as tables.
+query III
+SELECT read_id, reference, position
+FROM align_sortmerna('reg_queries', subject_table := 'tmp_subjects_view', num_threads := 1);
+----
+AB271211	Unc49508	1
+
+# align_sortmerna_rrna shares the reader; asserted so a later split cannot
+# regress one function silently.
+query III
+SELECT read_id, ref_name, ref_start
+FROM align_sortmerna_rrna('reg_queries', subject_table := 'tmp_subjects', num_threads := 1);
+----
+AB271211	Unc49508	1

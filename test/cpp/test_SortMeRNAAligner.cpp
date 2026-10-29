@@ -1,11 +1,14 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
+#include "Minimap2Aligner.hpp"
 #include "SortMeRNAAligner.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <stdexcept>
 #include <string>
 
@@ -19,7 +22,7 @@ namespace {
 
 // Path relative to the repo root (where tests are executed from). Same
 // approach used by test_Minimap2Aligner.cpp.
-const std::string kTestRef = "ext/sortmerna/data/test_ref.fasta";
+const std::string kTestRef = "ext/sortmerna/test_data/test_ref.fasta";
 
 // BLAST reports identity/coverage at 1-decimal precision. The library emits
 // full precision from the same computation, so rounding the library value
@@ -28,7 +31,24 @@ int64_t round_1dp(double v) {
 	return static_cast<int64_t>(std::llround(v * 10.0));
 }
 
-// AB271211 16S rRNA read from ext/sortmerna/data/test_read.fasta (1487 nt).
+// The one record of a FASTA file, id cut at the first whitespace as sortmerna
+// does, sequence lines joined.
+miint::AlignmentSubject ReadSingleFasta(const std::string &path) {
+	std::ifstream in(path);
+	REQUIRE(in.good());
+	miint::AlignmentSubject subject;
+	std::string line;
+	while (std::getline(in, line)) {
+		if (!line.empty() && line[0] == '>') {
+			subject.read_id = line.substr(1, line.find_first_of(" \t") - 1);
+		} else {
+			subject.sequence += line;
+		}
+	}
+	return subject;
+}
+
+// AB271211 16S rRNA read from ext/sortmerna/test_data/test_read.fasta (1487 nt).
 constexpr const char *kAB271211 = "TCCAACGCGTTGGGAGCTCTCCCATATGGTCGACCTGCAGGCGGCCGCACTAGTGATTAGAGTTTGATCCTGGCTCAG"
                                   "GATGAACGCTGGCGGCGTGCCTAACACATGCAAGTCGAACGGGAATCTTCGGATTCTAGTGGCGGACGGGTGAGTAAC"
                                   "GCGTAAGAATCTAACTTCAGGACGGGGACAACAGTGGGAAACGACTGCTAATACCCGATGTGCCGCGAGGTGAAACCT"
@@ -93,11 +113,74 @@ TEST_CASE("SortMeRNAAligner throws on missing reference", "[sortmerna][wrapper]"
 TEST_CASE("SortMeRNAAligner throws on empty ref_paths", "[sortmerna][wrapper]") {
 	miint::SortMeRNAConfig cfg;
 	cfg.num_threads = 1;
-	REQUIRE_THROWS_AS(miint::SortMeRNAAligner(cfg, {}), std::invalid_argument);
+	REQUIRE_THROWS_AS(miint::SortMeRNAAligner(cfg, std::vector<std::string> {}), std::invalid_argument);
+}
+
+// The library holds one index per handle, built from one file. Before 8.0.1 a
+// second path was accepted and silently ignored, so reads matching only it came
+// back unaligned. It must be refused, not dropped.
+TEST_CASE("SortMeRNAAligner refuses more than one reference file", "[sortmerna][wrapper]") {
+	miint::SortMeRNAConfig cfg;
+	cfg.num_threads = 1;
+	REQUIRE_THROWS_AS(miint::SortMeRNAAligner(cfg, std::vector<std::string> {kTestRef, kTestRef}), std::runtime_error);
+}
+
+// References given in memory (align_sortmerna's subject_table) must align
+// exactly as the same sequences do from a FASTA file: every field, including
+// e_value, which depends on the index's reference statistics.
+TEST_CASE("SortMeRNAAligner in-memory references match the FASTA file", "[sortmerna][wrapper]") {
+	miint::SortMeRNAConfig cfg;
+	cfg.num_threads = 1;
+	miint::SortMeRNAAligner from_file(cfg, {kTestRef});
+	miint::SortMeRNAAligner from_memory(cfg, std::vector<miint::AlignmentSubject> {ReadSingleFasta(kTestRef)});
+
+	miint::SortMeRNAQueryBatch queries;
+	queries.read_ids = {"fwd", "rc"};
+	queries.sequences = {kAB271211, kAB271211_RC};
+
+	miint::SortMeRNAResultBatch a;
+	miint::SortMeRNAResultBatch b;
+	from_file.align(queries, a);
+	from_memory.align(queries, b);
+
+	REQUIRE(a.size() == 2);
+	REQUIRE(b.size() == 2);
+	for (size_t i = 0; i < 2; ++i) {
+		REQUIRE(a.aligned[i] == 1); // not vacuous: both reads hit
+		REQUIRE(a.read_ids[i] == b.read_ids[i]);
+		REQUIRE(a.aligned[i] == b.aligned[i]);
+		REQUIRE(a.strands[i] == b.strands[i]);
+		REQUIRE(a.ref_names[i] == b.ref_names[i]);
+		REQUIRE(a.ref_starts[i] == b.ref_starts[i]);
+		REQUIRE(a.ref_ends[i] == b.ref_ends[i]);
+		REQUIRE(a.cigars[i] == b.cigars[i]);
+		REQUIRE(a.scores[i] == b.scores[i]);
+		REQUIRE(a.edit_distances[i] == b.edit_distances[i]);
+		REQUIRE(a.identities[i] == b.identities[i]);
+		REQUIRE(a.coverages[i] == b.coverages[i]);
+		REQUIRE(a.e_values[i] == b.e_values[i]);
+	}
+}
+
+TEST_CASE("SortMeRNAAligner throws on empty in-memory references", "[sortmerna][wrapper]") {
+	miint::SortMeRNAConfig cfg;
+	cfg.num_threads = 1;
+	REQUIRE_THROWS_AS(miint::SortMeRNAAligner(cfg, std::vector<miint::AlignmentSubject> {}), std::invalid_argument);
+}
+
+// The id becomes a FASTA header in the library's copy, where whitespace would
+// cut it short and ref_name would no longer match the caller's id.
+TEST_CASE("SortMeRNAAligner surfaces the library's reason for refusing a reference", "[sortmerna][wrapper]") {
+	miint::SortMeRNAConfig cfg;
+	cfg.num_threads = 1;
+	auto ref = ReadSingleFasta(kTestRef);
+	ref.read_id = "Unc 49508";
+	REQUIRE_THROWS_WITH(miint::SortMeRNAAligner(cfg, std::vector<miint::AlignmentSubject> {ref}),
+	                    Catch::Matchers::ContainsSubstring("whitespace"));
 }
 
 TEST_CASE("SortMeRNAAligner reports library version", "[sortmerna][wrapper]") {
-	REQUIRE(miint::SortMeRNAAligner::version() == "4.4.0");
+	REQUIRE(miint::SortMeRNAAligner::version() == "8.0.1");
 }
 
 TEST_CASE("SortMeRNAAligner aligns single-end forward-strand read", "[sortmerna][wrapper]") {

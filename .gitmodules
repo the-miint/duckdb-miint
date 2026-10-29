@@ -27,7 +27,7 @@
 [submodule "ext/sortmerna"]
 	path = ext/sortmerna
 	url = https://github.com/the-miint/sortmerna.git
-	branch = v4.4.0-miint
+	branch = v8.0.1-miint
 [submodule "ext/unifrac-binaries"]
 	path = ext/unifrac-binaries
 	url = https://github.com/biocore/unifrac-binaries.git

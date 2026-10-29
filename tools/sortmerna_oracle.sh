@@ -16,7 +16,8 @@
 #
 # The workdir is a fresh temp directory and is removed on exit. The oracle
 # intentionally uses native (not library) sortmerna so its output is
-# independent of the code under test.
+# independent of the code under test. `-e 1` matches run_tests.sh: the library
+# applies no e-value filter, and the CLI default has been 1e-5 since 7.0.
 set -euo pipefail
 
 if [[ $# -ne 4 ]]; then
@@ -48,6 +49,7 @@ trap 'rm -rf "$WORKDIR"' EXIT
     --workdir "$WORKDIR" \
     --aligned "$WORKDIR/aligned" \
     --blast "1 cigar qcov" \
+    -e 1 \
     --num_alignments "$NUM_ALIGNMENTS" \
     --threads "$THREADS" \
     >"$WORKDIR/stdout.log" 2>"$WORKDIR/stderr.log"

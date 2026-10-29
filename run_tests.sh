@@ -616,31 +616,36 @@ fi
 
 # Phase 5: real-data regression oracle.
 #
-# The BLAST-format output of `sortmerna 4.4.0 --blast '1 cigar qcov'` on the
+# The BLAST-format output of `sortmerna --blast '1 cigar qcov' -e 1` on the
 # in-tree 100k-read environmental amplicons vs. gg_13_8_ref_set.fasta is
 # checked in at data/sortmerna/real_oracle.blast.gz (1.9 MB gzipped). The
 # submodule SHA that produced it is recorded alongside so we can detect when
 # the oracle has gone stale.
+#
+# `-e 1` is deliberate: the library reports every hit and applies no e-value
+# filter, while the CLI's default threshold became 1e-5 in sortmerna 7.0.
+# Pinning the CLI to its old default of 1 keeps this a comparison of
+# alignments rather than of filtering.
 #
 # To regenerate after bumping ext/sortmerna: remove both files and rerun
 # run_tests.sh with MIINT_SORTMERNA_REAL_DATA=1. That rebuilds the oracle
 # using the submodule-built native CLI (the exact binary our library links),
 # so the oracle and our embedded library always run the same version.
 SMR_NATIVE_CLI="./build/release/extension/miint/sortmerna_build/src/sortmerna/sortmerna"
-SMR_REAL_QUERY="ext/sortmerna/data/set2_environmental_study_550_amplicon.fasta"
-SMR_REAL_REF="ext/sortmerna/data/gg_13_8_ref_set.fasta"
+SMR_REAL_QUERY="ext/sortmerna/test_data/set2_environmental_study_550_amplicon.fasta"
+SMR_REAL_REF="ext/sortmerna/test_data/gg_13_8_ref_set.fasta"
 SMR_ORACLE_GZ="data/sortmerna/real_oracle.blast.gz"
 SMR_ORACLE_SHA="data/sortmerna/real_oracle.submodule.sha"
 SMR_SUBMODULE_HEAD=$(git -C ext/sortmerna rev-parse HEAD 2>/dev/null || echo "unknown")
 
 if [ "${MIINT_SORTMERNA_REAL_DATA:-0}" = "1" ] && [ -x "$SMR_NATIVE_CLI" ] \
         && [ -f "$SMR_REAL_QUERY" ] && [ -f "$SMR_REAL_REF" ]; then
-    echo "Regenerating sortmerna real-data oracle via native 4.4.0 CLI..."
+    echo "Regenerating sortmerna real-data oracle via the native CLI..."
     SMR_TMP=$(mktemp -d)
     if "$SMR_NATIVE_CLI" \
             --ref "$SMR_REAL_REF" --reads "$SMR_REAL_QUERY" \
             --workdir "$SMR_TMP" --aligned "$SMR_TMP/aligned" \
-            --blast '1 cigar qcov' --num_alignments 1 --threads 4 > "$SMR_TMP/smr.log" 2>&1 \
+            --blast '1 cigar qcov' -e 1 --num_alignments 1 --threads 4 > "$SMR_TMP/smr.log" 2>&1 \
             && [ -f "$SMR_TMP/aligned.blast" ]; then
         mkdir -p data/sortmerna
         gzip -c "$SMR_TMP/aligned.blast" > "$SMR_ORACLE_GZ"

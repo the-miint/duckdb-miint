@@ -1,0 +1,248 @@
+# name: test/sql/align_sortmerna_subject_table.test
+# description: align_sortmerna / align_sortmerna_rrna take their references from a table (subject_table)
+# group: [sql]
+
+#
+# WHY THIS MATTERS
+#
+# References often already live in DuckDB: filtered out of a larger database,
+# joined to a taxonomy, deduplicated. subject_table lets them be used without a
+# round trip through a FASTA file, and it must never change the answer:
+# the same sequences give the same alignments whichever way they arrive. The
+# equivalence checks below compare every output column against ref_paths with
+# the same sequences, after a positive control proves there are rows to compare.
+#
+# The reference column mirrors the subject table's read_id type, as in
+# align_minimap2, so results join back to the subject table without a cast.
+#
+
+require miint
+
+require-env SORTMERNA_AVAILABLE
+
+# Fixtures straight from the FASTA files the ref_paths tests use, so the two
+# paths are fed identical sequences. read_fastx splits the header at the first
+# whitespace exactly as sortmerna does, so the ids agree too.
+statement ok
+CREATE TABLE smr_refs AS
+SELECT read_id, sequence1 FROM read_fastx('ext/sortmerna/test_data/test_ref.fasta');
+
+statement ok
+CREATE TABLE smr_q AS
+SELECT read_id, sequence1 FROM read_fastx('ext/sortmerna/test_data/test_read.fasta');
+
+# A read with no hit, so the unaligned encoding is covered for every id type.
+statement ok
+INSERT INTO smr_q VALUES ('polyA', repeat('A', 150));
+
+statement ok
+CREATE TABLE smr_q_pe AS
+SELECT read_id, sequence1, sequence1 AS sequence2 FROM smr_q WHERE read_id = 'AB271211';
+
+# --- Positive control: the read aligns, so the comparisons below are not vacuous ---
+query IIII
+SELECT read_id, flags, reference, cigar IS NOT NULL
+FROM align_sortmerna('smr_q', subject_table := 'smr_refs', num_threads := 1)
+ORDER BY read_id;
+----
+AB271211	0	Unc49508	true
+polyA	4	*	true
+
+# --- Equivalence: subject_table and ref_paths give identical rows ---
+# Symmetric difference over every column; EXCEPT ALL also catches duplicated
+# or missing rows.
+query I
+SELECT COUNT(*) FROM (
+    (SELECT * FROM align_sortmerna('smr_q', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], num_threads := 1)
+     EXCEPT ALL
+     SELECT * FROM align_sortmerna('smr_q', subject_table := 'smr_refs', num_threads := 1))
+    UNION ALL
+    (SELECT * FROM align_sortmerna('smr_q', subject_table := 'smr_refs', num_threads := 1)
+     EXCEPT ALL
+     SELECT * FROM align_sortmerna('smr_q', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], num_threads := 1))
+);
+----
+0
+
+query I
+SELECT COUNT(*) FROM (
+    (SELECT * FROM align_sortmerna('smr_q_pe', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'],
+                                   num_threads := 1, paired := true)
+     EXCEPT ALL
+     SELECT * FROM align_sortmerna('smr_q_pe', subject_table := 'smr_refs', num_threads := 1, paired := true))
+    UNION ALL
+    (SELECT * FROM align_sortmerna('smr_q_pe', subject_table := 'smr_refs', num_threads := 1, paired := true)
+     EXCEPT ALL
+     SELECT * FROM align_sortmerna('smr_q_pe', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'],
+                                   num_threads := 1, paired := true))
+);
+----
+0
+
+# The rrna schema carries e_value, identity and coverage, which SAM does not;
+# they come from the loaded index, so they are compared as well.
+query I
+SELECT COUNT(*) FROM (
+    (SELECT * FROM align_sortmerna_rrna('smr_q', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], num_threads := 1)
+     EXCEPT ALL
+     SELECT * FROM align_sortmerna_rrna('smr_q', subject_table := 'smr_refs', num_threads := 1))
+    UNION ALL
+    (SELECT * FROM align_sortmerna_rrna('smr_q', subject_table := 'smr_refs', num_threads := 1)
+     EXCEPT ALL
+     SELECT * FROM align_sortmerna_rrna('smr_q', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], num_threads := 1))
+);
+----
+0
+
+query I
+SELECT COUNT(*) FROM (
+    (SELECT * FROM align_sortmerna_rrna('smr_q_pe', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'],
+                                        num_threads := 1, paired := true)
+     EXCEPT ALL
+     SELECT * FROM align_sortmerna_rrna('smr_q_pe', subject_table := 'smr_refs', num_threads := 1, paired := true))
+    UNION ALL
+    (SELECT * FROM align_sortmerna_rrna('smr_q_pe', subject_table := 'smr_refs', num_threads := 1, paired := true)
+     EXCEPT ALL
+     SELECT * FROM align_sortmerna_rrna('smr_q_pe', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'],
+                                        num_threads := 1, paired := true))
+);
+----
+0
+
+# A view works the same as a table.
+statement ok
+CREATE VIEW smr_refs_view AS SELECT * FROM smr_refs;
+
+query II
+SELECT read_id, reference
+FROM align_sortmerna('smr_q', subject_table := 'smr_refs_view', num_threads := 1)
+WHERE flags = 0;
+----
+AB271211	Unc49508
+
+# --- BIGINT reference ids: the reference columns mirror the subject type ---
+statement ok
+CREATE TABLE smr_refs_bigint AS SELECT 49508::BIGINT AS read_id, sequence1 FROM smr_refs;
+
+query IIII
+SELECT read_id, typeof(reference), typeof(mate_reference), reference
+FROM align_sortmerna('smr_q', subject_table := 'smr_refs_bigint', num_threads := 1)
+ORDER BY read_id;
+----
+AB271211	BIGINT	BIGINT	49508
+polyA	BIGINT	BIGINT	NULL
+
+# Joins back to the subject table with no cast: the point of mirroring the type.
+query II
+SELECT a.read_id, length(r.sequence1)
+FROM align_sortmerna('smr_q', subject_table := 'smr_refs_bigint', num_threads := 1) a
+JOIN smr_refs_bigint r ON a.reference = r.read_id;
+----
+AB271211	1469
+
+# Paired, both mates on one reference: SAM writes "=" for mate_reference, which
+# a BIGINT column cannot hold, so it is resolved to the reference itself.
+query IIII
+SELECT flags, reference, mate_reference, mate_position
+FROM align_sortmerna('smr_q_pe', subject_table := 'smr_refs_bigint', num_threads := 1, paired := true)
+ORDER BY flags;
+----
+67	49508	49508	1
+131	49508	49508	1
+
+query IIII
+SELECT read_id, typeof(ref_name), ref_name, aligned
+FROM align_sortmerna_rrna('smr_q', subject_table := 'smr_refs_bigint', num_threads := 1)
+ORDER BY read_id;
+----
+AB271211	BIGINT	49508	1
+polyA	BIGINT	NULL	0
+
+# --- UUID reference ids ---
+statement ok
+CREATE TABLE smr_refs_uuid AS
+SELECT '7a4e1c2b-0000-4000-8000-00000000c164'::UUID AS read_id, sequence1 FROM smr_refs;
+
+query III
+SELECT read_id, typeof(reference), reference
+FROM align_sortmerna('smr_q', subject_table := 'smr_refs_uuid', num_threads := 1)
+ORDER BY read_id;
+----
+AB271211	UUID	7a4e1c2b-0000-4000-8000-00000000c164
+polyA	UUID	NULL
+
+query IIII
+SELECT flags, typeof(mate_reference), reference, mate_reference
+FROM align_sortmerna('smr_q_pe', subject_table := 'smr_refs_uuid', num_threads := 1, paired := true)
+ORDER BY flags;
+----
+67	UUID	7a4e1c2b-0000-4000-8000-00000000c164	7a4e1c2b-0000-4000-8000-00000000c164
+131	UUID	7a4e1c2b-0000-4000-8000-00000000c164	7a4e1c2b-0000-4000-8000-00000000c164
+
+query II
+SELECT typeof(ref_name), ref_name
+FROM align_sortmerna_rrna('smr_q', subject_table := 'smr_refs_uuid', num_threads := 1)
+WHERE aligned = 1;
+----
+UUID	7a4e1c2b-0000-4000-8000-00000000c164
+
+# With ref_paths the reference columns stay VARCHAR (FASTA header ids).
+query II
+SELECT typeof(reference), typeof(mate_reference)
+FROM align_sortmerna('smr_q', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], num_threads := 1)
+LIMIT 1;
+----
+VARCHAR	VARCHAR
+
+# --- Exactly one of ref_paths / subject_table ---
+statement error
+SELECT * FROM align_sortmerna('smr_q');
+----
+align_sortmerna requires exactly one of ref_paths or subject_table
+
+statement error
+SELECT * FROM align_sortmerna_rrna('smr_q', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'],
+                                   subject_table := 'smr_refs');
+----
+align_sortmerna_rrna requires exactly one of ref_paths or subject_table
+
+# --- Invalid subject tables ---
+statement error
+SELECT * FROM align_sortmerna('smr_q', subject_table := 'no_such_table');
+----
+Sequence table or view 'no_such_table' does not exist
+
+statement ok
+CREATE TABLE smr_refs_noseq AS SELECT read_id FROM smr_refs;
+
+statement error
+SELECT * FROM align_sortmerna('smr_q', subject_table := 'smr_refs_noseq');
+----
+missing required column 'sequence1'
+
+statement ok
+CREATE TABLE smr_refs_empty AS SELECT * FROM smr_refs WHERE false;
+
+statement error
+SELECT * FROM align_sortmerna('smr_q', subject_table := 'smr_refs_empty');
+----
+Subject table 'smr_refs_empty' is empty
+
+statement ok
+CREATE TABLE smr_refs_paired AS SELECT read_id, sequence1, sequence1 AS sequence2 FROM smr_refs;
+
+statement error
+SELECT * FROM align_sortmerna('smr_q', subject_table := 'smr_refs_paired');
+----
+Subjects cannot be paired-end
+
+# The id becomes the FASTA header of the library's reference copy, where
+# whitespace would end the id early and the output reference would no longer
+# match the table. The library refuses it; the message must reach the user.
+statement ok
+CREATE TABLE smr_refs_space AS SELECT 'Unc 49508' AS read_id, sequence1 FROM smr_refs;
+
+statement error
+SELECT * FROM align_sortmerna('smr_q', subject_table := 'smr_refs_space');
+----
+id contains whitespace

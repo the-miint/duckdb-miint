@@ -251,7 +251,7 @@ This source code is released under the terms of the MIT License.
 
 Header-only L-BFGS quasi-Newton optimizer (Eigen-backed). Drives the
 maximum-a-posteriori fit in `mmvec`. Vendored as tracked file copies at
-`ext/LBFGSpp/` (the same treatment as kseq++ and concurrentqueue: header-only,
+`ext/LBFGSpp/` (the same treatment as kseq++: header-only,
 no build step). Only the unbounded solver is vendored; the bounded `LBFGSB`
 solver is omitted as unused. Every vendored file is unmodified — see
 `ext/LBFGSpp/PROVENANCE.md` for per-file checksums.
@@ -596,14 +596,15 @@ SOFTWARE.
 
 rRNA read filtering and alignment. Used by `align_sortmerna` and
 `align_sortmerna_rrna`. Embedded as a statically linked C++ library
-from a fork with a streaming C API (`smr_run_seqs_with_index`).
-Full source is available under `ext/sortmerna/` in this repository,
-which satisfies the LGPL-3.0 source-availability requirement for
-distributed binaries that link against it.
+through its C API (`smr_index_load`, `smr_index_load_seqs`,
+`smr_run_seqs_with_index`). Full source is available under
+`ext/sortmerna/` in this repository, which satisfies the LGPL-3.0
+source-availability requirement for distributed binaries that link
+against it.
 
-- Repository (upstream): https://github.com/biocore/sortmerna
-- Repository (fork used here): https://github.com/the-miint/sortmerna — branch `v4.4.0-miint`, pinned at the submodule SHA recorded in `.gitmodules` / `git submodule status ext/sortmerna`
-- Version: 4.4.0
+- Repository (upstream): https://github.com/sortmerna/sortmerna
+- Repository (fork used here): https://github.com/the-miint/sortmerna — branch `v8.0.1-miint` (upstream `v8.0.1` plus dependency pins and a CIGAR fix), pinned at the submodule SHA recorded in `.gitmodules` / `git submodule status`
+- Version: 8.0.1
 - License: LGPL-3.0-or-later (SPDX)
 
 ### Citation
@@ -626,7 +627,7 @@ uses it under LGPL-3.0-or-later. The full LGPL-3.0 text is in
 ## RocksDB
 
 Embedded key-value store used by SortMeRNA for index persistence.
-Sourced via vcpkg and linked statically into `libsortmerna_bundle.a`.
+Sourced via vcpkg and linked statically into the extension.
 
 - Repository: https://github.com/facebook/rocksdb
 - License: `GPL-2.0-only OR Apache-2.0` (SPDX expression, dual); used here under Apache 2.0. See RocksDB's `LICENSE.Apache` for full text.
@@ -649,30 +650,173 @@ permissions and limitations under the License.
 
 ---
 
-## cmph
+## parasail
 
-Minimal perfect hash functions. Transitive dependency of SortMeRNA,
-bundled into `libsortmerna_bundle.a` via the post-build `ar`-append
-step in `cmake/scripts/bundle_sortmerna.cmake`.
+SIMD pairwise sequence alignment. SortMeRNA's Smith-Waterman aligner
+(replacing SSW). Built from source as a static library by the
+`parasail_build` ExternalProject and linked into the extension.
 
-- Repository: http://cmph.sourceforge.net/
-- Vendored location in this repo: `ext/sortmerna/3rdparty/cmph/` (submodule; same pin as SortMeRNA)
-- License: `LGPL-2.0-only OR MPL-1.1` (SPDX expression, dual)
+- Repository: https://github.com/jeffdaily/parasail
+- Vendored location in this repo: `ext/sortmerna/3rdparty/parasail/` (submodule of the SortMeRNA fork)
+- License: Battelle BSD-style (below)
 
-The cmph sources vendored inside SortMeRNA carry no per-file license
-headers. The upstream SourceForge project declares the dual license
-above. Downstream distributors of a binary linking cmph should include
-the full LGPL-2.0 and/or MPL-1.1 text; inlining them here would
-duplicate content that the upstream project does not itself ship
-alongside the sources.
+### License
+
+```
+Pairwise Sequence Alignment Library (parasail)
+
+Copyright (c) 2015, Battelle Memorial Institute
+
+1.  Battelle Memorial Institute (hereinafter Battelle) hereby grants
+    permission to any person or entity lawfully obtaining a copy of this
+    software and associated documentation files (hereinafter “the
+    Software”) to redistribute and use the Software in source and binary
+    forms, with or without modification.  Such person or entity may use,
+    copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and may permit others to do so, subject to
+    the following conditions:
+
+    - Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimers. 
+
+    - Redistributions in binary form must reproduce the above copyright
+      notice, this list of conditions and the following disclaimer in
+      the documentation and/or other materials provided with the
+      distribution. 
+
+    - Other than as used herein, neither the name Battelle Memorial
+      Institute or Battelle may be used in any form whatsoever without
+      the express written consent of Battelle.  
+
+    - Redistributions of the software in any form, and publications
+      based on work performed using the software should include the
+      following citation as a reference:
+
+    Daily, Jeff. (2016). Parasail: SIMD C library for global,
+    semi-global, and local pairwise sequence alignments. *BMC
+    Bioinformatics*, 17(1), 1-11.  doi:10.1186/s12859-016-0930-z
+
+2.  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+    "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+    LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+    FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL BATTELLE
+    OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+    SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+    LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF
+    USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+    ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+    OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
+    OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+    SUCH DAMAGE.
+```
+
+---
+
+## BBHash
+
+Minimal perfect hash functions for SortMeRNA's reference index
+(replacing cmph). Header-only; compiled into `libsmr_api.a`.
+
+- Repository: https://github.com/rizkg/BBHash
+- Vendored location in this repo: `ext/sortmerna/3rdparty/bbhash/` (submodule of the SortMeRNA fork)
+- License: MIT
+
+### MIT License
+
+Copyright (c) 2015 Guillaume Rizk
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+## cxxopts
+
+Command-line option parsing, used by SortMeRNA to parse the options the
+library builds internally. Header-only; compiled into `libsmr_api.a`.
+
+- Repository: https://github.com/jarro2783/cxxopts
+- Vendored location in this repo: `ext/sortmerna/3rdparty/cxxopts/` (submodule of the SortMeRNA fork)
+- License: MIT
+
+### MIT License
+
+Copyright (c) 2014 Jarryd Beck
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+## rapidgzip (librapidarchive)
+
+Parallel gzip decompression for SortMeRNA's file reader. Header-only;
+compiled into `libsmr_api.a`. Its bundled zlib copy (`zlibstatic`) is
+not linked; zlib calls resolve to the vcpkg zlib.
+
+- Repository: https://github.com/mxmlnkn/librapidarchive
+- Vendored location in this repo: `ext/sortmerna/3rdparty/indexed_bzip2/` (submodule of the SortMeRNA fork)
+- License: `MIT OR Apache-2.0` (SPDX expression, dual); used here under MIT.
+
+### MIT License
+
+Copyright (c) 2019-2023 Maximilian Knespel
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 ---
 
 ## alp (ascending ladder algorithm for p-values)
 
 NCBI statistical library used by SortMeRNA for alignment p-value
-computation. Transitive dependency bundled into
-`libsortmerna_bundle.a`.
+computation. Built in SortMeRNA's tree as `libalp.a` and linked into
+the extension.
 
 - Origin: NCBI BLAST+ toolkit
 - License: Public domain (U.S. government work per 17 U.S.C. §105)
@@ -741,49 +885,6 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-## concurrentqueue
-
-Lock-free concurrent queue used by SortMeRNA's producer/consumer
-pipeline. Vendored as a header-only include at
-`ext/concurrentqueue/concurrentqueue.h` (pinned to a specific commit
-for build reproducibility; not carried as a submodule to keep CI
-checkout simple).
-
-- Repository: https://github.com/cameron314/concurrentqueue
-- License: Simplified BSD / Boost Software License 1.0 (dual);
-  used under the Simplified BSD terms.
-
-### Simplified BSD License
-
-Copyright (c) 2013-2016, Cameron Desrochers.
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions
-are met:
-
-- Redistributions of source code must retain the above copyright
-  notice, this list of conditions and the following disclaimer.
-- Redistributions in binary form must reproduce the above copyright
-  notice, this list of conditions and the following disclaimer in
-  the documentation and/or other materials provided with the
-  distribution.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
-"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
-FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
-COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
-INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
-BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
-LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
-LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
-ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
-POSSIBILITY OF SUCH DAMAGE.
 
 ---
 

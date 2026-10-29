@@ -58,8 +58,8 @@ if(EMSCRIPTEN)
   )
 elseif(WIN32)
   # All of these rely on POSIX APIs (mkdtemp, process pipes, shm, autotools);
-  # MAFFT segfaults on MinGW. SortMeRNA's cmph needs <sys/time.h>, which MinGW
-  # lacks (upstream CI tests MSVC only).
+  # MAFFT segfaults on MinGW. SortMeRNA's RocksDB and parasail have never been
+  # built for MinGW (upstream CI tests MSVC only).
   set(MIINT_ENABLE_VSEARCH OFF)
   set(MIINT_ENABLE_MAFFT OFF)
   set(MIINT_ENABLE_ABPOA OFF)
@@ -71,7 +71,7 @@ elseif(WIN32)
     set(MIINT_ENABLE_SORTMERNA OFF)
     message(
       STATUS
-        "MinGW detected: disabling vsearch, MAFFT, SortMeRNA, sylph, gpl-boundary, UniFrac, and krepp (cmph + gpl-boundary rely on POSIX APIs; libssu inmem assumes POSIX)"
+        "MinGW detected: disabling vsearch, MAFFT, SortMeRNA, sylph, gpl-boundary, UniFrac, and krepp (gpl-boundary relies on POSIX APIs; libssu inmem assumes POSIX; SortMeRNA untested)"
     )
   else()
     message(

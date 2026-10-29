@@ -14,7 +14,7 @@ CREATE TABLE smr_q (read_id VARCHAR, sequence1 VARCHAR);
 query II
 SELECT column_name, column_type FROM (
     DESCRIBE SELECT * FROM align_sortmerna_rrna(
-        'smr_q', ref_paths := ['ext/sortmerna/data/test_ref.fasta'])
+        'smr_q', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'])
 ) ORDER BY column_name;
 ----
 aligned	INTEGER
@@ -43,9 +43,19 @@ SELECT * FROM align_sortmerna_rrna('smr_q', ref_paths := []);
 ----
 ref_paths
 
+# --- ref_paths takes exactly one file ---
+# SortMeRNA builds one index from one reference file. The library before 8.0.1
+# accepted more and silently used only the first, so reads matching only the
+# later files came back unaligned with no error. Reject at bind instead.
+statement error
+SELECT * FROM align_sortmerna_rrna('smr_q', ref_paths := [
+    'ext/sortmerna/test_data/test_ref.fasta', 'ext/sortmerna/test_data/gg_13_8_ref_set.fasta']);
+----
+ref_paths accepts one FASTA path (got 2)
+
 # --- Single-end forward alignment against golden values ---
 # Goldens regenerated via tools/sortmerna_oracle.sh on 2026-04-18
-# (AB271211 vs ext/sortmerna/data/test_ref.fasta). Identity/coverage are
+# (AB271211 vs ext/sortmerna/test_data/test_ref.fasta). Identity/coverage are
 # library full-precision values equivalent to BLAST's rounded 93.5 / 96.2.
 statement ok
 CREATE TABLE smr_fwd (read_id VARCHAR, sequence1 VARCHAR);
@@ -62,7 +72,7 @@ SELECT read_id, aligned, strand, ref_name, ref_start, ref_end, cigar, score,
        round(identity, 1) AS identity_1dp,
        round(coverage, 1) AS coverage_1dp
 FROM align_sortmerna_rrna(
-    'smr_fwd', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1);
+    'smr_fwd', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], num_threads := 1);
 ----
 AB271211	1	1	Unc49508	1	1446	57S57M2I12M2D4M2I29M1D11M2I3M2D11M1I7M1D13M5D4M3D9M2D3M7D1260M	2430	94	93.5	96.2
 
@@ -80,7 +90,7 @@ query IIIIIIIII
 SELECT strand, ref_name, ref_start, ref_end, cigar, score, edit_distance,
        round(identity, 1), round(coverage, 1)
 FROM align_sortmerna_rrna(
-    'smr_rc', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1);
+    'smr_rc', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], num_threads := 1);
 ----
 0	Unc49508	1	1446	57S57M2I12M2D4M2I29M1D11M2I3M2D11M1I7M1D13M5D4M3D9M2D3M7D1260M	2430	94	93.5	96.2
 
@@ -94,7 +104,7 @@ INSERT INTO smr_pe SELECT read_id, sequence1, sequence1 AS sequence2 FROM smr_fw
 query IIII
 SELECT segment_idx, strand, ref_start, ref_end
 FROM align_sortmerna_rrna(
-    'smr_pe', ref_paths := ['ext/sortmerna/data/test_ref.fasta'],
+    'smr_pe', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'],
     num_threads := 1, paired := true)
 ORDER BY segment_idx;
 ----
@@ -104,7 +114,7 @@ ORDER BY segment_idx;
 # --- Paired flag mismatch at bind ---
 statement error
 SELECT * FROM align_sortmerna_rrna(
-    'smr_fwd', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], paired := true);
+    'smr_fwd', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], paired := true);
 ----
 paired
 
@@ -127,7 +137,7 @@ SELECT COUNT(*), COUNT(DISTINCT read_id) FROM smr_big;
 query III
 SELECT COUNT(*), COUNT(DISTINCT read_id), COUNT(*) FILTER (WHERE aligned = 1)
 FROM align_sortmerna_rrna(
-    'smr_big', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1);
+    'smr_big', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], num_threads := 1);
 ----
 3000	3000	3000
 
@@ -136,6 +146,6 @@ query IIIII
 SELECT COUNT(DISTINCT ref_name), COUNT(DISTINCT ref_start), COUNT(DISTINCT ref_end),
        COUNT(DISTINCT score), COUNT(DISTINCT edit_distance)
 FROM align_sortmerna_rrna(
-    'smr_big', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1);
+    'smr_big', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], num_threads := 1);
 ----
 1	1	1	1	1

@@ -1,5 +1,6 @@
 #include "SortMeRNAAligner.hpp"
 
+#include "Minimap2Aligner.hpp"
 #include "smr_api.h"
 
 #include <cstring>
@@ -46,7 +47,33 @@ SortMeRNAAligner::SortMeRNAAligner(const SortMeRNAConfig &cfg, const std::vector
 	if (ref_paths.empty()) {
 		throw std::invalid_argument("SortMeRNAAligner: ref_paths is empty");
 	}
+	create_context(cfg);
 
+	std::vector<const char *> ref_ptrs;
+	ref_ptrs.reserve(ref_paths.size());
+	for (const auto &p : ref_paths) {
+		ref_ptrs.push_back(p.c_str());
+	}
+	adopt_index(smr_index_load(ctx_, ref_ptrs.data(), static_cast<int32_t>(ref_ptrs.size())), "smr_index_load");
+}
+
+SortMeRNAAligner::SortMeRNAAligner(const SortMeRNAConfig &cfg, const std::vector<AlignmentSubject> &refs)
+    : paired_(cfg.paired) {
+	if (refs.empty()) {
+		throw std::invalid_argument("SortMeRNAAligner: refs is empty");
+	}
+	create_context(cfg);
+
+	std::vector<smr_seq_t> seqs(refs.size());
+	for (size_t i = 0; i < refs.size(); ++i) {
+		seqs[i].id = refs[i].read_id.c_str();
+		seqs[i].sequence = refs[i].sequence.c_str();
+		seqs[i].quality = nullptr;
+	}
+	adopt_index(smr_index_load_seqs(ctx_, seqs.data(), static_cast<int32_t>(seqs.size())), "smr_index_load_seqs");
+}
+
+void SortMeRNAAligner::create_context(const SortMeRNAConfig &cfg) {
 	smr_config_t c_cfg;
 	apply_config(cfg, c_cfg);
 
@@ -54,27 +81,24 @@ SortMeRNAAligner::SortMeRNAAligner(const SortMeRNAConfig &cfg, const std::vector
 	if (!ctx_) {
 		throw std::runtime_error("SortMeRNAAligner: smr_ctx_create returned NULL");
 	}
+}
 
-	std::vector<const char *> ref_ptrs;
-	ref_ptrs.reserve(ref_paths.size());
-	for (const auto &p : ref_paths) {
-		ref_ptrs.push_back(p.c_str());
+void SortMeRNAAligner::adopt_index(smr_index *idx, const char *loader) {
+	idx_ = idx;
+	if (idx_) {
+		return;
 	}
-
-	idx_ = smr_index_load(ctx_, ref_ptrs.data(), static_cast<int32_t>(ref_ptrs.size()));
-	if (!idx_) {
-		int rc = smr_last_error_code(ctx_);
-		const char *last = smr_last_error(ctx_);
-		std::string msg = "smr_index_load: ";
-		msg += smr_strerror(rc ? rc : SMR_ERR_IO);
-		if (last && *last) {
-			msg += ": ";
-			msg += last;
-		}
-		smr_ctx_destroy(ctx_);
-		ctx_ = nullptr;
-		throw std::runtime_error(msg);
+	int rc = smr_last_error_code(ctx_);
+	const char *last = smr_last_error(ctx_);
+	std::string msg = std::string(loader) + ": ";
+	msg += smr_strerror(rc ? rc : SMR_ERR_IO);
+	if (last && *last) {
+		msg += ": ";
+		msg += last;
 	}
+	smr_ctx_destroy(ctx_);
+	ctx_ = nullptr;
+	throw std::runtime_error(msg);
 }
 
 SortMeRNAAligner::~SortMeRNAAligner() {

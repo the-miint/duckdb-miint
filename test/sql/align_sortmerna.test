@@ -13,7 +13,7 @@ CREATE TABLE smr_q (read_id VARCHAR, sequence1 VARCHAR);
 query II
 SELECT column_name, column_type FROM (
     DESCRIBE SELECT * FROM align_sortmerna(
-        'smr_q', ref_paths := ['ext/sortmerna/data/test_ref.fasta'])
+        'smr_q', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'])
 ) ORDER BY column_name;
 ----
 cigar	VARCHAR
@@ -50,6 +50,13 @@ SELECT * FROM align_sortmerna('smr_q', ref_paths := []);
 ----
 ref_paths
 
+# --- ref_paths takes exactly one file (see align_sortmerna_rrna.test) ---
+statement error
+SELECT * FROM align_sortmerna('smr_q', ref_paths := [
+    'ext/sortmerna/test_data/test_ref.fasta', 'ext/sortmerna/test_data/gg_13_8_ref_set.fasta']);
+----
+ref_paths accepts one FASTA path (got 2)
+
 # --- Single-end forward: SAM flags + coords derived from AB271211 golden ---
 # Same sequence / reference as align_sortmerna_rrna fwd test.
 # Expected mapping: strand=1 → flags=0; ref_end=1446 → stop_position=1447.
@@ -66,14 +73,14 @@ query IIIIIIIIII
 SELECT read_id, flags, reference, position, stop_position, mapq, cigar,
        mate_reference, mate_position, template_length
 FROM align_sortmerna(
-    'smr_fwd', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1);
+    'smr_fwd', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], num_threads := 1);
 ----
 AB271211	0	Unc49508	1	1447	255	57S57M2I12M2D4M2I29M1D11M2I3M2D11M1I7M1D13M5D4M3D9M2D3M7D1260M	*	0	0
 
 query II
 SELECT tag_as, tag_nm
 FROM align_sortmerna(
-    'smr_fwd', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1);
+    'smr_fwd', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], num_threads := 1);
 ----
 2430	94
 
@@ -83,7 +90,7 @@ SELECT (tag_xs IS NULL) AND (tag_ys IS NULL) AND (tag_xn IS NULL)
    AND (tag_xm IS NULL) AND (tag_xo IS NULL) AND (tag_xg IS NULL)
    AND (tag_yt IS NULL) AND (tag_md IS NULL) AND (tag_sa IS NULL)
 FROM align_sortmerna(
-    'smr_fwd', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1);
+    'smr_fwd', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], num_threads := 1);
 ----
 true
 
@@ -100,7 +107,7 @@ INSERT INTO smr_rc VALUES (
 query IIIII
 SELECT flags, reference, position, stop_position, cigar
 FROM align_sortmerna(
-    'smr_rc', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1);
+    'smr_rc', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], num_threads := 1);
 ----
 16	Unc49508	1	1447	57S57M2I12M2D4M2I29M1D11M2I3M2D11M1I7M1D13M5D4M3D9M2D3M7D1260M
 
@@ -116,7 +123,7 @@ INSERT INTO smr_pe SELECT read_id, sequence1, sequence1 AS sequence2 FROM smr_fw
 query IIIII
 SELECT flags, reference, position, mate_reference, mate_position
 FROM align_sortmerna(
-    'smr_pe', ref_paths := ['ext/sortmerna/data/test_ref.fasta'],
+    'smr_pe', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'],
     num_threads := 1, paired := true)
 ORDER BY flags;
 ----
@@ -126,7 +133,7 @@ ORDER BY flags;
 # --- Paired flag mismatch at bind ---
 statement error
 SELECT * FROM align_sortmerna(
-    'smr_fwd', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], paired := true);
+    'smr_fwd', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], paired := true);
 ----
 paired
 
@@ -142,7 +149,7 @@ CREATE TABLE smr_big AS
 query III
 SELECT COUNT(*), COUNT(DISTINCT read_id), COUNT(*) FILTER (WHERE flags = 0)
 FROM align_sortmerna(
-    'smr_big', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1);
+    'smr_big', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], num_threads := 1);
 ----
 3000	3000	3000
 
@@ -151,6 +158,6 @@ SELECT COUNT(DISTINCT reference), COUNT(DISTINCT position),
        COUNT(DISTINCT stop_position), COUNT(DISTINCT tag_as),
        COUNT(DISTINCT tag_nm)
 FROM align_sortmerna(
-    'smr_big', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1);
+    'smr_big', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], num_threads := 1);
 ----
 1	1	1	1	1
