@@ -351,7 +351,7 @@ Resolve phylogenetic placements into a reference tree, returning a fully resolve
 - Reads tree data from the tree table and builds a `NewickTree`
 - Reads placements and inserts each fragment as a new tip on the specified edge
 - Each placement creates 2 new nodes: an internal node (splitting the edge) and a fragment tip
-- Deduplicates placements by `fragment_id` (keeps highest `like_weight_ratio`, then lowest `pendant_length`)
+- Deduplicates placements by `fragment_id`, preferring the higher `like_weight_ratio` and, between ratios within 1e-9 of each other, the lower `pendant_length`; the kept placement is not always the one with the highest ratio (see Reproducibility below)
 - Multiple placements on the same edge are sorted by `distal_length` and inserted as a chain
 - Preserves original tip-to-tip distances in the tree
 - Works with both tables and views for either parameter

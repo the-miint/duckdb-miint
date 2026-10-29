@@ -504,7 +504,7 @@ Each column takes only the types listed, as COPY SAM's columns do: a column of a
   - Inserts fragment sequences into the tree at their placement locations
   - Requires tree to have `edge_id` column with valid edge identifiers
   - Required table columns: `fragment_id` (VARCHAR, BIGINT or UUID, as a `read_id`; the placed tip is named with its text), `edge_id` (BIGINT, INTEGER, UBIGINT or UINTEGER), `like_weight_ratio`, `distal_length` and `pendant_length` (each DOUBLE or FLOAT). A column of another type is refused, when the COPY is planned and again when the placements are read
-  - Duplicate fragment_ids are deduplicated (keeps highest like_weight_ratio)
+  - Duplicate fragment_ids are deduplicated as in [`tree_resolve_placement`](phylogeny.md#resolve-placements): one placement per fragment is kept, preferring the higher `like_weight_ratio` and, between ratios within 1e-9 of each other, the lower `pendant_length`. Because of that tolerance the kept placement is not always the one with the highest ratio
   - Multiple placements on same edge are handled correctly
 
 **Behavior:**
