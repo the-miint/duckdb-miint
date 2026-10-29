@@ -827,8 +827,8 @@ Emits the standard 21-column SAM schema shared with `align_minimap2` / `align_bo
 - `subject_table` (VARCHAR): Name of a table or view holding the references, with columns `read_id` (VARCHAR, BIGINT, or UUID; no whitespace) and `sequence1` (VARCHAR). Rows with a NULL `read_id` or `sequence1` are skipped; a non-NULL `sequence2` is an error.
 - **Exactly one of `ref_paths` or `subject_table` must be given.** Either way the index is built once per query — re-using references across queries rebuilds the index each time.
 - `num_threads` (INTEGER, default = DuckDB's thread count): Number of threads SortMeRNA's internal pool uses. The DuckDB function runs on a single DuckDB thread; parallelism is inside SortMeRNA.
-- `match`, `mismatch`, `gap_open`, `gap_ext`, `score_N` (INTEGER): SW scoring. Defaults `2 / -3 / 5 / 2 / 0`.
-- `evalue` (DOUBLE, default 1.0): E-value threshold.
+- `match`, `mismatch`, `gap_open`, `gap_ext`, `score_N` (INTEGER): SW scoring. Defaults `2 / -3 / 5 / 2 / -3`.
+- `evalue` (DOUBLE, default: none): Keep a hit only when its e-value is at most this; a read whose hit is above it is reported unaligned. By default every hit is kept. The e-values are per query and differ from the CLI's (see *Caveats*), so this does not reproduce the CLI's `-e`.
 - `seed_win_len` (UINTEGER, default 18): Seed window length.
 - `num_alignments` (UINTEGER, default 1): Max alignments reported per read.
 - `best` (BOOLEAN, default true): Keep only the best-scoring alignment per read.
@@ -849,7 +849,7 @@ Emits the standard 21-column SAM schema shared with `align_minimap2` / `align_bo
 - For `BIGINT`/`UUID` `read_id`, rows with NULL `read_id` are skipped at ingress (matching the existing `ProcessSingleChunk` row-skip convention used by VARCHAR query tables).
 
 **Caveats:**
-- **No minimum-score filter:** the embedded library returns every positive Smith-Waterman hit. The `sortmerna` CLI applies an internal minimum-score threshold that our streaming API path bypasses; to reproduce CLI output row-for-row, filter on `score` (`tag_as`) or on `e_value` in SQL. Be aware that e-values are not directly comparable between the library and the CLI (see below), so a library-side e-value threshold is not guaranteed to reproduce the exact CLI row set.
+- **No minimum-score filter by default:** without `evalue`, every positive Smith-Waterman hit is reported. The `sortmerna` CLI keeps only hits above a minimum score derived from its `-e` (default 1e-5). The library's e-values are not computed the way the CLI's are (see below), so neither `evalue` nor a filter on `e_value` or `score` (`tag_as`) in SQL is guaranteed to reproduce the CLI's row set exactly.
 - **E-value divergence from the CLI:** the library computes per-query Karlin-Altschul e-values; the CLI sums / corrects across the full database. Identity, coverage, score, CIGAR, ref_start, ref_end, and edit_distance are bit-identical between the two.
 - **Process-wide serialization:** SortMeRNA's `g_run_mutex` serializes calls process-wide. Concurrent `align_sortmerna` / `align_sortmerna_rrna` queries will block on each other at the library level. The DuckDB function deliberately runs on a single DuckDB thread (`MaxThreads() == 1`) to avoid queueing behind the mutex twice.
 

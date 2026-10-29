@@ -149,3 +149,35 @@ FROM align_sortmerna_rrna(
     'smr_big', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], num_threads := 1);
 ----
 1	1	1	1	1
+
+# --- evalue: the library reports every hit, so the threshold is applied in
+# the wrapper. Shorter pieces of AB271211 score lower and so have larger
+# e-values (len40 ~5e-10, len32 ~3e-7). With evalue := 1e-9, len32's hit is
+# reported as a read with no hit; the other rows are unchanged.
+statement ok
+CREATE TABLE smr_ev AS
+  SELECT 'len' || len AS read_id, substr(sequence1, 300, len) AS sequence1
+  FROM smr_fwd, (VALUES (32), (40), (60), (200)) t(len);
+
+query IIIIIII
+SELECT read_id, aligned, strand, ref_name, cigar, score, edit_distance
+FROM align_sortmerna_rrna(
+    'smr_ev', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], num_threads := 1)
+ORDER BY read_id;
+----
+len200	1	1	Unc49508	6S194M	333	11
+len32	1	1	Unc49508	6S26M	42	2
+len40	1	1	Unc49508	6S34M	53	3
+len60	1	1	Unc49508	6S54M	88	4
+
+query IIIIIII
+SELECT read_id, aligned, strand, ref_name, cigar, score, edit_distance
+FROM align_sortmerna_rrna(
+    'smr_ev', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], num_threads := 1,
+    evalue := 1e-9)
+ORDER BY read_id;
+----
+len200	1	1	Unc49508	6S194M	333	11
+len32	0	-1	(empty)	(empty)	-1	-1
+len40	1	1	Unc49508	6S34M	53	3
+len60	1	1	Unc49508	6S54M	88	4

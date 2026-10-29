@@ -11,6 +11,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 
 // Test-local constants and helpers. All golden values below are regenerated
 // from the native sortmerna CLI via tools/sortmerna_oracle.sh — do NOT
@@ -451,4 +452,44 @@ TEST_CASE("SortMeRNAAligner appends to existing output batch", "[sortmerna][wrap
 	REQUIRE(out.read_ids[0] == "AB271211_0");
 	REQUIRE(out.read_ids[1] == "AB271211_1");
 	REQUIRE(out.read_ids[2] == "AB271211_2");
+}
+
+// The library's in-memory path reports every hit and leaves the e-value
+// threshold to its caller. A hit above the threshold must come back exactly as
+// a read with no hit does, or filtered reads would look like partial hits.
+TEST_CASE("SortMeRNAAligner evalue reports hits above it as unaligned", "[sortmerna][wrapper]") {
+	// Shorter pieces of AB271211 score lower, so their e-values are larger.
+	const std::string ab(kAB271211);
+	miint::SortMeRNAQueryBatch q;
+	for (size_t len : {200, 40, 32}) {
+		q.read_ids.push_back("len" + std::to_string(len));
+		q.sequences.push_back(ab.substr(299, len));
+	}
+	q.read_ids.emplace_back("polyA");
+	q.sequences.emplace_back(60, 'A');
+
+	miint::SortMeRNAConfig cfg;
+	cfg.num_threads = 1;
+	miint::SortMeRNAResultBatch all;
+	miint::SortMeRNAAligner(cfg, {kTestRef}).align(q, all);
+	REQUIRE(all.aligned == std::vector<int32_t> {1, 1, 1, 0});
+	REQUIRE(all.e_values[0] < all.e_values[1]);
+	REQUIRE(all.e_values[1] < all.e_values[2]);
+
+	// Inclusive: len40's own e-value keeps it.
+	cfg.evalue = all.e_values[1];
+	miint::SortMeRNAResultBatch kept;
+	miint::SortMeRNAAligner(cfg, {kTestRef}).align(q, kept);
+	REQUIRE(kept.aligned == std::vector<int32_t> {1, 1, 0, 0});
+	for (size_t i = 0; i < 2; ++i) {
+		REQUIRE(kept.cigars[i] == all.cigars[i]);
+		REQUIRE(kept.scores[i] == all.scores[i]);
+		REQUIRE(kept.e_values[i] == all.e_values[i]);
+	}
+	auto row = [&kept](size_t i) {
+		return std::make_tuple(kept.aligned[i], kept.strands[i], kept.ref_names[i], kept.ref_starts[i],
+		                       kept.ref_ends[i], kept.cigars[i], kept.scores[i], kept.e_values[i], kept.identities[i],
+		                       kept.coverages[i], kept.edit_distances[i], kept.segment_indices[i]);
+	};
+	REQUIRE(row(2) == row(3)); // len32 reads as polyA, which has no hit
 }

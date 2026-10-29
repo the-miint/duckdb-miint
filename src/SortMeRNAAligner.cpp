@@ -43,7 +43,7 @@ using SmrOutputPtr = std::unique_ptr<smr_output_t, SmrOutputDeleter>;
 } // namespace
 
 SortMeRNAAligner::SortMeRNAAligner(const SortMeRNAConfig &cfg, const std::vector<std::string> &ref_paths)
-    : paired_(cfg.paired) {
+    : paired_(cfg.paired), evalue_(cfg.evalue) {
 	if (ref_paths.empty()) {
 		throw std::invalid_argument("SortMeRNAAligner: ref_paths is empty");
 	}
@@ -58,7 +58,7 @@ SortMeRNAAligner::SortMeRNAAligner(const SortMeRNAConfig &cfg, const std::vector
 }
 
 SortMeRNAAligner::SortMeRNAAligner(const SortMeRNAConfig &cfg, const std::vector<AlignmentSubject> &refs)
-    : paired_(cfg.paired) {
+    : paired_(cfg.paired), evalue_(cfg.evalue) {
 	if (refs.empty()) {
 		throw std::invalid_argument("SortMeRNAAligner: refs is empty");
 	}
@@ -196,6 +196,24 @@ void SortMeRNAAligner::align(const SortMeRNAQueryBatch &queries, SortMeRNAResult
 		const int32_t segment_idx = paired_ ? static_cast<int32_t>(i % 2) : 0;
 
 		out.read_ids.push_back(queries.read_ids[input_row]);
+		out.segment_indices.push_back(segment_idx);
+		// The library reports every hit and leaves the e-value threshold to its
+		// caller. A hit above it is reported as the library reports a read with
+		// no hit.
+		if (raw_out->aligned[i] && evalue_ >= 0.0 && raw_out->e_value[i] > evalue_) {
+			out.aligned.push_back(0);
+			out.strands.push_back(-1);
+			out.ref_names.emplace_back();
+			out.ref_starts.push_back(0);
+			out.ref_ends.push_back(0);
+			out.cigars.emplace_back();
+			out.scores.push_back(-1);
+			out.e_values.push_back(0.0);
+			out.identities.push_back(0.0);
+			out.coverages.push_back(0.0);
+			out.edit_distances.push_back(-1);
+			continue;
+		}
 		out.aligned.push_back(raw_out->aligned[i]);
 		out.strands.push_back(raw_out->strand[i]);
 		out.ref_names.emplace_back(raw_out->ref_name[i] ? raw_out->ref_name[i] : "");
@@ -207,7 +225,6 @@ void SortMeRNAAligner::align(const SortMeRNAQueryBatch &queries, SortMeRNAResult
 		out.identities.push_back(raw_out->identity[i]);
 		out.coverages.push_back(raw_out->coverage[i]);
 		out.edit_distances.push_back(raw_out->edit_distance[i]);
-		out.segment_indices.push_back(segment_idx);
 	}
 }
 

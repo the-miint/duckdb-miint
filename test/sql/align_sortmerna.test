@@ -161,3 +161,20 @@ FROM align_sortmerna(
     'smr_big', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], num_threads := 1);
 ----
 1	1	1	1	1
+
+# --- evalue: a hit above the threshold is an unmapped record (see
+# align_sortmerna_rrna.test for the e-values of these reads) ---
+statement ok
+CREATE TABLE smr_ev AS
+  SELECT 'len' || len AS read_id, substr(sequence1, 300, len) AS sequence1
+  FROM smr_fwd, (VALUES (32), (40)) t(len);
+
+query IIIII
+SELECT read_id, flags, reference, position, cigar
+FROM align_sortmerna(
+    'smr_ev', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], num_threads := 1,
+    evalue := 1e-9)
+ORDER BY read_id;
+----
+len32	4	*	0	*
+len40	0	Unc49508	265	6S34M

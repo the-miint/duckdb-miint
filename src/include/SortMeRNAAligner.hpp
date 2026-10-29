@@ -18,6 +18,8 @@ struct SortMeRNAConfig {
 	int32_t gap_open = 5;
 	int32_t gap_ext = 2;
 	int32_t score_N = -3;
+	// A hit with a larger e-value is reported unaligned; negative keeps every
+	// hit. The library leaves this to its caller (smr_api.h).
 	double evalue = -1.0;
 	uint32_t seed_win_len = 18;
 	uint32_t num_alignments = 1;
@@ -105,6 +107,7 @@ private:
 	smr_context *ctx_ = nullptr;
 	smr_index *idx_ = nullptr;
 	bool paired_ = false;
+	double evalue_ = -1.0;
 };
 
 } // namespace miint
