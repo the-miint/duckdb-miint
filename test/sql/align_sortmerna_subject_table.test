@@ -10,7 +10,8 @@
 # round trip through a FASTA file, and it must never change the answer:
 # the same sequences give the same alignments whichever way they arrive. The
 # equivalence checks below compare every output column against ref_paths with
-# the same sequences, after a positive control proves there are rows to compare.
+# the same sequences (BIGINT reference ids mapped back to names), after a
+# positive control proves there are rows to compare.
 #
 # The reference column mirrors the subject table's read_id type, as in
 # align_minimap2, so results join back to the subject table without a cast.
@@ -214,44 +215,6 @@ CREATE TABLE smr_set2_pe AS
 SELECT read_id, sequence1, lead(sequence1) OVER (ORDER BY read_id) AS sequence2
 FROM smr_set2 QUALIFY sequence2 IS NOT NULL;
 
-# Positive control: several references are hit, and some pairs straddle two.
-query II
-SELECT (SELECT COUNT(DISTINCT ref_name) > 1
-        FROM align_sortmerna_rrna('smr_set2', subject_table := 'smr_gg', num_threads := 1)
-        WHERE aligned = 1),
-       (SELECT COUNT(*) > 0
-        FROM align_sortmerna('smr_set2_pe', subject_table := 'smr_gg', paired := true, num_threads := 1)
-        WHERE NOT alignment_is_unmapped(flags) AND NOT alignment_is_mate_unmapped(flags)
-          AND mate_reference <> '=');
-----
-true	true
-
-query I
-SELECT COUNT(*) FROM (
-    (SELECT * FROM align_sortmerna_rrna('smr_set2', ref_paths := ['ext/sortmerna/test_data/gg_13_8_ref_set.fasta'], num_threads := 1)
-     EXCEPT ALL
-     SELECT * FROM align_sortmerna_rrna('smr_set2', subject_table := 'smr_gg', num_threads := 1))
-    UNION ALL
-    (SELECT * FROM align_sortmerna_rrna('smr_set2', subject_table := 'smr_gg', num_threads := 1)
-     EXCEPT ALL
-     SELECT * FROM align_sortmerna_rrna('smr_set2', ref_paths := ['ext/sortmerna/test_data/gg_13_8_ref_set.fasta'], num_threads := 1))
-);
-----
-0
-
-query I
-SELECT COUNT(*) FROM (
-    (SELECT * FROM align_sortmerna('smr_set2_pe', ref_paths := ['ext/sortmerna/test_data/gg_13_8_ref_set.fasta'], paired := true, num_threads := 1)
-     EXCEPT ALL
-     SELECT * FROM align_sortmerna('smr_set2_pe', subject_table := 'smr_gg', paired := true, num_threads := 1))
-    UNION ALL
-    (SELECT * FROM align_sortmerna('smr_set2_pe', subject_table := 'smr_gg', paired := true, num_threads := 1)
-     EXCEPT ALL
-     SELECT * FROM align_sortmerna('smr_set2_pe', ref_paths := ['ext/sortmerna/test_data/gg_13_8_ref_set.fasta'], paired := true, num_threads := 1))
-);
-----
-0
-
 # BIGINT ids numbered in reverse name order, so they match neither the FASTA
 # order nor the order of the names: a hit mapped back by position, not by id,
 # names the wrong reference here.
@@ -263,48 +226,99 @@ statement ok
 CREATE TABLE smr_gg_big AS
 SELECT n.id AS read_id, g.sequence1 FROM smr_gg g JOIN smr_gg_names n ON g.read_id = n.name;
 
+# Each alignment once; the comparisons below read these.
+statement ok
+CREATE TABLE gg_rrna_paths AS
+SELECT * FROM align_sortmerna_rrna('smr_set2', ref_paths := ['ext/sortmerna/test_data/gg_13_8_ref_set.fasta'], num_threads := 1);
+
+statement ok
+CREATE TABLE gg_rrna_subject AS
+SELECT * FROM align_sortmerna_rrna('smr_set2', subject_table := 'smr_gg', num_threads := 1);
+
+statement ok
+CREATE TABLE gg_rrna_big AS
+SELECT * FROM align_sortmerna_rrna('smr_set2', subject_table := 'smr_gg_big', num_threads := 1);
+
+statement ok
+CREATE TABLE gg_sam_paths AS
+SELECT * FROM align_sortmerna('smr_set2_pe', ref_paths := ['ext/sortmerna/test_data/gg_13_8_ref_set.fasta'], paired := true, num_threads := 1);
+
+statement ok
+CREATE TABLE gg_sam_subject AS
+SELECT * FROM align_sortmerna('smr_set2_pe', subject_table := 'smr_gg', paired := true, num_threads := 1);
+
+statement ok
+CREATE TABLE gg_sam_big AS
+SELECT * FROM align_sortmerna('smr_set2_pe', subject_table := 'smr_gg_big', paired := true, num_threads := 1);
+
+# Positive control: several references are hit, and some pairs straddle two.
+query II
+SELECT (SELECT COUNT(DISTINCT ref_name) > 1 FROM gg_rrna_subject WHERE aligned = 1),
+       (SELECT COUNT(*) > 0 FROM gg_sam_subject
+        WHERE NOT alignment_is_unmapped(flags) AND NOT alignment_is_mate_unmapped(flags)
+          AND mate_reference <> '=');
+----
+true	true
+
 query I
 SELECT COUNT(*) FROM (
-    (SELECT a.read_id, n.name, a.cigar, a.score
-     FROM align_sortmerna_rrna('smr_set2', subject_table := 'smr_gg_big', num_threads := 1) a
-     JOIN smr_gg_names n ON a.ref_name = n.id
-     EXCEPT ALL
-     SELECT read_id, ref_name, cigar, score
-     FROM align_sortmerna_rrna('smr_set2', ref_paths := ['ext/sortmerna/test_data/gg_13_8_ref_set.fasta'], num_threads := 1)
-     WHERE aligned = 1)
+    (SELECT * FROM gg_rrna_paths EXCEPT ALL SELECT * FROM gg_rrna_subject)
     UNION ALL
-    (SELECT read_id, ref_name, cigar, score
-     FROM align_sortmerna_rrna('smr_set2', ref_paths := ['ext/sortmerna/test_data/gg_13_8_ref_set.fasta'], num_threads := 1)
-     WHERE aligned = 1
-     EXCEPT ALL
-     SELECT a.read_id, n.name, a.cigar, a.score
-     FROM align_sortmerna_rrna('smr_set2', subject_table := 'smr_gg_big', num_threads := 1) a
-     JOIN smr_gg_names n ON a.ref_name = n.id)
+    (SELECT * FROM gg_rrna_subject EXCEPT ALL SELECT * FROM gg_rrna_paths)
 );
 ----
 0
 
-# Paired, mapped on both sides: reference and mate_reference name the right
-# references, with '=' resolved to the reference itself.
 query I
 SELECT COUNT(*) FROM (
-    (SELECT a.read_id, a.flags, r.name, m.name
-     FROM align_sortmerna('smr_set2_pe', subject_table := 'smr_gg_big', paired := true, num_threads := 1) a
-     JOIN smr_gg_names r ON a.reference = r.id
-     JOIN smr_gg_names m ON a.mate_reference = m.id
-     EXCEPT ALL
-     SELECT read_id, flags, reference, CASE WHEN mate_reference = '=' THEN reference ELSE mate_reference END
-     FROM align_sortmerna('smr_set2_pe', ref_paths := ['ext/sortmerna/test_data/gg_13_8_ref_set.fasta'], paired := true, num_threads := 1)
-     WHERE NOT alignment_is_unmapped(flags) AND NOT alignment_is_mate_unmapped(flags))
+    (SELECT * FROM gg_sam_paths EXCEPT ALL SELECT * FROM gg_sam_subject)
     UNION ALL
-    (SELECT read_id, flags, reference, CASE WHEN mate_reference = '=' THEN reference ELSE mate_reference END
-     FROM align_sortmerna('smr_set2_pe', ref_paths := ['ext/sortmerna/test_data/gg_13_8_ref_set.fasta'], paired := true, num_threads := 1)
-     WHERE NOT alignment_is_unmapped(flags) AND NOT alignment_is_mate_unmapped(flags)
-     EXCEPT ALL
-     SELECT a.read_id, a.flags, r.name, m.name
-     FROM align_sortmerna('smr_set2_pe', subject_table := 'smr_gg_big', paired := true, num_threads := 1) a
-     JOIN smr_gg_names r ON a.reference = r.id
-     JOIN smr_gg_names m ON a.mate_reference = m.id)
+    (SELECT * FROM gg_sam_subject EXCEPT ALL SELECT * FROM gg_sam_paths)
+);
+----
+0
+
+# BIGINT: every column, with the reference ids mapped back to names. An
+# unaligned row has no reference: '' or '*' for VARCHAR, NULL for BIGINT.
+statement ok
+CREATE VIEW gg_rrna_big_named AS
+SELECT a.* EXCLUDE (ref_name), n.name AS ref_name
+FROM gg_rrna_big a LEFT JOIN smr_gg_names n ON a.ref_name = n.id;
+
+statement ok
+CREATE VIEW gg_rrna_paths_named AS
+SELECT * EXCLUDE (ref_name), NULLIF(ref_name, '') AS ref_name FROM gg_rrna_paths;
+
+query I
+SELECT COUNT(*) FROM (
+    (SELECT * FROM gg_rrna_big_named EXCEPT ALL SELECT * FROM gg_rrna_paths_named)
+    UNION ALL
+    (SELECT * FROM gg_rrna_paths_named EXCEPT ALL SELECT * FROM gg_rrna_big_named)
+);
+----
+0
+
+# Paired: '=' is resolved to the reference itself, as a BIGINT column cannot
+# hold it.
+statement ok
+CREATE VIEW gg_sam_big_named AS
+SELECT a.* EXCLUDE (reference, mate_reference), r.name AS reference, m.name AS mate_reference
+FROM gg_sam_big a
+LEFT JOIN smr_gg_names r ON a.reference = r.id
+LEFT JOIN smr_gg_names m ON a.mate_reference = m.id;
+
+statement ok
+CREATE VIEW gg_sam_paths_named AS
+SELECT * EXCLUDE (reference, mate_reference),
+       NULLIF(reference, '*') AS reference,
+       CASE WHEN mate_reference = '=' THEN reference ELSE NULLIF(mate_reference, '*') END AS mate_reference
+FROM gg_sam_paths;
+
+query I
+SELECT COUNT(*) FROM (
+    (SELECT * FROM gg_sam_big_named EXCEPT ALL SELECT * FROM gg_sam_paths_named)
+    UNION ALL
+    (SELECT * FROM gg_sam_paths_named EXCEPT ALL SELECT * FROM gg_sam_big_named)
 );
 ----
 0

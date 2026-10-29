@@ -154,7 +154,7 @@ Run-time / conditional: `MIINT_USE_JEMALLOC` is set when DuckDB's jemalloc is li
   - `3rdparty/indexed_bzip2` — librapidarchive (rapidgzip, parallel gzip reading), header-only; its own submodules (zlib, zlib-ng, rpmalloc, cxxopts, isa-l) must be present or its CMake tries to fetch them
   - `3rdparty/bbhash` — BBHash minimal perfect hashing for the reference index, header-only
   - `3rdparty/cxxopts` — option parsing, header-only. Pinned past v3.3.1: sortmerna's `normalize_argv` writes `-N=-3`, which cxxopts parses only since jarro2783/cxxopts#488
-  - `3rdparty/parasail` — SIMD Smith-Waterman (replaced SSW), compiled by `parasail_build`; picks SSE/AVX2 or NEON at runtime
+  - `3rdparty/parasail` — SIMD Smith-Waterman, compiled by `parasail_build`; picks SSE/AVX2 or NEON at runtime
   - `3rdparty/alp` (NCBI p-value library) — in the sortmerna tree, static archive
 - **RocksDB:** supplied by vcpkg (`find_package(RocksDB CONFIG REQUIRED)`). Pinned via `vcpkg.json` entry `{"name": "rocksdb", "platform": "!emscripten"}`.
 - **Threading model:** sortmerna has a process-wide `g_run_mutex` serialising `smr_run_seqs_with_index`. `AlignSortMeRNA*TableFunction::GlobalState::MaxThreads()` returns `1` on the DuckDB side; sortmerna's internal thread pool does the real parallelism (controlled by `num_threads`).

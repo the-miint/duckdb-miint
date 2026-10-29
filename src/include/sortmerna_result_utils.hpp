@@ -22,9 +22,8 @@ inline std::vector<std::string> GetSortMeRNARRNAOutputNames() {
 }
 
 // `query_id_type` drives `read_id` and `ref_id_type` drives `ref_name`
-// (SortMeRNAReferences::IdType); each must be VARCHAR, BIGINT, or UUID. There
-// are no defaults: every caller passes both types. The other columns have fixed
-// types.
+// (SortMeRNAReferences::IdType); each must be VARCHAR, BIGINT, or UUID. The
+// other columns have fixed types.
 inline std::vector<LogicalType> GetSortMeRNARRNAOutputTypes(const LogicalType &query_id_type,
                                                             const LogicalType &ref_id_type) {
 	return {query_id_type,        LogicalType::INTEGER, LogicalType::INTEGER, ref_id_type,         LogicalType::INTEGER,

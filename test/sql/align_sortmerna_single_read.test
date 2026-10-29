@@ -1,0 +1,75 @@
+# name: test/sql/align_sortmerna_single_read.test
+# description: align_sortmerna_rrna reads its query and subject relations exactly once
+# group: [sql]
+
+#
+# A relation passed by name may not give the same rows twice: a view over
+# nextval(), random(), or a table another connection is writing. A reader that
+# reads it twice (once to count, once to align; or once per batch) can then
+# align rows that were never returned to the caller, or drop some. Here every
+# read of a view hands out fresh ids from a sequence, so the next value of the
+# sequence after the query says how many rows were read.
+#
+# The id column is one the aligner must project, so column pruning cannot
+# remove the nextval() from a read: count(*) over the view alone does not
+# advance the sequence.
+#
+
+require miint
+
+require-env SORTMERNA_AVAILABLE
+
+# Single-threaded so nextval() assignment order is deterministic.
+statement ok
+SET threads=1;
+
+statement ok
+CREATE TABLE smr_gg AS
+SELECT read_id, sequence1 FROM read_fastx('ext/sortmerna/test_data/gg_13_8_ref_set.fasta');
+
+statement ok
+CREATE TABLE smr_q AS
+SELECT read_id, sequence1
+FROM read_fastx('ext/sortmerna/test_data/set2_environmental_study_550_amplicon.fasta')
+ORDER BY read_id LIMIT 50;
+
+# --- subject_table: its 19 rows are read once, in InitGlobal ---
+statement ok
+CREATE SEQUENCE subject_ids;
+
+statement ok
+CREATE VIEW subject_view AS
+SELECT nextval('subject_ids')::BIGINT AS read_id, sequence1 FROM smr_gg;
+
+query II
+SELECT COUNT(*), MAX(ref_name) <= 19
+FROM align_sortmerna_rrna('smr_q', subject_table := 'subject_view', num_threads := 1);
+----
+50	true
+
+query I
+SELECT nextval('subject_ids');
+----
+20
+
+# --- query_table: 3000 rows, more than one 2048-row chunk, read once ---
+statement ok
+CREATE TABLE query_rows AS SELECT sequence1 FROM smr_q, range(60) t(i);
+
+statement ok
+CREATE SEQUENCE query_ids;
+
+statement ok
+CREATE VIEW query_view AS
+SELECT nextval('query_ids')::BIGINT AS read_id, sequence1 FROM query_rows;
+
+query III
+SELECT COUNT(*), MIN(read_id), MAX(read_id)
+FROM align_sortmerna_rrna('query_view', subject_table := 'smr_gg', num_threads := 1);
+----
+3000	1	3000
+
+query I
+SELECT nextval('query_ids');
+----
+3001

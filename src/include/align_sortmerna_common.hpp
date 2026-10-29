@@ -2,9 +2,8 @@
 /*
  * What align_sortmerna and align_sortmerna_rrna share: their named
  * parameters, the Bind-time check of where the references come from, and the
- * InitGlobal-time construction of the aligner from them. Only the output
- * schema differs, so Bind/InitGlobal/Execute themselves stay in each table
- * function's .cpp and call these.
+ * InitGlobal-time construction of the aligner from them. Bind/InitGlobal/
+ * Execute themselves stay in each table function's .cpp and call these.
  */
 
 #include "SortMeRNAAligner.hpp"
