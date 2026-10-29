@@ -329,8 +329,8 @@ statement ok
 PREPARE copy_csv_seqs AS
 COPY alignments TO '{TEST_DIR}/csv_seqs.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'csv_seqs');
 
-# A read_id that becomes a type ids do not take is refused: read as text, it would be an
-# internal error that invalidates the database.
+# A read_id that becomes a type ids do not take is refused before it reaches the id decoder,
+# where it would be an internal error that invalidates the database.
 statement ok
 COPY (SELECT row_number() OVER () + 0.5 AS read_id, sequence1, qual1, sequence2, qual2 FROM seq_data)
 TO '{TEST_DIR}/changing_seqs.csv';
@@ -437,7 +437,9 @@ DROP TABLE growing_refs;
 
 # Each COPY gets its own read even when one query runs several: IMPORT DATABASE runs every COPY in
 # its load.sql in one query, and frees each COPY's plan before planning the next, so the next can
-# be given the same memory. Here the second COPY must get refs_b's lengths, not refs_a's.
+# be given the same memory. Here the second COPY must get refs_b's lengths, not refs_a's. (Without
+# the per-statement key this fails only where the allocator gives the second COPY that memory, as
+# it does on Linux here.)
 statement ok
 CREATE TABLE refs_a AS SELECT name, 1111 AS length FROM ref_lens;
 

@@ -350,6 +350,10 @@ public:
 		const CopyExecution copy {&fdata, context.transaction.GetActiveQuery()};
 		// Held while reading, so the COPY's other files wait for this read instead of making their own
 		lock_guard<mutex> guard(lock);
+		// A context runs one statement at a time, so what another statement read is no longer needed
+		for (auto it = by_copy.begin(); it != by_copy.end();) {
+			it = it->first.second == copy.second ? std::next(it) : by_copy.erase(it);
+		}
 		auto &relations = by_copy[copy];
 		if (!relations) {
 			auto read = make_shared_ptr<SAMCopyRelations>();

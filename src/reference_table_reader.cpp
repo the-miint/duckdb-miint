@@ -169,8 +169,10 @@ std::vector<std::pair<std::string, uint64_t>> ReadReferenceTableSortedByName(Cli
 		std::vector<std::pair<int64_t, std::pair<std::string, uint64_t>>> keyed;
 		keyed.reserve(rows.size());
 		for (auto &row : rows) {
-			const auto key = *::miint::ParseIdAsInt64(row.first);
-			keyed.emplace_back(key, std::move(row));
+			// The text FormatIdFromInt64 wrote for a non-NULL name, so it always parses
+			const auto key = ::miint::ParseIdAsInt64(row.first);
+			D_ASSERT(key.has_value());
+			keyed.emplace_back(*key, std::move(row));
 		}
 		std::sort(keyed.begin(), keyed.end(),
 		          [](const std::pair<int64_t, std::pair<std::string, uint64_t>> &a,

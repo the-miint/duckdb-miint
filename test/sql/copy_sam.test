@@ -288,8 +288,8 @@ statement ok
 PREPARE copy_csv_refs AS
 COPY sam_test TO '{TEST_DIR}/csv_refs.sam' (FORMAT SAM, REFERENCE_LENGTHS 'csv_refs');
 
-# A name that becomes a type ids do not take is refused: read as text, it would be an
-# internal error that invalidates the database.
+# A name that becomes a type ids do not take is refused before it reaches the id decoder,
+# where it would be an internal error that invalidates the database.
 statement ok
 COPY (SELECT 4.5 AS name, length FROM ref_table) TO '{TEST_DIR}/changing_refs.csv';
 

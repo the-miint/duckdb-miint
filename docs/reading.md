@@ -170,7 +170,7 @@ SELECT * FROM read_alignments('some_alignments.sam')
 - `filename` (VARCHAR or VARCHAR[]): Path to SAM/BAM file(s), glob pattern (e.g., `'data/*.bam'`), or `-` / `/dev/stdin` for standard input
   - **Glob patterns**: When a single VARCHAR contains glob characters (`*`, `?`, `[`), files are expanded and sorted alphabetically
   - **Arrays**: VARCHAR[] elements are treated as literal paths (no glob expansion)
-- `reference_lengths` (VARCHAR, optional): Table or view name containing reference sequences for headerless SAM files. Must have at least 2 columns: first column = reference name (VARCHAR, BIGINT or UUID, matched as its text (decimal digits for BIGINT, the lowercase hyphenated form for UUID)), second column = reference length (INTEGER/BIGINT). Column names don't matter. Views are fully supported and can include computed columns.
+- `reference_lengths` (VARCHAR, optional): Table or view name containing reference sequences for headerless SAM files. Must have at least 2 columns: first column = reference name (VARCHAR, BIGINT or UUID, matched as its text (BIGINT in decimal, UUID in the lowercase hyphenated form)), second column = reference length (INTEGER/BIGINT). Column names don't matter. Views are fully supported and can include computed columns.
 - `include_filepath` (BOOLEAN, optional, default false): Add filepath column to output
 - `include_seq_qual` (BOOLEAN, optional, default false): Add sequence and quality score columns to output. When enabled, primary alignments (non-secondary, non-supplementary) and unmapped reads must have SEQ/QUAL data or an error will be raised.
 
