@@ -621,6 +621,16 @@ EXECUTE copy_csv;
 ----
 <REGEX>:Invalid Input Error: Column 'fragment_id' in table 'csv_placements' must be VARCHAR.*
 
+# Every column is checked, not only the first: here like_weight_ratio becomes an integer.
+statement ok
+COPY (SELECT fragment_id, edge_id, 1 AS like_weight_ratio, distal_length, pendant_length FROM single_placement)
+TO '{TEST_DIR}/changing_placements.csv';
+
+statement error
+EXECUTE copy_csv;
+----
+<REGEX>:Invalid Input Error: Column 'like_weight_ratio' in table 'csv_placements' must be DOUBLE or FLOAT.*
+
 query I
 SELECT 1;
 ----

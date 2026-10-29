@@ -169,7 +169,8 @@ for unless you write one:
    be handed to the scan either by *moving* it out of the bind data — so the second
    `EXECUTE` finds an empty vector and returns **zero rows, silently** — or by
    copying it, paying for the whole result twice. Both `pcoa`/`unifrac_pcoa` and the
-   progressive pair shipped with the first bug.
+   progressive pair shipped with the first bug. Rows a `Bind` reads from a relation
+   are also the relation as it was at `PREPARE`, however it changes before `EXECUTE`.
 2. **`EXPLAIN` pays full price.** `EXPLAIN` binds without executing, so work in `Bind`
    runs for a query the user never ran. Measured on a 4,000-sample ordination:
    `EXPLAIN` took 0.644 s against 0.638 s to actually run the query. After moving it,

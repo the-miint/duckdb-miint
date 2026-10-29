@@ -94,10 +94,12 @@ struct NewickCopyLocalState : public LocalFunctionData {
 //===--------------------------------------------------------------------===//
 // Select: cast the columns the sink reads to the types it reads them as
 //===--------------------------------------------------------------------===//
-// The columns the sink reads, the one type it reads each as, and the types NewickCopySelect
-// casts to it. An untyped NULL column is cast too, so `NULL AS name` writes no names.
+// The columns the sink reads, where bind records each, the one type the sink reads it as, and the
+// types NewickCopySelect casts to it. An untyped NULL column is cast too, so `NULL AS name` writes
+// no names.
 struct NewickColumnType {
 	const char *name;
+	idx_t NewickCopyBindData::*index;
 	LogicalTypeId type;
 	bool (*castable)(const LogicalType &type);
 	const char *description;
@@ -112,11 +114,11 @@ static bool IsNumericType(const LogicalType &type) {
 }
 
 static const NewickColumnType NEWICK_COLUMN_TYPES[] = {
-    {"node_index", LogicalTypeId::BIGINT, IsIntegralType, "an integer type"},
-    {"parent_index", LogicalTypeId::BIGINT, IsIntegralType, "an integer type"},
-    {"edge_id", LogicalTypeId::BIGINT, IsIntegralType, "an integer type"},
-    {"branch_length", LogicalTypeId::DOUBLE, IsNumericType, "a numeric type"},
-    {"name", LogicalTypeId::VARCHAR, nullptr, "VARCHAR"},
+    {"node_index", &NewickCopyBindData::node_index_idx, LogicalTypeId::BIGINT, IsIntegralType, "an integer type"},
+    {"parent_index", &NewickCopyBindData::parent_index_idx, LogicalTypeId::BIGINT, IsIntegralType, "an integer type"},
+    {"edge_id", &NewickCopyBindData::edge_id_idx, LogicalTypeId::BIGINT, IsIntegralType, "an integer type"},
+    {"branch_length", &NewickCopyBindData::branch_length_idx, LogicalTypeId::DOUBLE, IsNumericType, "a numeric type"},
+    {"name", &NewickCopyBindData::name_idx, LogicalTypeId::VARCHAR, nullptr, "VARCHAR"},
 };
 
 static const NewickColumnType *FindNewickColumnType(const Identifier &name) {
@@ -162,21 +164,18 @@ static unique_ptr<FunctionData> NewickCopyBind(ClientContext &context, CopyFunct
 	auto result = make_uniq<NewickCopyBindData>();
 	result->file_path = input.info.file_path;
 
-	// Find column indices
+	// Find the columns the sink reads. One NewickCopySelect did not cast is one the sink cannot read;
+	// other columns (like is_tip, filepath) are ignored.
 	for (idx_t i = 0; i < names.size(); i++) {
-		const auto &name = names[i];
-		if (name == "node_index") {
-			result->node_index_idx = i;
-		} else if (name == "parent_index") {
-			result->parent_index_idx = i;
-		} else if (name == "name") {
-			result->name_idx = i;
-		} else if (name == "branch_length") {
-			result->branch_length_idx = i;
-		} else if (name == "edge_id") {
-			result->edge_id_idx = i;
+		auto column = FindNewickColumnType(names[i]);
+		if (!column) {
+			continue;
 		}
-		// Ignore unknown columns (like is_tip, filepath)
+		if (sql_types[i].id() != column->type) {
+			throw BinderException("COPY FORMAT NEWICK: column '%s' must be %s, got %s", names[i].GetIdentifierName(),
+			                      column->description, sql_types[i].ToString());
+		}
+		(*result).*(column->index) = i;
 	}
 
 	// Validate required columns
@@ -186,15 +185,6 @@ static unique_ptr<FunctionData> NewickCopyBind(ClientContext &context, CopyFunct
 	if (result->parent_index_idx == DConstants::INVALID_INDEX) {
 		throw BinderException("COPY FORMAT NEWICK requires 'parent_index' column");
 	}
-	// A column NewickCopySelect did not cast is one the sink cannot read
-	for (idx_t i = 0; i < names.size(); i++) {
-		auto column = FindNewickColumnType(names[i]);
-		if (column && sql_types[i].id() != column->type) {
-			throw BinderException("COPY FORMAT NEWICK: column '%s' must be %s, got %s", names[i].GetIdentifierName(),
-			                      column->description, sql_types[i].ToString());
-		}
-	}
-
 	// Parse parameters
 	Value compression_param;
 	const vector<Value> *compression_level_values = nullptr;
@@ -442,7 +432,7 @@ static void NewickCopyFinalize(ClientContext &context, FunctionData &bind_data, 
 //===--------------------------------------------------------------------===//
 static void NewickCopyInitializeOperator(GlobalFunctionData &gstate, const PhysicalOperator &op) {
 	auto &copy = op.Cast<PhysicalCopyToFile>();
-	// Each file would get only the rows sent to it, a fragment of the tree
+	// Each file would get only the rows sent to it, part of the tree
 	if (copy.per_thread_output || copy.partition_output) {
 		throw InvalidInputException("COPY FORMAT NEWICK writes one tree to one file, so it takes no PER_THREAD_OUTPUT, "
 		                            "PARTITION_BY or ORDER_BY");

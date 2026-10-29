@@ -191,6 +191,26 @@ WHERE r.edge_id IS NOT DISTINCT FROM o.edge_id AND r.name IS NOT DISTINCT FROM o
 ----
 5
 
+# Integer indexes of any width and a FLOAT branch_length are cast the same way.
+statement ok
+COPY (SELECT node_index::SMALLINT AS node_index, parent_index::UTINYINT AS parent_index, name,
+             0.5::FLOAT AS branch_length
+      FROM read_newick('data/newick/simple.nwk'))
+TO '{TEST_DIR}/narrow_types.nwk' (FORMAT NEWICK);
+
+query T
+SELECT trim(content) FROM read_text('{TEST_DIR}/narrow_types.nwk');
+----
+((A:0.5,B:0.5):0.5,C:0.5):0.5;
+
+# A value the cast cannot hold fails the COPY rather than wrapping around.
+statement error
+COPY (SELECT node_index, parent_index, name, 18446744073709551615::UBIGINT AS edge_id
+      FROM read_newick('data/newick/simple.nwk'))
+TO '{TEST_DIR}/huge_edge_id.nwk' (FORMAT NEWICK);
+----
+<REGEX>:Conversion Error:.*18446744073709551615.*
+
 # An untyped NULL column is cast to the column's type too, so a tree can be written without
 # names, branch lengths or edge ids.
 statement ok
@@ -244,8 +264,9 @@ SELECT 1;
 # One tree, one file
 # =============================================================================
 
-# Output split across files would hold fragments of the tree, so per-thread, partitioned and
-# ordered output (which writes a directory of files) are refused, and nothing is written.
+# Output split across files would leave each holding only part of the tree, so per-thread,
+# partitioned and ordered output (which writes a directory of files) are refused, and no file is
+# written.
 statement error
 COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
 TO '{TEST_DIR}/per_thread_tree' (FORMAT NEWICK, PER_THREAD_OUTPUT true);

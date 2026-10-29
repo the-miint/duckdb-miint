@@ -492,7 +492,7 @@ Write query results to Newick phylogenetic tree format. Reconstructs a tree from
 - `branch_length` (DOUBLE): Branch length
 - `edge_id` (BIGINT): Edge identifier for jplace format
 
-An index column of another integer type is cast to BIGINT, and a `branch_length` of another numeric type (DECIMAL, as untyped literals such as `0.1` are) to DOUBLE. An untyped `NULL` column is cast to the column's type, so `NULL AS name` writes no names. A column of any other type is refused when the COPY is planned.
+A `node_index`, `parent_index` or `edge_id` of another integer type is cast to BIGINT, and a `branch_length` of another numeric type (DECIMAL, as untyped literals such as `0.1` are) to DOUBLE. An untyped `NULL` column is cast to the column's type, so `NULL AS name` writes no names. A column of any other type is refused when the COPY is planned.
 
 **Parameters:**
 - `EDGE_IDS` (BOOLEAN, default: auto): Include edge identifiers `{n}` in output
@@ -503,7 +503,7 @@ An index column of another integer type is cast to BIGINT, and a `branch_length`
 - `PLACEMENTS` (VARCHAR): Name of a table containing phylogenetic placement data to insert
   - Inserts fragment sequences into the tree at their placement locations
   - Requires tree to have `edge_id` column with valid edge identifiers
-  - Required table columns: `fragment_id` (VARCHAR), `edge_id` (BIGINT/INTEGER), `like_weight_ratio` (DOUBLE), `distal_length` (DOUBLE), `pendant_length` (DOUBLE)
+  - Required table columns: `fragment_id` (VARCHAR), `edge_id` (BIGINT, INTEGER, UBIGINT or UINTEGER), `like_weight_ratio`, `distal_length` and `pendant_length` (each DOUBLE or FLOAT). A column of another type is refused, when the COPY is planned and again when the placements are read
   - Duplicate fragment_ids are deduplicated (keeps highest like_weight_ratio)
   - Multiple placements on same edge are handled correctly
 
@@ -516,7 +516,7 @@ An index column of another integer type is cast to BIGINT, and a `branch_length`
   - All nodes connected
 - Serializes to standard Newick format with semicolon terminator
 - Extra columns (e.g., `is_tip`, `filepath`) are ignored
-- Writes one tree to one file: `PER_THREAD_OUTPUT`, `PARTITION_BY` and `ORDER_BY` are refused, as each file would hold a fragment of the tree. The refusal comes when a file is opened for rows, so a partitioned or ordered COPY of no rows succeeds and writes no file
+- Writes one tree to one file: `PER_THREAD_OUTPUT`, `PARTITION_BY` and `ORDER_BY` (which DuckDB writes as a directory of files) are refused, as each file would hold only part of the tree. The error comes when the COPY runs, not when it is planned (`EXPLAIN` and `PREPARE` do not raise it), and a partitioned or ordered COPY of no rows succeeds and writes no file
 
 **Examples:**
 ```sql
@@ -550,7 +550,7 @@ COPY (
 -- Create tree from scratch
 CREATE TABLE my_tree AS
 SELECT * FROM (VALUES
-    (0, NULL::BIGINT, '', 0.0),      -- root
+    (0, NULL::BIGINT, '', NULL),     -- root
     (1, 0, 'A', 0.1),                 -- tip A
     (2, 0, 'B', 0.2)                  -- tip B
 ) AS t(node_index, parent_index, name, branch_length);

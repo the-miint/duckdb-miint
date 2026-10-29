@@ -12,9 +12,8 @@
 namespace duckdb {
 
 // The placement columns, in the order ReadPlacementTable selects them, and the types each may
-// have. Both the bind-time check and the read check them: a relation's types can change after a
-// statement is bound with no change to the catalog (a view over a file whose detected types
-// change), and a prepared statement is then not bound again.
+// have. The bind-time check and the read both check them, as docs/internals/reading-tables-views.md
+// says to.
 struct PlacementColumn {
 	const char *name;
 	vector<LogicalTypeId> types;
@@ -61,10 +60,8 @@ void ValidatePlacementTableSchema(ClientContext &context, const std::string &tab
 std::vector<miint::Placement> ReadPlacementTable(ClientContext &context, const std::string &table_name) {
 	std::vector<miint::Placement> result;
 
-	// Create a new connection to avoid deadlocking the current context.
-	// This is necessary because context.Query() requires locking the context,
-	// but during bind/finalize the context is already locked.
-	// Using a separate connection allows us to execute queries for both tables and views.
+	// A helper connection, as the caller's context is running its own query
+	// (docs/internals/reading-tables-views.md)
 	auto conn = MakeReadOnlyHelperConnection(context);
 
 	// Execute a query to read from the table/view
