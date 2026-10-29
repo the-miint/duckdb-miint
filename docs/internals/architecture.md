@@ -161,7 +161,7 @@ Currently used by `align_minimap2` + `save_minimap2_index` (both sides), `copy_s
 **`Bind` resolves the schema. It does not compute the answer.** Reading an input
 relation, running a compute, building an index: all of that belongs at execution
 time. This is easy to get wrong because doing it in `Bind` *works* — the results are
-correct, the tests pass, and the cost only shows up in four ways that no test looks
+correct, the tests pass, and the cost only shows up in five ways that no test looks
 for unless you write one:
 
 1. **A prepared statement returns nothing the second time.** `PREPARE` binds once and
@@ -169,8 +169,7 @@ for unless you write one:
    be handed to the scan either by *moving* it out of the bind data — so the second
    `EXECUTE` finds an empty vector and returns **zero rows, silently** — or by
    copying it, paying for the whole result twice. Both `pcoa`/`unifrac_pcoa` and the
-   progressive pair shipped with the first bug. Rows a `Bind` reads from a relation
-   are also the relation as it was at `PREPARE`, however it changes before `EXECUTE`.
+   progressive pair shipped with the first bug.
 2. **`EXPLAIN` pays full price.** `EXPLAIN` binds without executing, so work in `Bind`
    runs for a query the user never ran. Measured on a 4,000-sample ordination:
    `EXPLAIN` took 0.644 s against 0.638 s to actually run the query. After moving it,
@@ -184,6 +183,9 @@ for unless you write one:
    must hand over a finished result, which the scan then re-materializes in its own
    row form. Driving the work from the scan instead lets rows go out as they are
    produced and keeps one copy.
+5. **A prepared statement uses stale rows.** Rows a `Bind` reads from a relation are
+   the rows as they were at `PREPARE`: an `INSERT`, `UPDATE` or `DELETE` before
+   `EXECUTE` does not bind the statement again, so `EXECUTE` uses the old rows.
 
 **What `Bind` legitimately does**: validate parameters, and resolve the output schema
 — including rejecting a mis-shaped input. That last part does not require reading

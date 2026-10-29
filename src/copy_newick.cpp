@@ -164,8 +164,8 @@ static unique_ptr<FunctionData> NewickCopyBind(ClientContext &context, CopyFunct
 	auto result = make_uniq<NewickCopyBindData>();
 	result->file_path = input.info.file_path;
 
-	// Find the columns the sink reads. One NewickCopySelect did not cast is one the sink cannot read;
-	// other columns (like is_tip, filepath) are ignored.
+	// Find the columns the sink reads. One still not of the sink's type is one NewickCopySelect could
+	// not cast; other columns (like is_tip, filepath) are ignored.
 	for (idx_t i = 0; i < names.size(); i++) {
 		auto column = FindNewickColumnType(names[i]);
 		if (!column) {

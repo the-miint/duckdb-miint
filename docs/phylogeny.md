@@ -337,7 +337,7 @@ Resolve phylogenetic placements into a reference tree, returning a fully resolve
 
 **Parameters:**
 - `tree_table` (VARCHAR): Name of a table or view containing tree data in `read_newick` schema (requires `node_index` and `parent_index` columns; `name`, `branch_length`, `edge_id` are optional)
-- `placements_table` (VARCHAR): Name of a table or view containing placement data (requires `fragment_id`, `edge_id`, `like_weight_ratio`, `distal_length`, `pendant_length` columns)
+- `placements_table` (VARCHAR): Name of a table or view containing placement data: `fragment_id` (VARCHAR), `edge_id` (BIGINT, INTEGER, UBIGINT or UINTEGER), and `like_weight_ratio`, `distal_length` and `pendant_length` (each DOUBLE or FLOAT)
 
 **Output schema:** Same as [`read_newick`](reading.md#newick) (without filepath):
 - `node_index` (BIGINT): 0-based index of node in resolved tree
@@ -422,7 +422,7 @@ WHERE is_tip = true;
 **Error conditions:**
 - Tree table or placements table does not exist
 - Tree table missing required `node_index` or `parent_index` columns
-- Placements table missing required columns (`fragment_id`, `edge_id`, `like_weight_ratio`, `distal_length`, `pendant_length`)
+- Placements table missing required columns (`fragment_id`, `edge_id`, `like_weight_ratio`, `distal_length`, `pendant_length`), or a column of another type than listed above, when the query is planned and again when the placements are read
 - Placement references an `edge_id` not present in the tree
 - `distal_length` exceeds the edge's branch length
 - Negative `distal_length` or `pendant_length`

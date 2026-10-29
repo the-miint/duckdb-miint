@@ -260,6 +260,19 @@ SELECT 1;
 ----
 1
 
+# node_index and parent_index are required.
+statement error
+COPY (SELECT parent_index, name FROM read_newick('data/newick/simple.nwk'))
+TO '{TEST_DIR}/no_node_index.nwk' (FORMAT NEWICK);
+----
+Binder Error: COPY FORMAT NEWICK requires 'node_index' column
+
+statement error
+COPY (SELECT node_index, name FROM read_newick('data/newick/simple.nwk'))
+TO '{TEST_DIR}/no_parent_index.nwk' (FORMAT NEWICK);
+----
+Binder Error: COPY FORMAT NEWICK requires 'parent_index' column
+
 # =============================================================================
 # One tree, one file
 # =============================================================================
@@ -289,6 +302,11 @@ query I
 SELECT count(*) FROM glob('{TEST_DIR}/*_tree/**');
 ----
 0
+
+# The refusal comes when the COPY runs, so EXPLAIN does not raise it.
+statement ok
+EXPLAIN COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
+TO '{TEST_DIR}/explained_tree' (FORMAT NEWICK, PARTITION_BY (is_tip));
 
 # The refusal comes when a file is opened for the rows, so a partitioned or ordered COPY of no
 # rows, which opens none, is not refused and writes no file.
