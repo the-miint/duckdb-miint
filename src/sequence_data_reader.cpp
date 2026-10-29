@@ -13,7 +13,6 @@ namespace duckdb {
 SequenceDataSchema ValidateSequenceDataSchema(ClientContext &context, const std::string &table_name) {
 	auto info = GetTableOrViewColumns(context, table_name, "Sequence data table");
 	auto &col_names = info.names;
-	auto &col_types = info.types;
 
 	// Build case-insensitive name-to-index map
 	std::unordered_map<string, idx_t> name_to_idx;
@@ -21,61 +20,18 @@ SequenceDataSchema ValidateSequenceDataSchema(ClientContext &context, const std:
 		name_to_idx[StringUtil::Lower(col_names[i])] = i;
 	}
 
-	auto require_varchar = [&](const string &col_name) {
-		auto it = name_to_idx.find(col_name);
-		if (it == name_to_idx.end()) {
-			throw BinderException("Sequence data table '%s' missing required column '%s'", table_name, col_name);
+	// Only which columns there are: their types are checked on what ReadSequenceDataTable reads,
+	// as the catalog's types for a view can lag behind a file it reads
+	for (const char *required : {"read_id", "sequence1", "qual1"}) {
+		if (name_to_idx.find(required) == name_to_idx.end()) {
+			throw BinderException("Sequence data table '%s' missing required column '%s'", table_name, required);
 		}
-		if (col_types[it->second].id() != LogicalTypeId::VARCHAR) {
-			throw BinderException("Column '%s' in sequence data table '%s' must be VARCHAR", col_name, table_name);
-		}
-	};
-
-	auto require_list_utinyint = [&](const string &col_name) {
-		auto it = name_to_idx.find(col_name);
-		if (it == name_to_idx.end()) {
-			throw BinderException("Sequence data table '%s' missing required column '%s'", table_name, col_name);
-		}
-		auto &t = col_types[it->second];
-		if (t.id() != LogicalTypeId::LIST || ListType::GetChildType(t).id() != LogicalTypeId::UTINYINT) {
-			throw BinderException("Column '%s' in sequence data table '%s' must be LIST(UTINYINT)", col_name,
-			                      table_name);
-		}
-	};
-
-	auto has_varchar = [&](const string &col_name) -> bool {
-		auto it = name_to_idx.find(col_name);
-		if (it == name_to_idx.end()) {
-			return false;
-		}
-		if (col_types[it->second].id() != LogicalTypeId::VARCHAR) {
-			throw BinderException("Column '%s' in sequence data table '%s' must be VARCHAR", col_name, table_name);
-		}
-		return true;
-	};
-
-	auto has_list_utinyint = [&](const string &col_name) -> bool {
-		auto it = name_to_idx.find(col_name);
-		if (it == name_to_idx.end()) {
-			return false;
-		}
-		auto &t = col_types[it->second];
-		if (t.id() != LogicalTypeId::LIST || ListType::GetChildType(t).id() != LogicalTypeId::UTINYINT) {
-			throw BinderException("Column '%s' in sequence data table '%s' must be LIST(UTINYINT)", col_name,
-			                      table_name);
-		}
-		return true;
-	};
-
-	// Required columns
-	require_varchar("read_id");
-	require_varchar("sequence1");
-	require_list_utinyint("qual1");
+	}
 
 	// Optional columns (for paired-end)
 	SequenceDataSchema schema;
-	schema.has_sequence2 = has_varchar("sequence2");
-	schema.has_qual2 = has_list_utinyint("qual2");
+	schema.has_sequence2 = name_to_idx.find("sequence2") != name_to_idx.end();
+	schema.has_qual2 = name_to_idx.find("qual2") != name_to_idx.end();
 
 	return schema;
 }
@@ -139,6 +95,28 @@ SequenceDataMap ReadSequenceDataTable(ClientContext &context, const std::string 
 	}
 	if (schema.has_qual2) {
 		col_qual2 = next_col++;
+	}
+
+	// Check the types the read returned, not the catalog's (docs/internals/reading-tables-views.md)
+	auto &result_types = materialized.GetTypes();
+	auto check_type = [&](idx_t col, const char *col_name, bool is_qual) {
+		auto &type = result_types[col];
+		const bool accepted =
+		    is_qual ? type.id() == LogicalTypeId::LIST && ListType::GetChildType(type).id() == LogicalTypeId::UTINYINT
+		            : type.id() == LogicalTypeId::VARCHAR;
+		if (!accepted) {
+			throw InvalidInputException("Column '%s' in sequence data table '%s' must be %s", col_name, table_name,
+			                            is_qual ? "LIST(UTINYINT)" : "VARCHAR");
+		}
+	};
+	check_type(COL_READ_ID, "read_id", false);
+	check_type(COL_SEQ1, "sequence1", false);
+	check_type(COL_QUAL1, "qual1", true);
+	if (schema.has_sequence2) {
+		check_type(col_seq2, "sequence2", false);
+	}
+	if (schema.has_qual2) {
+		check_type(col_qual2, "qual2", true);
 	}
 
 	// Temp vectors for two-pass extraction (strings first, then lists).

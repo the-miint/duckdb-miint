@@ -293,3 +293,57 @@ query IT
 SELECT sequence, qual FROM read_alignments('{TEST_DIR}/null_qual.sam', include_seq_qual=true) WHERE read_id='readA';
 ----
 AAACCCGGGT	[]
+
+# ===================================================================
+# SEQUENCE_DATA types are checked when the table is read
+# ===================================================================
+# They are checked against the types the read returns. A relation's types can change after the
+# COPY is planned with no change to the catalog, and a prepared COPY is then not bound again: here
+# a view over a CSV file. CSV has no lists, so the view casts the qualities.
+statement ok
+COPY seq_data TO '{TEST_DIR}/changing_seqs.csv';
+
+statement ok
+CREATE VIEW csv_seqs AS
+SELECT read_id, sequence1, qual1::UTINYINT[] AS qual1, sequence2, qual2::UTINYINT[] AS qual2
+FROM read_csv('{TEST_DIR}/changing_seqs.csv');
+
+statement ok
+PREPARE copy_csv_seqs AS
+COPY alignments TO '{TEST_DIR}/csv_seqs.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'csv_seqs');
+
+# A read_id that becomes an integer is refused, not read as text (which took the database down).
+statement ok
+COPY (SELECT row_number() OVER () AS read_id, sequence1, qual1, sequence2, qual2 FROM seq_data)
+TO '{TEST_DIR}/changing_seqs.csv';
+
+statement error
+EXECUTE copy_csv_seqs;
+----
+<REGEX>:Invalid Input Error: Column 'read_id' in sequence data table 'csv_seqs' must be VARCHAR.*
+
+# Every column is checked: here sequence1 becomes an integer.
+statement ok
+COPY (SELECT read_id, length(sequence1) AS sequence1, qual1, sequence2, qual2 FROM seq_data)
+TO '{TEST_DIR}/changing_seqs.csv';
+
+statement error
+EXECUTE copy_csv_seqs;
+----
+<REGEX>:Invalid Input Error: Column 'sequence1' in sequence data table 'csv_seqs' must be VARCHAR.*
+
+# Valid again, the COPY writes: the catalog's types for the view lag behind the file, so a check
+# against them would refuse it.
+statement ok
+COPY seq_data TO '{TEST_DIR}/changing_seqs.csv';
+
+statement ok
+EXECUTE copy_csv_seqs;
+
+query IT
+SELECT sequence, qual FROM read_alignments('{TEST_DIR}/csv_seqs.sam', include_seq_qual=true) WHERE read_id='readA';
+----
+AAACCCGGGT	[40, 40, 40, 40, 40, 37, 37, 37, 37, 37]
+
+statement ok
+DROP VIEW csv_seqs;
