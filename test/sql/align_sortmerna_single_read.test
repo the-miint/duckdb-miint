@@ -1,27 +1,21 @@
 # name: test/sql/align_sortmerna_single_read.test
-# description: align_sortmerna_rrna reads its query and subject relations exactly once
+# description: align_sortmerna and align_sortmerna_rrna read their query and subject relations exactly once
 # group: [sql]
 
 #
 # A relation passed by name may not give the same rows twice: a view over
 # nextval(), random(), or a table another connection is writing. A reader that
-# reads it twice (once to count, once to align; or once per batch) can then
+# reads it twice (once to size it, once to align; or once per batch) can then
 # align rows that were never returned to the caller, or drop some. Here every
-# read of a view hands out fresh ids from a sequence, so the next value of the
-# sequence after the query says how many rows were read.
-#
-# The id column is one the aligner must project, so column pruning cannot
-# remove the nextval() from a read: count(*) over the view alone does not
-# advance the sequence.
+# read of a view hands out fresh values from two sequences, one in read_id and
+# one in sequence1, so the next value of each after the query says how many
+# rows were read. Why both columns: docs/internals/reading-tables-views.md,
+# "Audit status".
 #
 
 require miint
 
 require-env SORTMERNA_AVAILABLE
-
-# Single-threaded so nextval() assignment order is deterministic.
-statement ok
-SET threads=1;
 
 statement ok
 CREATE TABLE smr_gg AS
@@ -33,43 +27,101 @@ SELECT read_id, sequence1
 FROM read_fastx('ext/sortmerna/test_data/set2_environmental_study_550_amplicon.fasta')
 ORDER BY read_id LIMIT 50;
 
-# --- subject_table: its 19 rows are read once, in InitGlobal ---
-statement ok
-CREATE SEQUENCE subject_ids;
-
-statement ok
-CREATE VIEW subject_view AS
-SELECT nextval('subject_ids')::BIGINT AS read_id, sequence1 FROM smr_gg;
-
-query II
-SELECT COUNT(*), MAX(ref_name) <= 19
-FROM align_sortmerna_rrna('smr_q', subject_table := 'subject_view', num_threads := 1);
-----
-50	true
-
-query I
-SELECT nextval('subject_ids');
-----
-20
-
-# --- query_table: 3000 rows, more than one 2048-row chunk, read once ---
+# 3000 query rows: more than one 2048-row chunk.
 statement ok
 CREATE TABLE query_rows AS SELECT sequence1 FROM smr_q, range(60) t(i);
 
+# --- align_sortmerna_rrna: subject_table, 19 rows, read once in InitGlobal ---
 statement ok
-CREATE SEQUENCE query_ids;
+CREATE SEQUENCE rrna_subject_ids;
 
 statement ok
-CREATE VIEW query_view AS
-SELECT nextval('query_ids')::BIGINT AS read_id, sequence1 FROM query_rows;
+CREATE SEQUENCE rrna_subject_seqs;
+
+statement ok
+CREATE VIEW rrna_subject_view AS
+SELECT nextval('rrna_subject_ids')::BIGINT AS read_id,
+       CASE WHEN nextval('rrna_subject_seqs') > 0 THEN sequence1 END AS sequence1
+FROM smr_gg;
+
+query II
+SELECT COUNT(*), MAX(ref_name) <= 19
+FROM align_sortmerna_rrna('smr_q', subject_table := 'rrna_subject_view', num_threads := 1);
+----
+50	true
+
+query II
+SELECT nextval('rrna_subject_ids'), nextval('rrna_subject_seqs');
+----
+20	20
+
+# --- align_sortmerna_rrna: query_table, 3000 rows, read once ---
+statement ok
+CREATE SEQUENCE rrna_query_ids;
+
+statement ok
+CREATE SEQUENCE rrna_query_seqs;
+
+statement ok
+CREATE VIEW rrna_query_view AS
+SELECT nextval('rrna_query_ids')::BIGINT AS read_id,
+       CASE WHEN nextval('rrna_query_seqs') > 0 THEN sequence1 END AS sequence1
+FROM query_rows;
 
 query III
 SELECT COUNT(*), MIN(read_id), MAX(read_id)
-FROM align_sortmerna_rrna('query_view', subject_table := 'smr_gg', num_threads := 1);
+FROM align_sortmerna_rrna('rrna_query_view', subject_table := 'smr_gg', num_threads := 1);
 ----
 3000	1	3000
 
-query I
-SELECT nextval('query_ids');
+query II
+SELECT nextval('rrna_query_ids'), nextval('rrna_query_seqs');
 ----
-3001
+3001	3001
+
+# --- align_sortmerna: the same, through its own Bind and InitGlobal ---
+statement ok
+CREATE SEQUENCE sam_subject_ids;
+
+statement ok
+CREATE SEQUENCE sam_subject_seqs;
+
+statement ok
+CREATE VIEW sam_subject_view AS
+SELECT nextval('sam_subject_ids')::BIGINT AS read_id,
+       CASE WHEN nextval('sam_subject_seqs') > 0 THEN sequence1 END AS sequence1
+FROM smr_gg;
+
+query II
+SELECT COUNT(*), MAX(reference) <= 19
+FROM align_sortmerna('smr_q', subject_table := 'sam_subject_view', num_threads := 1);
+----
+50	true
+
+query II
+SELECT nextval('sam_subject_ids'), nextval('sam_subject_seqs');
+----
+20	20
+
+statement ok
+CREATE SEQUENCE sam_query_ids;
+
+statement ok
+CREATE SEQUENCE sam_query_seqs;
+
+statement ok
+CREATE VIEW sam_query_view AS
+SELECT nextval('sam_query_ids')::BIGINT AS read_id,
+       CASE WHEN nextval('sam_query_seqs') > 0 THEN sequence1 END AS sequence1
+FROM query_rows;
+
+query III
+SELECT COUNT(*), MIN(read_id), MAX(read_id)
+FROM align_sortmerna('sam_query_view', subject_table := 'smr_gg', num_threads := 1);
+----
+3000	1	3000
+
+query II
+SELECT nextval('sam_query_ids'), nextval('sam_query_seqs');
+----
+3001	3001

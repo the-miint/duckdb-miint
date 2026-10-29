@@ -850,7 +850,7 @@ Emits the standard 21-column SAM schema shared with `align_minimap2` / `align_bo
 
 **Caveats:**
 - **No minimum-score filter by default:** without `evalue`, every positive Smith-Waterman hit is reported. The `sortmerna` CLI keeps only hits above a minimum score derived from its `-e` (default 1e-5). The library's e-values are not computed the way the CLI's are (see below), so neither `evalue` nor a filter on `e_value` or `score` (`tag_as`) in SQL is guaranteed to reproduce the CLI's row set exactly.
-- **E-value divergence from the CLI:** the library computes per-query Karlin-Altschul e-values; the CLI sums / corrects across the full database. The reference and its start and end (`reference` / `position` / `stop_position` here, `ref_name` / `ref_start` / `ref_end` in `align_sortmerna_rrna`) and the CIGAR match the CLI's exactly; `align_sortmerna_rrna`'s identity and coverage match to the CLI's one decimal.
+- **E-value divergence from the CLI:** the library computes per-query Karlin-Altschul e-values; the CLI sums / corrects across the full database. The reference and its start and end (`reference` / `position` here, with `stop_position` the CLI's end + 1; `ref_name` / `ref_start` / `ref_end` in `align_sortmerna_rrna`) and the CIGAR match the CLI's exactly; `align_sortmerna_rrna`'s identity and coverage match to the CLI's one decimal.
 - **Process-wide serialization:** SortMeRNA's `g_run_mutex` serializes calls process-wide. Concurrent `align_sortmerna` / `align_sortmerna_rrna` queries will block on each other at the library level. The DuckDB function deliberately runs on a single DuckDB thread (`MaxThreads() == 1`) to avoid queueing behind the mutex twice.
 
 **Examples:**
