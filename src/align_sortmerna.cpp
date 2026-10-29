@@ -20,7 +20,7 @@ unique_ptr<FunctionData> AlignSortMeRNATableFunction::Bind(ClientContext &contex
 	data->query_table = input.inputs[0].ToString();
 	RejectCTERelationName(input, data->query_table);
 	data->refs = BindSortMeRNAReferences(context, input, "align_sortmerna");
-	ParseSortMeRNAConfigParams(input.named_parameters, data->config);
+	ParseSortMeRNAConfigParams(input.named_parameters, data->config, "align_sortmerna");
 
 	data->query_schema = ValidateSequenceTableSchema(context, data->query_table, /*allow_bigint=*/true);
 	if (data->query_schema.has_sequence2 != data->config.paired) {

@@ -66,10 +66,15 @@ endif()
 # bundle step then fails configure on a zlib that is not a static archive.
 # ZLIB_LIBRARY_RELEASE is what ZLIB::ZLIB's location comes from, and a build
 # tree configured before this change has the system zlib cached there.
-set(SORTMERNA_ZLIB_ARGS
-    -DZLIB_LIBRARY=${ZLIB_LIBRARY_FILE}
-    -DZLIB_LIBRARY_RELEASE=${ZLIB_LIBRARY_FILE}
-    -DZLIB_INCLUDE_DIR=${ZLIB_INCLUDE_DIRS})
+# system_deps.cmake warns and leaves ZLIB_LIBRARY_FILE empty when it cannot name
+# the archive; the sub-builds then search on their own rather than cache "".
+set(SORTMERNA_ZLIB_ARGS "")
+if(ZLIB_LIBRARY_FILE)
+  set(SORTMERNA_ZLIB_ARGS
+      -DZLIB_LIBRARY=${ZLIB_LIBRARY_FILE}
+      -DZLIB_LIBRARY_RELEASE=${ZLIB_LIBRARY_FILE}
+      -DZLIB_INCLUDE_DIR=${ZLIB_INCLUDE_DIR})
+endif()
 
 # Only the library target: parasail's default targets also build its aligner app
 # (OpenMP) and test programs. It requires CMake 3.2, which CMake 4 refuses

@@ -98,7 +98,8 @@ MakeSortMeRNAAligner(ClientContext &context, const miint::SortMeRNAConfig &cfg, 
 	return std::make_unique<miint::SortMeRNAAligner>(cfg, subjects);
 }
 
-inline void ParseSortMeRNAConfigParams(const named_argument_map_t &params, miint::SortMeRNAConfig &cfg) {
+inline void ParseSortMeRNAConfigParams(const named_argument_map_t &params, miint::SortMeRNAConfig &cfg,
+                                       const char *fn_name) {
 	auto set_i32 = [&](const char *name, int32_t &dst) {
 		auto it = params.find(name);
 		if (it != params.end() && !it->second.IsNull()) {
@@ -131,6 +132,13 @@ inline void ParseSortMeRNAConfigParams(const named_argument_map_t &params, miint
 	set_i32("gap_ext", cfg.gap_ext);
 	set_i32("score_N", cfg.score_N);
 	set_double("evalue", cfg.evalue);
+	// A negative evalue is the aligner's "keep every hit" sentinel; from SQL it
+	// (or NaN) would be a filter that silently filters nothing.
+	auto evalue_it = params.find("evalue");
+	if (evalue_it != params.end() && !evalue_it->second.IsNull() && !(cfg.evalue >= 0.0)) {
+		throw BinderException("%s: evalue must be a non-negative number (got %s)", fn_name,
+		                      evalue_it->second.ToString());
+	}
 	set_u32("seed_win_len", cfg.seed_win_len);
 	set_u32("num_alignments", cfg.num_alignments);
 	set_bool("best", cfg.best);

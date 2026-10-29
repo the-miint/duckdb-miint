@@ -178,3 +178,9 @@ ORDER BY read_id;
 ----
 len32	4	*	0	*
 len40	0	Unc49508	265	6S34M
+
+statement error
+SELECT * FROM align_sortmerna(
+    'smr_ev', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], evalue := -1e-5);
+----
+align_sortmerna: evalue must be a non-negative number

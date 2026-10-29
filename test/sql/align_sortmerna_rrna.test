@@ -181,3 +181,17 @@ len200	1	1	Unc49508	6S194M	333	11
 len32	0	-1	(empty)	(empty)	-1	-1
 len40	1	1	Unc49508	6S34M	53	3
 len60	1	1	Unc49508	6S54M	88	4
+
+# A negative or NaN evalue would keep every hit, as if none were given, so it
+# is refused rather than silently ignored.
+statement error
+SELECT * FROM align_sortmerna_rrna(
+    'smr_ev', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], evalue := -1e-5);
+----
+align_sortmerna_rrna: evalue must be a non-negative number
+
+statement error
+SELECT * FROM align_sortmerna_rrna(
+    'smr_ev', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], evalue := CAST('nan' AS DOUBLE));
+----
+align_sortmerna_rrna: evalue must be a non-negative number
