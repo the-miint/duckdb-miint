@@ -156,10 +156,15 @@ static unique_ptr<GlobalFunctionData> BiomCopyInitializeGlobal(ClientContext &co
 	return gstate;
 }
 
-// A prepared COPY is bound again at EXECUTE only when its query reads a table, so the bind check alone can miss a
-// file made after PREPARE. Only OVERWRITE_OR_IGNORE into a directory replaces a file, as that option asks.
+// EXECUTE need not bind a prepared COPY again (DuckDB does not for a query that reads no table), so the bind
+// check can miss a file made after PREPARE. Only OVERWRITE_OR_IGNORE into a directory replaces a file, as that
+// option asks.
 static void BiomCopyInitializeOperator(GlobalFunctionData &gstate_p, const PhysicalOperator &op_p) {
 	auto &op = op_p.Cast<PhysicalCopyToFile>();
+	// DuckDB would rename the temporary file over the target, whatever is there by then
+	if (op.use_tmp_file) {
+		throw InvalidInputException("COPY FORMAT BIOM never replaces its target, so it takes no USE_TMP_FILE");
+	}
 	gstate_p.Cast<BiomCopyGlobalState>().replace_existing =
 	    (op.partition_output || op.per_thread_output) &&
 	    op.overwrite_mode == CopyOverwriteMode::COPY_OVERWRITE_OR_IGNORE;

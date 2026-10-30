@@ -375,9 +375,9 @@ TO '{TEST_DIR}/output_overwrite_test.biom' (FORMAT BIOM);
 ----
 Cannot overwrite existing file
 
-# A file made after PREPARE is refused too, and left as it was. DuckDB binds a prepared COPY again at EXECUTE only
-# when its query reads a table: the bind check refuses the file in this case, and the writer, which creates the
-# file only if none is there, in the next.
+# A file made after PREPARE is refused too, and left as it was. DuckDB binds this prepared COPY, whose query reads
+# a table, again at EXECUTE, so the bind check refuses the file. It does not bind the next one, from values,
+# again, so the writer, which creates the file only if none is there, refuses it.
 statement ok
 PREPARE biom_planned_early AS COPY test_biom_single TO '{TEST_DIR}/made_after_prepare.biom' (FORMAT BIOM);
 
@@ -413,6 +413,40 @@ SELECT feature_id, sample_id, value FROM read_biom('{TEST_DIR}/made_after_prepar
 Feature1	Sample1	1.0
 Feature1	Sample2	2.0
 Feature2	Sample1	3.0
+
+# USE_TMP_FILE true has DuckDB rename a temporary file over the target, which would replace a file made after
+# PREPARE, so it is refused. DuckDB takes the option before BIOM sees the COPY, so the refusal comes when the
+# COPY runs, and the file is left as it was.
+statement ok
+PREPARE biom_tmp_file AS COPY (SELECT 'F9' AS feature_id, 'S9' AS sample_id, 9.0::DOUBLE AS value) TO '{TEST_DIR}/made_after_prepare_tmp.biom' (FORMAT BIOM, USE_TMP_FILE true);
+
+statement ok
+COPY test_biom_basic TO '{TEST_DIR}/made_after_prepare_tmp.biom' (FORMAT BIOM);
+
+statement error
+EXECUTE biom_tmp_file;
+----
+Invalid Input Error: COPY FORMAT BIOM never replaces its target, so it takes no USE_TMP_FILE
+
+query TTR
+SELECT feature_id, sample_id, value FROM read_biom('{TEST_DIR}/made_after_prepare_tmp.biom') ORDER BY ALL;
+----
+Feature1	Sample1	1.0
+Feature1	Sample2	2.0
+Feature2	Sample1	3.0
+
+statement error
+COPY test_biom_single TO '{TEST_DIR}/tmp_file_refused.biom' (FORMAT BIOM, USE_TMP_FILE true);
+----
+Invalid Input Error: COPY FORMAT BIOM never replaces its target, so it takes no USE_TMP_FILE
+
+query I
+SELECT count(*) FROM glob('{TEST_DIR}/*tmp_file_refused.biom');
+----
+0
+
+statement ok
+COPY test_biom_single TO '{TEST_DIR}/tmp_file_false.biom' (FORMAT BIOM, USE_TMP_FILE false);
 
 # An option BIOM does not have is refused and named, and GENERATED_BY with no value is refused.
 statement error
@@ -503,6 +537,28 @@ COPY (SELECT 'F2' AS feature_id, 'S2' AS sample_id, 9.0::DOUBLE AS value, 1 AS g
 
 query TTR
 SELECT feature_id, sample_id, value FROM read_biom('{TEST_DIR}/biom_replaced/*/*.biom');
+----
+F2	S2	9.0
+
+# OVERWRITE empties the directory first, so the files it writes are new ones
+statement ok
+COPY (SELECT 'F3' AS feature_id, 'S3' AS sample_id, 7.0::DOUBLE AS value, 1 AS grp) TO '{TEST_DIR}/biom_replaced' (FORMAT BIOM, PARTITION_BY (grp), OVERWRITE);
+
+query TTR
+SELECT feature_id, sample_id, value FROM read_biom('{TEST_DIR}/biom_replaced/*/*.biom');
+----
+F3	S3	7.0
+
+# OVERWRITE_OR_IGNORE replaces a per-thread file of the same name too. One row is sunk by one thread, so each
+# COPY writes data_0.biom.
+statement ok
+COPY (SELECT 'F1' AS feature_id, 'S1' AS sample_id, 1.0::DOUBLE AS value) TO '{TEST_DIR}/biom_thread_replaced' (FORMAT BIOM, PER_THREAD_OUTPUT true);
+
+statement ok
+COPY (SELECT 'F2' AS feature_id, 'S2' AS sample_id, 9.0::DOUBLE AS value) TO '{TEST_DIR}/biom_thread_replaced' (FORMAT BIOM, PER_THREAD_OUTPUT true, OVERWRITE_OR_IGNORE);
+
+query TTR
+SELECT feature_id, sample_id, value FROM read_biom('{TEST_DIR}/biom_thread_replaced/*.biom');
 ----
 F2	S2	9.0
 

@@ -25,3 +25,9 @@ statement error
 SELECT COUNT(*) FROM read_biom('{MIINT_HTTPS_TEST_URL}/biom/truncated.biom');
 ----
 <REGEX>:IO Error: read_biom: cannot read '.*/biom/truncated\.biom': H5Fopen failed: truncated file.*
+
+# A remote file that is not BIOM is refused as a local one is, naming the URL
+statement error
+SELECT COUNT(*) FROM read_biom('{MIINT_HTTPS_TEST_URL}/biom/notbiom.h5');
+----
+<REGEX>:IO Error: File is not a BIOM file: .*/biom/notbiom\.h5.*

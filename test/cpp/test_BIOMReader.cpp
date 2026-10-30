@@ -4,6 +4,7 @@
 #include <chrono>
 #include <filesystem>
 #include <string>
+#include <thread>
 #include <vector>
 #include "BIOMReader.hpp"
 #ifndef _WIN32
@@ -146,6 +147,25 @@ TEST_CASE("Hdf5FailureRecorder keeps the first failure's cause and restores HDF5
 	H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
 	REQUIRE((func == SilentHdf5Handler));
 	REQUIRE((data == &handler_data));
+}
+
+TEST_CASE("Hdf5FailureRecorder holds the HDF5 mutex while it is alive", "[BIOMReader]") {
+	// Asked from another thread: try_lock on a mutex the calling thread holds is undefined
+	auto free_elsewhere = [] {
+		bool got = false;
+		std::thread([&got] {
+			got = miint::g_hdf5_mutex.try_lock();
+			if (got) {
+				miint::g_hdf5_mutex.unlock();
+			}
+		}).join();
+		return got;
+	};
+	{
+		miint::Hdf5FailureRecorder failure;
+		REQUIRE_FALSE(free_elsewhere());
+	}
+	REQUIRE(free_elsewhere());
 }
 
 // An HDF5 file whose root has a format-version attribute of `n` integers, the first `first`
