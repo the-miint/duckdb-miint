@@ -42,7 +42,14 @@ unique_ptr<FunctionData> ReadBIOMTableFunction::Bind(ClientContext &context, Tab
 				throw IOException("File not found: " + path);
 			}
 			std::lock_guard<std::mutex> hdf5_guard(miint::g_hdf5_mutex);
-			if (!miint::BIOMReader::IsBIOM(path)) {
+			miint::Hdf5FailureRecorder hdf5_failure;
+			bool is_biom;
+			try {
+				is_biom = miint::BIOMReader::IsBIOM(path);
+			} catch (const std::runtime_error &e) {
+				throw IOException("read_biom: cannot open '%s': %s", path, hdf5_failure.Explain(e.what()));
+			}
+			if (!is_biom) {
 				throw IOException("File is not a BIOM file: " + path);
 			}
 		}

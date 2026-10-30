@@ -1,8 +1,12 @@
 #define CATCH_CONFIG_MAIN
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
+#include <filesystem>
 #include <string>
 #include "BIOMReader.hpp"
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 
 TEST_CASE("BIOM empty table", "[BIOMReader]") {
 	auto path = "data/biom/empty.biom";
@@ -79,4 +83,55 @@ TEST_CASE("BIOM file error recovery", "[BIOMReader]") {
 	miint::BIOMReader reader("data/biom/test.biom");
 	auto table = reader.read();
 	REQUIRE((table.nnz() == 15));
+}
+
+TEST_CASE("BIOM IsBIOM refuses a file HDF5 cannot open, and the recorder keeps why", "[BIOMReader]") {
+	H5Eset_auto(H5E_DEFAULT, nullptr, nullptr); // Disable HDF5 error printing, as the extension does at load
+	SECTION("truncated") {
+		miint::Hdf5FailureRecorder failure;
+		REQUIRE_THROWS_AS(miint::BIOMReader::IsBIOM("data/biom/truncated.biom"), std::runtime_error);
+		REQUIRE_THAT(failure.Cause(), Catch::Matchers::StartsWith("truncated file"));
+	}
+#ifndef _WIN32
+	SECTION("unreadable") {
+		if (geteuid() == 0) {
+			SKIP("root reads a file whatever its mode");
+		}
+		// A copy of test.biom no one may read, given back its mode and removed however the section ends
+		struct UnreadableCopy {
+			std::filesystem::path path = std::filesystem::temp_directory_path() /
+			                             ("miint_isbiom_unreadable_" + std::to_string(getpid()) + ".biom");
+			UnreadableCopy() {
+				std::filesystem::copy_file("data/biom/test.biom", path);
+				std::filesystem::permissions(path, std::filesystem::perms::none);
+			}
+			~UnreadableCopy() {
+				std::error_code ignored;
+				std::filesystem::permissions(path, std::filesystem::perms::owner_read, ignored);
+				std::filesystem::remove(path, ignored);
+			}
+		} unreadable;
+		miint::Hdf5FailureRecorder failure;
+		REQUIRE_THROWS_AS(miint::BIOMReader::IsBIOM(unreadable.path.string()), std::runtime_error);
+		REQUIRE(failure.Cause() == "Permission denied");
+	}
+#endif
+}
+
+TEST_CASE("Hdf5FailureRecorder keeps the first failure's cause and restores HDF5's handler", "[BIOMReader]") {
+	H5Eset_auto(H5E_DEFAULT, nullptr, nullptr);
+	{
+		miint::Hdf5FailureRecorder failure;
+		REQUIRE(failure.Cause().empty());
+		// An HDF5 file without BIOM's datasets: the first failure is the missing dataset, and neither the cleanup
+		// closes that follow it nor a later failure replaces the recorded cause
+		REQUIRE_THROWS_AS(miint::BIOMReader("data/biom/notbiom.h5"), std::runtime_error);
+		REQUIRE_THAT(failure.Cause(), Catch::Matchers::ContainsSubstring("component not found"));
+		REQUIRE_THROWS_AS(miint::BIOMReader::IsBIOM("data/biom/truncated.biom"), std::runtime_error);
+		REQUIRE_THAT(failure.Cause(), Catch::Matchers::ContainsSubstring("component not found"));
+	}
+	H5E_auto2_t func = nullptr;
+	void *data = nullptr;
+	H5Eget_auto2(H5E_DEFAULT, &func, &data);
+	REQUIRE(func == nullptr);
 }

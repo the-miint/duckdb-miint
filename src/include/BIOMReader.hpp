@@ -48,6 +48,10 @@ public:
 	const std::string &Cause() const {
 		return cause;
 	}
+	//! `what` failed, and why: "<what>: <cause>", or `what` alone without a cause
+	std::string Explain(const std::string &what) const {
+		return cause.empty() ? what : what + ": " + cause;
+	}
 
 private:
 	static herr_t Record(hid_t error_stack, void *recorder);
@@ -82,6 +86,8 @@ public:
 	explicit BIOMReader(const std::string &path1);
 	~BIOMReader();
 	BIOMTable read() const;
+	//! False for a missing file, a file that is not HDF5, and an HDF5 file without BIOM's format-version 2.
+	//! Throws std::runtime_error for a file HDF5 cannot open; a Hdf5FailureRecorder has the reason.
 	static bool IsBIOM(const std::string &path);
 };
 } // namespace miint

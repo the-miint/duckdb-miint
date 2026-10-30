@@ -417,15 +417,6 @@ static void WriteNumericDataset(H5::Group &group, const string &name, const std:
 //===--------------------------------------------------------------------===//
 // Finalize
 //===--------------------------------------------------------------------===//
-// Why the write failed: the call the exception names, and the cause the recorder took as the first HDF5
-// call failed
-static string Hdf5FailureReason(const H5::Exception &e, const miint::Hdf5FailureRecorder &failure) {
-	if (failure.Cause().empty()) {
-		return e.getDetailMsg();
-	}
-	return e.getDetailMsg() + ": " + failure.Cause();
-}
-
 static void BiomCopyFinalize(ClientContext &context, FunctionData &bind_data, GlobalFunctionData &gstate_p) {
 	auto &fdata = bind_data.Cast<BiomCopyBindData>();
 	auto &gstate = gstate_p.Cast<BiomCopyGlobalState>();
@@ -495,8 +486,9 @@ static void BiomCopyFinalize(ClientContext &context, FunctionData &bind_data, Gl
 		// throws here; with an object open, HDF5 would put the write off until that object's destructor.
 		file.close();
 	} catch (const H5::Exception &e) {
+		// The call the exception names, and the cause the recorder took as the first HDF5 call failed
 		throw IOException("COPY FORMAT BIOM: cannot write '%s': %s", gstate.file_path,
-		                  Hdf5FailureReason(e, hdf5_failure));
+		                  hdf5_failure.Explain(e.getDetailMsg()));
 	}
 }
 

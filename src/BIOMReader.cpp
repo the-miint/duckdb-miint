@@ -1,5 +1,6 @@
 #include "BIOMReader.hpp"
 #include <sys/stat.h>
+#include <cerrno>
 #include <cstring>
 
 namespace miint {
@@ -57,7 +58,7 @@ BIOMReader::BIOMReader(const std::string &path) {
 	// Check if file exists and get size
 	struct stat st;
 	if (stat(path.c_str(), &st) != 0) {
-		throw std::runtime_error("File does not exist or cannot be accessed: " + path);
+		throw std::runtime_error(std::string("cannot stat the file: ") + std::strerror(errno));
 	}
 
 	htri_t is_hdf5 = -1;
@@ -69,14 +70,17 @@ BIOMReader::BIOMReader(const std::string &path) {
 		// Check if file is actually HDF5
 		is_hdf5 = H5Fis_hdf5(path.c_str());
 		if (is_hdf5 < 0) {
-			throw std::runtime_error("File is not HDF5");
+			throw std::runtime_error("H5Fis_hdf5 failed");
+		}
+		if (is_hdf5 == 0) {
+			throw std::runtime_error("not an HDF5 file");
 		}
 
 		// Open file with C API
 		file_id = H5Fopen(path.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
 
 		if (file_id < 0) {
-			throw std::runtime_error("H5Fopen failed with return value: " + std::to_string(file_id));
+			throw std::runtime_error("H5Fopen failed");
 		}
 
 		ds_indices_id = H5Dopen2(file_id, SAMPLE_INDICES, H5P_DEFAULT);
@@ -176,14 +180,18 @@ bool BIOMReader::IsBIOM(const std::string &path) {
 		return false;
 	}
 
+	// A file HDF5 cannot open is an error, not a file that is not BIOM, so its reason reaches the user
 	is_hdf5 = H5Fis_hdf5(path.c_str());
 	if (is_hdf5 < 0) {
+		throw std::runtime_error("H5Fis_hdf5 failed");
+	}
+	if (is_hdf5 == 0) {
 		return false;
 	}
 
 	file_id = H5Fopen(path.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
 	if (file_id < 0) {
-		return false;
+		throw std::runtime_error("H5Fopen failed");
 	}
 
 	root_id = H5Gopen(file_id, "/", H5P_DEFAULT);

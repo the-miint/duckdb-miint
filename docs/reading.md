@@ -808,6 +808,7 @@ SELECT * FROM read_biom('some_file.biom');
 - Reads up to 4 files at a time, one thread per file
 - Zero values are not returned (sparse representation)
 - Supports reading multiple files which are concatenated in the output
+- A local file is checked when the query is planned: a missing file, a file HDF5 cannot open and a file that is not BIOM are refused then. A file HDF5 cannot open, being unreadable or damaged, is refused with HDF5's reason (`read_biom: cannot open '<file>': H5Fopen failed: truncated file ...`). A remote file is checked when it is read, and a read that fails names the file and why (`read_biom: cannot read '<file>': ...`)
 
 **Examples:**
 ```sql

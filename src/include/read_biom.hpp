@@ -83,9 +83,15 @@ public:
 			// The reader's destructor closes HDF5 handles, so it stays inside the lock.
 			{
 				std::lock_guard<std::mutex> hdf5_guard(miint::g_hdf5_mutex);
-				{
+				miint::Hdf5FailureRecorder hdf5_failure;
+				// The reader and its table throw these two; anything else, such as bad_alloc, passes through
+				try {
 					auto reader = miint::BIOMReader(local_path);
 					table = reader.read();
+				} catch (const std::runtime_error &e) {
+					throw IOException("read_biom: cannot read '%s': %s", path, hdf5_failure.Explain(e.what()));
+				} catch (const std::logic_error &e) {
+					throw IOException("read_biom: cannot read '%s': %s", path, hdf5_failure.Explain(e.what()));
 				}
 			}
 
