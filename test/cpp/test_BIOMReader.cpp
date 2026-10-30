@@ -3,6 +3,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 #include <filesystem>
 #include <string>
+#include <vector>
 #include "BIOMReader.hpp"
 #ifndef _WIN32
 #include <unistd.h>
@@ -134,4 +135,42 @@ TEST_CASE("Hdf5FailureRecorder keeps the first failure's cause and restores HDF5
 	void *data = nullptr;
 	H5Eget_auto2(H5E_DEFAULT, &func, &data);
 	REQUIRE(func == nullptr);
+}
+
+// An HDF5 file whose root has a format-version attribute of `n` integers, the first `first`
+namespace {
+std::filesystem::path WriteFormatVersionFile(const std::string &name, hsize_t n, int first) {
+	auto path = std::filesystem::temp_directory_path() / ("miint_" + name + "_" + std::to_string(getpid()) + ".h5");
+	hid_t file = H5Fcreate(path.string().c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
+	REQUIRE(file >= 0);
+	hid_t space = H5Screate_simple(1, &n, nullptr);
+	hid_t attr =
+	    H5Acreate_by_name(file, "/", "format-version", H5T_NATIVE_INT, space, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+	std::vector<int> values(n, 0);
+	values[0] = first;
+	REQUIRE(H5Awrite(attr, H5T_NATIVE_INT, values.data()) >= 0);
+	H5Aclose(attr);
+	H5Sclose(space);
+	H5Fclose(file);
+	return path;
+}
+} // namespace
+
+TEST_CASE("BIOM IsBIOM takes only a format-version of two integers starting with 2", "[BIOMReader]") {
+	H5Eset_auto(H5E_DEFAULT, nullptr, nullptr);
+	struct Case {
+		std::string name;
+		hsize_t n;
+		int first;
+		bool is_biom;
+	};
+	// Three integers would overrun a reader that reads the attribute into two
+	for (const auto &c : {Case {"v2", 2, 2, true}, Case {"v1", 2, 1, false}, Case {"v2_three_ints", 3, 2, false},
+	                      Case {"v2_one_int", 1, 2, false}}) {
+		auto path = WriteFormatVersionFile(c.name, c.n, c.first);
+		INFO(c.name);
+		bool is_biom = miint::BIOMReader::IsBIOM(path.string());
+		std::filesystem::remove(path);
+		REQUIRE(is_biom == c.is_biom);
+	}
 }

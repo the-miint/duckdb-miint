@@ -35,8 +35,9 @@ std::string Hdf5ErrorCause(hid_t error_stack = H5E_DEFAULT);
 
 //! While alive, keeps the cause (Hdf5ErrorCause) of the first HDF5 call that fails, taken as that call fails.
 //! Every HDF5 call clears the error stack, so a cause read later is lost to the calls made in between, such
-//! as the closes in the destructors an exception unwinds through. The stack and the hook this sets are the
-//! process's (this HDF5 is not thread-safe): hold g_hdf5_mutex for the recorder's whole life.
+//! as the closes in the destructors an exception unwinds through. Use it around code that stops at its first
+//! failure: a failure the code tolerated would be kept as the cause of a later one. The stack and the hook
+//! this sets are the process's (this HDF5 is not thread-safe): hold g_hdf5_mutex for the recorder's whole life.
 class Hdf5FailureRecorder {
 public:
 	Hdf5FailureRecorder();
