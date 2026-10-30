@@ -172,8 +172,9 @@ std::vector<double> CommunityDistancesCondensed(const std::vector<double> &matri
 //! Results are BIT-IDENTICAL to CommunityDistancesCondensed on the same matrix.
 //! On the merge path both accumulate in ascending feature order, and the terms the
 //! dense loop adds for features absent from both samples are exactly 0.0. That also
-//! needs every product rounded before it is added, in both loops, so the file is
-//! built with -ffp-contract=off (CMakeLists.txt). On the dense-Gram path (see
+//! needs every product rounded before it is added, in both loops, so GCC and Clang
+//! build the file with -ffp-contract=off (CMakeLists.txt); MSVC builds target
+//! baseline x64, which has no FMA to fuse into. On the dense-Gram path (see
 //! CommunityDistancesUsesGramPath) the guarantee survives for a different reason:
 //! the dispatch rule is the same on both sides, so a block that takes the Gram path
 //! here takes it there too, and the two then run the identical kernel over the

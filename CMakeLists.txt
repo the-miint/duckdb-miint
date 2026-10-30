@@ -391,6 +391,7 @@ list(
 # way to stay bit-identical (community_distances.hpp). Left to contract, clang
 # on arm64 fused the sparse merge's into FMAs but not the vectorized dense
 # loop's. Source properties are directory-scoped, so this reaches `tests` too.
+# MSVC gets no -march from DuckDB, and baseline x64 has no FMA.
 if(NOT MSVC)
   set_source_files_properties(src/community_distances.cpp
                               PROPERTIES COMPILE_OPTIONS -ffp-contract=off)
