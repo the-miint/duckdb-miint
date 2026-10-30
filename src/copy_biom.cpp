@@ -354,7 +354,7 @@ static void WriteStringDataset(H5::Group &group, const string &name, const std::
 		hsize_t dims[1] = {0};
 		H5::DataSpace dataspace(1, dims);
 		H5::StrType datatype(H5::PredType::C_S1, H5T_VARIABLE);
-		H5::DataSet dataset = group.createDataSet(name, datatype, dataspace);
+		group.createDataSet(name, datatype, dataspace).close();
 		return;
 	}
 
@@ -382,6 +382,8 @@ static void WriteStringDataset(H5::Group &group, const string &name, const std::
 	}
 
 	dataset.write(c_strs.data(), datatype);
+	// HDF5 can hold a dataset's data until it closes; a destructor's close would drop that write's failure
+	dataset.close();
 }
 
 template <typename T>
@@ -391,7 +393,7 @@ static void WriteNumericDataset(H5::Group &group, const string &name, const std:
 		// Write empty dataset
 		hsize_t dims[1] = {0};
 		H5::DataSpace dataspace(1, dims);
-		H5::DataSet dataset = group.createDataSet(name, dtype, dataspace);
+		group.createDataSet(name, dtype, dataspace).close();
 		return;
 	}
 
@@ -408,41 +410,20 @@ static void WriteNumericDataset(H5::Group &group, const string &name, const std:
 
 	H5::DataSet dataset = group.createDataSet(name, dtype, dataspace, plist);
 	dataset.write(data.data(), dtype);
+	// HDF5 can hold a dataset's data until it closes; a destructor's close would drop that write's failure
+	dataset.close();
 }
 
 //===--------------------------------------------------------------------===//
 // Finalize
 //===--------------------------------------------------------------------===//
-static herr_t KeepInnermostHdf5Error(unsigned n, const H5E_error2_t *err, void *cause) {
-	if (n == 0) {
-		*static_cast<const char **>(cause) = err->desc;
-	}
-	return 0;
-}
-
-// Why an HDF5 call failed: the call the exception names, plus the innermost entry of HDF5's error stack,
-// cut to the OS error when the entry quotes one (a failed open's "error message = '...'"). This HDF5 is not
-// built thread-safe, so the stack is the process's: the caller holds miint::g_hdf5_mutex from before the
-// failed call through this walk, so the entry is this write's. Unwinding closes the HDF5 objects before
-// the catch, and a close clears the stack or leaves its own error, so a failure after the file is open
-// may name only the call, or a close's error.
-static string Hdf5FailureReason(const H5::Exception &e) {
-	const char *innermost = nullptr;
-	H5Ewalk2(H5E_DEFAULT, H5E_WALK_UPWARD, KeepInnermostHdf5Error, &innermost);
-	if (!innermost || !*innermost) {
+// Why the write failed: the call the exception names, and the cause the recorder took as the first HDF5
+// call failed
+static string Hdf5FailureReason(const H5::Exception &e, const miint::Hdf5FailureRecorder &failure) {
+	if (failure.Cause().empty()) {
 		return e.getDetailMsg();
 	}
-	string cause = innermost;
-	static const string os_error_tag = "error message = '";
-	const auto tag = cause.find(os_error_tag);
-	if (tag != string::npos) {
-		const auto start = tag + os_error_tag.size();
-		const auto end = cause.find('\'', start);
-		if (end != string::npos) {
-			cause = cause.substr(start, end - start);
-		}
-	}
-	return e.getDetailMsg() + ": " + cause;
+	return e.getDetailMsg() + ": " + failure.Cause();
 }
 
 static void BiomCopyFinalize(ClientContext &context, FunctionData &bind_data, GlobalFunctionData &gstate_p) {
@@ -470,11 +451,12 @@ static void BiomCopyFinalize(ClientContext &context, FunctionData &bind_data, Gl
 	auto csr = table.ToCSR(); // observation/matrix
 	auto csc = table.ToCSC(); // sample/matrix
 
-	// Every HDF5 call below, the destructors that close the file and its objects and the error-stack walk
+	// Every HDF5 call below, the destructors that close the file and its objects and the failure recorder
 	// included, runs under miint::g_hdf5_mutex (BIOMReader.hpp): a partitioned or per-thread COPY finalizes
 	// several BIOM files at once, and other queries may be reading BIOM files. One BIOM write therefore
 	// holds up every other BIOM read and write until it is done.
 	std::lock_guard<std::mutex> hdf5_guard(miint::g_hdf5_mutex);
+	miint::Hdf5FailureRecorder hdf5_failure;
 
 	// HDF5 throws H5::Exception, which is not a std::exception, so it is rethrown naming the file and why
 	// rather than reaching DuckDB as an unknown exception.
@@ -485,39 +467,36 @@ static void BiomCopyFinalize(ClientContext &context, FunctionData &bind_data, Gl
 		// Write root attributes
 		WriteRootAttributes(file, nnz, n_features, n_samples, fdata.id, fdata.generated_by);
 
-		// Create groups
-		H5::Group obs_group = file.createGroup("/observation");
-		H5::Group obs_matrix_group = file.createGroup("/observation/matrix");
-		H5::Group obs_metadata_group = file.createGroup("/observation/metadata");
-		H5::Group obs_group_metadata_group = file.createGroup("/observation/group-metadata");
-
-		H5::Group samp_group = file.createGroup("/sample");
-		H5::Group samp_matrix_group = file.createGroup("/sample/matrix");
-		H5::Group samp_metadata_group = file.createGroup("/sample/metadata");
-		H5::Group samp_group_metadata_group = file.createGroup("/sample/group-metadata");
+		// Create groups. Each is closed at once, and the datasets are written by their full paths.
+		for (auto group :
+		     {"/observation", "/observation/matrix", "/observation/metadata", "/observation/group-metadata", "/sample",
+		      "/sample/matrix", "/sample/metadata", "/sample/group-metadata"}) {
+			file.createGroup(group).close();
+		}
 
 		// Write observation (feature) IDs
-		WriteStringDataset(obs_group, "ids", table.FeatureIDs(), fdata.use_compression);
+		WriteStringDataset(file, miint::OBS_IDS, table.FeatureIDs(), fdata.use_compression);
 
 		// Write observation/matrix (CSR)
-		WriteNumericDataset(obs_matrix_group, "data", csr.data, H5::PredType::NATIVE_DOUBLE, fdata.use_compression);
-		WriteNumericDataset(obs_matrix_group, "indices", csr.indices, H5::PredType::NATIVE_INT32,
-		                    fdata.use_compression);
-		WriteNumericDataset(obs_matrix_group, "indptr", csr.indptr, H5::PredType::NATIVE_INT32, fdata.use_compression);
+		WriteNumericDataset(file, miint::OBS_DATA, csr.data, H5::PredType::NATIVE_DOUBLE, fdata.use_compression);
+		WriteNumericDataset(file, miint::OBS_INDICES, csr.indices, H5::PredType::NATIVE_INT32, fdata.use_compression);
+		WriteNumericDataset(file, miint::OBS_INDPTR, csr.indptr, H5::PredType::NATIVE_INT32, fdata.use_compression);
 
 		// Write sample IDs
-		WriteStringDataset(samp_group, "ids", table.SampleIDs(), fdata.use_compression);
+		WriteStringDataset(file, miint::SAMPLE_IDS, table.SampleIDs(), fdata.use_compression);
 
 		// Write sample/matrix (CSC)
-		WriteNumericDataset(samp_matrix_group, "data", csc.data, H5::PredType::NATIVE_DOUBLE, fdata.use_compression);
-		WriteNumericDataset(samp_matrix_group, "indices", csc.indices, H5::PredType::NATIVE_INT32,
+		WriteNumericDataset(file, miint::SAMPLE_DATA, csc.data, H5::PredType::NATIVE_DOUBLE, fdata.use_compression);
+		WriteNumericDataset(file, miint::SAMPLE_INDICES, csc.indices, H5::PredType::NATIVE_INT32,
 		                    fdata.use_compression);
-		WriteNumericDataset(samp_matrix_group, "indptr", csc.indptr, H5::PredType::NATIVE_INT32, fdata.use_compression);
+		WriteNumericDataset(file, miint::SAMPLE_INDPTR, csc.indptr, H5::PredType::NATIVE_INT32, fdata.use_compression);
 
-		// Close file
+		// Every object in the file is closed by now, so this close writes what HDF5 still holds, and a failure
+		// throws here; with an object open, HDF5 would put the write off until that object's destructor.
 		file.close();
 	} catch (const H5::Exception &e) {
-		throw IOException("COPY FORMAT BIOM: cannot write '%s': %s", gstate.file_path, Hdf5FailureReason(e));
+		throw IOException("COPY FORMAT BIOM: cannot write '%s': %s", gstate.file_path,
+		                  Hdf5FailureReason(e, hdf5_failure));
 	}
 }
 

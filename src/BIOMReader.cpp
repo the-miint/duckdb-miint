@@ -8,6 +8,51 @@ namespace miint {
 // See the header for the contract and rationale.
 std::mutex g_hdf5_mutex;
 
+static herr_t KeepInnermostHdf5Error(unsigned n, const H5E_error2_t *err, void *desc) {
+	if (n == 0) {
+		*static_cast<const char **>(desc) = err->desc;
+	}
+	return 0;
+}
+
+std::string Hdf5ErrorCause(hid_t error_stack) {
+	const char *innermost = nullptr;
+	H5Ewalk2(error_stack, H5E_WALK_UPWARD, KeepInnermostHdf5Error, &innermost);
+	if (!innermost) {
+		return {};
+	}
+	std::string cause = innermost;
+	static const std::string os_error_tag = "error message = '";
+	const auto tag = cause.find(os_error_tag);
+	if (tag != std::string::npos) {
+		const auto start = tag + os_error_tag.size();
+		const auto end = cause.find('\'', start);
+		if (end != std::string::npos) {
+			cause = cause.substr(start, end - start);
+		}
+	}
+	return cause;
+}
+
+Hdf5FailureRecorder::Hdf5FailureRecorder() {
+	H5Eget_auto2(H5E_DEFAULT, &saved_func, &saved_data);
+	H5Eset_auto2(H5E_DEFAULT, Record, this);
+}
+
+Hdf5FailureRecorder::~Hdf5FailureRecorder() {
+	H5Eset_auto2(H5E_DEFAULT, saved_func, saved_data);
+}
+
+// HDF5 calls this as a failing call returns, with that call's error stack
+herr_t Hdf5FailureRecorder::Record(hid_t error_stack, void *recorder) {
+	auto &self = *static_cast<Hdf5FailureRecorder *>(recorder);
+	if (!self.failed) {
+		self.failed = true;
+		self.cause = Hdf5ErrorCause(error_stack);
+	}
+	return 0;
+}
+
 BIOMReader::BIOMReader(const std::string &path) {
 	// Check if file exists and get size
 	struct stat st;

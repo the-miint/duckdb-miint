@@ -29,6 +29,35 @@ namespace miint {
 //! not exit while any HDF5 call is in progress.
 extern std::mutex g_hdf5_mutex;
 
+//! Why an HDF5 call failed: the innermost entry of an HDF5 error stack, cut to the OS error when the entry
+//! quotes one (a failed open's "error message = '...'"); empty for an empty stack.
+std::string Hdf5ErrorCause(hid_t error_stack = H5E_DEFAULT);
+
+//! While alive, keeps the cause (Hdf5ErrorCause) of the first HDF5 call that fails, taken as that call fails.
+//! Every HDF5 call clears the error stack, so a cause read later is lost to the calls made in between, such
+//! as the closes in the destructors an exception unwinds through. The stack and the hook this sets are the
+//! process's (this HDF5 is not thread-safe): hold g_hdf5_mutex for the recorder's whole life.
+class Hdf5FailureRecorder {
+public:
+	Hdf5FailureRecorder();
+	~Hdf5FailureRecorder();
+	Hdf5FailureRecorder(const Hdf5FailureRecorder &) = delete;
+	Hdf5FailureRecorder &operator=(const Hdf5FailureRecorder &) = delete;
+
+	//! Empty if no call has failed, or the failure's stack named no cause
+	const std::string &Cause() const {
+		return cause;
+	}
+
+private:
+	static herr_t Record(hid_t error_stack, void *recorder);
+
+	H5E_auto2_t saved_func = nullptr;
+	void *saved_data = nullptr;
+	bool failed = false;
+	std::string cause;
+};
+
 /* datasets defined by the BIOM 2.x spec */
 static constexpr const char *OBS_INDPTR = "/observation/matrix/indptr";
 static constexpr const char *OBS_INDICES = "/observation/matrix/indices";

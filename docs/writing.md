@@ -365,6 +365,8 @@ An id is written as its text, as `read_id` is elsewhere: BIGINT in decimal, UUID
 
 BIOM is written to local files only; a remote target is refused. `PARTITION_BY` and `PER_THREAD_OUTPUT` write `.biom` files, each a complete table of its own rows: one per thread, and one or more per partition (DuckDB starts another file for a partition when more partitions are open than `partitioned_write_max_open_files`), so a (feature, sample) pair can be split across files. DuckDB leaves the partition columns out of the rows it writes unless `WRITE_PARTITION_COLUMNS true`, so partitioning by `sample_id` or `feature_id` needs it.
 
+A target file that already exists is refused (`Cannot overwrite existing file`). With `PARTITION_BY` or `PER_THREAD_OUTPUT` and `OVERWRITE_OR_IGNORE`, a file of the same name already in the directory is replaced, as that option asks. A write that fails partway, on a full disk for example, fails the COPY with an IO Error naming the file, the HDF5 call that failed and the system's reason, such as `No space left on device`, and DuckDB removes the file the failed COPY created.
+
 **Parameters:**
 - `COMPRESSION` (default: 'gzip'): HDF5's compression of the datasets inside the file, `'gzip'` or `'gz'` (deflate level 4, h5py's default), or `'none'` or `'uncompressed'`, in any case. Any other value, zstd included, is refused. The `.biom` file itself is always HDF5, never gzip, whatever its name.
 - `ID` (default: 'No Table ID'): Custom table identifier for BIOM metadata

@@ -323,10 +323,10 @@ SELECT 'F' || (r % 50) AS feature_id, 'S' || (r // 50) AS sample_id, (r + 1)::DO
 foreach comp gzip GZ none Uncompressed
 
 statement ok
-COPY biom_compressible TO '{TEST_DIR}/comp_${comp}.biom' (FORMAT BIOM, COMPRESSION '${comp}');
+COPY biom_compressible TO '{TEST_DIR}/comp_{comp}.biom' (FORMAT BIOM, COMPRESSION '{comp}');
 
 query IR
-SELECT count(*), sum(value) FROM read_biom('{TEST_DIR}/comp_${comp}.biom');
+SELECT count(*), sum(value) FROM read_biom('{TEST_DIR}/comp_{comp}.biom');
 ----
 2000	2001000.0
 
@@ -354,6 +354,26 @@ COPY (SELECT feature_id, sample_id, value FROM test_biom_basic)
 TO '{TEST_DIR}/output_overwrite_test.biom' (FORMAT BIOM);
 ----
 Cannot overwrite existing file
+
+# DuckDB binds a prepared COPY again at EXECUTE, so a file made after PREPARE is refused too, and left as it
+# was.
+statement ok
+PREPARE biom_planned_early AS COPY test_biom_single TO '{TEST_DIR}/made_after_prepare.biom' (FORMAT BIOM);
+
+statement ok
+COPY test_biom_basic TO '{TEST_DIR}/made_after_prepare.biom' (FORMAT BIOM);
+
+statement error
+EXECUTE biom_planned_early;
+----
+Cannot overwrite existing file
+
+query TTR
+SELECT feature_id, sample_id, value FROM read_biom('{TEST_DIR}/made_after_prepare.biom') ORDER BY ALL;
+----
+Feature1	Sample1	1.0
+Feature1	Sample2	2.0
+Feature2	Sample1	3.0
 
 # An option BIOM does not have is refused and named, and GENERATED_BY with no value is refused.
 statement error
@@ -434,6 +454,19 @@ RESET threads;
 
 statement ok
 DROP TABLE biom_many;
+
+# OVERWRITE_OR_IGNORE replaces a partition's file of the same name, as that option asks: the writer does not
+# refuse an existing file itself, so this is DuckDB's rule, and a single target is refused at bind instead.
+statement ok
+COPY (SELECT 'F1' AS feature_id, 'S1' AS sample_id, 1.0::DOUBLE AS value, 1 AS grp) TO '{TEST_DIR}/biom_replaced' (FORMAT BIOM, PARTITION_BY (grp));
+
+statement ok
+COPY (SELECT 'F2' AS feature_id, 'S2' AS sample_id, 9.0::DOUBLE AS value, 1 AS grp) TO '{TEST_DIR}/biom_replaced' (FORMAT BIOM, PARTITION_BY (grp), OVERWRITE_OR_IGNORE);
+
+query TTR
+SELECT feature_id, sample_id, value FROM read_biom('{TEST_DIR}/biom_replaced/*/*.biom');
+----
+F2	S2	9.0
 
 # Test 21: concurrent COPY TO BIOM and read_biom return correct values
 concurrentloop i 0 8
