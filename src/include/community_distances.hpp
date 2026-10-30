@@ -171,13 +171,15 @@ std::vector<double> CommunityDistancesCondensed(const std::vector<double> &matri
 //!
 //! Results are BIT-IDENTICAL to CommunityDistancesCondensed on the same matrix.
 //! On the merge path both accumulate in ascending feature order, and the terms the
-//! dense loop adds for features absent from both samples are exactly 0.0. On the
-//! dense-Gram path (see CommunityDistancesUsesGramPath) the guarantee survives for a
-//! different reason: the dispatch rule is the same on both sides, so a block that
-//! takes the Gram path here takes it there too, and the two then run the identical
-//! kernel over the identical operand. Also bit-identical for any `n_threads`, on the
-//! same grounds as the dense loop — the Gram path's product is serial regardless of
-//! `n_threads`, which only fans out the fill.
+//! dense loop adds for features absent from both samples are exactly 0.0. That also
+//! needs every product rounded before it is added, in both loops, so the file is
+//! built with -ffp-contract=off (CMakeLists.txt). On the dense-Gram path (see
+//! CommunityDistancesUsesGramPath) the guarantee survives for a different reason:
+//! the dispatch rule is the same on both sides, so a block that takes the Gram path
+//! here takes it there too, and the two then run the identical kernel over the
+//! identical operand. Also bit-identical for any `n_threads`, on the same grounds as
+//! the dense loop — the Gram path's product is serial regardless of `n_threads`,
+//! which only fans out the fill.
 //!
 //! Bit-identity across the two ENTRY POINTS is not bit-identity across the two
 //! KERNELS: for `euclidean` and `morisita_horn` a Gram-path distance can differ from

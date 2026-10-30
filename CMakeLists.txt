@@ -387,6 +387,15 @@ list(
   src/zip_utils.cpp
   third_party/microtar/microtar.c)
 
+# The sparse and dense distance kernels must round every multiply-add the same
+# way to stay bit-identical (community_distances.hpp). Left to contract, clang
+# on arm64 fused the sparse merge's into FMAs but not the vectorized dense
+# loop's. Source properties are directory-scoped, so this reaches `tests` too.
+if(NOT MSVC)
+  set_source_files_properties(src/community_distances.cpp
+                              PROPERTIES COMPILE_OPTIONS -ffp-contract=off)
+endif()
+
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/isa_dispatch.cmake)
 miint_add_isa_variants(mmvec_kernel src/mmvec_kernel.cpp)
 
