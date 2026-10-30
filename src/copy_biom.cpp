@@ -163,7 +163,9 @@ static void BiomCopyInitializeOperator(GlobalFunctionData &gstate_p, const Physi
 	auto &op = op_p.Cast<PhysicalCopyToFile>();
 	// DuckDB would rename the temporary file over the target, whatever is there by then
 	if (op.use_tmp_file) {
-		throw InvalidInputException("COPY FORMAT BIOM never replaces its target, so it takes no USE_TMP_FILE");
+		throw InvalidInputException("COPY FORMAT BIOM: cannot write '%s' with USE_TMP_FILE true: BIOM never replaces "
+		                            "its target",
+		                            op.file_path);
 	}
 	gstate_p.Cast<BiomCopyGlobalState>().replace_existing =
 	    (op.partition_output || op.per_thread_output) &&

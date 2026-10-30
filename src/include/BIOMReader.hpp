@@ -22,8 +22,7 @@ namespace miint {
 //! configuration at extension load (H5Eset_auto), plus the BIOMReader /
 //! BIOMTable scope that drives them — including the BIOMReader destructor so
 //! file/dataset handles are closed under the lock. A Hdf5FailureRecorder
-//! holds it for its whole life, so HDF5 work done under one, the closing
-//! destructors included, takes no lock of its own.
+//! takes it for you; see that class.
 //!
 //! HDF5 tears down from atexit handlers outside this lock, so a process must
 //! not exit while any HDF5 call is in progress.

@@ -426,7 +426,7 @@ COPY test_biom_basic TO '{TEST_DIR}/made_after_prepare_tmp.biom' (FORMAT BIOM);
 statement error
 EXECUTE biom_tmp_file;
 ----
-Invalid Input Error: COPY FORMAT BIOM never replaces its target, so it takes no USE_TMP_FILE
+<REGEX>:Invalid Input Error: COPY FORMAT BIOM: cannot write '.*made_after_prepare_tmp\.biom' with USE_TMP_FILE true: BIOM never replaces its target.*
 
 query TTR
 SELECT feature_id, sample_id, value FROM read_biom('{TEST_DIR}/made_after_prepare_tmp.biom') ORDER BY ALL;
@@ -438,7 +438,7 @@ Feature2	Sample1	3.0
 statement error
 COPY test_biom_single TO '{TEST_DIR}/tmp_file_refused.biom' (FORMAT BIOM, USE_TMP_FILE true);
 ----
-Invalid Input Error: COPY FORMAT BIOM never replaces its target, so it takes no USE_TMP_FILE
+<REGEX>:Invalid Input Error: COPY FORMAT BIOM: cannot write '.*tmp_file_refused\.biom' with USE_TMP_FILE true: BIOM never replaces its target.*
 
 query I
 SELECT count(*) FROM glob('{TEST_DIR}/*tmp_file_refused.biom');
