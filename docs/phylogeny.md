@@ -337,7 +337,7 @@ Resolve phylogenetic placements into a reference tree, returning a fully resolve
 
 **Parameters:**
 - `tree_table` (VARCHAR): Name of a table or view containing tree data in `read_newick` schema (requires `node_index` and `parent_index` columns; `name`, `branch_length`, `edge_id` are optional)
-- `placements_table` (VARCHAR): Name of a table or view containing placement data (requires `fragment_id`, `edge_id`, `like_weight_ratio`, `distal_length`, `pendant_length` columns)
+- `placements_table` (VARCHAR): Name of a table or view containing placement data: `fragment_id` (VARCHAR, BIGINT or UUID, as a `read_id`, so `place_krepp`'s `fragment` of any id type can be used; the placed tip is named with its text), `edge_id` (BIGINT, INTEGER, UBIGINT or UINTEGER), and `like_weight_ratio`, `distal_length` and `pendant_length` (each DOUBLE or FLOAT)
 
 **Output schema:** Same as [`read_newick`](reading.md#newick) (without filepath):
 - `node_index` (BIGINT): 0-based index of node in resolved tree
@@ -351,7 +351,7 @@ Resolve phylogenetic placements into a reference tree, returning a fully resolve
 - Reads tree data from the tree table and builds a `NewickTree`
 - Reads placements and inserts each fragment as a new tip on the specified edge
 - Each placement creates 2 new nodes: an internal node (splitting the edge) and a fragment tip
-- Deduplicates placements by `fragment_id` (keeps highest `like_weight_ratio`, then lowest `pendant_length`)
+- Deduplicates placements by `fragment_id`, preferring the higher `like_weight_ratio` and, between ratios within 1e-9 of each other, the lower `pendant_length`; the kept placement is not always the one with the highest ratio (see Reproducibility below)
 - Multiple placements on the same edge are sorted by `distal_length` and inserted as a chain
 - Preserves original tip-to-tip distances in the tree
 - Works with both tables and views for either parameter
@@ -370,7 +370,7 @@ rows each within tolerance of the next walks the pass down to the lowest
 `pendant_length` in the chain, which may sit outside tolerance of the maximum.
 
 Edge grouping and chain order are then keyed on the data itself — edges in
-`edge_id` order, placements within an edge by `distal_length` then `fragment_id`
+`edge_id` order, placements within an edge by `distal_length` then `fragment_id`'s text
 — rather than on `std::unordered_map` iteration, whose order is unspecified and
 varies with insertion order and standard-library implementation. The
 `fragment_id` tiebreak matters because a placer reporting one position per edge
@@ -422,7 +422,7 @@ WHERE is_tip = true;
 **Error conditions:**
 - Tree table or placements table does not exist
 - Tree table missing required `node_index` or `parent_index` columns
-- Placements table missing required columns (`fragment_id`, `edge_id`, `like_weight_ratio`, `distal_length`, `pendant_length`)
+- Placements table missing required columns (`fragment_id`, `edge_id`, `like_weight_ratio`, `distal_length`, `pendant_length`), or a column of another type than listed above, when the query is planned and again when the placements are read
 - Placement references an `edge_id` not present in the tree
 - `distal_length` exceeds the edge's branch length
 - Negative `distal_length` or `pendant_length`
