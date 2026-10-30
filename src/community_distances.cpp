@@ -1,6 +1,5 @@
 #include "community_distances.hpp"
-
-#include <Eigen/Core>
+#include "community_distances_gram.hpp"
 
 #include <algorithm>
 #include <array>
@@ -8,8 +7,14 @@
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <thread>
+
+// This file is built with -ffp-contract=off, so Eigen stays out (CMakeLists.txt).
+#ifdef EIGEN_WORLD_VERSION
+#error "community_distances.cpp must not include Eigen; the product is in community_distances_gram.cpp"
+#endif
 
 namespace miint {
 
@@ -364,49 +369,37 @@ double MorisitaHornFromMoments(double dot, double sum_i, double sum_j, double ss
 // never formed, which is the whole point of caching it.
 std::vector<double> CondensedViaGram(const double *M, uint32_t n, uint32_t f, Metric m, unsigned n_threads,
                                      uint32_t n_cached_tail, bool operand_prebinarized = false) {
-	using RowMajor = Eigen::Matrix<double, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>;
-
 	// Jaccard's operand is the binary indicator, and presence is `> 0.0` -- the same
 	// test the merge uses, so a negative cell counts as ABSENT in both. A caller that
 	// materialized the operand itself can binarize while doing so and say so, which
 	// saves holding a SECOND n x f matrix; the jaccard branch below reads only the Gram
 	// and its diagonal, never the raw values, so a binarized operand loses it nothing.
-	RowMajor binary;
+	std::unique_ptr<double[]> binary;
 	const double *operand = M;
 	if (m == Metric::Jaccard && !operand_prebinarized) {
-		binary.resize(n, f);
+		binary.reset(new double[static_cast<size_t>(n) * f]);
 		for (uint32_t i = 0; i < n; ++i) {
 			const double *xi = M + static_cast<size_t>(i) * f;
+			double *bi = binary.get() + static_cast<size_t>(i) * f;
 			for (uint32_t k = 0; k < f; ++k) {
-				binary(i, k) = xi[k] > 0.0 ? 1.0 : 0.0;
+				bi[k] = xi[k] > 0.0 ? 1.0 : 0.0;
 			}
 		}
-		operand = binary.data();
+		operand = binary.get();
 	}
-	const Eigen::Map<const RowMajor> X(operand, n, f);
 
 	// Only the lower triangle is ever read (pair (i,j) with j > i reads S(j,i)), so
-	// only the lower triangle is formed. With a cached tail the product splits into
-	// the head triangle and the tail x head rectangle, leaving the tail's own
-	// triangle uncomputed.
-	// Uninitialized, not Zero(n, n): the strict upper triangle is never written by the
+	// only the lower triangle is formed (CommunityDistancesGramLower).
+	// Uninitialized, not zeroed: the strict upper triangle is never written by the
 	// product and never read by the loops below (they take S(j,i) with j > i, and the
 	// diagonal), so zeroing it is half an n x n memset and -- worse -- half an n x n of
-	// first-touch RSS. `triangularView<Lower>() = product` zeros only the triangle it
-	// writes and dispatches to the same kernel with the same blocking as rankUpdate, so
-	// the values are bit-identical.
-	Eigen::MatrixXd S(n, n);
+	// first-touch RSS.
+	std::unique_ptr<double[]> gram(new double[static_cast<size_t>(n) * n]);
+	CommunityDistancesGramLower(operand, n, f, n_cached_tail, gram.get());
+	auto S = [&](uint32_t row, uint32_t col) { // column-major, as Eigen wrote it
+		return gram[static_cast<size_t>(col) * n + row];
+	};
 	const uint32_t head = n - n_cached_tail;
-	if (n_cached_tail == 0) {
-		S.triangularView<Eigen::Lower>() = X * X.transpose();
-	} else if (head > 0) {
-		// Reached only when n_cached_tail != 0 (the branch above takes 0), so the tail
-		// rectangle is mandatory here, not optional. `head > 0` is defensive: the sparse
-		// entry point returns early when the whole block is cached, so a zero head does
-		// not arrive from there.
-		S.topLeftCorner(head, head).triangularView<Eigen::Lower>() = X.topRows(head) * X.topRows(head).transpose();
-		S.bottomLeftCorner(n_cached_tail, head).noalias() = X.bottomRows(n_cached_tail) * X.topRows(head).transpose();
-	}
 
 	// The Gram diagonal already holds Sum_k x_k^2 for euclidean and the presence
 	// count for jaccard, so neither needs its own pass. Only morisita's Sum_k x_k

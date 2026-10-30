@@ -225,6 +225,7 @@ list(
   src/cluster_upgma_function.cpp
   src/community_distances.cpp
   src/community_distances_function.cpp
+  src/community_distances_gram.cpp
   src/compress_intervals.cpp
   src/compute_coverage_depth.cpp
   src/compute_msa_consensus.cpp
@@ -388,10 +389,12 @@ list(
   third_party/microtar/microtar.c)
 
 # The sparse and dense distance kernels must round every multiply-add the same
-# way to stay bit-identical (community_distances.hpp). Left to contract, clang
-# on arm64 fused the sparse merge's into FMAs but not the vectorized dense
-# loop's. Source properties are directory-scoped, so this reaches `tests` too.
-# MSVC gets no -march from DuckDB, and baseline x64 has no FMA.
+# way to stay bit-identical (community_distances.hpp), and contraction lets the
+# compiler fuse a scalar loop's into FMAs but not a vectorized loop's. The file
+# must not include Eigen: Eigen's templates are shared with other files, and the
+# linker would keep one copy, built either way, for all of them. Its product is
+# in community_distances_gram.cpp. MSVC-style compilers are skipped: DuckDB
+# gives cl.exe no -march, and baseline x64 has no FMA.
 if(NOT MSVC)
   set_source_files_properties(src/community_distances.cpp
                               PROPERTIES COMPILE_OPTIONS -ffp-contract=off)
@@ -415,6 +418,7 @@ list(
   src/cluster_kmeans.cpp
   src/cluster_upgma.cpp
   src/community_distances.cpp
+  src/community_distances_gram.cpp
   src/CoverageDepthCalculator.cpp
   src/CumulativeCoverageAccumulator.cpp
   src/deblur.cpp
