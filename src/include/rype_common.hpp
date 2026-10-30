@@ -22,6 +22,7 @@
 #include "duckdb/storage/buffer_manager.hpp"
 
 #include <algorithm>
+#include <optional>
 #include <string>
 #include <vector>
 #include "miint_named_parameter.hpp"
@@ -154,21 +155,43 @@ inline void AddRypeSharedNamedParameters(TableFunction &tf) {
 	AddNamedParameter(tf, "debug", LogicalType::BOOLEAN);
 }
 
-//! Ask RYpe to size a classification batch, and report the numbers when asked.
+//! The score at or above which rype_classify reports a match, and rype_filter
+//! drops a read, unless `threshold` says otherwise.
+constexpr double RYPE_DEFAULT_THRESHOLD = 0.1;
+
+//! The `threshold` named parameter of rype_classify and rype_filter, which must
+//! agree on it: RYPE_DEFAULT_THRESHOLD when it is absent or NULL.
+inline double ParseRypeThreshold(const TableFunctionBindInput &input) {
+	auto param = input.named_parameters.find("threshold");
+	if (param == input.named_parameters.end() || param->second.IsNull()) {
+		return RYPE_DEFAULT_THRESHOLD;
+	}
+	const double threshold = param->second.GetValue<double>();
+	// Written so that NaN fails it too.
+	if (!(threshold >= 0.0 && threshold <= 1.0)) {
+		throw BinderException("threshold must be between 0.0 and 1.0");
+	}
+	return threshold;
+}
+
+//! The text of an error RYpe reported, as rype_get_last_error or an Arrow
+//! stream's get_last_error gives it; either can give none.
+inline const char *RypeErrorText(const char *err) {
+	return err ? err : "unknown error";
+}
+
+//! Ask RYpe to size a classification batch within `memory_budget`.
 //!
 //! Wraps rype_calculate_batch_config rather than rype_recommend_batch_size
 //! because it returns the same batch_size plus the memory estimates behind it.
-//! Those estimates were the missing signal in #204/#199: shard loading is ~99.9%
-//! of a classify, so batch count is very nearly a direct multiplier on runtime,
-//! and nothing reached the caller. `debug` surfaces them through
-//! miint::EmitWarning, i.e. stderr and miint_warnings().
 //!
 //! `label` names the calling function in the message. `sizing_index` is the
 //! index whose shard sizes bound the estimate — for log-ratio, the larger of the
-//! two. Returns STANDARD_VECTOR_SIZE if RYpe cannot size a batch, warning either
-//! way since that fallback is not a considered choice.
-inline size_t ResolveRypeBatchSize(ClientContext &context, const char *label, const RypeIndex *sizing_index,
-                                   size_t avg_read_length, int is_paired, size_t memory_budget, bool debug) {
+//! two. Returns nothing if RYpe cannot size a batch, after warning that the caller
+//! falls back to STANDARD_VECTOR_SIZE reads, since that is not a considered choice.
+inline std::optional<RypeBatchConfig> CalculateRypeBatchConfig(ClientContext &context, const char *label,
+                                                               const RypeIndex *sizing_index, size_t avg_read_length,
+                                                               int is_paired, size_t memory_budget) {
 	// is_large_binary=1 tells RYpe to skip its 2 GiB batch cap. That is only sound
 	// because ConfigureRypeArrowExport pinned the connection to Arrow LargeBinary
 	// (i64 offsets) — the two must be changed together (#222).
@@ -176,11 +199,28 @@ inline size_t ResolveRypeBatchSize(ClientContext &context, const char *label, co
 	    rype_calculate_batch_config(sizing_index, avg_read_length, is_paired, memory_budget, 1);
 
 	if (config.batch_size == 0) {
-		const char *err = rype_get_last_error();
 		miint::EmitWarning(context, "%s: could not size a classification batch (%s); falling back to %llu reads", label,
-		                   err ? err : "unknown error", (unsigned long long)STANDARD_VECTOR_SIZE);
+		                   RypeErrorText(rype_get_last_error()), (unsigned long long)STANDARD_VECTOR_SIZE);
+		return std::nullopt;
+	}
+	return config;
+}
+
+//! The reads in one classification batch, as CalculateRypeBatchConfig sizes it,
+//! reporting the numbers when asked.
+//!
+//! Those estimates were the missing signal in #204/#199: shard loading is ~99.9%
+//! of a classify, so batch count is very nearly a direct multiplier on runtime,
+//! and nothing reached the caller. `debug` surfaces them through
+//! miint::EmitWarning, i.e. stderr and miint_warnings().
+inline size_t ResolveRypeBatchSize(ClientContext &context, const char *label, const RypeIndex *sizing_index,
+                                   size_t avg_read_length, int is_paired, size_t memory_budget, bool debug) {
+	const auto resolved =
+	    CalculateRypeBatchConfig(context, label, sizing_index, avg_read_length, is_paired, memory_budget);
+	if (!resolved) {
 		return STANDARD_VECTOR_SIZE;
 	}
+	const RypeBatchConfig &config = *resolved;
 
 	if (debug) {
 		// batch_count is documented as "always 1, reserved for
@@ -273,6 +313,16 @@ struct RypeSequenceTableInfo {
 	LogicalType id_type = LogicalType(LogicalTypeId::INVALID);
 };
 
+//! Refuse a sequence column RYpe cannot be handed as it is. RYpe's input stream
+//! reinterprets VARCHAR or BLOB as BLOB in place, which is sound only for the
+//! string physical type: anything else would hand RYpe a pointer that is not one.
+//! `column` is "sequence1" or "sequence2"; `relation` is the caller's name for it.
+inline void RequireRypeSequenceType(const LogicalType &type, const std::string &column, const std::string &relation) {
+	if (type.id() != LogicalTypeId::VARCHAR && type.id() != LogicalTypeId::BLOB) {
+		throw BinderException("Column '%s' in '%s' must be VARCHAR or BLOB, not %s", column, relation, type.ToString());
+	}
+}
+
 //! Validate that a table/view exists and has the required columns for RYpe
 //! functions. Reports whether the optional "sequence2" column is present and the
 //! id column's storage type. All RYpe functions require id_column and
@@ -280,27 +330,35 @@ struct RypeSequenceTableInfo {
 //! ids as strings internally and emits them back in their SQL storage type, so
 //! only the codec-supported set round-trips losslessly; anything else is
 //! rejected loud at bind, matching align_minimap2 and the rest of the id-aware
-//! tree.
+//! tree. The sequences RYpe reads (sequence2 only when `reads_sequence2`) must
+//! be VARCHAR or BLOB (RequireRypeSequenceType).
 inline RypeSequenceTableInfo ValidateSequenceTable(ClientContext &context, const std::string &table_name,
-                                                   const std::string &id_column) {
+                                                   const std::string &id_column, bool reads_sequence2) {
 	auto cols = GetTableColumnsLower(context, table_name);
 	auto &col_names = cols.names;
 
 	auto id_col_lower = StringUtil::Lower(id_column);
 	auto id_it = std::find(col_names.begin(), col_names.end(), id_col_lower);
-	bool has_seq1 = std::find(col_names.begin(), col_names.end(), "sequence1") != col_names.end();
-	bool has_seq2 = std::find(col_names.begin(), col_names.end(), "sequence2") != col_names.end();
+	auto seq1_it = std::find(col_names.begin(), col_names.end(), "sequence1");
+	auto seq2_it = std::find(col_names.begin(), col_names.end(), "sequence2");
+	const auto type_at = [&](vector<string>::const_iterator it) {
+		return cols.types[static_cast<size_t>(std::distance(col_names.cbegin(), it))];
+	};
 
 	if (id_it == col_names.end()) {
 		throw BinderException("Table '%s' missing required column '%s'", table_name, id_column);
 	}
-	if (!has_seq1) {
+	if (seq1_it == col_names.end()) {
 		throw BinderException("Table '%s' missing required column 'sequence1'", table_name);
+	}
+	RequireRypeSequenceType(type_at(seq1_it), "sequence1", table_name);
+	if (reads_sequence2 && seq2_it != col_names.end()) {
+		RequireRypeSequenceType(type_at(seq2_it), "sequence2", table_name);
 	}
 
 	RypeSequenceTableInfo info;
-	info.has_sequence2 = has_seq2;
-	info.id_type = cols.types[static_cast<size_t>(std::distance(col_names.begin(), id_it))];
+	info.has_sequence2 = seq2_it != col_names.end();
+	info.id_type = type_at(id_it);
 
 	if (!IsAllowedIdType(info.id_type)) {
 		throw BinderException("Column '%s' in table '%s' must be %s", id_column, table_name, AllowedIdTypeList());

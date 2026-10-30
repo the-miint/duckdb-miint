@@ -168,12 +168,14 @@ The main binaries that will be built are:
 ./build/release/test/unittest
 ./build/release/extension/miint/miint.duckdb_extension
 ./build/release/extension/miint/tests
+./build/release/extension/miint/tests_duckdb
 ```
 
 - `duckdb` is the binary for the DuckDB shell with the extension code automatically loaded.
 - `unittest` is the DuckDB test runner with the extension linked in (for SQL logic tests).
 - `miint.duckdb_extension` is the loadable binary as it would be distributed.
 - `tests` is the Catch2 C++ unit test runner.
+- `tests_duckdb` runs the C++ tests that need a running DuckDB.
 
 ## Running the extension
 To run the extension code, simply start the shell with `./build/release/duckdb`.

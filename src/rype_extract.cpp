@@ -77,7 +77,8 @@ static unique_ptr<RypeExtractData> BindExtraction(ClientContext &context, TableF
 	// Capture the id column's storage type so read_id mirrors it on output
 	// (BIGINT/UUID/VARCHAR) instead of always VARCHAR. Extraction is single-end,
 	// so has_sequence2 is irrelevant here.
-	data->id_type = ValidateSequenceTable(context, data->sequence_table, data->id_column).id_type;
+	data->id_type =
+	    ValidateSequenceTable(context, data->sequence_table, data->id_column, /*reads_sequence2=*/false).id_type;
 
 	return data;
 }
@@ -179,8 +180,8 @@ static void ExecuteExtraction(RypeExtractGlobalState &gstate, RypeExtractLocalSt
 
 		auto wrapper = make_shared_ptr<ArrowArrayWrapper>();
 		if (gstate.output_stream.get_next(&gstate.output_stream, &wrapper->arrow_array) != 0) {
-			const char *err = gstate.output_stream.get_last_error(&gstate.output_stream);
-			throw IOException("Error getting next batch from RYpe: %s", err ? err : "unknown error");
+			throw IOException("Error getting next batch from RYpe: %s",
+			                  RypeErrorText(gstate.output_stream.get_last_error(&gstate.output_stream)));
 		}
 
 		if (!wrapper->arrow_array.release) {
@@ -270,13 +271,12 @@ unique_ptr<GlobalTableFunctionState> RypeExtractMinimizerSetTableFunction::InitG
 	int result = rype_extract_minimizer_set_arrow(&gstate->input_stream->stream, bind_data.k, bind_data.w,
 	                                              bind_data.salt, &gstate->output_stream);
 	if (result != 0) {
-		const char *err = rype_get_last_error();
-		throw IOException("RYpe minimizer set extraction failed: %s", err ? err : "unknown error");
+		throw IOException("RYpe minimizer set extraction failed: %s", RypeErrorText(rype_get_last_error()));
 	}
 
 	if (gstate->output_stream.get_schema(&gstate->output_stream, &gstate->output_schema) != 0) {
-		const char *err = gstate->output_stream.get_last_error(&gstate->output_stream);
-		throw IOException("Failed to get RYpe output schema: %s", err ? err : "unknown error");
+		throw IOException("Failed to get RYpe output schema: %s",
+		                  RypeErrorText(gstate->output_stream.get_last_error(&gstate->output_stream)));
 	}
 
 	ArrowTableFunction::PopulateArrowTableSchema(context, gstate->arrow_table, gstate->output_schema);
@@ -349,13 +349,12 @@ RypeExtractStrandMinimizersTableFunction::InitGlobal(ClientContext &context, Tab
 	int result = rype_extract_strand_minimizers_arrow(&gstate->input_stream->stream, bind_data.k, bind_data.w,
 	                                                  bind_data.salt, &gstate->output_stream);
 	if (result != 0) {
-		const char *err = rype_get_last_error();
-		throw IOException("RYpe strand minimizer extraction failed: %s", err ? err : "unknown error");
+		throw IOException("RYpe strand minimizer extraction failed: %s", RypeErrorText(rype_get_last_error()));
 	}
 
 	if (gstate->output_stream.get_schema(&gstate->output_stream, &gstate->output_schema) != 0) {
-		const char *err = gstate->output_stream.get_last_error(&gstate->output_stream);
-		throw IOException("Failed to get RYpe output schema: %s", err ? err : "unknown error");
+		throw IOException("Failed to get RYpe output schema: %s",
+		                  RypeErrorText(gstate->output_stream.get_last_error(&gstate->output_stream)));
 	}
 
 	ArrowTableFunction::PopulateArrowTableSchema(context, gstate->arrow_table, gstate->output_schema);

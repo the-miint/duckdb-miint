@@ -272,6 +272,58 @@ statement ok
 DROP TABLE ref_null_length;
 
 # =============================================================================
+# REFERENCE_LENGTHS types are checked when the table is read
+# =============================================================================
+
+# They are checked against the types the read returns. A relation's types can change after the
+# COPY is planned with no change to the catalog, and a prepared COPY is then not bound again: here
+# a view over a CSV file.
+statement ok
+COPY ref_table TO '{TEST_DIR}/changing_refs.csv';
+
+statement ok
+CREATE VIEW csv_refs AS SELECT * FROM read_csv('{TEST_DIR}/changing_refs.csv');
+
+statement ok
+PREPARE copy_csv_refs AS
+COPY sam_test TO '{TEST_DIR}/csv_refs.sam' (FORMAT SAM, REFERENCE_LENGTHS 'csv_refs');
+
+# A name that becomes a type ids do not take is refused before it reaches the id decoder,
+# where it would be an internal error that invalidates the database.
+statement ok
+COPY (SELECT 4.5 AS name, length FROM ref_table) TO '{TEST_DIR}/changing_refs.csv';
+
+statement error
+EXECUTE copy_csv_refs;
+----
+<REGEX>:Invalid Input Error: First column of reference table 'csv_refs' must be VARCHAR, BIGINT, or UUID \(reference name\).*
+
+# A length that is no longer an integer is refused the same way.
+statement ok
+COPY (SELECT name, 1.5 AS length FROM ref_table) TO '{TEST_DIR}/changing_refs.csv';
+
+statement error
+EXECUTE copy_csv_refs;
+----
+<REGEX>:Invalid Input Error: Second column of reference table 'csv_refs' must be an integer type \(reference length\).*
+
+# Valid again, the COPY writes: the catalog's types for the view lag behind the file, so a check
+# against them would refuse it.
+statement ok
+COPY ref_table TO '{TEST_DIR}/changing_refs.csv';
+
+statement ok
+EXECUTE copy_csv_refs;
+
+query I
+SELECT count(*) = (SELECT count(*) FROM sam_test) FROM read_sam('{TEST_DIR}/csv_refs.sam');
+----
+true
+
+statement ok
+DROP VIEW csv_refs;
+
+# =============================================================================
 # View Support: REFERENCE_LENGTHS can be a view
 # =============================================================================
 

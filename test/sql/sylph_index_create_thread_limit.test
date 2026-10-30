@@ -18,7 +18,7 @@ statement ok
 CREATE TABLE refs AS
   SELECT * FROM read_fastx('data/sylph/tiny_refs/*.fasta.gz', include_filepath := true);
 
-# threads := 2 also leaves a builder that no thread filled, which the merge must take as empty.
+# threads := 2 asks for a second thread, which cannot start.
 query I
 SELECT num_genomes
   FROM sylph_index_create(

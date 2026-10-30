@@ -100,6 +100,7 @@
 #include <read_mzxml.hpp>
 #include <rype_classify.hpp>
 #include <rype_extract.hpp>
+#include <rype_filter.hpp>
 #include <rype_index_create.hpp>
 #include <rype_log_ratio.hpp>
 #include <sc_fit_function.hpp>
@@ -328,9 +329,18 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// reaches the multi-batch path without a quarter-gigabyte fixture.
 	ena_db_config.AddExtensionOption(
 	    "miint_rype_arrow_batch_bytes",
-	    "Byte ceiling on one Arrow record batch's sequence payload in rype_classify / rype_log_ratio / "
-	    "rype_extract_*. 0 disables the ceiling, restoring a single unbounded batch. Default 256 MiB.",
+	    "Byte ceiling on one Arrow record batch's sequence payload in the RYpe functions that read a relation: "
+	    "rype_classify, rype_filter, rype_log_ratio and rype_extract_*. 0 disables the ceiling, restoring a single "
+	    "unbounded batch. Default 256 MiB.",
 	    LogicalType::BIGINT, Value::BIGINT(NumericCast<int64_t>(RYPE_ARROW_BATCH_BYTES)));
+
+	// Rows per rype_filter group, each group one RYpe call. 0 sizes groups from the
+	// memory budget. Tests set it to make groups of one row, or groups that end
+	// inside a scan chunk.
+	ena_db_config.AddExtensionOption("miint_rype_filter_group_rows",
+	                                 "Rows per rype_filter group, each classified by one RYpe call. 0 (the default) "
+	                                 "sizes groups from the memory budget.",
+	                                 LogicalType::BIGINT, Value::BIGINT(0));
 
 	ScalarFunction version_func("miint_version", {}, LogicalType::VARCHAR, MiintVersionFunction);
 	loader.RegisterFunction(version_func);
@@ -566,6 +576,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	MIINTMacros::Register(loader);
 
 	RypeClassifyTableFunction::Register(loader);
+	RypeFilterTableFunction::Register(loader);
 	RypeExtractMinimizerSetTableFunction::Register(loader);
 	RypeExtractStrandMinimizersTableFunction::Register(loader);
 	RypeLogRatioTableFunction::Register(loader);

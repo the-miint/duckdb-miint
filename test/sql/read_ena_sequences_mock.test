@@ -69,3 +69,33 @@ query I
 SELECT count(*) FROM read_ena_sequences('ERR9999999', verify_md5 => false);
 ----
 20939
+
+# With more than one run, a run that fails the md5 check is skipped rather than raised; its rows
+# were already emitted. The warning gives the check's own message.
+query II
+SELECT run_accession, count(*)
+FROM read_ena_sequences(['ERR1074767', 'ERR9999999'])
+GROUP BY ALL ORDER BY ALL;
+----
+ERR1074767	20939
+ERR9999999	20939
+
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE '%run ''ERR9999999'' failed integrity verification at completion (read_ena_sequences: md5 mismatch for %';
+----
+true
+
+# A correlated call warns the same way when a run fails the check at its end.
+query I
+SELECT count(*)
+FROM (VALUES ('ERR9999999')) r(run_accession),
+     LATERAL (SELECT read_id FROM read_ena_sequences(r.run_accession)) seq;
+----
+20939
+
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE '%skipped run ''ERR9999999''%finish/transfer completion failed: read_ena_sequences: md5 mismatch for %';
+----
+true

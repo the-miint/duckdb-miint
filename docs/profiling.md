@@ -108,11 +108,12 @@ Sketching is done from in-memory sequence bytes via the same sylph 1.0.0-miint R
 - `output_path` (VARCHAR, positional): Destination path. Overwritten if it exists. When `two_stage` is not given, a `.syl2db` suffix selects the two-stage format.
 - `two_stage` (BOOLEAN, default = inferred from the `output_path` suffix): Write a two-stage `.syl2db` database instead of a plain `.syldb`. An explicit value wins over the suffix, as `FORMAT` does for `COPY`; readers detect the format from the file, not the name.
 - `genome_id` (VARCHAR, **required**): Name of the grouping column. One `GenomeSketch` is produced per distinct value; all contigs sharing a value are merged into that genome (matching `sylph sketch`'s default whole-file behavior). A natural choice is the `filepath` column from `read_fastx(..., include_filepath := true)` — one genome per reference FASTA.
-- `order_by` (VARCHAR, default `read_id`): Column used to order a genome's contigs before sketching. Pass `sequence_index` to reproduce original FASTA order (and thus byte-parity with `sylph sketch`).
+- `order_by` (VARCHAR, default `sequence_index`): Integer column that orders the pieces of a contig stored across several rows before they are joined, and picks each genome's `first_contig_name`: its contig with the lowest value. The default is the column `read_fastx` adds, so for a genome from one FASTA file the first contig is the first in the file, as in `sylph sketch`; a source without it names another column. Among contigs that share the lowest value (a genome built from several files, where `sequence_index` restarts in each), the one whose name sorts last is picked. Values are cast to BIGINT as each genome is read, and one that does not cast (a non-numeric `read_id`, for example) fails the build with an Invalid Input Error naming the genome and giving DuckDB's Conversion Error.
 - `k` (INTEGER, default 31): k-mer size. Only 21 and 31 are supported. Must match the `k` used at profile time.
 - `c` (INTEGER, default 200): FracMinHash subsampling rate. Must be ≥ the `c` of any sample sketch profiled against the database.
 - `min_spacing` (INTEGER, default 30): Minimum k-mer spacing; thins densely-seeded regions.
 - `pseudotax` (BOOLEAN, default true): Track min-spacing-dropped k-mers so the database supports pseudotax/profiling mode. Set false for query-only databases. Not allowed with a two-stage output, which always needs profiling k-mers.
+- `threads` (INTEGER, default 0): Number of genomes sketched at once, each on its own thread. 0 uses DuckDB's `threads` setting; another value sets the count for this call only, above or below that setting, without changing it. The count is capped at the number of genomes.
 - `screen_c` (INTEGER, default 3000, two-stage only): FracMinHash rate of the stage-1 screen index. Must be ≥ `c`; larger is a smaller, faster, more permissive screen. Matches `--screen-c` on `sylph convert-db-two-screen`.
 - `min_sparse_kmers` (INTEGER, default 50, two-stage only): Minimum screen k-mers per genome; genomes that would fall short at `screen_c` get a denser, genome-specific screen rate. Matches `--min-sparse-kmers`.
 
@@ -128,9 +129,9 @@ Sketching is done from in-memory sequence bytes via the same sylph 1.0.0-miint R
 
 **Behavior:**
 
-- **Grouping:** genomes are enumerated as the distinct non-NULL `genome_id` values (compared as VARCHAR), ordered so the `.syldb`'s genome ordering is reproducible. Within each genome, contigs are fed in `order_by` order.
-- **Memory:** one genome's contigs are streamed and sketched at a time; only the finalized (compact) genome sketches accumulate before the single write at the end.
-- **Single-threaded:** the build runs as a synchronous side effect; the status row is emitted once it completes.
+- **Grouping:** genomes are the distinct non-NULL `genome_id` values. With more than one thread, the order of the genomes in the written file can differ from run to run; their sketches do not. Within each genome, rows sharing a contig name are joined into one contig in `order_by` order.
+- **Memory:** each thread reads and sketches one genome's contigs at a time; only the finalized (compact) genome sketches accumulate before the single write at the end.
+- **Synchronous:** the build runs as a side effect of the query; the status row is emitted once it completes.
 
 **Examples:**
 
@@ -154,6 +155,7 @@ ORDER BY taxonomic_abundance DESC;
 
 - Error if `source_table` does not exist or is missing required columns (`read_id`, `sequence1`).
 - Error if the `genome_id` parameter is not supplied, or if the `genome_id` / `order_by` column does not exist.
+- Error if an `order_by` value does not cast to BIGINT, naming the genome being read (when several genomes fail, the first in `genome_id` order); error if `threads` is negative.
 - Error if `k` is not 21 or 31.
 - Error if the output is two-stage and `pseudotax := false`, or `screen_c` < `c`; error if `screen_c` / `min_sparse_kmers` are given for a plain `.syldb` output.
 - Error if no non-NULL `genome_id` values are found.

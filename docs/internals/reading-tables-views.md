@@ -94,17 +94,17 @@ pass a connection they created a TEMP view on, so it deliberately does not inher
 
 ## Helper connections at EXECUTION time
 
-Most callers open a helper connection during `Bind`. It also works from `InitGlobal`
-(`DeblurInitGlobal`) and from `Execute` — the progressive PCoA functions run their whole
-wave-fill (`CREATE TEMPORARY TABLE`, an `Appender`, and three large joins) from inside
-`ProgressivePcoaExecute`, once per wave, so a run can emit rows as it goes instead of
-computing everything up front. That means the queries run on a task-scheduler worker
-thread rather than the client thread, and it is fine for the same reason the recipe works
-at all: the helper has its own `ClientContext`, so there is no re-entrant lock, and a
-nested query drives its own execution on the calling thread rather than waiting for a free
-worker. Verified by `test/sql/temp_table_resolution_unifrac.test`, which reads a TEMP
-distance table through that path and then asserts no `_miint_wave_%` staging table
-survived.
+A helper connection works in `Bind`, for a schema probe, and at execution, where the rows
+are read: from `InitGlobal` (`DeblurInitGlobal`) and from `Execute` — the progressive PCoA
+functions run their whole wave-fill (`CREATE TEMPORARY TABLE`, an `Appender`, and three
+large joins) from inside `ProgressivePcoaExecute`, once per wave, so a run can emit rows
+as it goes instead of computing everything up front. That means the queries run on a
+task-scheduler worker thread rather than the client thread, and it is fine for the same
+reason the recipe works at all: the helper has its own `ClientContext`, so there is no
+re-entrant lock, and a nested query drives its own execution on the calling thread rather
+than waiting for a free worker. Verified by `test/sql/temp_table_resolution_unifrac.test`,
+which reads a TEMP distance table through that path and then asserts no `_miint_wave_%`
+staging table survived.
 
 Two things to keep in mind if you do this:
 
@@ -199,12 +199,16 @@ before trusting it. `test/sql/rype_single_read.test` documents both forms.
 | `align_minimap2_sharded` | query once; routing once in the scan, plus a separate bind-time scan for shard discovery | fixed, remedy (2) on both relations |
 | `align_bowtie2_sharded` | once per shard | fixed by remedy (3) — fails loud |
 | `rype_classify`, `rype_log_ratio`, `rype_extract_*` | once | fixed, remedy (1) — guarded by `test/sql/rype_single_read.test` |
+| `rype_filter` | once | remedy (1) by design: the scan's chunks are held for minimap2 and the output, never re-read — guarded by `test/sql/rype_filter.test` and `test/sql/rype_filter_minimap2.test` |
 | `align_sortmerna`, `align_sortmerna_rrna` | query once, streamed; `subject_table` once, materialized in InitGlobal by `ReadSubjectTable` | guarded by `test/sql/align_sortmerna_single_read.test` |
 | `per_sample_table_function` (`DiscoverSamples` + per-sample re-read) | once per sample | **exposed** — shared by `woltka_ogu`, `sylph_profile`, `detect_chimera_uchime`, `align_abpoa`, `consensus_abpoa`, `align_mafft`, `uchime_denovo`, `deblur`, `massql` |
 | `ena_upload_reads` | plan scan + per-sample scan | **exposed** |
 | sc: `fit_*`, `cross_validate_*`, `predict`, `predict_proba`, `shap` | counts once, streamed; `fit_*` and `cross_validate_*` also read the metadata once, materialized (one row per sample). Each after a `LIMIT 0` probe at bind | fixed, remedy (1) for the counts; guarded by `test/sql/sc_model_relation_reads.test` |
 | sc: model relation (`predict`, `predict_proba`, `shap`, `feature_importances`, `model_features`) | twice: once at bind for `feature_id_type`, plus `task` where it types the output (all but `feature_importances` and `model_features`); once at execution for the blob with those columns again | fixed by failing loud: execution compares the re-read columns with bind's and refuses a change, guarded by `test/sql/sc_model_relation_reads.test` |
 | `sourcetracker` (feature table via `ReadFeatureTable`, metadata via `ReadWideMetadata`) | once each, at execution | fixed — guarded by the volatile-view cases in `test/sql/sourcetracker.test` |
+| COPY FORMAT NEWICK `PLACEMENTS` and `tree_resolve_placement` (`ReadPlacementTable`) | once, at execution, materialized; `Bind` checks the schema only, and COPY NEWICK refuses multi-file output | fixed — the `EXPLAIN` and prepared-statement cases in `test/sql/copy_newick_placements.test` guard that no rows are read at planning; the prepared type-change cases there and in `test/sql/tree_resolve_placement.test` guard the read-time type check |
+| COPY FORMAT SAM/BAM `REFERENCE_LENGTHS` and `read_alignments`' `reference_lengths` (`ReadReferenceTable`, `ReadReferenceTableSortedByName` for COPY) | once, at execution; COPY SAM/BAM shares the read among its output files. `Bind` checks only that the relation exists | fixed — the prepared type-change cases in `test/sql/copy_sam.test` and `test/sql/read_alignments.test` guard the read-time type check; the partitioned, prepared and `IMPORT DATABASE` cases in `test/sql/copy_sam_sequence_data.test` guard one read per COPY |
+| COPY FORMAT SAM/BAM `SEQUENCE_DATA` (`ReadSequenceDataTable`) | once, at execution, shared among the COPY's output files; `Bind` checks only that the relation exists | fixed — the prepared type-change cases in `test/sql/copy_sam_sequence_data.test` guard the read-time type check, and its partitioned and prepared cases one read per COPY |
 | everything else taking a relation by name | unaudited | unknown |
 
 The per-sample family is the highest-value remaining target precisely because the
@@ -315,5 +319,5 @@ if (entry->type == CatalogType::TABLE_ENTRY) {
 - The caller's catalog **search path** (`SET search_path`) is not inherited either, so a bare name that resolves for the user through a non-default schema will not resolve on the helper connection.
 - **Session variables (`SET VARIABLE`, `getvariable()`) are not visible in the separate connection.** Views that use `getvariable()` will see NULL values. This is a fundamental limitation — each connection has its own session state. Document this in user-facing docs when relevant.
 - For most use cases (reading from persistent tables/views), this is fine
-- Read placements/references at bind time if possible, storing results in bind data to avoid issues during finalize
+- Read the relation's rows when the query runs, in `InitGlobal`, and check only its schema in `Bind` ([no work in `Bind`](architecture.md#no-work-in-bind)). A COPY format's `copy_to_initialize_global` runs once per output file, so a format that reads there reads the relation once for each file it opens, unless it shares the first read: COPY SAM/BAM keeps what its first file read in a `ClientContextState`, cleared in `QueryEnd`, which DuckDB calls when the query ends (`src/copy_sam.cpp`, `SAMCopyRelationsCache`). Key such a cache by the COPY's bind data *and* the statement's query number (`context.transaction.GetActiveQuery()`): a query can run several statements (`IMPORT DATABASE` runs every COPY in its `load.sql`), freeing each one's bind data before the next is planned, so the address alone can repeat within a query. COPY NEWICK refuses multi-file output (`PER_THREAD_OUTPUT`, `PARTITION_BY`, `ORDER_BY`) in `initialize_operator`, which DuckDB calls just after that read, so the first file's read still runs, and if it fails, its error is the one reported. Check the column types again when the rows are read: they can change after `Bind` with no change to the catalog (a view over a file whose detected types change), and a prepared statement is then not bound again. Check the types the read returns (`QueryResult::GetTypes()`), not the catalog's: a view's catalog types are those of its last binding, which lag behind such a file, so a check against them refuses valid rows and passes rows of the wrong type.
 - See `src/placement_table_reader.cpp` for a complete example

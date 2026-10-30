@@ -138,17 +138,18 @@ inline void EmitIdCell(Vector &out, idx_t row, const std::string &s, const Logic
 	}
 	if (id_type.id() == LogicalTypeId::BIGINT) {
 		auto out_data = FlatVector::GetDataMutable<int64_t>(out);
+		std::optional<int64_t> parsed;
 		try {
-			auto parsed = ::miint::ParseIdAsInt64(s);
-			if (parsed.has_value()) {
-				out_data[row] = *parsed;
-				validity.SetValid(row);
-			} else {
-				out_data[row] = 0;
-				validity.SetInvalid(row);
-			}
+			parsed = ::miint::ParseIdAsInt64(s);
 		} catch (const std::exception &e) {
 			throw InvalidInputException("EmitIdCell: cannot parse value '%s' as BIGINT: %s", s, e.what());
+		}
+		if (parsed.has_value()) {
+			out_data[row] = *parsed;
+			validity.SetValid(row);
+		} else {
+			out_data[row] = 0;
+			validity.SetInvalid(row);
 		}
 		return;
 	}

@@ -1,0 +1,64 @@
+# name: test/sql/read_ena_sequences_open_errors_mock.test
+# description: read_ena_sequences warns with the open error's own text when it cannot open a run's file
+# group: [sql]
+
+require httpfs
+
+require miint
+
+require-env ENA_WEBIN_MOCK_URL
+
+require-env MIINT_ENA_PORTAL_URL_BASE
+
+# The Portal search goes to the mock and is allowed; every other remote path is refused, so each
+# run's FASTQ open fails with DuckDB's Permission Error before any request is made. External access
+# cannot be turned back on, so these cases have a file of their own. Persistent secrets are off
+# because their directory would be refused too.
+statement ok
+SET allow_persistent_secrets = false;
+
+statement ok
+SET allowed_directories = ['{MIINT_ENA_PORTAL_URL_BASE}'];
+
+statement ok
+SET enable_external_access = false;
+
+# With more than one run, a run that cannot be opened is retried once, then skipped; with every
+# run skipped, the scan fails and names the first run's error.
+statement error
+SELECT count(*) FROM read_ena_sequences(['ERR1074767', 'ERR9999999']);
+----
+<REGEX>:.*every run failed \(2\): .*; first error: Cannot access file ".*" - file system operations are disabled by configuration.*
+
+# One warning per run for each attempt. The warnings are counted rather than matched once, as the
+# first attempt's is worded the same in the correlated call below.
+query I
+SELECT count(*) FROM miint_warnings()
+WHERE message LIKE '%failed to open (Cannot access file "%), retrying...';
+----
+2
+
+query I
+SELECT count(*) FROM miint_warnings()
+WHERE message LIKE '%failed on retry (Cannot access file "%), skipping';
+----
+2
+
+# A correlated call skips a run it cannot open, after the same retry, and returns no rows for it.
+query I
+SELECT count(*) FROM (VALUES ('ERR1074767')) r(run_accession),
+     LATERAL (SELECT read_id FROM read_ena_sequences(r.run_accession)) seq;
+----
+0
+
+query I
+SELECT count(*) FROM miint_warnings()
+WHERE message LIKE '%failed to open (Cannot access file "%), retrying...';
+----
+3
+
+query I
+SELECT count(*) FROM miint_warnings()
+WHERE message LIKE '%skipped run ''ERR1074767'' (from outer accession ''ERR1074767'') — open failed on retry: Cannot access file "%';
+----
+1

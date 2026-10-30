@@ -23,15 +23,16 @@ struct SequenceDataSchema {
 	bool has_qual2 = false;
 };
 
-// Validate that a table/view has the required read_fastx schema columns:
-// Required: read_id (VARCHAR), sequence1 (VARCHAR), qual1 (LIST(UTINYINT)).
-// Optional: sequence2 (VARCHAR), qual2 (LIST(UTINYINT)) — only needed for paired-end.
-// Throws BinderException on missing required columns or wrong types.
+// Check that a table/view has the read_fastx columns ReadSequenceDataTable needs (read_id,
+// sequence1, qual1) and report which paired-end columns (sequence2, qual2) it has.
+// Throws BinderException on a missing required column.
 SequenceDataSchema ValidateSequenceDataSchema(ClientContext &context, const std::string &table_name);
 
 // Read all sequence data from a table/view into memory, keyed by read_id.
 // Uses a separate Connection to avoid deadlocking the caller's context.
-// Throws on duplicate read_id, NULL read_id, or NULL sequence1.
+// Column types, checked on the types the read returns: read_id an id type (IsAllowedIdType; keyed
+// by its text), sequence1 and sequence2 VARCHAR, qual1 and qual2 LIST(UTINYINT).
+// Throws on duplicate read_id, NULL read_id, NULL sequence1, or a column of another type.
 SequenceDataMap ReadSequenceDataTable(ClientContext &context, const std::string &table_name);
 
 } // namespace duckdb

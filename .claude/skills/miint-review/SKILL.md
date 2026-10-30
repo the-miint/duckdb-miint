@@ -91,7 +91,8 @@ on this PR.
 
 Then apply the fixes and run what the change touches: rebuild (`bash build.sh`), each
 changed or affected SQL test file (`./build/release/test/unittest test/sql/<file>.test`),
-the C++ tests for a changed module (`./build/release/extension/miint/tests "[<tag>]"`),
+the C++ tests for a changed module (`./build/release/extension/miint/tests "[<tag>]"`, or
+`tests_duckdb` for the tests that open a DuckDB),
 and `make format-check` in the pinned environment (`CLAUDE.md`, "Formatting"). Run
 `MIINT_TEST_JOBS=8 bash run_tests.sh` (its SQL and C++ tests on eight workers) before the last
 round. Fix test failures before the next round, so it reads code that passes. Commit

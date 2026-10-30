@@ -1,0 +1,153 @@
+# name: test/sql/read_ena_sequences_resume_mock.test
+# description: read_ena_sequences resumes a connection that drops while a run opens or downloads under DuckDB's HTTP retry settings, and fails at once on an HTTP error status
+# group: [sql]
+
+require httpfs
+
+require miint
+
+require json
+
+require-env ENA_WEBIN_MOCK_URL
+
+require-env MIINT_ENA_PORTAL_URL_BASE
+
+# test/scripts/ena_webin_mock.py serves copies of ERR1074767's file (20939 reads)
+# whose ranged GETs are reset partway through the body: ERR9000001 at two offsets,
+# ERR9000002's mates at different offsets, ERR9000003 on every request. Waits are 1 ms so
+# the test is fast. Every retry here draws on one per-host retry quota, so the runs that
+# recover come before the ones that never do.
+statement ok
+SET http_retries = 8;
+
+statement ok
+SET http_retry_wait_ms = 1;
+
+statement ok
+SET http_retry_backoff = 2;
+
+statement ok
+SELECT * FROM read_text('{ENA_WEBIN_MOCK_URL}/_faults/reset');
+
+# Every read once and in order, with no skip warning; reading to the end also passes the
+# md5 check of the resumed byte stream.
+query IIII
+SELECT count(*), count(DISTINCT read_id), min(sequence_index), max(sequence_index)
+FROM read_ena_sequences('ERR9000001');
+----
+20939	20939	1	20939
+
+# The reads were ranged GETs, three of them cut, and none fell back to a full download.
+query III
+SELECT content::JSON->>'cuts', content::JSON->>'full', (content::JSON->>'ranged')::INT > 0
+FROM read_text('{ENA_WEBIN_MOCK_URL}/_faults/stats/ERR9000001.fastq.gz');
+----
+3	0	true
+
+# A paired run whose mates are cut at different offsets stays in lockstep: both mates are
+# the same file, so every pair's two records must be identical.
+query III
+SELECT count(*), count(DISTINCT read_id), count(*) FILTER (sequence1 <> sequence2 OR qual1 <> qual2)
+FROM read_ena_sequences('ERR9000002');
+----
+20939	20939	0
+
+query IIII
+SELECT parse_filename(filename), content::JSON->>'cuts', content::JSON->>'full', (content::JSON->>'ranged')::INT > 0
+FROM read_text(['{ENA_WEBIN_MOCK_URL}/_faults/stats/ERR9000002_1.fastq.gz',
+                '{ENA_WEBIN_MOCK_URL}/_faults/stats/ERR9000002_2.fastq.gz'])
+ORDER BY 1;
+----
+ERR9000002_1.fastq.gz	3	0	true
+ERR9000002_2.fastq.gz	2	0	true
+
+query I
+SELECT count(*) FROM miint_warnings()
+WHERE message LIKE '%ERR900000%';
+----
+0
+
+# A HEAD (the size check when a file opens) reset three times is retried the same way: the
+# run opens on the fourth try and every read arrives, with no open-failure warning.
+query II
+SELECT count(*), count(DISTINCT read_id) FROM read_ena_sequences('ERR9000006');
+----
+20939	20939
+
+query III
+SELECT content::JSON->>'cuts', content::JSON->>'full', (content::JSON->>'ranged')::INT > 0
+FROM read_text('{ENA_WEBIN_MOCK_URL}/_faults/stats/ERR9000006.fastq.gz');
+----
+3	0	true
+
+query I
+SELECT count(*) FROM miint_warnings()
+WHERE message LIKE '%ERR9000006%';
+----
+0
+
+# A server that never recovers: the retries are bounded, then the run is skipped,
+# which a single-run scan raises.
+statement error
+SELECT count(*) FROM read_ena_sequences('ERR9000003');
+----
+every run failed
+
+# The first attempt and eight retries for the read that keeps failing.
+query I
+SELECT content::JSON->>'cuts'
+FROM read_text('{ENA_WEBIN_MOCK_URL}/_faults/stats/ERR9000003.fastq.gz');
+----
+9
+
+# In a scan of several runs, the run is skipped with the mid-stream warning and the others
+# are read in full.
+query I
+SELECT count(*) FILTER (run_accession = 'ERR1074767')
+FROM read_ena_sequences(['ERR9000003', 'ERR1074767']);
+----
+20939
+
+query I
+SELECT count(*) >= 1 FROM miint_warnings()
+WHERE message LIKE '%ERR9000003%failed mid-stream%';
+----
+true
+
+# A HEAD that never succeeds is bounded too: nine tries per open, and the run is opened twice
+# before the scan gives up.
+statement error
+SELECT count(*) FROM read_ena_sequences('ERR9000007');
+----
+error for HTTP HEAD
+
+query I
+SELECT content::JSON->>'cuts'
+FROM read_text('{ENA_WEBIN_MOCK_URL}/_faults/stats/ERR9000007.fastq.gz');
+----
+18
+
+# An HTTP error status is the server's answer, not a dropped connection, so it is not retried:
+# a file gone partway (404) or changed since it opened (412 on its ETag) fails on the first
+# refusal.
+statement error
+SELECT count(*) FROM read_ena_sequences('ERR9000004');
+----
+<REGEX>:.*every run failed.*HTTP 404.*
+
+query I
+SELECT content::JSON->>'errors'
+FROM read_text('{ENA_WEBIN_MOCK_URL}/_faults/stats/ERR9000004.fastq.gz');
+----
+1
+
+statement error
+SELECT count(*) FROM read_ena_sequences('ERR9000005');
+----
+<REGEX>:.*every run failed.*changed after it was opened.*
+
+query I
+SELECT content::JSON->>'errors'
+FROM read_text('{ENA_WEBIN_MOCK_URL}/_faults/stats/ERR9000005.fastq.gz');
+----
+1

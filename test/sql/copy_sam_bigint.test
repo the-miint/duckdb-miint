@@ -203,3 +203,79 @@ COPY (SELECT
 ) TO '{TEST_DIR}/bad_mate.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_dummy');
 ----
 Column 'mate_reference' must be VARCHAR, BIGINT, or UUID
+
+# ---------------------------------------------------------------------------
+# REFERENCE_LENGTHS' name and SEQUENCE_DATA's read_id are ids, so they take
+# BIGINT too: a BIGINT-keyed reference or sequence table is matched against
+# the BIGINT reference and read_id columns with no cast in the query.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE ref_bigint_names AS
+SELECT 2001::BIGINT AS name, 10000 AS length
+UNION ALL SELECT 2002::BIGINT, 10000;
+
+statement ok
+CREATE TABLE seq_bigint_ids AS
+SELECT 1001::BIGINT AS read_id, repeat('A', 50) AS sequence1,
+       list_transform(range(50), lambda i: 30::UTINYINT) AS qual1;
+
+statement ok
+COPY result_all_bigint TO '{TEST_DIR}/bigint_names.sam'
+(FORMAT SAM, REFERENCE_LENGTHS 'ref_bigint_names', SEQUENCE_DATA 'seq_bigint_ids');
+
+query IIIT
+SELECT read_id, reference, mate_reference, sequence
+FROM read_alignments('{TEST_DIR}/bigint_names.sam', include_seq_qual=true);
+----
+1001	2001	2002	AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+
+# read_alignments takes them for a headerless file too
+statement ok
+COPY result_all_bigint TO '{TEST_DIR}/bigint_names_headerless.sam'
+(FORMAT SAM, INCLUDE_HEADER false, REFERENCE_LENGTHS 'ref_bigint_names');
+
+query II
+SELECT reference, mate_reference
+FROM read_alignments('{TEST_DIR}/bigint_names_headerless.sam', reference_lengths='ref_bigint_names');
+----
+2001	2002
+
+# @SQ follows the names' own order, numeric for BIGINT, so that `ORDER BY reference, position`
+# gives a coordinate-sorted file: 2 comes before 10, though '10' sorts before '2' as text, and -5,
+# signed, comes first.
+statement ok
+CREATE TABLE ref_numeric_names AS SELECT * FROM (VALUES (10::BIGINT, 1000), (2::BIGINT, 1000), (-5::BIGINT, 1000), (1::BIGINT, 1000)) t(name, length);
+
+statement ok
+COPY (SELECT * FROM result_all_bigint WHERE false) TO '{TEST_DIR}/numeric_sq.sam'
+(FORMAT SAM, REFERENCE_LENGTHS 'ref_numeric_names');
+
+query T
+SELECT regexp_extract(line, 'SN:([^\t]+)', 1) AS sn
+FROM read_csv('{TEST_DIR}/numeric_sq.sam', delim='\x1f', header=false,
+              columns={'line':'VARCHAR'}, auto_detect=false, quote='', escape='')
+WHERE line LIKE '@SQ%';
+----
+-5
+1
+2
+10
+
+# Any other type is refused, naming the table.
+statement ok
+CREATE TABLE ref_integer_names AS SELECT 2001::INTEGER AS name, 10000 AS length;
+
+statement error
+COPY result_all_bigint TO '{TEST_DIR}/integer_names.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_integer_names');
+----
+First column of reference table 'ref_integer_names' must be VARCHAR, BIGINT, or UUID (reference name)
+
+statement ok
+CREATE TABLE seq_integer_ids AS SELECT 1001::INTEGER AS read_id, sequence1, qual1 FROM seq_bigint_ids;
+
+statement error
+COPY result_all_bigint TO '{TEST_DIR}/integer_ids.sam'
+(FORMAT SAM, REFERENCE_LENGTHS 'ref_bigint_names', SEQUENCE_DATA 'seq_integer_ids');
+----
+Column 'read_id' in sequence data table 'seq_integer_ids' must be VARCHAR, BIGINT, or UUID

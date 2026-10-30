@@ -178,13 +178,13 @@ SAM and BAM are written to local files only; a remote target (`s3://...`) is ref
 **Parameters:**
 - `INCLUDE_HEADER` (default: true): Include header with reference sequences
   - **Note:** BAM format requires `INCLUDE_HEADER=true` (headers are mandatory in BAM files)
-- `REFERENCE_LENGTHS` (VARCHAR, required if INCLUDE_HEADER=true): Table or view name containing reference sequences. Must have at least 2 columns: first column = reference name (VARCHAR), second column = reference length (INTEGER/BIGINT). Column names don't matter. Views are fully supported and can include computed columns. Duplicate reference names are collapsed, keeping the first occurrence.
+- `REFERENCE_LENGTHS` (VARCHAR, required if INCLUDE_HEADER=true): Table or view name containing reference sequences. Must have at least 2 columns: first column = reference name (VARCHAR, BIGINT or UUID, as `reference` takes, matched as its text (BIGINT in decimal, UUID in the lowercase hyphenated form)), second column = reference length (INTEGER/BIGINT). Column names don't matter. Views are fully supported and can include computed columns. Duplicate reference names are collapsed, keeping the first occurrence.
 
 **`@SQ` order, and how to write a coordinate-sorted BAM:**
 
-`@SQ` lines are emitted **sorted by reference name**, regardless of the order of rows in `REFERENCE_LENGTHS`. This matters because a reference's index in the `@SQ` list *is* its TID, and a BAM is coordinate-sorted by **TID**, not by reference name — so the header order determines what "sorted" means.
+`@SQ` lines are emitted **sorted by reference name**, in the name column's own order (numeric for BIGINT names), regardless of the order of rows in `REFERENCE_LENGTHS`. This matters because a reference's index in the `@SQ` list *is* its TID, and a BAM is coordinate-sorted by **TID**, not by reference name — so the header order determines what "sorted" means.
 
-Because the order is name-sorted, sorting your records the obvious way produces a genuinely coordinate-sorted file:
+Because the order is name-sorted, sorting your records the obvious way produces a genuinely coordinate-sorted file, as long as the name column and `reference` have the same type (a VARCHAR `reference` sorts `'10'` before `'2'`, a BIGINT name column puts 2 first) and VARCHAR names are compared with the default binary collation:
 
 ```sql
 COPY (SELECT * FROM aln ORDER BY reference, position)
@@ -205,6 +205,8 @@ With `INCLUDE_HEADER=false` no `@SQ` lines are written at all, so the ordering a
 - `COMPRESSION` (default: auto): Enable gzip compression for SAM (auto-detected from `.gz` extension); values as for the other text formats, [above](#writing-files). BAM is always BGZF-compressed: it accepts `'gzip'` or `'gz'`, in any case, and refuses any other value, which it would ignore; `COMPRESSION_LEVEL 0` writes its BGZF blocks uncompressed.
 - `COMPRESSION_LEVEL` (BAM, and gzip SAM): BGZF compression level 0-9 (default: 6). Higher = better compression, slower speed. Refused for uncompressed SAM, as for FASTQ, FASTA and NEWICK.
 - **Multithreaded compression:** BAM and gzip-SAM output compress in parallel, following DuckDB's thread count (`PRAGMA threads`). Record order is preserved and the output is byte-identical to single-threaded writing. (The speedup is smaller than for FASTQ/FASTA because per-record marshalling is serialized; only the BGZF compression is parallelized.)
+
+A COPY reads `REFERENCE_LENGTHS` and `SEQUENCE_DATA` once, when it runs, so a COPY that writes several files gives every file the same `@SQ` lines and the same sequences.
 
 **SAM Format Examples:**
 ```sql
@@ -274,7 +276,7 @@ The `SEQUENCE_DATA` parameter allows writing actual SEQ and QUAL fields into SAM
 This design avoids duplicating immutable sequence data across alignment records. The original FASTQ sequences are stored once and joined at write time.
 
 **Required columns in the SEQUENCE_DATA table:**
-- `read_id` (VARCHAR): Read identifier (must match alignment read_id values)
+- `read_id` (VARCHAR, BIGINT or UUID): Read identifier, matched as its text (BIGINT in decimal, UUID in the lowercase hyphenated form) against the alignment's read_id values, so a BIGINT or UUID read_id needs no cast
 - `sequence1` (VARCHAR): Forward-strand DNA sequence for read 1
 - `qual1` (LIST(UTINYINT)): Phred quality scores for read 1 (raw values 0-93, no ASCII offset)
 
@@ -488,9 +490,11 @@ Write query results to Newick phylogenetic tree format. Reconstructs a tree from
 - `parent_index` (BIGINT, nullable): Parent node's node_index (NULL for root)
 
 **Optional columns:**
-- `name` (VARCHAR): Node label
+- `name` (VARCHAR, BIGINT or UUID): Node label, written as its text
 - `branch_length` (DOUBLE): Branch length
 - `edge_id` (BIGINT): Edge identifier for jplace format
+
+Each column takes only the types listed. A column of another type, such as the INTEGER and DECIMAL that untyped literals like `1` and `0.1` are, is refused when the COPY is planned; cast it in the query (`node_index::BIGINT`). `name` takes the types a `read_id` does. An untyped `NULL` column is cast to the column's type, so `NULL AS name` writes no names.
 
 **Parameters:**
 - `EDGE_IDS` (BOOLEAN, default: auto): Include edge identifiers `{n}` in output
@@ -501,8 +505,8 @@ Write query results to Newick phylogenetic tree format. Reconstructs a tree from
 - `PLACEMENTS` (VARCHAR): Name of a table containing phylogenetic placement data to insert
   - Inserts fragment sequences into the tree at their placement locations
   - Requires tree to have `edge_id` column with valid edge identifiers
-  - Required table columns: `fragment_id` (VARCHAR), `edge_id` (BIGINT/INTEGER), `like_weight_ratio` (DOUBLE), `distal_length` (DOUBLE), `pendant_length` (DOUBLE)
-  - Duplicate fragment_ids are deduplicated (keeps highest like_weight_ratio)
+  - Required table columns: `fragment_id` (VARCHAR, BIGINT or UUID, as a `read_id`; the placed tip is named with its text), `edge_id` (BIGINT, INTEGER, UBIGINT or UINTEGER), `like_weight_ratio`, `distal_length` and `pendant_length` (each DOUBLE or FLOAT). A column of another type is refused, when the COPY is planned and again when the placements are read
+  - Duplicate fragment_ids are deduplicated as in [`tree_resolve_placement`](phylogeny.md#resolve-placements), which does not always keep the placement with the highest `like_weight_ratio`
   - Multiple placements on same edge are handled correctly
 
 **Behavior:**
@@ -514,6 +518,7 @@ Write query results to Newick phylogenetic tree format. Reconstructs a tree from
   - All nodes connected
 - Serializes to standard Newick format with semicolon terminator
 - Extra columns (e.g., `is_tip`, `filepath`) are ignored
+- Writes one tree to one file: `PER_THREAD_OUTPUT`, `PARTITION_BY` and `ORDER_BY` (which DuckDB writes as a directory of files) are refused, as each file would hold only part of the tree. The error comes when the COPY runs, not when it is planned (`EXPLAIN` and `PREPARE` do not raise it), and a partitioned or ordered COPY of no rows succeeds and writes no file
 
 **Examples:**
 ```sql
@@ -544,12 +549,12 @@ COPY (
     FROM read_newick('input.nwk')
 ) TO 'scaled.nwk' (FORMAT NEWICK);
 
--- Create tree from scratch
+-- Create tree from scratch (the casts give each column its type)
 CREATE TABLE my_tree AS
 SELECT * FROM (VALUES
-    (0, NULL::BIGINT, '', 0.0),      -- root
-    (1, 0, 'A', 0.1),                 -- tip A
-    (2, 0, 'B', 0.2)                  -- tip B
+    (0::BIGINT, NULL::BIGINT, '', NULL::DOUBLE),  -- root
+    (1, 0, 'A', 0.1),                              -- tip A
+    (2, 0, 'B', 0.2)                               -- tip B
 ) AS t(node_index, parent_index, name, branch_length);
 
 COPY (SELECT * FROM my_tree)

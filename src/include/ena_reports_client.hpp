@@ -2,14 +2,15 @@
 //
 // Webin Reports API client — alias → primary-accession lookup.
 //
-// Used by L5 to translate user-supplied aliases into server-assigned
-// accessions before lifecycle envelope build, restoring the alias-based UX
-// removed in L1d (decision #12). The envelope-builder rejection of
+// Used to translate user-supplied aliases into server-assigned accessions
+// before lifecycle envelope build, so a lifecycle call can name an object by
+// its alias although the envelope builder takes only an accession. The
+// envelope-builder rejection of
 // `target_refname` is intentionally preserved as defense-in-depth; only the
 // SQL-surface translates refname → accession before constructing the
 // LifecycleSubmitOptions.
 //
-// Wire shape (live-verified 2026-05-08 via localdocs/ena-live-reports-probe.sh):
+// Wire shape (live-verified 2026-05-08):
 //   GET <base>/<kind>/{id}?format=json
 //     Authorization: Basic <Webin user:password>
 //   200  [{"report":{"id":"<primary-accession>","alias":"<alias>", …}}]   (hit)
@@ -62,7 +63,7 @@ std::string LookupAccessionByAlias(const std::string &reports_base, AliasObjectK
 
 // Default Reports API bases. Reports is endpoint-segregated (each server
 // only sees its own account's records), unlike the portal API used by
-// ena_alias_check which is unified. The L5 client must hit the same
+// ena_alias_check which is unified. The alias lookup must hit the same
 // endpoint the lifecycle POST will hit, otherwise an alias registered on
 // wwwdev would surface as "not found" when the lookup goes to production.
 constexpr const char *DEFAULT_REPORTS_BASE_PROD = "https://www.ebi.ac.uk/ena/submit/report";

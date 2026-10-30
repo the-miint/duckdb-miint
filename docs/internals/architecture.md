@@ -140,7 +140,7 @@ Currently used by `align_minimap2` + `save_minimap2_index` (both sides), `copy_s
 
 - **C++ Standard**: C++20 (required for kseq++)
 - **Namespaces**: extension code in `duckdb`, readers in `miint`
-- **Error Handling**: DuckDB exceptions (`InvalidInputException`, `IOException`, `RuntimeException`)
+- **Error Handling**: DuckDB exceptions (`InvalidInputException`, `IOException`, `RuntimeException`). A message built from a caught DuckDB exception uses `ErrorData(e).RawMessage()`, since its `what()` is JSON ([Exceptions](duckdb-engine-notes.md#exceptions)), and a worker thread's error crosses the join as a `std::exception_ptr`, rethrown unchanged.
 - **Memory Management**: RAII with smart pointers (HTSlib uses custom deleters)
 - **Formatting**: DuckDB style (`.clang-format`); pre-commit hook runs `make format-check`, auto-fix with `conda run -n duckdb-format make format-fix`
 
@@ -161,7 +161,7 @@ Currently used by `align_minimap2` + `save_minimap2_index` (both sides), `copy_s
 **`Bind` resolves the schema. It does not compute the answer.** Reading an input
 relation, running a compute, building an index: all of that belongs at execution
 time. This is easy to get wrong because doing it in `Bind` *works* — the results are
-correct, the tests pass, and the cost only shows up in four ways that no test looks
+correct, the tests pass, and the cost only shows up in five ways that no test looks
 for unless you write one:
 
 1. **A prepared statement returns nothing the second time.** `PREPARE` binds once and
@@ -183,6 +183,9 @@ for unless you write one:
    must hand over a finished result, which the scan then re-materializes in its own
    row form. Driving the work from the scan instead lets rows go out as they are
    produced and keeps one copy.
+5. **A prepared statement uses stale rows.** Rows a `Bind` reads from a relation are
+   the rows as they were at `PREPARE`: an `INSERT`, `UPDATE` or `DELETE` before
+   `EXECUTE` does not bind the statement again, so `EXECUTE` uses the old rows.
 
 **What `Bind` legitimately does**: validate parameters, and resolve the output schema
 — including rejecting a mis-shaped input. That last part does not require reading

@@ -120,6 +120,32 @@ SELECT num_genomes FROM sylph_index_create(
 ----
 3
 
+# order_by picks the genome's contig_name: its contig with the lowest value, and on a tie (as
+# when a genome comes from several files, each numbered from 1) the name that sorts last, as
+# docs/profiling.md says. K12's one contig is split into two halves to make a two-contig genome.
+statement ok
+CREATE TABLE k12_halves AS
+  WITH k12 AS (SELECT sequence1, length(sequence1) AS n
+               FROM read_fastx('data/sylph/tiny_refs/e.coli-K12.fasta.gz'))
+  SELECT 'g' AS genome, 'a_ctg' AS read_id, sequence1[1:n // 2] AS sequence1, 0 AS a_first, 1 AS tied FROM k12
+  UNION ALL
+  SELECT 'g', 'z_ctg', sequence1[n // 2 + 1:], 1, 1 FROM k12;
+
+statement ok
+SELECT * FROM sylph_index_create('k12_halves', '{TEST_DIR}/a_first.syldb', genome_id := 'genome', order_by := 'a_first');
+
+statement ok
+SELECT * FROM sylph_index_create('k12_halves', '{TEST_DIR}/tied.syldb', genome_id := 'genome', order_by := 'tied');
+
+query TT
+SELECT 'a_first', contig_name FROM sylph_profile('k12_reads', '{TEST_DIR}/a_first.syldb')
+UNION ALL
+SELECT 'tied', contig_name FROM sylph_profile('k12_reads', '{TEST_DIR}/tied.syldb')
+ORDER BY 1;
+----
+a_first	a_ctg
+tied	z_ctg
+
 # --- error handling -------------------------------------------------------
 
 # genome_id is required.
@@ -138,8 +164,40 @@ statement error
 SELECT * FROM sylph_index_create('refs', '{TEST_DIR}/err.syldb', genome_id := 'not_a_column');
 ----
 
+# order_by defaults to read_fastx's sequence_index, so a source without that column names another.
+statement ok
+CREATE TABLE refs_no_index AS SELECT read_id, sequence1, filepath FROM refs;
+
+statement error
+SELECT * FROM sylph_index_create('refs_no_index', '{TEST_DIR}/err.syldb', genome_id := 'filepath');
+----
+<REGEX>:Binder Error: sylph_index_create: genome_id/order_by column check failed: .*sequence_index.*
+
 # Unsupported k.
 statement error
 SELECT * FROM sylph_index_create('refs', '{TEST_DIR}/err.syldb', genome_id := 'filepath', k := 30);
 ----
 k must be 21 or 31
+
+# An order_by column that does not cast to BIGINT fails while a genome is read, on a worker
+# thread; the error is the worker's own, not one wrapping DuckDB's serialized form of it.
+statement error
+SELECT * FROM sylph_index_create('refs', '{TEST_DIR}/err.syldb', genome_id := 'filepath', order_by := 'read_id');
+----
+<REGEX>:Invalid Input Error: sylph_index_create: failed to read genome .*: Conversion Error: Could not convert string .* to INT64.*
+
+# When several genomes fail, the error is the first genome's in genome_id order, not the error
+# that happened first, so a rerun reports the same genome. g1's order value comes only after a
+# long aggregate, so g2, on the other thread, fails well before g1 does.
+statement ok
+CREATE VIEW two_bad_genomes AS
+SELECT 'g1' AS genome, 'c1' AS read_id, 'ACGTACGTACGTACGTACGTACGTACGTACGTACGT' AS sequence1,
+       (SELECT CASE WHEN sum(range % 7) > 0 THEN 'late' END FROM range(100000000)) AS ord
+UNION ALL
+SELECT 'g2', 'c2', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGT', 'early';
+
+statement error
+SELECT * FROM sylph_index_create('two_bad_genomes', '{TEST_DIR}/err.syldb', genome_id := 'genome', order_by := 'ord',
+                                 threads := 2);
+----
+<REGEX>:Invalid Input Error: sylph_index_create: failed to read genome g1: Conversion Error: Could not convert string 'late' to INT64.*

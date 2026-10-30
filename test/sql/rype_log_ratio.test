@@ -77,6 +77,19 @@ missing required column
 statement ok
 DROP TABLE bad_table2;
 
+# Test error: a sequence2 that is not a string, refused at bind (no index is
+# there to load); rype_log_ratio reads sequence2, as rype_classify does
+statement ok
+CREATE TABLE int_sequence2 AS SELECT 'seq1' AS read_id, 'ACGTACGTACGTACGTACGTACGTACGTACGT' AS sequence1, 42 AS sequence2;
+
+statement error
+SELECT * FROM rype_log_ratio('nonexistent.ryxdi', 'nonexistent.ryxdi', 'int_sequence2');
+----
+Column 'sequence2' in 'int_sequence2' must be VARCHAR or BLOB, not INTEGER
+
+statement ok
+DROP TABLE int_sequence2;
+
 # Test error: multi-bucket index used as numerator
 statement error
 SELECT * FROM rype_log_ratio('data/rype/test.ryxdi', 'data/rype/test_denominator.ryxdi', 'sequences');

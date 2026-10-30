@@ -1,0 +1,457 @@
+# name: test/sql/rype_filter.test
+# description: rype_filter returns the rows of a relation that RYpe does not match, whole and read once
+# group: [sql]
+
+require miint
+
+# ---------------------------------------------------------------------------
+# WHAT rype_filter MUST BE EQUIVALENT TO
+#
+# rype_filter('reads', index, threshold := t) is the host-depletion step
+#
+#   SELECT * FROM reads ANTI JOIN rype_classify(index, 'reads', threshold := t) USING (read_id)
+#
+# fused into one pass: the same rows, every column as `reads` has it, without
+# the second read of `reads` the join takes and without needing a read_id at all.
+# Every check below compares against that join, or against the read classes the
+# join is known to produce, so a row kept that RYpe matched, or dropped that it
+# did not, fails a check.
+#
+# Read classes in RY-space against data/rype/test.ryxdi (k = 16), as
+# test/sql/rype_classify.test establishes them:
+#   ACGT repeats        score 1.0 to every bucket            dropped at any threshold
+#   ACGT then poly-A    score ~0.11-0.22 to two buckets      dropped at 0.05, kept at 0.5
+#   ATATCGCG repeats    no shared minimizer                  always kept
+#   7 nt                shorter than k, no minimizer at all  always kept
+#   GGGGCCCC repeats    alpha and gamma                      dropped at any threshold
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE MACRO read_class(c) AS CASE c
+    WHEN 0 THEN 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'
+    WHEN 1 THEN 'ACGTACGTACGTACGTAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+    WHEN 2 THEN 'ATATCGCGATATCGCGATATCGCGATATCGCGATATCGCGATATCGCGATAT'
+    WHEN 3 THEN 'ACGTACG'
+    ELSE 'GGGGCCCCGGGGCCCCGGGGCCCCGGGGCCCCGGGGCCCCGGGGCCCCGGGG' END;
+
+# Classes are scrambled by hash so that matched and unmatched rows interleave at
+# every position: a filter that kept the wrong row of a group, or shifted its
+# matches by one, keeps a different set.
+statement ok
+CREATE TABLE reads AS
+SELECT i AS ord,
+       'r' || i AS read_id,
+       (hash(i) % 5)::INTEGER AS cls,
+       read_class(hash(i) % 5) AS sequence1,
+       i * 3 AS extra,
+       [i % 256, (i + 1) % 256]::UTINYINT[] AS qual1
+FROM range(3000) t(i);
+
+# The same reads paired. The mate's class is chosen independently, and every
+# seventh mate is NULL, which RYpe classifies as a single-end read.
+statement ok
+CREATE TABLE pairs AS
+SELECT *,
+       CASE WHEN ord % 7 = 0 THEN NULL ELSE read_class(hash(ord + 7919) % 5) END AS sequence2
+FROM reads;
+
+# ---------------------------------------------------------------------------
+# Output schema: the relation's own columns, names, types and order
+# ---------------------------------------------------------------------------
+
+query II
+SELECT list(column_name), list(column_type)
+FROM (DESCRIBE SELECT * FROM rype_filter('pairs', 'data/rype/test.ryxdi'));
+----
+[ord, read_id, cls, sequence1, extra, qual1, sequence2]	[BIGINT, VARCHAR, INTEGER, VARCHAR, BIGINT, 'UTINYINT[]', VARCHAR]
+
+# Names keep their case; sequence1 is still found.
+statement ok
+CREATE TABLE mixed_case AS SELECT 'x' AS "ReadName", 'ACGTACG' AS "Sequence1";
+
+query II
+SELECT list(column_name), list(column_type)
+FROM (DESCRIBE SELECT * FROM rype_filter('mixed_case', 'data/rype/test.ryxdi'));
+----
+[ReadName, Sequence1]	[VARCHAR, VARCHAR]
+
+query II
+SELECT "ReadName", "Sequence1" FROM rype_filter('mixed_case', 'data/rype/test.ryxdi');
+----
+x	ACGTACG
+
+# The relation's name and every column's go into the scan's SQL. A relation and a
+# carried column named so that either would end the statement if spliced in raw
+# are one identifier each: the call gives what the plain names give, and runs
+# nothing else.
+statement ok
+CREATE TABLE injection_victim AS SELECT 1 AS x;
+
+statement ok
+CREATE TABLE "reads""; DROP TABLE injection_victim; --" AS
+SELECT read_id, sequence1, extra AS "extra""; DROP TABLE injection_victim; --" FROM reads;
+
+query II
+SELECT count(*) > 0, count(*) = (SELECT count(*) FROM rype_filter('reads', 'data/rype/test.ryxdi', threshold := 0.05))
+FROM rype_filter('reads"; DROP TABLE injection_victim; --', 'data/rype/test.ryxdi', threshold := 0.05) f
+JOIN reads r ON r.read_id = f.read_id AND r.extra = f."extra""; DROP TABLE injection_victim; --";
+----
+true	true
+
+query I
+SELECT count(*) FROM injection_victim;
+----
+1
+
+# ---------------------------------------------------------------------------
+# Errors
+# ---------------------------------------------------------------------------
+
+# A relation that cannot be filtered fails at bind, before the index is loaded:
+# a real host index is gigabytes. The index path here does not exist, so these
+# errors can only come from the relation's checks.
+statement ok
+CREATE TABLE no_sequence AS SELECT 'x' AS read_id;
+
+statement error
+SELECT * FROM rype_filter('no_sequence', 'nonexistent.ryxdi');
+----
+missing required column 'sequence1'
+
+statement ok
+CREATE TABLE int_sequence AS SELECT 1 AS sequence1;
+
+statement error
+SELECT * FROM rype_filter('int_sequence', 'nonexistent.ryxdi');
+----
+must be VARCHAR or BLOB
+
+statement ok
+CREATE TABLE int_mate AS SELECT 'ACGT' AS sequence1, 2 AS sequence2;
+
+statement error
+SELECT * FROM rype_filter('int_mate', 'nonexistent.ryxdi');
+----
+must be VARCHAR or BLOB
+
+statement error
+SELECT * FROM rype_filter('nonexistent_relation', 'data/rype/test.ryxdi');
+----
+does not exist
+
+statement error
+SELECT * FROM rype_filter('reads', 'nonexistent.ryxdi');
+----
+Failed to load RYpe index 'nonexistent.ryxdi'
+
+statement error
+SELECT * FROM rype_filter('reads', 'data/rype/test.ryxdi', threshold := -0.1);
+----
+threshold must be between 0.0 and 1.0
+
+statement error
+SELECT * FROM rype_filter('reads', 'data/rype/test.ryxdi', threshold := 1.5);
+----
+threshold must be between 0.0 and 1.0
+
+# NaN is outside the range too, though it compares false with both of its ends.
+statement error
+SELECT * FROM rype_filter('reads', 'data/rype/test.ryxdi', threshold := 'nan'::DOUBLE);
+----
+threshold must be between 0.0 and 1.0
+
+# A NULL argument is named, not read as the table or path 'NULL'; and an empty
+# minimap2 path is refused, where it would quietly have left minimap2 out.
+statement error
+SELECT * FROM rype_filter(NULL, 'data/rype/test.ryxdi');
+----
+rype_filter: sequence_table cannot be NULL
+
+statement error
+SELECT * FROM rype_filter('reads', NULL);
+----
+rype_filter: index_path cannot be NULL
+
+statement error
+SELECT * FROM rype_filter('reads', 'data/rype/test.ryxdi', NULL);
+----
+rype_filter: minimap2_index_path cannot be NULL
+
+statement error
+SELECT * FROM rype_filter('reads', 'data/rype/test.ryxdi', '');
+----
+rype_filter: minimap2_index_path cannot be empty
+
+# Checked where it is read, as miint_rype_arrow_batch_bytes is.
+statement ok
+SET miint_rype_filter_group_rows = -1;
+
+statement error
+SELECT * FROM rype_filter('reads', 'data/rype/test.ryxdi');
+----
+miint_rype_filter_group_rows must be >= 0
+
+statement ok
+RESET miint_rype_filter_group_rows;
+
+# A NULL sequence1 is reported against its row, as the RYpe functions report it.
+statement ok
+CREATE TABLE null_sequence AS
+SELECT i AS ord, CASE WHEN i = 5 THEN NULL ELSE read_class(i % 5) END AS sequence1 FROM range(10) t(i);
+
+statement error
+SELECT * FROM rype_filter('null_sequence', 'data/rype/test.ryxdi');
+----
+sequence1 is NULL in 'null_sequence' at row 5
+
+# ---------------------------------------------------------------------------
+# Single-end: the rows the ANTI JOIN keeps, at thresholds either side of the
+# partial-match score, and under every group size: one row, groups that end
+# inside a 2048-row scan chunk, one chunk, and the automatic size (0)
+# ---------------------------------------------------------------------------
+
+# The classes alone predict the answer: every unmatched read and no other. This
+# pins it so the parity checks below cannot pass by both sides agreeing on nothing.
+query II
+SELECT count(*) = (SELECT count(*) FROM reads WHERE cls IN (2, 3)), count(*) FILTER (WHERE cls NOT IN (2, 3))
+FROM rype_filter('reads', 'data/rype/test.ryxdi', threshold := 0.05);
+----
+true	0
+
+query II
+SELECT count(*) = (SELECT count(*) FROM reads WHERE cls IN (1, 2, 3)), count(*) FILTER (WHERE cls NOT IN (1, 2, 3))
+FROM rype_filter('reads', 'data/rype/test.ryxdi', threshold := 0.5);
+----
+true	0
+
+foreach group_rows 7 2048 0
+
+statement ok
+SET miint_rype_filter_group_rows = {group_rows};
+
+foreach threshold 0.05 0.15 0.5
+
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM rype_filter('reads', 'data/rype/test.ryxdi', threshold := {threshold})
+     EXCEPT ALL
+     SELECT * FROM reads ANTI JOIN rype_classify('data/rype/test.ryxdi', 'reads', threshold := {threshold}) c USING (read_id))
+    UNION ALL
+    (SELECT * FROM reads ANTI JOIN rype_classify('data/rype/test.ryxdi', 'reads', threshold := {threshold}) c USING (read_id)
+     EXCEPT ALL
+     SELECT * FROM rype_filter('reads', 'data/rype/test.ryxdi', threshold := {threshold})));
+----
+0
+
+endloop
+
+endloop
+
+# One row per group, over fewer rows: every group is its own RYpe call.
+statement ok
+SET miint_rype_filter_group_rows = 1;
+
+statement ok
+CREATE VIEW reads_head AS SELECT * FROM reads WHERE ord < 200;
+
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM rype_filter('reads_head', 'data/rype/test.ryxdi', threshold := 0.05)
+     EXCEPT ALL
+     SELECT * FROM reads_head ANTI JOIN rype_classify('data/rype/test.ryxdi', 'reads_head', threshold := 0.05) c USING (read_id))
+    UNION ALL
+    (SELECT * FROM reads_head ANTI JOIN rype_classify('data/rype/test.ryxdi', 'reads_head', threshold := 0.05) c USING (read_id)
+     EXCEPT ALL
+     SELECT * FROM rype_filter('reads_head', 'data/rype/test.ryxdi', threshold := 0.05)));
+----
+0
+
+query I
+SELECT count(*) = (SELECT count(*) FROM reads_head WHERE cls IN (2, 3))
+FROM rype_filter('reads_head', 'data/rype/test.ryxdi', threshold := 0.05);
+----
+true
+
+statement ok
+RESET miint_rype_filter_group_rows;
+
+# ---------------------------------------------------------------------------
+# Paired: a pair is kept or dropped whole, as RYpe classifies it
+# ---------------------------------------------------------------------------
+
+foreach group_rows 7 0
+
+statement ok
+SET miint_rype_filter_group_rows = {group_rows};
+
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM rype_filter('pairs', 'data/rype/test.ryxdi', threshold := 0.05)
+     EXCEPT ALL
+     SELECT * FROM pairs ANTI JOIN rype_classify('data/rype/test.ryxdi', 'pairs', threshold := 0.05) c USING (read_id))
+    UNION ALL
+    (SELECT * FROM pairs ANTI JOIN rype_classify('data/rype/test.ryxdi', 'pairs', threshold := 0.05) c USING (read_id)
+     EXCEPT ALL
+     SELECT * FROM rype_filter('pairs', 'data/rype/test.ryxdi', threshold := 0.05)));
+----
+0
+
+endloop
+
+statement ok
+RESET miint_rype_filter_group_rows;
+
+# The pairs both sides keep are not trivially all or none.
+query I
+SELECT count(*) BETWEEN 1 AND 2999 FROM rype_filter('pairs', 'data/rype/test.ryxdi', threshold := 0.05);
+----
+true
+
+# A pair with one matching mate is dropped, whichever mate it is; a pair of two
+# unmatched mates is kept, and so is one of reads too short to have a minimizer.
+statement ok
+CREATE TABLE one_mate AS SELECT * FROM (VALUES
+    ('r1_matches', read_class(0), read_class(2)),
+    ('r2_matches', read_class(2), read_class(0)),
+    ('neither', read_class(2), read_class(2)),
+    ('both_short', read_class(3), read_class(3))
+) AS t(read_id, sequence1, sequence2);
+
+query I
+SELECT read_id FROM rype_filter('one_mate', 'data/rype/test.ryxdi', threshold := 0.05) ORDER BY read_id;
+----
+both_short
+neither
+
+# ---------------------------------------------------------------------------
+# An empty relation is an empty answer
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE no_reads (read_id VARCHAR, sequence1 VARCHAR);
+
+query I
+SELECT count(*) FROM rype_filter('no_reads', 'data/rype/test.ryxdi');
+----
+0
+
+# ---------------------------------------------------------------------------
+# A view over read_fastx, which is the relation the function exists for
+# ---------------------------------------------------------------------------
+
+statement ok
+COPY (SELECT read_id, sequence1, list_transform(range(length(sequence1)), lambda x: 40)::UTINYINT[] AS qual1,
+             sequence2, list_transform(range(length(sequence2)), lambda x: 40)::UTINYINT[] AS qual2
+      FROM pairs WHERE sequence2 IS NOT NULL AND ord < 500 ORDER BY ord)
+TO '{TEST_DIR}/rype_filter_{ORIENTATION}.fq' (FORMAT FASTQ);
+
+statement ok
+CREATE VIEW fastq_pairs AS
+SELECT * FROM read_fastx('{TEST_DIR}/rype_filter_R1.fq', sequence2 := '{TEST_DIR}/rype_filter_R2.fq');
+
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM rype_filter('fastq_pairs', 'data/rype/test.ryxdi', threshold := 0.05)
+     EXCEPT ALL
+     SELECT * FROM fastq_pairs ANTI JOIN rype_classify('data/rype/test.ryxdi', 'fastq_pairs', threshold := 0.05) c USING (read_id))
+    UNION ALL
+    (SELECT * FROM fastq_pairs ANTI JOIN rype_classify('data/rype/test.ryxdi', 'fastq_pairs', threshold := 0.05) c USING (read_id)
+     EXCEPT ALL
+     SELECT * FROM rype_filter('fastq_pairs', 'data/rype/test.ryxdi', threshold := 0.05)));
+----
+0
+
+query I
+SELECT count(*) BETWEEN 1 AND 499 FROM rype_filter('fastq_pairs', 'data/rype/test.ryxdi', threshold := 0.05);
+----
+true
+
+# ---------------------------------------------------------------------------
+# On one thread the rows come out in the relation's order
+# ---------------------------------------------------------------------------
+
+statement ok
+SET threads = 1;
+
+# 2000 rows a group does not divide a scan chunk of at most 2048 rows, so one
+# group holds two long runs, from two chunks, that must come out in that order.
+foreach group_rows 7 2000 0
+
+statement ok
+SET miint_rype_filter_group_rows = {group_rows};
+
+query I
+SELECT list(ord) = list_sort(list(ord))
+FROM rype_filter('reads', 'data/rype/test.ryxdi', threshold := 0.05);
+----
+true
+
+endloop
+
+statement ok
+RESET miint_rype_filter_group_rows;
+
+# ---------------------------------------------------------------------------
+# The relation is read exactly once
+#
+# As in test/sql/rype_single_read.test, the volatility is in sequence1, which
+# every reader must evaluate: the first 2000 rows any scan pulls are the
+# unmatched class and later ones the matched class. A single scan keeps all
+# 2000 rows with unmatched sequences; any second read of the relation (a probe,
+# or re-reading rows to return them) moves a suffix into the matched class,
+# which either drops rows or returns a matched sequence.
+# ---------------------------------------------------------------------------
+
+statement ok
+CREATE SEQUENCE once_seq START 1;
+
+statement ok
+CREATE VIEW volatile_reads AS
+SELECT i AS ord, CASE WHEN nextval('once_seq') <= 2000 THEN read_class(2) ELSE read_class(0) END AS sequence1
+FROM range(2000) t(i);
+
+query II
+SELECT count(*), count(*) FILTER (WHERE sequence1 != read_class(2))
+FROM rype_filter('volatile_reads', 'data/rype/test.ryxdi', threshold := 0.05);
+----
+2000	0
+
+# Several groups, so the scan is carried across RYpe calls rather than restarted.
+statement ok
+CREATE SEQUENCE once_grouped_seq START 1;
+
+statement ok
+CREATE VIEW volatile_grouped AS
+SELECT i AS ord,
+       CASE WHEN nextval('once_grouped_seq') <= 2000 THEN read_class(2) ELSE read_class(0) END AS sequence1,
+       read_class(3) AS sequence2
+FROM range(2000) t(i);
+
+statement ok
+SET miint_rype_filter_group_rows = 7;
+
+query II
+SELECT count(*), count(*) FILTER (WHERE sequence1 != read_class(2))
+FROM rype_filter('volatile_grouped', 'data/rype/test.ryxdi', threshold := 0.05);
+----
+2000	0
+
+# Past one scan chunk, in groups that end inside chunks, so that the scan's
+# read-ahead fetches chunks of its own ahead of RYpe's pulls: from the same scan.
+statement ok
+CREATE SEQUENCE once_ahead_seq START 1;
+
+statement ok
+CREATE VIEW volatile_ahead AS
+SELECT i AS ord,
+       CASE WHEN nextval('once_ahead_seq') <= 5000 THEN read_class(2) ELSE read_class(0) END AS sequence1
+FROM range(5000) t(i);
+
+statement ok
+SET miint_rype_filter_group_rows = 1000;
+
+query II
+SELECT count(*), count(*) FILTER (WHERE sequence1 != read_class(2))
+FROM rype_filter('volatile_ahead', 'data/rype/test.ryxdi', threshold := 0.05);
+----
+5000	0

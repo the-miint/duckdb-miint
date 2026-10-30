@@ -39,8 +39,20 @@ Behavior:
     each queried run in _READ_RUNS, with fastq_ftp pointing back
     at this mock's /fastq/ and the size and md5 computed from the file. The
     aspera and submitted-file fields are empty, so nothing reaches EBI.
-    MD5_MISMATCH_RUN gets ERR1074767's file with a wrong md5.
-  - On GET or HEAD to /fastq/<file>, serves that file from data/ena/.
+    MD5_MISMATCH_RUN gets ERR1074767's file with a wrong md5. A PAIRED run
+    lists one file per mate, separated by ";", as ENA does.
+  - On GET or HEAD to /fastq/<file>, serves that file from data/ena/, a
+    `Range: bytes=FIRST-LAST` GET with 206 as ENA's file servers do. A file in
+    _FASTQ_FAULTS has a GET whose range covers a listed byte offset reset
+    after the bytes before it, a set number of times or on every request. A
+    file in _HEAD_FAULTS has its HEAD reset the same way; one in _FASTQ_GONE
+    answers a ranged GET from its offset on with 404; one in _FASTQ_CHANGED
+    takes a new ETag at its offset, so a GET still sent with the old one in
+    If-Match gets 412.
+  - GET /_faults/reset clears those counts; GET /_faults/stats/<file> answers
+    {"ranged": n, "full": n, "cuts": n, "errors": n} for that file since the
+    reset (cuts counts reset GETs and HEADs, errors the 404s and 412s), so a
+    test can show how many requests failed and how.
 
 Started on a free port by test/scripts/ena_mock_env.sh, for run_tests.sh and
 onboarding-tutorials/run_tutorial_tests.sh, which exports its URL as
@@ -54,6 +66,8 @@ import hashlib
 import json
 import os
 import re
+import socket
+import struct
 import sys
 from functools import cache
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -82,11 +96,66 @@ _READ_RUNS = {
 MD5_MISMATCH_RUN = "ERR9999999"
 _READ_RUNS[MD5_MISMATCH_RUN] = dict(_READ_RUNS["ERR1074767"], fastq_md5="0" * 32)
 
+# Runs served from copies of ERR1074767's file (1,376,946 bytes) whose
+# connections drop mid-body: _FASTQ_FAULTS maps a served name to its
+# (byte offset, times to cut or None for every time) pairs.
+_FAULT_RUN_FILES = {
+    "ERR9000001": ("ERR9000001.fastq.gz",),
+    "ERR9000002": ("ERR9000002_1.fastq.gz", "ERR9000002_2.fastq.gz"),
+    **{run: (f"{run}.fastq.gz",) for run in ("ERR9000003", "ERR9000004", "ERR9000005", "ERR9000006", "ERR9000007")},
+}
+_FASTQ_ALIASES = {name: "ERR1074767.fastq.gz" for names in _FAULT_RUN_FILES.values() for name in names}
+_FASTQ_FAULTS = {
+    "ERR9000001.fastq.gz": [(400_000, 2), (900_000, 1)],
+    "ERR9000002_1.fastq.gz": [(300_000, 3)],
+    "ERR9000002_2.fastq.gz": [(1_000_000, 2)],
+    "ERR9000003.fastq.gz": [(500_000, None)],
+}
+_HEAD_FAULTS = {"ERR9000006.fastq.gz": 3, "ERR9000007.fastq.gz": None}
+_FASTQ_GONE = {"ERR9000004.fastq.gz": 600_000}
+_FASTQ_CHANGED = {"ERR9000005.fastq.gz": 600_000}
+for _run, _names in _FAULT_RUN_FILES.items():
+    _READ_RUNS[_run] = dict(
+        _READ_RUNS["ERR1074767"],
+        library_layout="PAIRED" if len(_names) == 2 else "SINGLE",
+        fastq_file=";".join(_names),
+    )
+_fault_cuts: dict[tuple[str, int], int] = {}
+_fault_stats: dict[str, dict[str, int]] = {}
+_NO_FAULTS = {"ranged": 0, "full": 0, "cuts": 0, "errors": 0}
+_RANGE = re.compile(r"bytes=(\d+)-(\d+)")
+
+
+def _fastq_path(name: str) -> Path:
+    return _ENA_DATA_DIR / _FASTQ_ALIASES.get(name, name)
+
 
 @cache
 def _fastq_size_and_md5(name: str) -> tuple[int, str]:
-    payload = (_ENA_DATA_DIR / name).read_bytes()
+    payload = _fastq_path(name).read_bytes()
     return len(payload), hashlib.md5(payload).hexdigest()
+
+
+def _take_cut(name: str, first: int, last: int) -> int | None:
+    """The offset to reset a GET of first..last at, if one is due."""
+    for offset, times in _FASTQ_FAULTS.get(name, []):
+        if first <= offset <= last:
+            done = _fault_cuts.get((name, offset), 0)
+            if times is None or done < times:
+                _fault_cuts[(name, offset)] = done + 1
+                return offset
+    return None
+
+
+def _take_head_cut(name: str) -> bool:
+    if name not in _HEAD_FAULTS:
+        return False
+    times = _HEAD_FAULTS[name]
+    done = _fault_cuts.get((name, -1), 0)
+    if times is not None and done >= times:
+        return False
+    _fault_cuts[(name, -1)] = done + 1
+    return True
 
 
 _CHECKLIST_TST000001 = """<?xml version="1.0" encoding="UTF-8"?>
@@ -383,6 +452,8 @@ def _build_receipt(
 
 
 class Handler(BaseHTTPRequestHandler):
+    _was_reset = False
+
     def log_message(self, format, *args):  # silence stderr
         return
 
@@ -396,23 +467,98 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return user_pw.startswith("Webin-") and ":" in user_pw
 
+    def finish(self):
+        try:
+            super().finish()
+        except OSError:
+            if not self._was_reset:
+                raise
+
     def _send_fastq(self, head_only: bool):
         name = self.path[len("/fastq/") :]
-        path = _ENA_DATA_DIR / name
+        path = _fastq_path(name)
         if "/" in name or not path.is_file():
             self.send_response(404)
             self.end_headers()
             return
-        self.send_response(200)
+        stats = _fault_stats.setdefault(name, dict(_NO_FAULTS))
+        if head_only and _take_head_cut(name):
+            stats["cuts"] += 1
+            self._reset_connection()
+            return
+        data = path.read_bytes()
+        m = _RANGE.fullmatch(self.headers.get("Range", ""))
+        ranged = not head_only and m is not None and int(m[1]) <= int(m[2]) and int(m[1]) < len(data)
+        first = int(m[1]) if ranged else 0
+        etag = None
+        if name in _FASTQ_CHANGED:
+            etag = '"v2"' if ranged and first >= _FASTQ_CHANGED[name] else '"v1"'
+        if_match = self.headers.get("If-Match")
+        gone = ranged and first >= _FASTQ_GONE.get(name, len(data))
+        if gone or (etag and if_match and if_match != etag):
+            stats["errors"] += 1
+            self.send_response(404 if gone else 412)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if not ranged:
+            body = data
+            self.send_response(200)
+        else:
+            last = min(int(m[2]), len(data) - 1)
+            body = data[first : last + 1]
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {first}-{last}/{len(data)}")
+        self.send_header("Accept-Ranges", "bytes")
+        if etag:
+            self.send_header("ETag", etag)
         self.send_header("Content-Type", "application/gzip")
-        self.send_header("Content-Length", str(path.stat().st_size))
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if head_only:
+            return
+        cut = _take_cut(name, first, last) if ranged else None
+        if cut is None:
+            stats["ranged" if ranged else "full"] += 1
+            self.wfile.write(body)
+            return
+        stats["cuts"] += 1
+        self.wfile.write(body[: cut - first])
+        self._reset_connection()
+
+    def _reset_connection(self):
+        # SO_LINGER 0 makes close() send RST: the client sees a transport error, not a clean EOF.
+        self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+        self.connection.close()
+        self.close_connection = True
+        self._was_reset = True
+
+    def _send_fault_control(self, head_only: bool):
+        if self.path == "/_faults/reset":
+            if not head_only:
+                _fault_cuts.clear()
+                _fault_stats.clear()
+            payload = b"ok\n"
+        elif self.path.startswith("/_faults/stats/"):
+            name = self.path[len("/_faults/stats/") :]
+            payload = json.dumps(_fault_stats.get(name, _NO_FAULTS)).encode()
+        else:
+            self.send_response(404)
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         if not head_only:
-            self.wfile.write(path.read_bytes())
+            self.wfile.write(payload)
 
     def do_HEAD(self):
         if self.path.startswith("/fastq/"):
             self._send_fastq(head_only=True)
+            return
+        if self.path.startswith("/_faults/"):
+            self._send_fault_control(head_only=True)
             return
         self.send_response(404)
         self.end_headers()
@@ -420,6 +566,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/fastq/"):
             self._send_fastq(head_only=False)
+            return
+        if self.path.startswith("/_faults/"):
+            self._send_fault_control(head_only=False)
             return
         # Checklist XML (Phase 8 Step 8b). Anonymous GET — public reference
         # data on the real EBI browser API.
@@ -550,16 +699,17 @@ class Handler(BaseHTTPRequestHandler):
             meta = _READ_RUNS.get(run)
             if meta is None:
                 continue
-            size, md5 = _fastq_size_and_md5(meta["fastq_file"])
+            files = meta["fastq_file"].split(";")
+            sizes, md5s = zip(*(_fastq_size_and_md5(f) for f in files))
             row = {
                 "run_accession": run,
                 "sample_accession": meta["sample_accession"],
                 "experiment_accession": meta["experiment_accession"],
                 "study_accession": meta["study_accession"],
                 "library_layout": meta["library_layout"],
-                "fastq_ftp": f"http://{host}:{port}/fastq/{meta['fastq_file']}",
-                "fastq_bytes": str(size),
-                "fastq_md5": meta.get("fastq_md5", md5),
+                "fastq_ftp": ";".join(f"http://{host}:{port}/fastq/{f}" for f in files),
+                "fastq_bytes": ";".join(map(str, sizes)),
+                "fastq_md5": meta.get("fastq_md5", ";".join(md5s)),
             }
             lines.append("\t".join(row.get(name, "") for name in names))
         return "\n".join(lines) + "\n"

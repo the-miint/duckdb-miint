@@ -1,4 +1,4 @@
-# minimap2 (v2.30): read alignment and indexing. Always built. Its ksw2 kernels
+# minimap2 (v2.31): read alignment and indexing. Always built. Its ksw2 kernels
 # also back the align_pairwise_ksw2* functions.
 
 # Detect architecture for minimap2 SIMD support: OSX_BUILD_ARCH on macOS,
@@ -7,8 +7,8 @@ set(MINIMAP2_ARCH_FLAGS "")
 set(MINIMAP2_ARCH_CFLAGS "")
 set(MINIMAP2_FPIC "-fPIC")
 if(EMSCRIPTEN)
-  # Emscripten: use WASM SIMD via SSE2 emulation (minimap2 has SIMDe support).
-  # sse2only=1 avoids SSE4.1 dispatch which requires runtime CPU detection.
+  # Emscripten: use WASM SIMD via Emscripten's SSE2 emulation. sse2only=1 avoids
+  # SSE4.1 dispatch which requires runtime CPU detection.
   set(MINIMAP2_ARCH_FLAGS "sse2only=1")
   set(MINIMAP2_ARCH_CFLAGS "-msimd128 -msse -msse2 ${EMSCRIPTEN_THREAD_CFLAGS}")
   # Keep -fPIC: required for WASM side module linking (-sSIDE_MODULE=2)

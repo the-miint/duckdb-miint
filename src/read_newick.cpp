@@ -305,14 +305,15 @@ void ReadNewickTableFunction::Execute(ClientContext &context, TableFunctionInput
 		const std::string &path = global_state.file_paths[local_state.current_file_idx];
 		local_state.current_filepath = path;
 
+		std::string content = ReadNewickFile(global_state.fs, path);
+		miint::NewickTree tree;
 		try {
-			std::string content = ReadNewickFile(global_state.fs, path);
-			auto tree = miint::NewickTree::parse(content);
-			local_state.current_rows = TreeToRows(tree);
-			local_state.current_row_idx = 0;
+			tree = miint::NewickTree::parse(content);
 		} catch (const std::exception &e) {
 			throw IOException("Error parsing newick file '" + path + "': " + ErrorData(e).RawMessage());
 		}
+		local_state.current_rows = TreeToRows(tree);
+		local_state.current_row_idx = 0;
 
 		local_state.has_file = false; // Ready to claim next file when done
 	}

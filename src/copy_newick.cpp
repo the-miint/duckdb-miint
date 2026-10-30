@@ -6,7 +6,9 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/vector_operations/generic_executor.hpp"
+#include "duckdb/execution/operator/persistent/physical_copy_to_file.hpp"
 #include "duckdb/function/copy_function.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
 
 namespace duckdb {
 
@@ -19,11 +21,9 @@ struct NewickCopyBindData : public FunctionData {
 	FileCompressionType compression = FileCompressionType::UNCOMPRESSED;
 	int compression_level = ::miint::DEFAULT_GZIP_LEVEL; // COMPRESSION_LEVEL, for local gzip output
 
-	// Placements are read at bind time (not during finalize) to avoid deadlocks
-	// when executing queries during an active COPY operation.
-	// This is consistent with SQL snapshot semantics - placement data is captured
-	// when the query is planned.
-	std::vector<miint::Placement> placements;
+	// The PLACEMENTS relation. Its rows are read when the COPY runs (InitializeGlobal), so
+	// planning reads none and a prepared COPY writes the placements as they are when executed.
+	std::optional<std::string> placements_table;
 
 	// Column indices (DConstants::INVALID_INDEX if not present)
 	idx_t node_index_idx = DConstants::INVALID_INDEX;
@@ -32,30 +32,33 @@ struct NewickCopyBindData : public FunctionData {
 	idx_t branch_length_idx = DConstants::INVALID_INDEX;
 	idx_t edge_id_idx = DConstants::INVALID_INDEX;
 
+	// The name column's type, an id type (IsAllowedIdType)
+	LogicalType name_type = LogicalType::VARCHAR;
+
 	unique_ptr<FunctionData> Copy() const override {
 		auto result = make_uniq<NewickCopyBindData>();
 		result->file_path = file_path;
 		result->include_edge_ids = include_edge_ids;
 		result->compression = compression;
 		result->compression_level = compression_level;
-		result->placements = placements;
+		result->placements_table = placements_table;
 		result->node_index_idx = node_index_idx;
 		result->parent_index_idx = parent_index_idx;
 		result->name_idx = name_idx;
 		result->branch_length_idx = branch_length_idx;
 		result->edge_id_idx = edge_id_idx;
+		result->name_type = name_type;
 		return result;
 	}
 
 	bool Equals(const FunctionData &other_p) const override {
 		auto &other = other_p.Cast<NewickCopyBindData>();
-		// Note: we don't compare placements for equality - if all other fields match,
-		// we consider the bind data equal (placements are derived from the table reference)
 		return file_path == other.file_path && include_edge_ids == other.include_edge_ids &&
 		       compression == other.compression && compression_level == other.compression_level &&
-		       placements.size() == other.placements.size() && node_index_idx == other.node_index_idx &&
+		       placements_table == other.placements_table && node_index_idx == other.node_index_idx &&
 		       parent_index_idx == other.parent_index_idx && name_idx == other.name_idx &&
-		       branch_length_idx == other.branch_length_idx && edge_id_idx == other.edge_id_idx;
+		       branch_length_idx == other.branch_length_idx && edge_id_idx == other.edge_id_idx &&
+		       name_type == other.name_type;
 	}
 };
 
@@ -69,7 +72,7 @@ struct NewickCopyGlobalState : public GlobalFunctionData {
 	int compression_level;
 	bool include_edge_ids;
 
-	// Placements are copied from bind data (read at bind time)
+	// Read from the PLACEMENTS relation when the COPY started; empty without one
 	std::vector<miint::Placement> placements;
 
 	// File handle (opened in finalize, not at init)
@@ -94,6 +97,66 @@ struct NewickCopyLocalState : public LocalFunctionData {
 };
 
 //===--------------------------------------------------------------------===//
+// Select: cast untyped NULL columns to the types the sink reads
+//===--------------------------------------------------------------------===//
+// The columns the sink reads, where bind records each, and the types each takes: `type` alone, or
+// what `accepts` takes when it is set. An untyped NULL column is cast to `type`, so `NULL AS name`
+// writes no names.
+struct NewickColumnType {
+	const char *name;
+	idx_t NewickCopyBindData::*index;
+	LogicalTypeId type;
+	bool (*accepts)(const LogicalType &type);
+	const char *description;
+};
+
+static const NewickColumnType NEWICK_COLUMN_TYPES[] = {
+    {"node_index", &NewickCopyBindData::node_index_idx, LogicalTypeId::BIGINT, nullptr, "BIGINT"},
+    {"parent_index", &NewickCopyBindData::parent_index_idx, LogicalTypeId::BIGINT, nullptr, "BIGINT"},
+    {"edge_id", &NewickCopyBindData::edge_id_idx, LogicalTypeId::BIGINT, nullptr, "BIGINT"},
+    {"branch_length", &NewickCopyBindData::branch_length_idx, LogicalTypeId::DOUBLE, nullptr, "DOUBLE"},
+    // A node's label is an id, so it takes the id types
+    {"name", &NewickCopyBindData::name_idx, LogicalTypeId::VARCHAR, IsAllowedIdType, AllowedIdTypeList()},
+};
+
+static bool NewickColumnAccepts(const NewickColumnType &column, const LogicalType &type) {
+	return column.accepts ? column.accepts(type) : type.id() == column.type;
+}
+
+static const NewickColumnType *FindNewickColumnType(const Identifier &name) {
+	for (auto &column : NEWICK_COLUMN_TYPES) {
+		if (name == column.name) {
+			return &column;
+		}
+	}
+	return nullptr;
+}
+
+static vector<unique_ptr<Expression>> NewickCopySelect(CopyToSelectInput &input) {
+	vector<unique_ptr<Expression>> result;
+	bool any_cast = false;
+	for (auto &expr : input.select_list) {
+		const auto &type = expr->GetReturnType();
+		const auto name = expr->GetAlias();
+		auto column = FindNewickColumnType(name);
+		if (!column || type.id() != LogicalTypeId::SQLNULL) {
+			result.push_back(std::move(expr));
+			continue;
+		}
+		auto cast_expr =
+		    BoundCastExpression::AddCastToType(input.context, std::move(expr), LogicalType(column->type), false);
+		cast_expr->SetAlias(name);
+		result.push_back(std::move(cast_expr));
+		any_cast = true;
+	}
+	// An empty list leaves the input as it is
+	if (!any_cast) {
+		result.clear();
+	}
+	return result;
+}
+
+//===--------------------------------------------------------------------===//
 // Bind
 //===--------------------------------------------------------------------===//
 static unique_ptr<FunctionData> NewickCopyBind(ClientContext &context, CopyFunctionBindInput &input,
@@ -101,21 +164,21 @@ static unique_ptr<FunctionData> NewickCopyBind(ClientContext &context, CopyFunct
 	auto result = make_uniq<NewickCopyBindData>();
 	result->file_path = input.info.file_path;
 
-	// Find column indices
+	// Find the columns the sink reads and check their types; other columns (like is_tip, filepath)
+	// are ignored.
 	for (idx_t i = 0; i < names.size(); i++) {
-		const auto &name = names[i];
-		if (name == "node_index") {
-			result->node_index_idx = i;
-		} else if (name == "parent_index") {
-			result->parent_index_idx = i;
-		} else if (name == "name") {
-			result->name_idx = i;
-		} else if (name == "branch_length") {
-			result->branch_length_idx = i;
-		} else if (name == "edge_id") {
-			result->edge_id_idx = i;
+		auto column = FindNewickColumnType(names[i]);
+		if (!column) {
+			continue;
 		}
-		// Ignore unknown columns (like is_tip, filepath)
+		if (!NewickColumnAccepts(*column, sql_types[i])) {
+			throw BinderException("COPY FORMAT NEWICK: column '%s' must be %s, got %s", names[i].GetIdentifierName(),
+			                      column->description, sql_types[i].ToString());
+		}
+		(*result).*(column->index) = i;
+	}
+	if (result->name_idx != DConstants::INVALID_INDEX) {
+		result->name_type = sql_types[result->name_idx];
 	}
 
 	// Validate required columns
@@ -125,7 +188,6 @@ static unique_ptr<FunctionData> NewickCopyBind(ClientContext &context, CopyFunct
 	if (result->parent_index_idx == DConstants::INVALID_INDEX) {
 		throw BinderException("COPY FORMAT NEWICK requires 'parent_index' column");
 	}
-
 	// Parse parameters
 	Value compression_param;
 	const vector<Value> *compression_level_values = nullptr;
@@ -170,11 +232,7 @@ static unique_ptr<FunctionData> NewickCopyBind(ClientContext &context, CopyFunct
 		throw BinderException("PLACEMENTS option requires 'edge_id' column in input tree data");
 	}
 
-	// Read placements at bind time to avoid deadlocks during COPY execution.
-	// This is safe because bind happens before query execution starts.
-	if (placements_table.has_value()) {
-		result->placements = ReadPlacementTable(context, placements_table.value());
-	}
+	result->placements_table = placements_table;
 
 	return result;
 }
@@ -185,8 +243,12 @@ static unique_ptr<FunctionData> NewickCopyBind(ClientContext &context, CopyFunct
 static unique_ptr<GlobalFunctionData> NewickCopyInitializeGlobal(ClientContext &context, FunctionData &bind_data,
                                                                  const string &file_path) {
 	auto &fdata = bind_data.Cast<NewickCopyBindData>();
+	std::vector<miint::Placement> placements;
+	if (fdata.placements_table) {
+		placements = ReadPlacementTable(context, *fdata.placements_table);
+	}
 	return make_uniq<NewickCopyGlobalState>(file_path, fdata.compression, fdata.compression_level,
-	                                        fdata.include_edge_ids, fdata.placements);
+	                                        fdata.include_edge_ids, std::move(placements));
 }
 
 //===--------------------------------------------------------------------===//
@@ -204,9 +266,9 @@ static void NewickCopySink(ExecutionContext &context, FunctionData &bind_data, G
 	auto &fdata = bind_data.Cast<NewickCopyBindData>();
 	auto &lstate = lstate_p.Cast<NewickCopyLocalState>();
 
-	// Get unified formats for all columns
+	// Unified formats for the numeric columns; names are extracted as text below
 	UnifiedVectorFormat node_index_data, parent_index_data;
-	UnifiedVectorFormat name_data, branch_length_data, edge_id_data;
+	UnifiedVectorFormat branch_length_data, edge_id_data;
 
 	input.data[fdata.node_index_idx].ToUnifiedFormat(node_index_data);
 	input.data[fdata.parent_index_idx].ToUnifiedFormat(parent_index_data);
@@ -218,13 +280,13 @@ static void NewickCopySink(ExecutionContext &context, FunctionData &bind_data, G
 	bool has_branch_length = fdata.branch_length_idx != DConstants::INVALID_INDEX;
 	bool has_edge_id = fdata.edge_id_idx != DConstants::INVALID_INDEX;
 
-	const string_t *names_ptr = nullptr;
+	std::vector<std::string> names;
+	std::vector<bool> name_nulls;
 	const double *branch_lengths_ptr = nullptr;
 	const int64_t *edge_ids_ptr = nullptr;
 
 	if (has_name) {
-		input.data[fdata.name_idx].ToUnifiedFormat(name_data);
-		names_ptr = UnifiedVectorFormat::GetData<string_t>(name_data);
+		ExtractIdColumnAsStrings(input, fdata.name_idx, fdata.name_type, names, name_nulls);
 	}
 	if (has_branch_length) {
 		input.data[fdata.branch_length_idx].ToUnifiedFormat(branch_length_data);
@@ -257,11 +319,8 @@ static void NewickCopySink(ExecutionContext &context, FunctionData &bind_data, G
 		}
 
 		// name (optional)
-		if (has_name) {
-			auto name_row = name_data.sel->get_index(row);
-			if (name_data.validity.RowIsValid(name_row)) {
-				node.name = names_ptr[name_row].GetString();
-			}
+		if (has_name && !name_nulls[row]) {
+			node.name = std::move(names[row]);
 		}
 
 		// branch_length (optional, default to NaN)
@@ -328,7 +387,7 @@ static void NewickCopyFinalize(ClientContext &context, FunctionData &bind_data, 
 		throw InvalidInputException("COPY FORMAT NEWICK: Failed to build tree: %s", e.what());
 	}
 
-	// Insert placements if any were provided (read at bind time)
+	// Insert placements if any were provided (read when the COPY started)
 	if (!gstate.placements.empty()) {
 		// Validate tree has at least one non-NULL edge_id
 		bool has_edge_id = false;
@@ -343,7 +402,7 @@ static void NewickCopyFinalize(ClientContext &context, FunctionData &bind_data, 
 			                            "Placements require a tree with edge identifiers.");
 		}
 
-		// Insert placements into tree (placements were already read at bind time)
+		// Insert placements into tree
 		try {
 			tree.insert_fully_resolved(gstate.placements);
 		} catch (const std::runtime_error &e) {
@@ -369,6 +428,18 @@ static void NewickCopyFinalize(ClientContext &context, FunctionData &bind_data, 
 }
 
 //===--------------------------------------------------------------------===//
+// Initialize Operator: one tree, one file
+//===--------------------------------------------------------------------===//
+static void NewickCopyInitializeOperator(GlobalFunctionData &gstate, const PhysicalOperator &op) {
+	auto &copy = op.Cast<PhysicalCopyToFile>();
+	// Each file would get only the rows sent to it, part of the tree
+	if (copy.per_thread_output || copy.partition_output) {
+		throw InvalidInputException("COPY FORMAT NEWICK writes one tree to one file, so it takes no PER_THREAD_OUTPUT, "
+		                            "PARTITION_BY or ORDER_BY");
+	}
+}
+
+//===--------------------------------------------------------------------===//
 // Register Function
 //===--------------------------------------------------------------------===//
 static void NewickCopyOptions(ClientContext &context, CopyOptionsInput &input) {
@@ -381,12 +452,14 @@ static void NewickCopyOptions(ClientContext &context, CopyOptionsInput &input) {
 CopyFunction CopyNewickFunction::GetFunction() {
 	CopyFunction func("newick");
 	func.copy_options = NewickCopyOptions;
+	func.copy_to_select = NewickCopySelect;
 	func.copy_to_bind = NewickCopyBind;
 	func.copy_to_initialize_local = NewickCopyInitializeLocal;
 	func.copy_to_initialize_global = NewickCopyInitializeGlobal;
 	func.copy_to_sink = NewickCopySink;
 	func.copy_to_combine = NewickCopyCombine;
 	func.copy_to_finalize = NewickCopyFinalize;
+	func.initialize_operator = NewickCopyInitializeOperator;
 	return func;
 }
 

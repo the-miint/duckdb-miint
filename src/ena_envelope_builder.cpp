@@ -12,10 +12,10 @@ namespace miint {
 
 namespace {
 
-// Compile-time enum sets for client-side validation. Sourced from the SRA
-// XSDs in localdocs/ena-research-webin-v2-deep.md §4.4 and §6.1. Membership
-// is rough — the goal is to reject typos before the network round-trip, not
-// to be an exhaustive compatibility matrix. ENA's server is the authority.
+// Compile-time enum sets for client-side validation, from ENA's SRA XSDs.
+// Membership is rough — the goal is to reject typos before the network
+// round-trip, not to be an exhaustive compatibility matrix. ENA's server is
+// the authority.
 const std::unordered_set<std::string> &LibraryStrategies() {
 	static const std::unordered_set<std::string> kSet = {"WGS",
 	                                                     "WGA",
@@ -847,9 +847,9 @@ void AppendXmlSample(std::string &out, const SampleSpec &s) {
 	//     </SAMPLE_ATTRIBUTES>
 	//   </SAMPLE>
 	//
-	// L4b-fix exists because V2's JSON dispatcher emitted <DESCRIPTION> BEFORE
-	// <SAMPLE_NAME> regardless of JSON-key order, violating the XSD; emitting
-	// XML directly lets us control element order.
+	// Samples are written as XML because V2's JSON dispatcher emitted
+	// <DESCRIPTION> BEFORE <SAMPLE_NAME> regardless of JSON-key order,
+	// violating the XSD; emitting XML directly lets us control element order.
 	ValidateSampleSpec(s);
 
 	out.append("<SAMPLE alias=\"");

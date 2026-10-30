@@ -151,6 +151,187 @@ statement ok
 DROP TABLE missing_parent;
 
 # =============================================================================
+# Column types
+# =============================================================================
+
+# Each tree column takes one type: node_index, parent_index and edge_id BIGINT, branch_length
+# DOUBLE. A column of another type is refused when the COPY is planned, naming the column and the
+# type it needs, and the database stays usable. A tree built from untyped literals has INTEGER
+# indices and DECIMAL branch lengths, so it is refused.
+statement ok
+CREATE TABLE literal_tree AS
+SELECT * FROM (VALUES (0, NULL, NULL, NULL), (1, 0, 'a', 0.1), (2, 0, 'b', 0.2))
+    AS t(node_index, parent_index, name, branch_length);
+
+query TTTT
+SELECT typeof(node_index), typeof(parent_index), typeof(name), typeof(branch_length) FROM literal_tree LIMIT 1;
+----
+INTEGER	INTEGER	VARCHAR	DECIMAL(2,1)
+
+statement error
+COPY literal_tree TO '{TEST_DIR}/literal_tree.nwk' (FORMAT NEWICK);
+----
+Binder Error: COPY FORMAT NEWICK: column 'node_index' must be BIGINT, got INTEGER
+
+query I
+SELECT 1;
+----
+1
+
+# Cast to the column types, the same tree is written.
+statement ok
+COPY (SELECT node_index::BIGINT AS node_index, parent_index::BIGINT AS parent_index, name,
+             branch_length::DOUBLE AS branch_length
+      FROM literal_tree)
+TO '{TEST_DIR}/literal_tree.nwk' (FORMAT NEWICK);
+
+query T
+SELECT trim(content) FROM read_text('{TEST_DIR}/literal_tree.nwk');
+----
+(a:0.1,b:0.2);
+
+statement ok
+DROP TABLE literal_tree;
+
+# Every tree column is checked, and a narrower type of the same kind is refused too: nothing is
+# widened.
+statement error
+COPY (SELECT node_index, parent_index::UTINYINT AS parent_index FROM read_newick('data/newick/simple.nwk'))
+TO '{TEST_DIR}/utinyint_parent_index.nwk' (FORMAT NEWICK);
+----
+Binder Error: COPY FORMAT NEWICK: column 'parent_index' must be BIGINT, got UTINYINT
+
+statement error
+COPY (SELECT node_index, parent_index, edge_id::INTEGER AS edge_id FROM read_newick('data/newick/with_edge_ids.nwk'))
+TO '{TEST_DIR}/integer_edge_id.nwk' (FORMAT NEWICK);
+----
+Binder Error: COPY FORMAT NEWICK: column 'edge_id' must be BIGINT, got INTEGER
+
+statement error
+COPY (SELECT node_index, parent_index, branch_length::FLOAT AS branch_length FROM read_newick('data/newick/simple.nwk'))
+TO '{TEST_DIR}/float_branch_length.nwk' (FORMAT NEWICK);
+----
+Binder Error: COPY FORMAT NEWICK: column 'branch_length' must be DOUBLE, got FLOAT
+
+statement error
+COPY (SELECT node_index::VARCHAR AS node_index, parent_index FROM read_newick('data/newick/simple.nwk'))
+TO '{TEST_DIR}/varchar_node_index.nwk' (FORMAT NEWICK);
+----
+Binder Error: COPY FORMAT NEWICK: column 'node_index' must be BIGINT, got VARCHAR
+
+statement error
+COPY (SELECT node_index, parent_index, branch_length::VARCHAR AS branch_length FROM read_newick('data/newick/simple.nwk'))
+TO '{TEST_DIR}/varchar_branch_length.nwk' (FORMAT NEWICK);
+----
+Binder Error: COPY FORMAT NEWICK: column 'branch_length' must be DOUBLE, got VARCHAR
+
+# An untyped NULL column is cast to the column's type, so a tree can be written without names,
+# branch lengths or edge ids.
+statement ok
+COPY (SELECT node_index, parent_index, NULL AS name, NULL AS branch_length, NULL AS edge_id
+      FROM read_newick('data/newick/simple.nwk'))
+TO '{TEST_DIR}/null_columns.nwk' (FORMAT NEWICK);
+
+query T
+SELECT trim(content) FROM read_text('{TEST_DIR}/null_columns.nwk');
+----
+((,),);
+
+# name is an id, so it takes the types read_id does (VARCHAR, BIGINT or UUID), and a BIGINT or
+# UUID name is written as its text. A NULL name writes no label.
+statement ok
+COPY (SELECT node_index, parent_index, CASE WHEN is_tip THEN node_index + 100 END AS name, branch_length
+      FROM read_newick('data/newick/simple.nwk'))
+TO '{TEST_DIR}/bigint_name.nwk' (FORMAT NEWICK);
+
+query T
+SELECT trim(content) FROM read_text('{TEST_DIR}/bigint_name.nwk');
+----
+((100:0.1,101:0.2):0.3,103:0.4);
+
+statement ok
+COPY (SELECT node_index, parent_index,
+             CASE WHEN is_tip THEN ('00000000-0000-0000-0000-00000000000' || node_index)::UUID END AS name,
+             branch_length
+      FROM read_newick('data/newick/simple.nwk'))
+TO '{TEST_DIR}/uuid_name.nwk' (FORMAT NEWICK);
+
+query T
+SELECT trim(content) FROM read_text('{TEST_DIR}/uuid_name.nwk');
+----
+((00000000-0000-0000-0000-000000000000:0.1,00000000-0000-0000-0000-000000000001:0.2):0.3,00000000-0000-0000-0000-000000000003:0.4);
+
+statement error
+COPY (SELECT node_index, parent_index, node_index::INTEGER AS name FROM read_newick('data/newick/simple.nwk'))
+TO '{TEST_DIR}/integer_name.nwk' (FORMAT NEWICK);
+----
+Binder Error: COPY FORMAT NEWICK: column 'name' must be VARCHAR, BIGINT, or UUID, got INTEGER
+
+query I
+SELECT 1;
+----
+1
+
+# node_index and parent_index are required.
+statement error
+COPY (SELECT parent_index, name FROM read_newick('data/newick/simple.nwk'))
+TO '{TEST_DIR}/no_node_index.nwk' (FORMAT NEWICK);
+----
+Binder Error: COPY FORMAT NEWICK requires 'node_index' column
+
+statement error
+COPY (SELECT node_index, name FROM read_newick('data/newick/simple.nwk'))
+TO '{TEST_DIR}/no_parent_index.nwk' (FORMAT NEWICK);
+----
+Binder Error: COPY FORMAT NEWICK requires 'parent_index' column
+
+# =============================================================================
+# One tree, one file
+# =============================================================================
+
+# Output split across files would leave each holding only part of the tree, so per-thread,
+# partitioned and ordered output (which writes a directory of files) are refused, and no file is
+# written.
+statement error
+COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
+TO '{TEST_DIR}/per_thread_tree' (FORMAT NEWICK, PER_THREAD_OUTPUT true);
+----
+COPY FORMAT NEWICK writes one tree to one file
+
+statement error
+COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
+TO '{TEST_DIR}/partitioned_tree' (FORMAT NEWICK, PARTITION_BY (is_tip));
+----
+COPY FORMAT NEWICK writes one tree to one file
+
+statement error
+COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
+TO '{TEST_DIR}/ordered_tree' (FORMAT NEWICK, ORDER_BY (node_index));
+----
+COPY FORMAT NEWICK writes one tree to one file
+
+query I
+SELECT count(*) FROM glob('{TEST_DIR}/*_tree/**');
+----
+0
+
+# The refusal comes when the COPY runs, so EXPLAIN does not raise it.
+statement ok
+EXPLAIN COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk'))
+TO '{TEST_DIR}/explained_tree' (FORMAT NEWICK, PARTITION_BY (is_tip));
+
+# The refusal comes when a file is opened for the rows, so a partitioned or ordered COPY of no
+# rows, which opens none, is not refused and writes no file.
+statement ok
+COPY (SELECT * FROM read_newick('data/newick/with_edge_ids.nwk') WHERE false)
+TO '{TEST_DIR}/empty_partitioned' (FORMAT NEWICK, PARTITION_BY (is_tip));
+
+query I
+SELECT count(*) FROM glob('{TEST_DIR}/empty_partitioned/**');
+----
+0
+
+# =============================================================================
 # Tree structure validation
 # =============================================================================
 

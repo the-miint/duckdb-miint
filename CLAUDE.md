@@ -124,6 +124,7 @@ If a test produces an **incorrect expected value**: DO NOT change the expected v
 bash run_tests.sh                                                 # all SQL tests
 MIINT_TEST_JOBS=8 bash run_tests.sh                               # the same, SQL and C++ tests on 8 workers
 ./build/release/extension/miint/tests                             # C++ unit tests
+./build/release/extension/miint/tests_duckdb                      # C++ tests that need a running DuckDB
 export DUCKDB_TEST_CONFIG=$PWD/test/configs/no_skipped_errors.json  # as run_tests.sh does
 ./build/release/test/unittest "test/sql/read_alignments.test"     # single SQL test
 ./build/release/test/unittest "[alignment]"                       # tests matching a pattern
@@ -172,7 +173,7 @@ Developer-facing deep dives live under `docs/internals/`:
 - **[`docs/internals/reading-tables-views.md`](docs/internals/reading-tables-views.md)** — the separate-connection recipe for reading user-specified tables/views from extension code (avoids the `context.Query()` deadlock). Covers both data reads and schema validation.
 - **[`docs/internals/arrow-zero-copy.md`](docs/internals/arrow-zero-copy.md)** — zero-copy Arrow C Data Interface → DuckDB Vector conversion, with lifetime management and reference implementations.
 - **[`docs/internals/per-sample-pattern.md`](docs/internals/per-sample-pattern.md)** — the `sample_id` named parameter that partitions an input relation and runs a function's pipeline once per distinct sample, prepending a sample column. Covers `src/include/per_sample_table_function.hpp` (bind-time discovery, exec-time atomic claim) and which functions use it.
-- **[`docs/internals/duckdb-engine-notes.md`](docs/internals/duckdb-engine-notes.md)** — non-obvious DuckDB engine behavior that affects us: storage version 64 as the default (and the compression it gates), non-flat input vectors, `string_t` inlining limits, single-pass optimizer passes, zonemap vs. ART index reality, and jemalloc knobs.
+- **[`docs/internals/duckdb-engine-notes.md`](docs/internals/duckdb-engine-notes.md)** — non-obvious DuckDB engine behavior that affects extension code, one section per engine area (such as why a caught DuckDB exception's `what()` is JSON); its headings list the areas.
 
 User-facing API reference (parameters, return types, examples) is organized by task under `docs/` — start from the index at [`docs/table_of_contents.md`](docs/table_of_contents.md) (e.g. `docs/reading.md`, `docs/writing.md`, `docs/alignment_*.md`, `docs/qc.md`, `docs/diversity.md`, `docs/insdc_ena.md`, `docs/utilities.md`).
 

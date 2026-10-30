@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: MIT
 //
 // SQL surface for ENA Webin V2 MODIFY actions. Wires the four MODIFY family
-// members: ena_modify_project (L4a) + ena_modify_sample (L4b) +
-// ena_modify_experiment (L4c) + ena_modify_run (L4d). See
-// ena_modify_functions.hpp for the contract.
+// members: ena_modify_project, ena_modify_sample, ena_modify_experiment and
+// ena_modify_run. See ena_modify_functions.hpp for the contract.
 
 #include "ena_modify_functions.hpp"
 
@@ -169,7 +168,7 @@ void ExecuteModifyProject(ClientContext &context, TableFunctionInput &data, Data
 	miint::ENAPostFn post_fn = [&client](const string &url, const string &body, const string &user,
 	                                     const string &password, const string &content_type) {
 		// Projects use JSON (V2's JSON dispatcher handles projects correctly).
-		// Samples (post L4b-fix), experiments, and runs go through XML —
+		// Samples, experiments, and runs go through XML —
 		// samples because V2's JSON-to-XML dispatcher misorders DESCRIPTION
 		// vs. SAMPLE_NAME (XSD violation), the SRA-side objects because the
 		// JSON dispatcher NPEs on them. The content-type dispatch matches
@@ -183,21 +182,9 @@ void ExecuteModifyProject(ClientContext &context, TableFunctionInput &data, Data
 
 	std::vector<miint::ProjectSpec> specs = {spec};
 
-	bool transport_failure = false;
-	string transport_error;
-	try {
-		gs.outcome = miint::SubmitProjectInsertOutcome(specs, opts, post_fn);
-	} catch (const std::exception &e) {
-		transport_failure = true;
-		transport_error = e.what();
-	}
-
-	const bool success = !transport_failure && gs.outcome.success;
-	auto error_messages = gs.outcome.error_messages;
-	if (transport_failure && error_messages.empty()) {
-		error_messages.push_back(transport_error);
-	}
-	gs.outcome.error_messages = error_messages;
+	const auto submitted = duckdb::SubmitCapturingTransportFailure(
+	    gs.outcome, [&] { return miint::SubmitProjectInsertOutcome(specs, opts, post_fn); });
+	gs.outcome.error_messages = submitted.error_messages;
 
 	if (auto *catalog =
 	        duckdb::FindAttachedENACatalog(context, "ena_modify_project", bd.catalog_name, bd.catalog_explicit)) {
@@ -205,12 +192,12 @@ void ExecuteModifyProject(ClientContext &context, TableFunctionInput &data, Data
 		payload.object_type = "projects";
 		payload.action = miint::ActionName(miint::ENAAction::MODIFY);
 		payload.n_objects = 1;
-		payload.success = success;
+		payload.success = submitted.success;
 		payload.duration_ms = gs.outcome.duration_ms;
 		payload.envelope_payload = gs.outcome.envelope_payload;
 		payload.raw_receipt = gs.outcome.raw_receipt;
 		payload.era_accession = gs.outcome.era_accession;
-		payload.error_messages = error_messages;
+		payload.error_messages = submitted.error_messages;
 		// `target` for MODIFY is the accession the user is updating —
 		// matches the convention from the lifecycle ops, lets the audit
 		// reader filter by accession across action types.
@@ -227,12 +214,12 @@ void ExecuteModifyProject(ClientContext &context, TableFunctionInput &data, Data
 		duckdb::RecordSubmissionLog(*catalog, creds, payload);
 	}
 
-	if (transport_failure) {
-		throw InvalidInputException("ena_modify_project: %s", transport_error);
+	if (submitted.transport_failure) {
+		throw InvalidInputException("ena_modify_project: %s", submitted.transport_error);
 	}
-	if (!success) {
+	if (!submitted.success) {
 		string detail;
-		for (const auto &m : error_messages) {
+		for (const auto &m : submitted.error_messages) {
 			if (!detail.empty()) {
 				detail += "; ";
 			}
@@ -247,13 +234,13 @@ void ExecuteModifyProject(ClientContext &context, TableFunctionInput &data, Data
 	output.SetChildCardinality(1);
 	output.data[0].SetValue(0, Value(string(miint::ActionName(miint::ENAAction::MODIFY))));
 	output.data[1].SetValue(0, Value(bd.accession));
-	output.data[2].SetValue(0, Value::BOOLEAN(success));
+	output.data[2].SetValue(0, Value::BOOLEAN(submitted.success));
 	output.data[3].SetValue(0, Value(bd.alias));
 	output.data[4].SetValue(0, Value(gs.outcome.era_accession));
 
 	vector<Value> errs;
-	errs.reserve(error_messages.size());
-	for (const auto &m : error_messages) {
+	errs.reserve(submitted.error_messages.size());
+	for (const auto &m : submitted.error_messages) {
 		errs.emplace_back(m);
 	}
 	output.data[5].SetValue(0, Value::LIST(LogicalType::VARCHAR, errs));
@@ -434,21 +421,9 @@ void ExecuteModifySample(ClientContext &context, TableFunctionInput &data, DataC
 
 	std::vector<miint::SampleSpec> specs = {spec};
 
-	bool transport_failure = false;
-	string transport_error;
-	try {
-		gs.outcome = miint::SubmitSampleInsertOutcome(specs, opts, post_fn);
-	} catch (const std::exception &e) {
-		transport_failure = true;
-		transport_error = e.what();
-	}
-
-	const bool success = !transport_failure && gs.outcome.success;
-	auto error_messages = gs.outcome.error_messages;
-	if (transport_failure && error_messages.empty()) {
-		error_messages.push_back(transport_error);
-	}
-	gs.outcome.error_messages = error_messages;
+	const auto submitted = duckdb::SubmitCapturingTransportFailure(
+	    gs.outcome, [&] { return miint::SubmitSampleInsertOutcome(specs, opts, post_fn); });
+	gs.outcome.error_messages = submitted.error_messages;
 
 	if (auto *catalog =
 	        duckdb::FindAttachedENACatalog(context, "ena_modify_sample", bd.catalog_name, bd.catalog_explicit)) {
@@ -456,14 +431,14 @@ void ExecuteModifySample(ClientContext &context, TableFunctionInput &data, DataC
 		payload.object_type = "samples";
 		payload.action = miint::ActionName(miint::ENAAction::MODIFY);
 		payload.n_objects = 1;
-		payload.success = success;
+		payload.success = submitted.success;
 		payload.duration_ms = gs.outcome.duration_ms;
 		payload.envelope_payload = gs.outcome.envelope_payload;
 		payload.raw_receipt = gs.outcome.raw_receipt;
 		payload.era_accession = gs.outcome.era_accession;
-		payload.error_messages = error_messages;
+		payload.error_messages = submitted.error_messages;
 		// `target` is the user-supplied accession (audit ground truth),
-		// matching the L4a ena_modify_project convention (decision #23).
+		// matching ena_modify_project.
 		payload.target = bd.accession;
 		payload.object_aliases.reserve(gs.outcome.rows.size());
 		payload.object_accessions.reserve(gs.outcome.rows.size());
@@ -474,12 +449,12 @@ void ExecuteModifySample(ClientContext &context, TableFunctionInput &data, DataC
 		duckdb::RecordSubmissionLog(*catalog, creds, payload);
 	}
 
-	if (transport_failure) {
-		throw InvalidInputException("ena_modify_sample: %s", transport_error);
+	if (submitted.transport_failure) {
+		throw InvalidInputException("ena_modify_sample: %s", submitted.transport_error);
 	}
-	if (!success) {
+	if (!submitted.success) {
 		string detail;
-		for (const auto &m : error_messages) {
+		for (const auto &m : submitted.error_messages) {
 			if (!detail.empty()) {
 				detail += "; ";
 			}
@@ -494,13 +469,13 @@ void ExecuteModifySample(ClientContext &context, TableFunctionInput &data, DataC
 	output.SetChildCardinality(1);
 	output.data[0].SetValue(0, Value(string(miint::ActionName(miint::ENAAction::MODIFY))));
 	output.data[1].SetValue(0, Value(bd.accession));
-	output.data[2].SetValue(0, Value::BOOLEAN(success));
+	output.data[2].SetValue(0, Value::BOOLEAN(submitted.success));
 	output.data[3].SetValue(0, Value(bd.alias));
 	output.data[4].SetValue(0, Value(gs.outcome.era_accession));
 
 	vector<Value> errs;
-	errs.reserve(error_messages.size());
-	for (const auto &m : error_messages) {
+	errs.reserve(submitted.error_messages.size());
+	for (const auto &m : submitted.error_messages) {
 		errs.emplace_back(m);
 	}
 	output.data[5].SetValue(0, Value::LIST(LogicalType::VARCHAR, errs));
@@ -528,8 +503,8 @@ void AddModifySampleNamedParameters(TableFunction &tf) {
 // ===========================================================================
 //
 // MODIFY semantics for experiments: re-submit the full updated experiment XML
-// identified by ERX accession. The L4a/L4b template applies — bind-time
-// require everything `ValidateExperimentSpec` and `AppendXmlExperiment` would
+// identified by ERX accession. As for projects and samples, bind requires
+// everything `ValidateExperimentSpec` and `AppendXmlExperiment` would
 // otherwise surface mid-Execute. Cross-references (`study_ref`,
 // `sample_descriptor`) are XSD-mandatory; each is a single VARCHAR that
 // accepts either an ENA accession or a parent's alias. The naming and
@@ -735,21 +710,9 @@ void ExecuteModifyExperiment(ClientContext &context, TableFunctionInput &data, D
 
 	std::vector<miint::ExperimentSpec> specs = {spec};
 
-	bool transport_failure = false;
-	string transport_error;
-	try {
-		gs.outcome = miint::SubmitExperimentInsertOutcome(specs, opts, post_fn);
-	} catch (const std::exception &e) {
-		transport_failure = true;
-		transport_error = e.what();
-	}
-
-	const bool success = !transport_failure && gs.outcome.success;
-	auto error_messages = gs.outcome.error_messages;
-	if (transport_failure && error_messages.empty()) {
-		error_messages.push_back(transport_error);
-	}
-	gs.outcome.error_messages = error_messages;
+	const auto submitted = duckdb::SubmitCapturingTransportFailure(
+	    gs.outcome, [&] { return miint::SubmitExperimentInsertOutcome(specs, opts, post_fn); });
+	gs.outcome.error_messages = submitted.error_messages;
 
 	if (auto *catalog =
 	        duckdb::FindAttachedENACatalog(context, "ena_modify_experiment", bd.catalog_name, bd.catalog_explicit)) {
@@ -757,14 +720,14 @@ void ExecuteModifyExperiment(ClientContext &context, TableFunctionInput &data, D
 		payload.object_type = "experiments";
 		payload.action = miint::ActionName(miint::ENAAction::MODIFY);
 		payload.n_objects = 1;
-		payload.success = success;
+		payload.success = submitted.success;
 		payload.duration_ms = gs.outcome.duration_ms;
 		payload.envelope_payload = gs.outcome.envelope_payload;
 		payload.raw_receipt = gs.outcome.raw_receipt;
 		payload.era_accession = gs.outcome.era_accession;
-		payload.error_messages = error_messages;
-		// `target` is the user-supplied accession (audit ground truth,
-		// decision #23 — same convention as L4a/L4b).
+		payload.error_messages = submitted.error_messages;
+		// `target` is the user-supplied accession (audit ground truth, as for
+		// projects and samples).
 		payload.target = bd.accession;
 		payload.object_aliases.reserve(gs.outcome.rows.size());
 		payload.object_accessions.reserve(gs.outcome.rows.size());
@@ -775,12 +738,12 @@ void ExecuteModifyExperiment(ClientContext &context, TableFunctionInput &data, D
 		duckdb::RecordSubmissionLog(*catalog, creds, payload);
 	}
 
-	if (transport_failure) {
-		throw InvalidInputException("ena_modify_experiment: %s", transport_error);
+	if (submitted.transport_failure) {
+		throw InvalidInputException("ena_modify_experiment: %s", submitted.transport_error);
 	}
-	if (!success) {
+	if (!submitted.success) {
 		string detail;
-		for (const auto &m : error_messages) {
+		for (const auto &m : submitted.error_messages) {
 			if (!detail.empty()) {
 				detail += "; ";
 			}
@@ -795,13 +758,13 @@ void ExecuteModifyExperiment(ClientContext &context, TableFunctionInput &data, D
 	output.SetChildCardinality(1);
 	output.data[0].SetValue(0, Value(string(miint::ActionName(miint::ENAAction::MODIFY))));
 	output.data[1].SetValue(0, Value(bd.accession));
-	output.data[2].SetValue(0, Value::BOOLEAN(success));
+	output.data[2].SetValue(0, Value::BOOLEAN(submitted.success));
 	output.data[3].SetValue(0, Value(bd.alias));
 	output.data[4].SetValue(0, Value(gs.outcome.era_accession));
 
 	vector<Value> errs;
-	errs.reserve(error_messages.size());
-	for (const auto &m : error_messages) {
+	errs.reserve(submitted.error_messages.size());
+	for (const auto &m : submitted.error_messages) {
 		errs.emplace_back(m);
 	}
 	output.data[5].SetValue(0, Value::LIST(LogicalType::VARCHAR, errs));
@@ -836,13 +799,13 @@ void AddModifyExperimentNamedParameters(TableFunction &tf) {
 // ===========================================================================
 //
 // MODIFY semantics for runs: re-submit the full updated run XML identified by
-// ERR accession. The L4a/L4b/L4c template applies. `files` is
+// ERR accession. The other ena_modify_* functions' pattern applies. `files` is
 // `LIST<STRUCT<filename VARCHAR, filetype VARCHAR, md5 VARCHAR>>`,
 // extracted at bind via `duckdb::ExtractENARunFilesList` so the per-entry
 // invariants (non-empty filename/filetype/checksum, no NULL entries) surface
 // as `BinderException`s before secret resolution. `experiment_ref` matches the
 // INSERT-path column name; single VARCHAR each, accession-vs-refname
-// disambiguated at Execute via `miint::ResolveENAExperimentRef` (decision #36).
+// disambiguated at Execute via `miint::ResolveENAExperimentRef`.
 
 struct ModifyRunBindData : public TableFunctionData {
 	string secret_name;
@@ -961,7 +924,7 @@ void ExecuteModifyRun(ClientContext &context, TableFunctionInput &data, DataChun
 		// so a non-XML content_type here indicates a future trait/dispatch
 		// refactor that broke the contract; throw at the violation point
 		// rather than route to a JSON path that itself fails server-side.
-		// Mirrors decision #37 (ena_modify_experiment).
+		// The same check as ena_modify_experiment's.
 		if (content_type != "application/xml") {
 			throw duckdb::InternalException("ena_modify_run: post_fn received content_type='%s'; runs are XML-only",
 			                                content_type);
@@ -971,21 +934,9 @@ void ExecuteModifyRun(ClientContext &context, TableFunctionInput &data, DataChun
 
 	std::vector<miint::RunSpec> specs = {spec};
 
-	bool transport_failure = false;
-	string transport_error;
-	try {
-		gs.outcome = miint::SubmitRunInsertOutcome(specs, opts, post_fn);
-	} catch (const std::exception &e) {
-		transport_failure = true;
-		transport_error = e.what();
-	}
-
-	const bool success = !transport_failure && gs.outcome.success;
-	auto error_messages = gs.outcome.error_messages;
-	if (transport_failure && error_messages.empty()) {
-		error_messages.push_back(transport_error);
-	}
-	gs.outcome.error_messages = error_messages;
+	const auto submitted = duckdb::SubmitCapturingTransportFailure(
+	    gs.outcome, [&] { return miint::SubmitRunInsertOutcome(specs, opts, post_fn); });
+	gs.outcome.error_messages = submitted.error_messages;
 
 	if (auto *catalog =
 	        duckdb::FindAttachedENACatalog(context, "ena_modify_run", bd.catalog_name, bd.catalog_explicit)) {
@@ -993,13 +944,13 @@ void ExecuteModifyRun(ClientContext &context, TableFunctionInput &data, DataChun
 		payload.object_type = "runs";
 		payload.action = miint::ActionName(miint::ENAAction::MODIFY);
 		payload.n_objects = 1;
-		payload.success = success;
+		payload.success = submitted.success;
 		payload.duration_ms = gs.outcome.duration_ms;
 		payload.envelope_payload = gs.outcome.envelope_payload;
 		payload.raw_receipt = gs.outcome.raw_receipt;
 		payload.era_accession = gs.outcome.era_accession;
-		payload.error_messages = error_messages;
-		// `target` is the user-supplied accession (audit ground truth, decision #23).
+		payload.error_messages = submitted.error_messages;
+		// `target` is the user-supplied accession (audit ground truth).
 		payload.target = bd.accession;
 		payload.object_aliases.reserve(gs.outcome.rows.size());
 		payload.object_accessions.reserve(gs.outcome.rows.size());
@@ -1010,12 +961,12 @@ void ExecuteModifyRun(ClientContext &context, TableFunctionInput &data, DataChun
 		duckdb::RecordSubmissionLog(*catalog, creds, payload);
 	}
 
-	if (transport_failure) {
-		throw InvalidInputException("ena_modify_run: %s", transport_error);
+	if (submitted.transport_failure) {
+		throw InvalidInputException("ena_modify_run: %s", submitted.transport_error);
 	}
-	if (!success) {
+	if (!submitted.success) {
 		string detail;
-		for (const auto &m : error_messages) {
+		for (const auto &m : submitted.error_messages) {
 			if (!detail.empty()) {
 				detail += "; ";
 			}
@@ -1030,13 +981,13 @@ void ExecuteModifyRun(ClientContext &context, TableFunctionInput &data, DataChun
 	output.SetChildCardinality(1);
 	output.data[0].SetValue(0, Value(string(miint::ActionName(miint::ENAAction::MODIFY))));
 	output.data[1].SetValue(0, Value(bd.accession));
-	output.data[2].SetValue(0, Value::BOOLEAN(success));
+	output.data[2].SetValue(0, Value::BOOLEAN(submitted.success));
 	output.data[3].SetValue(0, Value(bd.alias));
 	output.data[4].SetValue(0, Value(gs.outcome.era_accession));
 
 	vector<Value> errs;
-	errs.reserve(error_messages.size());
-	for (const auto &m : error_messages) {
+	errs.reserve(submitted.error_messages.size());
+	for (const auto &m : submitted.error_messages) {
 		errs.emplace_back(m);
 	}
 	output.data[5].SetValue(0, Value::LIST(LogicalType::VARCHAR, errs));

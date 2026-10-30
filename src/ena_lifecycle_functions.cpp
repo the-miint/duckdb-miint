@@ -14,6 +14,7 @@
 #include "ena_storage.hpp"
 
 #include "duckdb/catalog/catalog_transaction.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/attached_database.hpp"
@@ -54,7 +55,7 @@ struct LifecycleBindData : public TableFunctionData {
 	string fn_name; // for error messages — owned string so plan-cache serialization is safe
 	string secret_name;
 	string accession;              // server-assigned ID — wins over refname when both set
-	string refname;                // user-supplied alias; translated → accession at execute via Reports API (L5)
+	string refname;                // user-supplied alias; translated → accession at execute via Reports API
 	string refname_kind;           // required when refname is set: 'projects' / 'samples' / 'experiments' / 'runs'
 	string until_date;             // HOLD only; ignored for CANCEL/RELEASE
 	string catalog_name;           // resolved name; "ena" by default
@@ -187,17 +188,17 @@ void ExecuteLifecycle(ClientContext &context, TableFunctionInput &data, DataChun
 
 	ENAClient client(*context.db);
 
-	// L5: when the user supplied refname (alias) instead of accession, hit
+	// When the user supplied refname (alias) instead of accession, hit
 	// the Webin Reports API to translate before envelope build. The envelope
-	// builder rejects refname on lifecycle actions (decision #12) — that's
+	// builder rejects refname on lifecycle actions — that's
 	// defense-in-depth; by the time we hand `LifecycleSubmitOptions` over,
 	// `target.accession` is set and `target.refname` is empty.
 	string resolved_accession = bd.accession;
 	if (!bd.refname.empty()) {
 		const auto kind = miint::AliasObjectKindFromTableName(bd.refname_kind);
 		// Reports base must match the endpoint the lifecycle POST will hit
-		// (each server only sees its own account's records); see decision
-		// notes in ena_reports_client.hpp.
+		// (each server only sees its own account's records); see
+		// ena_reports_client.hpp.
 		const auto reports_base = miint::ResolveReportsBaseForEndpoint(creds.endpoint);
 		// Lifetime contract for the fetcher closure: `client` lives on this
 		// stack frame and the fetcher is invoked synchronously by
@@ -215,7 +216,7 @@ void ExecuteLifecycle(ClientContext &context, TableFunctionInput &data, DataChun
 			resolved_accession = miint::LookupAccessionByAlias(reports_base, kind, bd.refname, fetcher);
 		} catch (const std::exception &e) {
 			throw InvalidInputException("%s: Reports API lookup for refname '%s' (kind=%s) failed: %s", bd.fn_name,
-			                            bd.refname, bd.refname_kind, e.what());
+			                            bd.refname, bd.refname_kind, duckdb::ErrorData(e).RawMessage());
 		}
 		if (resolved_accession.empty()) {
 			throw InvalidInputException("%s: refname '%s' not found in this submission account "
@@ -242,13 +243,9 @@ void ExecuteLifecycle(ClientContext &context, TableFunctionInput &data, DataChun
 		return client.PostJSONReceiveXML(url, body, user, password);
 	};
 
-	bool transport_failure = false;
-	string transport_error;
-	try {
-		gs.outcome = SubmitLifecycle(bd.action, opts, post_fn);
-	} catch (const std::exception &e) {
-		transport_failure = true;
-		transport_error = e.what();
+	const auto submitted =
+	    duckdb::SubmitCapturingTransportFailure(gs.outcome, [&] { return SubmitLifecycle(bd.action, opts, post_fn); });
+	if (submitted.transport_failure) {
 		// Pre-POST exceptions (envelope-validation or transport setup) leave
 		// `gs.outcome` default-initialized — fill in the fields we know the
 		// log row needs so the audit trail still identifies the action+target.
@@ -258,16 +255,7 @@ void ExecuteLifecycle(ClientContext &context, TableFunctionInput &data, DataChun
 		gs.outcome.target = resolved_accession;
 		gs.outcome.hold_until_date = bd.until_date;
 	}
-
-	const bool success = !transport_failure && gs.outcome.success;
-	auto error_messages = gs.outcome.error_messages;
-	if (transport_failure && error_messages.empty()) {
-		error_messages.push_back(transport_error);
-	}
-	// Make the emitted row's `error_messages` reflect what we actually
-	// computed (pre-existing logic was a no-op, but the assignment matters
-	// once we add transport_error to the list above).
-	gs.outcome.error_messages = error_messages;
+	gs.outcome.error_messages = submitted.error_messages;
 
 	// submission_log integration. Default catalog "ena" is silently skipped
 	// when not attached (one-shot CANCEL from a no-ATTACH session). An
@@ -276,7 +264,7 @@ void ExecuteLifecycle(ClientContext &context, TableFunctionInput &data, DataChun
 	if (auto *catalog = duckdb::FindAttachedENACatalog(context, bd.fn_name, bd.catalog_name, bd.catalog_explicit)) {
 		duckdb::ResolvedENACredentials log_creds = creds;
 		duckdb::SubmissionLogPayload payload;
-		// Audit-log object_type: when the user supplied `kind => '…'` (the L5
+		// Audit-log object_type: when the user supplied `kind => '…'` (the
 		// alias-targeted path), use the explicit kind so the audit row matches
 		// the per-table convention used by the DELETE-by-alias path. The
 		// accession-targeted path leaves it empty — the lifecycle table fns
@@ -286,22 +274,22 @@ void ExecuteLifecycle(ClientContext &context, TableFunctionInput &data, DataChun
 		payload.object_type = bd.refname_kind;
 		payload.action = ActionName(gs.outcome.action);
 		payload.n_objects = 1;
-		payload.success = success;
+		payload.success = submitted.success;
 		payload.duration_ms = gs.outcome.duration_ms;
 		payload.envelope_payload = gs.outcome.envelope_payload;
 		payload.raw_receipt = gs.outcome.raw_receipt;
 		payload.era_accession = gs.outcome.era_accession;
-		payload.error_messages = error_messages;
+		payload.error_messages = submitted.error_messages;
 		payload.target = gs.outcome.target;
 		duckdb::RecordSubmissionLog(*catalog, log_creds, payload);
 	}
 
-	if (transport_failure) {
-		throw InvalidInputException("%s: %s", bd.fn_name, transport_error);
+	if (submitted.transport_failure) {
+		throw InvalidInputException("%s: %s", bd.fn_name, submitted.transport_error);
 	}
-	if (!success) {
+	if (!submitted.success) {
 		string detail;
-		for (const auto &m : error_messages) {
+		for (const auto &m : submitted.error_messages) {
 			if (!detail.empty()) {
 				detail += "; ";
 			}
@@ -350,7 +338,7 @@ unique_ptr<FunctionData> BindHold(ClientContext &ctx, TableFunctionBindInput &in
 void AddLifecycleNamedParameters(TableFunction &tf, bool include_until) {
 	AddNamedParameter(tf, "secret", LogicalType::VARCHAR);
 	AddNamedParameter(tf, "accession", LogicalType::VARCHAR);
-	// L5: alias-based UX. `refname` is translated to accession at execute via
+	// Alias-based UX. `refname` is translated to accession at execute via
 	// the Webin Reports API; `kind` is required alongside (one of 'projects' /
 	// 'samples' / 'experiments' / 'runs'). Aliases are unique per-account-per-
 	// kind, so the kind disambiguates a reused alias.

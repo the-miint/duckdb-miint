@@ -82,9 +82,8 @@ void RegisterENASecretType(duckdb::ExtensionLoader &loader) {
 	fn.named_parameters["password_file"] = duckdb::LogicalType::VARCHAR;
 	fn.named_parameters["endpoint"] = duckdb::LogicalType::VARCHAR;
 	fn.named_parameters["endpoint_url"] = duckdb::LogicalType::VARCHAR;
-	// Bearer-token auth is not supported by Webin V2 (HTTP Basic only); see
-	// localdocs/ena-research-webin-v2-deep.md §3. Add `bearer_token` here
-	// only if/when that changes.
+	// Bearer-token auth is not supported by Webin V2 (HTTP Basic only). Add
+	// `bearer_token` here only if/when that changes.
 	loader.RegisterFunction(fn);
 }
 

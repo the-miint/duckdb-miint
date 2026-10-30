@@ -33,7 +33,7 @@ make test
 
 `MIINT_TEST_JOBS=N` runs the files `make test` runs, each in its own `unittest` process, alongside the C++ test binary (`test/scripts/run_tests_parallel.py`). It prints a line per file as each finishes, then the output of every file that failed, and reports skips per reason as the serial pass does. A job still running after ten minutes is killed and fails the run, so a deadlocked test cannot stall it; each SQL file is one job, and so is the whole C++ test binary. The descriptor-limit rerun and the shell tests stay serial. Its SQL jobs run with `RUST_MIN_STACK=4194304` unless that is already set. Under heavy load on a many-core machine, the workers of rayon's global pool, which rype classifies on, can overflow Rust's default 2 MiB thread stack ([RYpe#28](https://github.com/the-miint/RYpe/issues/28)). The parallel jobs make that load themselves; a serial run meets it only when other heavy work shares the machine. CI leaves `MIINT_TEST_JOBS` unset and runs the serial pass.
 
-`build/release/duckdb`, `test/unittest`, `extension/miint/tests` and the loadable `miint.duckdb_extension` are separate build targets, so after an incremental `ninja` of one of them the others can be stale. Rebuild every binary you probe with, e.g. `ninja -C build/release duckdb test/unittest extension/miint/tests`.
+`build/release/duckdb`, `test/unittest`, `extension/miint/tests`, `extension/miint/tests_duckdb` and the loadable `miint.duckdb_extension` are separate build targets, so after an incremental `ninja` of one of them the others can be stale. Rebuild every binary you probe with, e.g. `ninja -C build/release duckdb test/unittest extension/miint/tests extension/miint/tests_duckdb`.
 
 **Test file structure:**
 SQL logic tests consist of statements and expected outputs. Each test file follows this format:
@@ -96,7 +96,7 @@ A skipped file is not a passing one, and the suite's skip count is part of its r
 - The live ENA tests (`require-env ENA_AVAILABLE`, and `test/shell/read_ena_sequences_aspera.sh`) skip unless `MIINT_ENA_LIVE_TEST=1`, which CI sets only in its nightly run. EBI's HTTP 500s, empty answers and md5 mismatches failed 18 of the 175 attempts of CI's test job between 2026-08-01 and 2026-10-22.
 - `test/shell/load_miint_concurrent.sh` (many databases in one process loading the extension at once) skips unless `MIINT_LOAD_RACE_TEST=1`, which CI sets only in its nightly run, with 100 processes: it takes minutes, and on a 4-CPU runner the race it guards against hits about one process in 30. With the opt-in set, `run_tests.sh` fails unless `MIINT_TEST_PYTHON` (default `python3`) has the duckdb matching this build.
   - The rest of `run_tests.sh` sends miint's Portal, checklist and Reports requests to the mock `test/scripts/ena_webin_mock.py`, through the base URLs `test/scripts/ena_mock_env.sh` exports. The Portal base covers every Portal request, so a live test run with it would read from the mock; the live tests run after the httpfs pass instead, without those variables and with `ENA_AVAILABLE`, which nothing else sets.
-  - On every run, `read_ena_sequences_mock.test` reads runs through the mock, from `data/ena/`, and `read_ena_input_errors.test` checks the ENA read functions' input errors, which need no request.
+  - On every run, `read_ena_sequences_mock.test` reads runs through the mock, from `data/ena/`, `read_ena_sequences_open_errors_mock.test` checks the warnings for a run whose file cannot be opened, and `read_ena_input_errors.test` checks the ENA read functions' input errors, which need no request. `read_ena_sequences_resume_mock.test` sets DuckDB's `http_retries`, `http_retry_wait_ms` (1 ms) and `http_retry_backoff` itself, and reads the runs that recover before those that never do.
   - `onboarding-tutorials/run_tutorial_tests.sh` starts the same mock unless `MIINT_TUTORIAL_LIVE=1`, which CI also sets only nightly. Live, each tutorial gets three attempts, a minute apart (`MIINT_TUTORIAL_LIVE_ATTEMPTS` changes the count), since EBI also drops FASTQ transfers partway; a pass after a failed attempt shows as a warning on the run. Against the mock a tutorial gets one attempt. The tutorials still fetch a genome from NCBI and install httpfs from DuckDB's extension repository on every run.
 
 ## C++ Unit Tests
@@ -114,6 +114,8 @@ Core algorithms and internal utilities are tested using the Catch2 framework. C+
 # Run a specific test case
 ./build/release/extension/miint/tests "ParseCigar - Basic operations"
 ```
+
+`tests` links no DuckDB. A C++ test that needs a running database, one that opens an in-process `DuckDB` and drives miint code against it, goes in the second runner instead, `./build/release/extension/miint/tests_duckdb`, which links DuckDB and miint statically. List its file under `tests_duckdb` in `CMakeLists.txt`, not in `TEST_SOURCES`. It is built only where DuckDB builds `unittest`, so not in the WASM builds. `run_tests.sh` runs both.
 
 **Code organization for testing:**
 

@@ -421,7 +421,7 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 			} catch (const std::exception &e) {
 				auto &run = global_state.runs[local_state.current_run_idx];
 				miint::EmitWarning(context, "read_ena_sequences: warning: run '%s' failed to open (%s), retrying...",
-				                   run.run_accession, e.what());
+				                   run.run_accession, ErrorData(e).RawMessage());
 				global_state.readers[local_state.current_run_idx].reset();
 				global_state.run_sequence_counters[local_state.current_run_idx] = 1;
 				try {
@@ -433,7 +433,7 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 						throw;
 					}
 					miint::EmitWarning(context, "read_ena_sequences: warning: run '%s' failed on retry (%s), skipping",
-					                   run.run_accession, e2.what());
+					                   run.run_accession, ErrorData(e2).RawMessage());
 					skip_run(run, e2);
 					continue;
 				}
@@ -465,7 +465,7 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 			miint::EmitWarning(context,
 			                   "read_ena_sequences: WARNING: run '%s' failed mid-stream after emitting %llu read(s) "
 			                   "(%s); skipping remainder — downstream sees partial data for this run",
-			                   run.run_accession, static_cast<unsigned long long>(emitted), e.what());
+			                   run.run_accession, static_cast<unsigned long long>(emitted), ErrorData(e).RawMessage());
 			global_state.readers[current_run_idx].reset();
 			skip_run(run, e);
 			continue;
@@ -489,7 +489,7 @@ void ReadENASequencesTableFunction::Execute(ClientContext &context, TableFunctio
 				miint::EmitWarning(context,
 				                   "read_ena_sequences: WARNING: run '%s' failed integrity verification at "
 				                   "completion (%s); skipping — its already-emitted rows are unverified",
-				                   run.run_accession, e.what());
+				                   run.run_accession, ErrorData(e).RawMessage());
 				skip_run(run, e);
 				continue;
 			}
@@ -604,8 +604,8 @@ void ReadENASequencesTableFunction::FillOutputFromBatch(DataChunk &output, const
 // final skip notices are emitted.
 //
 // `lateral_sequence_counter` is reset to 1 when a new outer row is consumed
-// (Phase 1) AND on open-retry / mid-stream retry (matching the literal path's
-// counter reset invariant #4 in localdocs/PLAN-ena-lateral.md). Within a
+// (Phase 1) AND on open-retry / mid-stream retry (as the literal path resets
+// its counter on a retry). Within a
 // single outer row, the counter increments monotonically across pending_runs
 // so sequence_index is globally unique per outer row.
 OperatorResultType ReadENASequencesTableFunction::ExecuteInOut(ExecutionContext &context, TableFunctionInput &data_p,
@@ -680,7 +680,8 @@ OperatorResultType ReadENASequencesTableFunction::ExecuteInOut(ExecutionContext 
 				local.pending_runs.push_back(run);
 			}
 		} catch (const std::exception &e) {
-			record_skip(local.current_accession, "", std::string("metadata resolution failed: ") + e.what());
+			record_skip(local.current_accession, "",
+			            std::string("metadata resolution failed: ") + ErrorData(e).RawMessage());
 			local.row_consumed = true;
 			output.SetChildCardinality(0);
 			return OperatorResultType::NEED_MORE_INPUT;
@@ -689,7 +690,7 @@ OperatorResultType ReadENASequencesTableFunction::ExecuteInOut(ExecutionContext 
 	}
 
 	// Phase 2: ensure we have an open reader on the current pending run.
-	// Retry-once-on-open mirrors Execute (literal path, invariant #3).
+	// Retry-once-on-open mirrors Execute (the literal path).
 	if (!local.current_reader) {
 		if (local.pending_runs.empty()) {
 			local.row_consumed = true;
@@ -703,7 +704,7 @@ OperatorResultType ReadENASequencesTableFunction::ExecuteInOut(ExecutionContext 
 			local.current_reader->Open();
 		} catch (const std::exception &e) {
 			miint::EmitWarning(context.client, "read_ena_sequences: warning: run '%s' failed to open (%s), retrying...",
-			                   run.run_accession, e.what());
+			                   run.run_accession, ErrorData(e).RawMessage());
 			local.current_reader.reset();
 			local.lateral_sequence_counter = 1; // No rows emitted yet; keep counter consistent.
 			local.current_reader = make_reader_for(run);
@@ -711,7 +712,7 @@ OperatorResultType ReadENASequencesTableFunction::ExecuteInOut(ExecutionContext 
 				local.current_reader->Open();
 			} catch (const std::exception &e2) {
 				record_skip(local.current_accession, run.run_accession,
-				            std::string("open failed on retry: ") + e2.what());
+				            std::string("open failed on retry: ") + ErrorData(e2).RawMessage());
 				local.current_reader.reset();
 				// State advanced (run popped, reader reset); the dispatcher
 				// will call us back to handle the next pending run or yield
@@ -745,7 +746,8 @@ OperatorResultType ReadENASequencesTableFunction::ExecuteInOut(ExecutionContext 
 		const std::string failed_run = local.current_reader->Run().run_accession;
 		record_skip(local.current_accession, failed_run,
 		            "failed mid-stream after emitting " + std::to_string(emitted) +
-		                " read(s); downstream sees partial data for this run (error: " + e.what() + ")");
+		                " read(s); downstream sees partial data for this run (error: " + ErrorData(e).RawMessage() +
+		                ")");
 		local.current_reader.reset();
 		output.SetChildCardinality(0);
 		return OperatorResultType::HAVE_MORE_OUTPUT;
@@ -761,7 +763,7 @@ OperatorResultType ReadENASequencesTableFunction::ExecuteInOut(ExecutionContext 
 			local.current_reader->Finish();
 		} catch (const std::exception &e) {
 			record_skip(local.current_accession, local.current_reader->Run().run_accession,
-			            std::string("finish/transfer completion failed: ") + e.what());
+			            std::string("finish/transfer completion failed: ") + ErrorData(e).RawMessage());
 		}
 		local.current_reader.reset();
 		if (!local.pending_runs.empty()) {

@@ -13,6 +13,15 @@ statement error
 SELECT * FROM read_jplace_newick('nonexistent.jplace');
 ----
 
+# A tree that does not parse is reported with the file it came from
+statement ok
+COPY (SELECT '(A,B;' AS tree) TO '__TEST_DIR__/unclosed.jplace' (FORMAT JSON);
+
+statement error
+SELECT * FROM read_jplace_newick('__TEST_DIR__/unclosed.jplace');
+----
+<REGEX>:IO Error: Error parsing tree from jplace file '.*unclosed\.jplace': Unmatched opening parenthesis in Newick string.*
+
 # =============================================================================
 # Basic parsing: test.jplace
 # Tree: ((A:0.1,B:0.2):0.3{0},(C:0.4,D:0.5):0.6{1}):0.0{2};
