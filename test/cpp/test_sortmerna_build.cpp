@@ -12,7 +12,7 @@ TEST_CASE("vcpkg provides rocksdb headers", "[sortmerna][build]") {
 TEST_CASE("sortmerna static lib is linkable", "[sortmerna][build]") {
 	const char *v = smr_version();
 	REQUIRE(v != nullptr);
-	REQUIRE(std::strcmp(v, "4.4.0") == 0);
+	REQUIRE(std::strcmp(v, "8.0.1") == 0);
 }
 
 TEST_CASE("sortmerna config ABI matches header", "[sortmerna][build]") {

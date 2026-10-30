@@ -34,6 +34,14 @@ SELECT (SELECT COUNT(*) FROM miint_versions() WHERE library = 'mafft')
 ----
 true
 
+# Likewise sortmerna and the parasail aligner it links, present only when
+# align_sortmerna is (not on WASM or MinGW).
+query I
+SELECT (SELECT COUNT(*) FROM miint_versions() WHERE library IN ('sortmerna', 'parasail'))
+     = (SELECT 2 * (COUNT(*) > 0)::INTEGER FROM duckdb_functions() WHERE function_name = 'align_sortmerna');
+----
+true
+
 # Likewise the st3 row and sourcetracker, both present only with MIINT_ENABLE_ST3.
 query I
 SELECT (SELECT COUNT(*) FROM miint_versions() WHERE library = 'st3')
@@ -44,7 +52,7 @@ true
 # Every row matches either a core or optional library name
 query I
 SELECT COUNT(*) FROM miint_versions()
-WHERE library NOT IN ('miint', 'htslib', 'minimap2', 'kseq++', 'LBFGS++', 'WFA2-lib', 'HDF5', 'zlib', 'libdeflate', 'libcurl', 'rype', 'sc', 'vsearch', 'mafft', 'abpoa', 'sylph', 'st3', 'unifrac', 'scikit-bio-binaries', 'krepp', 'krepp-openmp');
+WHERE library NOT IN ('miint', 'htslib', 'minimap2', 'kseq++', 'LBFGS++', 'WFA2-lib', 'HDF5', 'zlib', 'libdeflate', 'libcurl', 'rype', 'sc', 'vsearch', 'mafft', 'abpoa', 'sylph', 'st3', 'unifrac', 'scikit-bio-binaries', 'krepp', 'krepp-openmp', 'sortmerna', 'parasail');
 ----
 0
 

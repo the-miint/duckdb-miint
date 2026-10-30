@@ -19,8 +19,8 @@ unique_ptr<FunctionData> AlignSortMeRNATableFunction::Bind(ClientContext &contex
 	}
 	data->query_table = input.inputs[0].ToString();
 	RejectCTERelationName(input, data->query_table);
-	data->ref_paths = ParseSortMeRNARefPaths(input.named_parameters, "align_sortmerna");
-	ParseSortMeRNAConfigParams(input.named_parameters, data->config);
+	data->refs = BindSortMeRNAReferences(context, input, "align_sortmerna");
+	ParseSortMeRNAConfigParams(input.named_parameters, data->config, "align_sortmerna");
 
 	data->query_schema = ValidateSequenceTableSchema(context, data->query_table, /*allow_bigint=*/true);
 	if (data->query_schema.has_sequence2 != data->config.paired) {
@@ -31,8 +31,8 @@ unique_ptr<FunctionData> AlignSortMeRNATableFunction::Bind(ClientContext &contex
 	}
 
 	// Output schema: read_id mirrors the query column type; reference and
-	// mate_reference are always VARCHAR (refs come from FASTA files on disk).
-	data->types = GetAlignmentOutputTypes(data->query_schema.id_type, LogicalType::VARCHAR);
+	// mate_reference follow the reference source (SortMeRNAReferences::IdType).
+	data->types = GetAlignmentOutputTypes(data->query_schema.id_type, data->refs.IdType());
 
 	for (const auto &n : data->names)
 		names.emplace_back(n);
@@ -50,7 +50,7 @@ unique_ptr<GlobalTableFunctionState> AlignSortMeRNATableFunction::InitGlobal(Cli
 	if (cfg.num_threads <= 0) {
 		cfg.num_threads = NumericCast<int32_t>(TaskScheduler::GetScheduler(context).NumberOfThreads());
 	}
-	gstate->aligner = std::make_unique<miint::SortMeRNAAligner>(cfg, data.ref_paths);
+	gstate->aligner = MakeSortMeRNAAligner(context, cfg, data.refs);
 	gstate->query_stream = std::make_unique<QuerySequenceStream>(context, data.query_table, data.query_schema);
 	// Execute holds gstate.lock across align() on the assumption that
 	// MaxThreads() is 1. If that invariant ever changes, the shared
@@ -79,7 +79,7 @@ void AlignSortMeRNATableFunction::Execute(ClientContext &, TableFunctionInput &d
 		if (available > 0) {
 			idx_t count = std::min(available, static_cast<idx_t>(STANDARD_VECTOR_SIZE));
 			OutputSortMeRNASamBatch(output, gstate.result_buffer, gstate.buffer_offset, count, bind_data.config.paired,
-			                        bind_data.query_schema.id_type, LogicalType::VARCHAR);
+			                        bind_data.query_schema.id_type, bind_data.refs.IdType());
 			gstate.buffer_offset += count;
 			return;
 		}

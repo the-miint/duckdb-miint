@@ -17,7 +17,7 @@ require-env SORTMERNA_REAL_ORACLE
 statement ok
 CREATE TABLE smr_rw_q AS
   SELECT read_id, sequence1
-  FROM read_fastx('ext/sortmerna/data/set2_environmental_study_550_amplicon.fasta');
+  FROM read_fastx('ext/sortmerna/test_data/set2_environmental_study_550_amplicon.fasta');
 
 query I
 SELECT COUNT(*) FROM smr_rw_q;
@@ -42,7 +42,7 @@ CREATE TABLE smr_rw_ours AS
   SELECT read_id, aligned, ref_name, ref_start, ref_end, cigar,
          score, edit_distance, identity, coverage
   FROM align_sortmerna_rrna('smr_rw_q',
-       ref_paths := ['ext/sortmerna/data/gg_13_8_ref_set.fasta'],
+       ref_paths := ['ext/sortmerna/test_data/gg_13_8_ref_set.fasta'],
        num_threads := 1);
 
 # Every input row produces exactly one output row.
@@ -51,7 +51,8 @@ SELECT COUNT(*) FROM smr_rw_ours;
 ----
 100000
 
-# --- Load native sortmerna 4.4.0 BLAST oracle (gzipped, checked in) ---
+# --- Load the native sortmerna CLI's BLAST oracle (gzipped, checked in;
+#     generated with -e 1, see run_tests.sh) ---
 # The path below is hardcoded rather than read from $SORTMERNA_REAL_ORACLE
 # because sqllogictest's read_csv does not interpolate env vars. run_tests.sh
 # sets SORTMERNA_REAL_ORACLE to exactly this path after the SHA-match check,
@@ -167,7 +168,7 @@ ORDER BY score;
 826110	40
 826110	42
 
-# --- All aligned rows must carry SAM-legal CIGAR strings. sortmerna's SSW
+# --- All aligned rows must carry SAM-legal CIGAR strings. sortmerna's parasail
 #     backend emits only M/I/D/S in practice (verified on this dataset), but
 #     the regex allows N for defense-in-depth against backend changes. ---
 query I

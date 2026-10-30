@@ -817,16 +817,18 @@ SELECT * FROM align_minimap2_sharded('nanopore_reads',
 
 #### Alignment with SAM output
 
-rRNA filtering / alignment against one or more rRNA reference databases using [SortMeRNA](https://github.com/biocore/sortmerna) (Kopylova et al. 2012, Bioinformatics 28:3211-3217). Embedded as a statically linked library (SortMeRNA 4.4.0 fork; LGPL-3.0-or-later).
+rRNA filtering / alignment against an rRNA reference database, given as one FASTA file or a table, using [SortMeRNA](https://github.com/sortmerna/sortmerna) (Kopylova et al. 2012, Bioinformatics 28:3211-3217). Embedded as a statically linked library (SortMeRNA 8.0.1; LGPL-3.0-or-later).
 
 Emits the standard 21-column SAM schema shared with `align_minimap2` / `align_bowtie2`. For a schema preserving SortMeRNA's native identity / coverage / e-value / edit-distance fields, use [`align_sortmerna_rrna`](#alignment-with-rrna-output) below.
 
 **Parameters:**
 - `query_table` (VARCHAR, positional): Name of a table or view with columns `read_id` (VARCHAR, BIGINT, or UUID — see *Identifier-column types* below), `sequence1` (VARCHAR), and optionally `sequence2` (VARCHAR) when `paired := true`.
-- `ref_paths` (VARCHAR[], required): List of FASTA paths for the reference database(s). The index is built once per query in-memory — re-using references across queries rebuilds the index each time.
+- `ref_paths` (VARCHAR[]): A one-element list holding the path of the reference FASTA file. More than one path is an error: SortMeRNA builds one index from one file, so concatenate the files, or load them into a table and pass `subject_table`.
+- `subject_table` (VARCHAR): Name of a table or view holding the references, with columns `read_id` (VARCHAR, BIGINT, or UUID) and `sequence1` (VARCHAR). A VARCHAR id containing whitespace is an error when the query runs. Rows with a NULL `read_id` or `sequence1` are skipped; a non-NULL `sequence2` is an error.
+- **Exactly one of `ref_paths` or `subject_table` must be given.** Either way the index is built once per query — re-using references across queries rebuilds the index each time.
 - `num_threads` (INTEGER, default = DuckDB's thread count): Number of threads SortMeRNA's internal pool uses. The DuckDB function runs on a single DuckDB thread; parallelism is inside SortMeRNA.
-- `match`, `mismatch`, `gap_open`, `gap_ext`, `score_N` (INTEGER): SW scoring. Defaults `2 / -3 / 5 / 2 / 0`.
-- `evalue` (DOUBLE, default 1.0): E-value threshold.
+- `match`, `mismatch`, `gap_open`, `gap_ext`, `score_N` (INTEGER): SW scoring. Defaults `2 / -3 / 5 / 2 / -3`.
+- `evalue` (DOUBLE, default: none): Keep a hit only when its e-value is at most this; a read whose hit is above it is reported unaligned. By default every hit is kept. The e-values are per query and differ from the CLI's (see *Caveats*), so this does not reproduce the CLI's `-e`.
 - `seed_win_len` (UINTEGER, default 18): Seed window length.
 - `num_alignments` (UINTEGER, default 1): Max alignments reported per read.
 - `best` (BOOLEAN, default true): Keep only the best-scoring alignment per read.
@@ -842,13 +844,13 @@ Emits the standard 21-column SAM schema shared with `align_minimap2` / `align_bo
 
 **Identifier-column types (`read_id`):**
 - The input `read_id` column may be `VARCHAR`, `BIGINT`, or `UUID`. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time with the message `Column 'read_id' in table '<table>' must be VARCHAR, BIGINT, or UUID`.
-- The output `read_id` column type mirrors the query side. `reference` and `mate_reference` are always `VARCHAR` — SortMeRNA references come from FASTA files on disk (`ref_paths`), never a user-provided table.
-- Because the subject side is always VARCHAR, the SAM `=` mate-reference sentinel is preserved verbatim for paired-end output when both mates map to the same reference (no resolution needed — VARCHAR carries `=` directly, unlike the BIGINT-subject path in `align_minimap2` / `align_bowtie2`).
+- The output `read_id` column type mirrors the query side. `reference` and `mate_reference` are `VARCHAR` (FASTA header ids) with `ref_paths`, and mirror the subject table's `read_id` type with `subject_table`, so results join back to it without a cast.
+- With a `VARCHAR` reference column, the SAM `=` mate-reference sentinel is kept verbatim for paired-end output when both mates map to the same reference. A `BIGINT`/`UUID` column cannot hold `=`, so there it is resolved to the reference itself, as in `align_minimap2` / `align_bowtie2`.
 - For `BIGINT`/`UUID` `read_id`, rows with NULL `read_id` are skipped at ingress (matching the existing `ProcessSingleChunk` row-skip convention used by VARCHAR query tables).
 
 **Caveats:**
-- **No minimum-score filter:** the embedded library returns every positive Smith-Waterman hit. The `sortmerna` CLI applies an internal minimum-score threshold that our streaming API path bypasses; to reproduce CLI output row-for-row, filter on `score` (`tag_as`) or on `e_value` in SQL. Be aware that e-values are not directly comparable between the library and the CLI (see below), so a library-side e-value threshold is not guaranteed to reproduce the exact CLI row set.
-- **E-value divergence from the CLI:** the library computes per-query Karlin-Altschul e-values; the CLI sums / corrects across the full database. Identity, coverage, score, CIGAR, ref_start, ref_end, and edit_distance are bit-identical between the two.
+- **No minimum-score filter by default:** without `evalue`, every positive Smith-Waterman hit is reported. The `sortmerna` CLI keeps only hits above a minimum score derived from its `-e` (default 1e-5). The library's e-values are not computed the way the CLI's are (see below), so neither `evalue` nor a filter on `e_value` or `score` (`tag_as`) in SQL is guaranteed to reproduce the CLI's row set exactly.
+- **E-value divergence from the CLI:** the library computes per-query Karlin-Altschul e-values; the CLI sums / corrects across the full database. The reference and its start and end (`reference` / `position` here, with `stop_position` the CLI's end + 1; `ref_name` / `ref_start` / `ref_end` in `align_sortmerna_rrna`) and the CIGAR match the CLI's exactly; `align_sortmerna_rrna`'s identity and coverage match to the CLI's one decimal.
 - **Process-wide serialization:** SortMeRNA's `g_run_mutex` serializes calls process-wide. Concurrent `align_sortmerna` / `align_sortmerna_rrna` queries will block on each other at the library level. The DuckDB function deliberately runs on a single DuckDB thread (`MaxThreads() == 1`) to avoid queueing behind the mutex twice.
 
 **Examples:**
@@ -856,11 +858,18 @@ Emits the standard 21-column SAM schema shared with `align_minimap2` / `align_bo
 ```sql
 CREATE TABLE reads AS SELECT read_id, sequence1 FROM read_fastx('metaT.fastq.gz');
 
--- Keep only reads that align to any SILVA reference with a reasonable e-value.
+-- Keep only reads that align to a SILVA reference.
 CREATE TABLE rrna_reads AS
   SELECT read_id, flags, reference, position, cigar, tag_as AS score
-  FROM align_sortmerna('reads', ref_paths := ['silva-bac-16s.fasta', 'silva-arc-16s.fasta'])
+  FROM align_sortmerna('reads', ref_paths := ['silva-bac-16s.fasta'])
   WHERE (flags & 0x4) = 0;  -- drop unaligned
+
+-- Several reference files: combine them in a table instead of a FASTA file.
+CREATE TABLE silva AS
+  SELECT read_id, sequence1 FROM read_fastx(['silva-bac-16s.fasta', 'silva-arc-16s.fasta']);
+SELECT read_id, reference
+FROM align_sortmerna('reads', subject_table := 'silva')
+WHERE (flags & 0x4) = 0;
 ```
 
 #### Alignment with rRNA output
@@ -876,10 +885,10 @@ Same aligner as `align_sortmerna` but emits SortMeRNA's native output schema, wh
 | `read_id` | VARCHAR, BIGINT, or UUID | Query read identifier from the input table (mirrors the query column type — see *Identifier-column types* below) |
 | `aligned` | INTEGER | `1` if the read aligned, `0` otherwise |
 | `strand` | INTEGER | `1` for forward, `0` for reverse-complement. `0` for unaligned rows has no meaning. |
-| `ref_name` | VARCHAR | Reference sequence ID (empty for unaligned rows) |
+| `ref_name` | VARCHAR, BIGINT, or UUID | Reference sequence ID: VARCHAR with `ref_paths`, the subject table's `read_id` type with `subject_table`. Empty (VARCHAR) or NULL (BIGINT/UUID) for unaligned rows |
 | `ref_start` | INTEGER | 1-based inclusive start position on reference (`0` for unaligned) |
 | `ref_end` | INTEGER | 1-based inclusive end position on reference (`0` for unaligned) |
-| `cigar` | VARCHAR | CIGAR string, SSW convention (uses `M/I/D/S`) |
+| `cigar` | VARCHAR | CIGAR string (uses `M/I/D/S`) |
 | `score` | INTEGER | Raw Smith-Waterman score (not bitscore) |
 | `e_value` | DOUBLE | Per-query Karlin-Altschul e-value |
 | `identity` | DOUBLE | Percent identity (0..100) at full precision |
@@ -891,7 +900,7 @@ Paired-end mode produces two rows per input row with `segment_idx` 0 (forward) a
 
 **Identifier-column types (`read_id`):**
 - The input `read_id` column may be `VARCHAR`, `BIGINT`, or `UUID`. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time with the message `Column 'read_id' in table '<table>' must be VARCHAR, BIGINT, or UUID`.
-- The output `read_id` column type mirrors the query side. `ref_name` is always `VARCHAR` — it carries the free-form FASTA header text from `ref_paths`, not an identifier column.
+- The output `read_id` column type mirrors the query side. `ref_name` follows the reference source as described in the output schema above.
 - For `BIGINT`/`UUID` `read_id`, rows with NULL `read_id` are skipped at ingress (matching the existing `ProcessSingleChunk` row-skip convention used by VARCHAR query tables).
 
 **Example:**

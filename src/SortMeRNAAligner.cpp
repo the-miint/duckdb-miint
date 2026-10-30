@@ -1,5 +1,6 @@
 #include "SortMeRNAAligner.hpp"
 
+#include "Minimap2Aligner.hpp"
 #include "smr_api.h"
 
 #include <cstring>
@@ -42,47 +43,71 @@ using SmrOutputPtr = std::unique_ptr<smr_output_t, SmrOutputDeleter>;
 } // namespace
 
 SortMeRNAAligner::SortMeRNAAligner(const SortMeRNAConfig &cfg, const std::vector<std::string> &ref_paths)
-    : paired_(cfg.paired) {
+    : paired_(cfg.paired), evalue_(cfg.evalue) {
 	if (ref_paths.empty()) {
 		throw std::invalid_argument("SortMeRNAAligner: ref_paths is empty");
 	}
-
-	smr_config_t c_cfg;
-	apply_config(cfg, c_cfg);
-
-	ctx_ = smr_ctx_create(&c_cfg);
-	if (!ctx_) {
-		throw std::runtime_error("SortMeRNAAligner: smr_ctx_create returned NULL");
-	}
+	create_context(cfg);
 
 	std::vector<const char *> ref_ptrs;
 	ref_ptrs.reserve(ref_paths.size());
 	for (const auto &p : ref_paths) {
 		ref_ptrs.push_back(p.c_str());
 	}
+	adopt_index(smr_index_load(ctx_.get(), ref_ptrs.data(), static_cast<int32_t>(ref_ptrs.size())), "smr_index_load");
+}
 
-	idx_ = smr_index_load(ctx_, ref_ptrs.data(), static_cast<int32_t>(ref_ptrs.size()));
-	if (!idx_) {
-		int rc = smr_last_error_code(ctx_);
-		const char *last = smr_last_error(ctx_);
-		std::string msg = "smr_index_load: ";
-		msg += smr_strerror(rc ? rc : SMR_ERR_IO);
-		if (last && *last) {
-			msg += ": ";
-			msg += last;
-		}
-		smr_ctx_destroy(ctx_);
-		ctx_ = nullptr;
-		throw std::runtime_error(msg);
+SortMeRNAAligner::SortMeRNAAligner(const SortMeRNAConfig &cfg, const std::vector<AlignmentSubject> &refs)
+    : paired_(cfg.paired), evalue_(cfg.evalue) {
+	if (refs.empty()) {
+		throw std::invalid_argument("SortMeRNAAligner: refs is empty");
+	}
+	create_context(cfg);
+
+	std::vector<smr_seq_t> seqs(refs.size());
+	for (size_t i = 0; i < refs.size(); ++i) {
+		seqs[i].id = refs[i].read_id.c_str();
+		seqs[i].sequence = refs[i].sequence.c_str();
+		seqs[i].quality = nullptr;
+	}
+	adopt_index(smr_index_load_seqs(ctx_.get(), seqs.data(), static_cast<int32_t>(seqs.size())), "smr_index_load_seqs");
+}
+
+void SortMeRNAAligner::create_context(const SortMeRNAConfig &cfg) {
+	smr_config_t c_cfg;
+	apply_config(cfg, c_cfg);
+
+	ctx_.reset(smr_ctx_create(&c_cfg));
+	if (!ctx_) {
+		throw std::runtime_error("SortMeRNAAligner: smr_ctx_create returned NULL");
 	}
 }
 
-SortMeRNAAligner::~SortMeRNAAligner() {
-	if (idx_)
-		smr_index_free(idx_);
-	if (ctx_)
-		smr_ctx_destroy(ctx_);
+void SortMeRNAAligner::adopt_index(smr_index *idx, const char *loader) {
+	idx_.reset(idx);
+	if (idx_) {
+		return;
+	}
+	int rc = smr_last_error_code(ctx_.get());
+	const char *last = smr_last_error(ctx_.get());
+	std::string msg = std::string(loader) + ": ";
+	msg += smr_strerror(rc ? rc : SMR_ERR_IO);
+	if (last && *last) {
+		msg += ": ";
+		msg += last;
+	}
+	throw std::runtime_error(msg);
 }
+
+void SortMeRNAAligner::ContextDeleter::operator()(smr_context *ctx) const noexcept {
+	smr_ctx_destroy(ctx);
+}
+
+void SortMeRNAAligner::IndexDeleter::operator()(smr_index *idx) const noexcept {
+	smr_index_free(idx);
+}
+
+SortMeRNAAligner::~SortMeRNAAligner() = default;
 
 void SortMeRNAAligner::align(const SortMeRNAQueryBatch &queries, SortMeRNAResultBatch &out) {
 	if (queries.empty()) {
@@ -130,9 +155,9 @@ void SortMeRNAAligner::align(const SortMeRNAQueryBatch &queries, SortMeRNAResult
 
 	smr_output_t *raw = nullptr;
 	smr_stats_t stats = {};
-	int rc = smr_run_seqs_with_index(idx_, smr_seqs.data(), static_cast<int32_t>(n_seqs), &raw, &stats);
+	int rc = smr_run_seqs_with_index(idx_.get(), smr_seqs.data(), static_cast<int32_t>(n_seqs), &raw, &stats);
 	if (rc != SMR_OK) {
-		const char *last = smr_last_error(ctx_);
+		const char *last = smr_last_error(ctx_.get());
 		std::string msg = "smr_run_seqs_with_index: ";
 		msg += smr_strerror(rc);
 		if (last && *last) {
@@ -172,6 +197,24 @@ void SortMeRNAAligner::align(const SortMeRNAQueryBatch &queries, SortMeRNAResult
 		const int32_t segment_idx = paired_ ? static_cast<int32_t>(i % 2) : 0;
 
 		out.read_ids.push_back(queries.read_ids[input_row]);
+		out.segment_indices.push_back(segment_idx);
+		// The library reports every hit and leaves the e-value threshold to its
+		// caller. A hit above it is reported as the library reports a read with
+		// no hit.
+		if (raw_out->aligned[i] && evalue_ >= 0.0 && raw_out->e_value[i] > evalue_) {
+			out.aligned.push_back(0);
+			out.strands.push_back(-1);
+			out.ref_names.emplace_back();
+			out.ref_starts.push_back(0);
+			out.ref_ends.push_back(0);
+			out.cigars.emplace_back();
+			out.scores.push_back(-1);
+			out.e_values.push_back(0.0);
+			out.identities.push_back(0.0);
+			out.coverages.push_back(0.0);
+			out.edit_distances.push_back(-1);
+			continue;
+		}
 		out.aligned.push_back(raw_out->aligned[i]);
 		out.strands.push_back(raw_out->strand[i]);
 		out.ref_names.emplace_back(raw_out->ref_name[i] ? raw_out->ref_name[i] : "");
@@ -183,7 +226,6 @@ void SortMeRNAAligner::align(const SortMeRNAQueryBatch &queries, SortMeRNAResult
 		out.identities.push_back(raw_out->identity[i]);
 		out.coverages.push_back(raw_out->coverage[i]);
 		out.edit_distances.push_back(raw_out->edit_distance[i]);
-		out.segment_indices.push_back(segment_idx);
 	}
 }
 

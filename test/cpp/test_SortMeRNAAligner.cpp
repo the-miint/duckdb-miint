@@ -1,5 +1,8 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 
+#include "Minimap2Aligner.hpp"
+#include "SequenceReader.hpp"
 #include "SortMeRNAAligner.hpp"
 
 #include <algorithm>
@@ -8,18 +11,19 @@
 #include <filesystem>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 
-// Test-local constants and helpers. All golden values below are regenerated
-// from the native sortmerna CLI via tools/sortmerna_oracle.sh — do NOT
-// edit by hand; rerun the script if test inputs or the embedded sortmerna
-// version change. Identity/coverage match native exactly at CLI's 1-decimal
+// Test-local constants and helpers. All golden values below come from the
+// native sortmerna CLI via tools/sortmerna_oracle.sh, not from the code under
+// test; rerun the script if test inputs or the embedded sortmerna version
+// change. Identity/coverage match native exactly at CLI's 1-decimal
 // display precision; e_value is the only field we expect to differ (documented
 // per-query Karlin-Altschul divergence in smr_api.h).
 namespace {
 
 // Path relative to the repo root (where tests are executed from). Same
 // approach used by test_Minimap2Aligner.cpp.
-const std::string kTestRef = "ext/sortmerna/data/test_ref.fasta";
+const std::string kTestRef = "ext/sortmerna/test_data/test_ref.fasta";
 
 // BLAST reports identity/coverage at 1-decimal precision. The library emits
 // full precision from the same computation, so rounding the library value
@@ -28,7 +32,18 @@ int64_t round_1dp(double v) {
 	return static_cast<int64_t>(std::llround(v * 10.0));
 }
 
-// AB271211 16S rRNA read from ext/sortmerna/data/test_read.fasta (1487 nt).
+// The one record of a FASTA file, read as read_fastx reads it.
+miint::AlignmentSubject ReadSingleFasta(const std::string &path) {
+	miint::SequenceReader reader(path);
+	auto batch = reader.read(2);
+	REQUIRE(batch.size() == 1);
+	miint::AlignmentSubject subject;
+	subject.read_id = batch.read_ids[0];
+	subject.sequence = batch.sequences1[0];
+	return subject;
+}
+
+// AB271211 16S rRNA read from ext/sortmerna/test_data/test_read.fasta (1487 nt).
 constexpr const char *kAB271211 = "TCCAACGCGTTGGGAGCTCTCCCATATGGTCGACCTGCAGGCGGCCGCACTAGTGATTAGAGTTTGATCCTGGCTCAG"
                                   "GATGAACGCTGGCGGCGTGCCTAACACATGCAAGTCGAACGGGAATCTTCGGATTCTAGTGGCGGACGGGTGAGTAAC"
                                   "GCGTAAGAATCTAACTTCAGGACGGGGACAACAGTGGGAAACGACTGCTAATACCCGATGTGCCGCGAGGTGAAACCT"
@@ -93,11 +108,74 @@ TEST_CASE("SortMeRNAAligner throws on missing reference", "[sortmerna][wrapper]"
 TEST_CASE("SortMeRNAAligner throws on empty ref_paths", "[sortmerna][wrapper]") {
 	miint::SortMeRNAConfig cfg;
 	cfg.num_threads = 1;
-	REQUIRE_THROWS_AS(miint::SortMeRNAAligner(cfg, {}), std::invalid_argument);
+	REQUIRE_THROWS_AS(miint::SortMeRNAAligner(cfg, std::vector<std::string> {}), std::invalid_argument);
+}
+
+// The library holds one index per handle, built from one file. A second path
+// must be refused: ignoring it would leave reads that match only it unaligned,
+// with no error.
+TEST_CASE("SortMeRNAAligner refuses more than one reference file", "[sortmerna][wrapper]") {
+	miint::SortMeRNAConfig cfg;
+	cfg.num_threads = 1;
+	REQUIRE_THROWS_AS(miint::SortMeRNAAligner(cfg, std::vector<std::string> {kTestRef, kTestRef}), std::runtime_error);
+}
+
+// References given in memory (align_sortmerna's subject_table) must align
+// exactly as the same sequences do from a FASTA file: every field, including
+// e_value, which depends on the index's reference statistics.
+TEST_CASE("SortMeRNAAligner in-memory references match the FASTA file", "[sortmerna][wrapper]") {
+	miint::SortMeRNAConfig cfg;
+	cfg.num_threads = 1;
+	miint::SortMeRNAAligner from_file(cfg, {kTestRef});
+	miint::SortMeRNAAligner from_memory(cfg, std::vector<miint::AlignmentSubject> {ReadSingleFasta(kTestRef)});
+
+	miint::SortMeRNAQueryBatch queries;
+	queries.read_ids = {"fwd", "rc"};
+	queries.sequences = {kAB271211, kAB271211_RC};
+
+	miint::SortMeRNAResultBatch a;
+	miint::SortMeRNAResultBatch b;
+	from_file.align(queries, a);
+	from_memory.align(queries, b);
+
+	REQUIRE(a.size() == 2);
+	REQUIRE(b.size() == 2);
+	for (size_t i = 0; i < 2; ++i) {
+		REQUIRE(a.aligned[i] == 1); // not vacuous: both reads hit
+		REQUIRE(a.read_ids[i] == b.read_ids[i]);
+		REQUIRE(a.aligned[i] == b.aligned[i]);
+		REQUIRE(a.strands[i] == b.strands[i]);
+		REQUIRE(a.ref_names[i] == b.ref_names[i]);
+		REQUIRE(a.ref_starts[i] == b.ref_starts[i]);
+		REQUIRE(a.ref_ends[i] == b.ref_ends[i]);
+		REQUIRE(a.cigars[i] == b.cigars[i]);
+		REQUIRE(a.scores[i] == b.scores[i]);
+		REQUIRE(a.edit_distances[i] == b.edit_distances[i]);
+		REQUIRE(a.identities[i] == b.identities[i]);
+		REQUIRE(a.coverages[i] == b.coverages[i]);
+		REQUIRE(a.e_values[i] == b.e_values[i]);
+	}
+}
+
+TEST_CASE("SortMeRNAAligner throws on empty in-memory references", "[sortmerna][wrapper]") {
+	miint::SortMeRNAConfig cfg;
+	cfg.num_threads = 1;
+	REQUIRE_THROWS_AS(miint::SortMeRNAAligner(cfg, std::vector<miint::AlignmentSubject> {}), std::invalid_argument);
+}
+
+// The id becomes a FASTA header in the library's copy, where whitespace would
+// cut it short and ref_name would no longer match the caller's id.
+TEST_CASE("SortMeRNAAligner surfaces the library's reason for refusing a reference", "[sortmerna][wrapper]") {
+	miint::SortMeRNAConfig cfg;
+	cfg.num_threads = 1;
+	auto ref = ReadSingleFasta(kTestRef);
+	ref.read_id = "Unc 49508";
+	REQUIRE_THROWS_WITH(miint::SortMeRNAAligner(cfg, std::vector<miint::AlignmentSubject> {ref}),
+	                    Catch::Matchers::ContainsSubstring("whitespace"));
 }
 
 TEST_CASE("SortMeRNAAligner reports library version", "[sortmerna][wrapper]") {
-	REQUIRE(miint::SortMeRNAAligner::version() == "4.4.0");
+	REQUIRE(miint::SortMeRNAAligner::version() == "8.0.1");
 }
 
 TEST_CASE("SortMeRNAAligner aligns single-end forward-strand read", "[sortmerna][wrapper]") {
@@ -368,4 +446,44 @@ TEST_CASE("SortMeRNAAligner appends to existing output batch", "[sortmerna][wrap
 	REQUIRE(out.read_ids[0] == "AB271211_0");
 	REQUIRE(out.read_ids[1] == "AB271211_1");
 	REQUIRE(out.read_ids[2] == "AB271211_2");
+}
+
+// The library's in-memory path reports every hit and leaves the e-value
+// threshold to its caller. A hit above the threshold must come back exactly as
+// a read with no hit does, or filtered reads would look like partial hits.
+TEST_CASE("SortMeRNAAligner evalue reports hits above it as unaligned", "[sortmerna][wrapper]") {
+	// Shorter pieces of AB271211 score lower, so their e-values are larger.
+	const std::string ab(kAB271211);
+	miint::SortMeRNAQueryBatch q;
+	for (size_t len : {200, 40, 32}) {
+		q.read_ids.push_back("len" + std::to_string(len));
+		q.sequences.push_back(ab.substr(299, len));
+	}
+	q.read_ids.emplace_back("polyA");
+	q.sequences.emplace_back(60, 'A');
+
+	miint::SortMeRNAConfig cfg;
+	cfg.num_threads = 1;
+	miint::SortMeRNAResultBatch all;
+	miint::SortMeRNAAligner(cfg, {kTestRef}).align(q, all);
+	REQUIRE(all.aligned == std::vector<int32_t> {1, 1, 1, 0});
+	REQUIRE(all.e_values[0] < all.e_values[1]);
+	REQUIRE(all.e_values[1] < all.e_values[2]);
+
+	// Inclusive: len40's own e-value keeps it.
+	cfg.evalue = all.e_values[1];
+	miint::SortMeRNAResultBatch kept;
+	miint::SortMeRNAAligner(cfg, {kTestRef}).align(q, kept);
+	REQUIRE(kept.aligned == std::vector<int32_t> {1, 1, 0, 0});
+	for (size_t i = 0; i < 2; ++i) {
+		REQUIRE(kept.cigars[i] == all.cigars[i]);
+		REQUIRE(kept.scores[i] == all.scores[i]);
+		REQUIRE(kept.e_values[i] == all.e_values[i]);
+	}
+	auto row = [&kept](size_t i) {
+		return std::make_tuple(kept.aligned[i], kept.strands[i], kept.ref_names[i], kept.ref_starts[i],
+		                       kept.ref_ends[i], kept.cigars[i], kept.scores[i], kept.e_values[i], kept.identities[i],
+		                       kept.coverages[i], kept.edit_distances[i], kept.segment_indices[i]);
+	};
+	REQUIRE(row(2) == row(3)); // len32 reads as polyA, which has no hit
 }
