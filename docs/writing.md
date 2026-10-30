@@ -13,7 +13,7 @@ Options follow DuckDB's rules for COPY options in every format here, as they do 
 - An option the format does not have is refused, and the error may suggest options with similar names. The names of DuckDB's own COPY options, such as `OVERWRITE`, are not refused as unknown; DuckDB handles them, and refuses those a format cannot support, such as `FILE_SIZE_BYTES`.
 - Other values are cast to the option's type, so `COMPRESSION_LEVEL '3'` is level 3 and `COMPRESSION_LEVEL 1.6` is level 2. An option with no value or a NULL value is refused.
 
-`COMPRESSION` takes the same values in the text formats, FASTQ, FASTA, NEWICK and SAM, in any case: `'gzip'` or `'gz'`, and `'none'` or `'uncompressed'`. Without it, a path ending in `.gz` is written as gzip. zstd (`'zstd'`, or a `.zst` path) is refused. BAM's and BIOM's `COMPRESSION` differ; see [SAM / BAM](#sam-and-bam) and [BIOM](#biom).
+`COMPRESSION` takes the same values in the text formats, FASTQ, FASTA, NEWICK and SAM, in any case: `'gzip'` or `'gz'`, and `'none'` or `'uncompressed'`. Without it, a path ending in `.gz` is written as gzip. zstd (`'zstd'`, or a `.zst` path) is refused. BIOM's `COMPRESSION` takes the same values but sets HDF5's compression inside the file, and BAM's takes only gzip; see [BIOM](#biom) and [SAM / BAM](#sam-and-bam).
 
 FASTQ, FASTA and NEWICK write a path with a URI scheme other than `file://` (`s3://`, `https://`, `az://`, ...) through DuckDB's file systems, which load the extension that serves the scheme. For a scheme no file system serves, DuckDB opens the path as a local file, as it does for its own formats. SAM, BAM, UBAM and BIOM write local files only and refuse a remote target. In every format a `file:` URI is the local file it names, as DuckDB reads it (`file:///p`, `file://localhost/p` and `file:/p` are `/p`; on Windows, `file:///C:/p` is `C:/p`), and gzip output to it takes `COMPRESSION_LEVEL` as any local path does.
 
@@ -366,7 +366,7 @@ An id is written as its text, as `read_id` is elsewhere: BIGINT in decimal, UUID
 BIOM is written to local files only; a remote target is refused. `PARTITION_BY` and `PER_THREAD_OUTPUT` write `.biom` files, each a complete table of its own rows: one per thread, and one or more per partition (DuckDB starts another file for a partition when more partitions are open than `partitioned_write_max_open_files`), so a (feature, sample) pair can be split across files. DuckDB leaves the partition columns out of the rows it writes unless `WRITE_PARTITION_COLUMNS true`, so partitioning by `sample_id` or `feature_id` needs it.
 
 **Parameters:**
-- `COMPRESSION` (default: 'gzip'): HDF5's compression of the datasets inside the file, `'gzip'` (or `'gz'`; deflate level 4, h5py's default) or `'none'`. The `.biom` file itself is always HDF5, never gzip, whatever its name.
+- `COMPRESSION` (default: 'gzip'): HDF5's compression of the datasets inside the file, `'gzip'` or `'gz'` (deflate level 4, h5py's default), or `'none'` or `'uncompressed'`, in any case. Any other value, zstd included, is refused. The `.biom` file itself is always HDF5, never gzip, whatever its name.
 - `ID` (default: 'No Table ID'): Custom table identifier for BIOM metadata
 - `GENERATED_BY` (default: 'miint'): Tool/version string for provenance tracking
 
@@ -467,8 +467,8 @@ TO 'sparse.biom' (FORMAT BIOM);
 ```
 
 **Compression options:**
-- `'gzip'`: Good compression, widely compatible (recommended)
-- `'none'`: No compression, fastest but largest files
+- `'gzip'` (or `'gz'`): Good compression, widely compatible (recommended)
+- `'none'` (or `'uncompressed'`): No compression, fastest but largest files
 
 **Compatibility:**
 - Output files are compatible with:

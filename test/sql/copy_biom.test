@@ -307,7 +307,42 @@ statement error
 COPY (SELECT feature_id, sample_id, value FROM test_biom_basic)
 TO '{TEST_DIR}/error7.biom' (FORMAT BIOM, COMPRESSION 'invalid');
 ----
-compression
+Binder Error: COMPRESSION must be 'gzip', 'gz', 'none' or 'uncompressed', got 'invalid'
+
+# COMPRESSION takes the values it takes in the text formats, in any case: 'gzip' or 'gz', and 'none' or
+# 'uncompressed'. HDF5 has no zstd filter here, so zstd is refused as any other value is.
+statement error
+COPY test_biom_basic TO '{TEST_DIR}/zstd.biom' (FORMAT BIOM, COMPRESSION 'zstd');
+----
+Binder Error: COMPRESSION must be 'gzip', 'gz', 'none' or 'uncompressed', got 'zstd'
+
+statement ok
+CREATE TABLE biom_compressible AS
+SELECT 'F' || (r % 50) AS feature_id, 'S' || (r // 50) AS sample_id, (r + 1)::DOUBLE AS value FROM range(2000) t(r);
+
+foreach comp gzip GZ none Uncompressed
+
+statement ok
+COPY biom_compressible TO '{TEST_DIR}/comp_${comp}.biom' (FORMAT BIOM, COMPRESSION '${comp}');
+
+query IR
+SELECT count(*), sum(value) FROM read_biom('{TEST_DIR}/comp_${comp}.biom');
+----
+2000	2001000.0
+
+endloop
+
+# 'uncompressed' writes what 'none' writes, and 'gz' what 'gzip' writes; the gzip file is the smaller.
+query III
+SELECT max(size) FILTER (filename LIKE '%comp_none.biom') = max(size) FILTER (filename LIKE '%comp_Uncompressed.biom'),
+       max(size) FILTER (filename LIKE '%comp_gzip.biom') = max(size) FILTER (filename LIKE '%comp_GZ.biom'),
+       max(size) FILTER (filename LIKE '%comp_gzip.biom') < max(size) FILTER (filename LIKE '%comp_none.biom')
+FROM read_blob('{TEST_DIR}/comp_*.biom');
+----
+true	true	true
+
+statement ok
+DROP TABLE biom_compressible;
 
 # Test 20: Error - cannot overwrite existing file (file exists protection)
 statement ok

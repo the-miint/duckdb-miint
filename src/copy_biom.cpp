@@ -1,5 +1,5 @@
 #include "copy_biom.hpp"
-#include "copy_option_parsing.hpp"
+#include "copy_format_common.hpp"
 #include "BIOMReader.hpp"
 #include "BIOMTable.hpp"
 #include "id_column_utils.hpp"
@@ -115,14 +115,7 @@ static unique_ptr<FunctionData> BiomCopyBind(ClientContext &context, CopyFunctio
 		auto &values = option.second;
 
 		if (key == "compression") {
-			string comp_str = StringUtil::Lower(values[0].ToString());
-			if (comp_str == "gzip" || comp_str == "gz") {
-				result->use_compression = true;
-			} else if (comp_str == "none") {
-				result->use_compression = false;
-			} else {
-				throw InvalidInputException("COPY FORMAT BIOM: compression must be 'gzip', 'gz', or 'none'");
-			}
+			result->use_compression = CompressionValueIsGzip(values[0]);
 		} else if (key == "id") {
 			result->id = values[0].ToString();
 		} else if (key == "generated_by") {
