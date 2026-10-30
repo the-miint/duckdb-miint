@@ -98,9 +98,21 @@ if(MIINT_KREPP_OPENMP_OK)
 else()
   set(MIINT_KREPP_WOPENMP 0)
 endif()
+# krepp's src/sdust.h, compiled into rqseq.cpp, is a copy of minimap2's sdust
+# with the same global names, so a link that pulls in both archives' copies
+# (tests_duckdb's does) fails with duplicate symbols. No miint TU includes
+# sdust.h, so unlike seq_nt4_table the rename needs no source-file property. See
+# docs/internals/embedded-tools.md, krepp.
 target_compile_definitions(
-  krepp PRIVATE _WOPENMP=${MIINT_KREPP_WOPENMP} _WLCURL=0
-                seq_nt4_table=krepp_seq_nt4_table)
+  krepp
+  PRIVATE _WOPENMP=${MIINT_KREPP_WOPENMP}
+          _WLCURL=0
+          seq_nt4_table=krepp_seq_nt4_table
+          sdust=krepp_sdust
+          sdust_core=krepp_sdust_core
+          sdust_buf_init=krepp_sdust_buf_init
+          sdust_buf_destroy=krepp_sdust_buf_destroy
+          seq2nt4=krepp_seq2nt4)
 if(MIINT_KREPP_OPENMP_OK)
   # Apple Clang rejects a bare -fopenmp and wants the preprocessor form, with
   # libomp linked separately - the same choice the skbb/unifrac sub-makes make
