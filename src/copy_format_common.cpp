@@ -166,23 +166,29 @@ bool IsGzipCompressionName(const string &name) {
 	return StringUtil::CIEquals(name, "gzip") || StringUtil::CIEquals(name, "gz");
 }
 
+bool CompressionValueIsGzip(const Value &compression) {
+	auto name = compression.ToString();
+	if (IsGzipCompressionName(name)) {
+		return true;
+	}
+	if (StringUtil::CIEquals(name, "none") || StringUtil::CIEquals(name, "uncompressed")) {
+		return false;
+	}
+	throw BinderException("COMPRESSION must be 'gzip', 'gz', 'none' or 'uncompressed', got '%s'", name);
+}
+
 FileCompressionType DetectCompressionType(const string &file_path, const Value &compression_param) {
 	// Explicit parameter takes precedence
 	if (!compression_param.IsNull()) {
 		string comp_str = StringUtil::Lower(compression_param.ToString());
-		if (IsGzipCompressionName(comp_str)) {
-			return FileCompressionType::GZIP;
-		} else if (comp_str == "zstd" || comp_str == "zst") {
+		if (comp_str == "zstd" || comp_str == "zst") {
 			// TODO: zstd support temporarily disabled due to unicode encoding issues during read-back
 			throw NotImplementedException("zstd compression is temporarily disabled for FASTX/SAM formats. "
 			                              "Please use gzip compression instead. "
 			                              "zstd support will be re-enabled in a future release.");
-		} else if (comp_str == "none" || comp_str == "uncompressed") {
-			return FileCompressionType::UNCOMPRESSED;
-		} else {
-			throw BinderException("COMPRESSION must be 'gzip', 'gz', 'none' or 'uncompressed', got '%s'",
-			                      compression_param.ToString());
 		}
+		return CompressionValueIsGzip(compression_param) ? FileCompressionType::GZIP
+		                                                 : FileCompressionType::UNCOMPRESSED;
 	}
 
 	// Auto-detect from extension
