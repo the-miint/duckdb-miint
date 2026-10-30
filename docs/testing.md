@@ -115,7 +115,7 @@ Core algorithms and internal utilities are tested using the Catch2 framework. C+
 ./build/release/extension/miint/tests "ParseCigar - Basic operations"
 ```
 
-`tests` links no DuckDB. A C++ test that needs a running database, one that opens an in-process `DuckDB` and drives miint code against it, goes in the second runner instead, `./build/release/extension/miint/tests_duckdb`, which links DuckDB and miint statically. List its file under `tests_duckdb` in `CMakeLists.txt`, not in `TEST_SOURCES`; a file that needs an optional feature, such as HDF5, is added there with `target_sources` under that feature's switch. It is built only where DuckDB builds `unittest`, so not in the WASM builds. `run_tests.sh` runs both.
+`tests` links no DuckDB. A C++ test that needs a running database, one that opens an in-process `DuckDB` and drives miint code against it, goes in the second runner instead, `./build/release/extension/miint/tests_duckdb`, which links DuckDB and miint statically. List its file under `tests_duckdb` in `CMakeLists.txt`, not in `TEST_SOURCES`. It is built only where DuckDB builds `unittest`, so not in the WASM builds. `run_tests.sh` runs both.
 
 **Code organization for testing:**
 

@@ -20,8 +20,7 @@ SELECT COUNT(*) FROM read_biom('{MIINT_HTTPS_TEST_URL}/biom/test.biom');
 15
 
 
-# A remote file is checked only when it is read, so HDF5's reason for refusing one comes from the read, with
-# the URL. truncated.biom is the first 4 KiB of test.biom.
+# HDF5's reason for refusing a remote file comes with the URL. truncated.biom is the first 4 KiB of test.biom.
 statement error
 SELECT COUNT(*) FROM read_biom('{MIINT_HTTPS_TEST_URL}/biom/truncated.biom');
 ----

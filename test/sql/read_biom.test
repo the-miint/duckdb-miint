@@ -26,10 +26,19 @@ IO Error: File is not a BIOM file: data/biom/notbiom.h5
 statement error
 SELECT * FROM read_biom('data/biom/truncated.biom');
 ----
-<REGEX>:IO Error: read_biom: cannot open 'data/biom/truncated\.biom': H5Fopen failed: truncated file.*
+<REGEX>:IO Error: read_biom: cannot read 'data/biom/truncated\.biom': H5Fopen failed: truncated file.*
 
-# A file is checked when the query is planned and read when it runs. A prepared query is planned once, so a
-# file replaced in between fails when it is read, with an error that names it and says why.
+# Planning opens no file with HDF5: what a file holds is checked when the query runs. So PREPARE of a read of
+# a file that is not BIOM succeeds, and EXECUTE refuses the file.
+statement ok
+PREPARE read_notbiom AS SELECT count(*) FROM read_biom('data/biom/notbiom.h5');
+
+statement error
+EXECUTE read_notbiom;
+----
+IO Error: File is not a BIOM file: data/biom/notbiom.h5
+
+# A prepared query is planned once, so a file replaced after PREPARE is checked when EXECUTE reads it.
 statement ok
 COPY (SELECT 'F1' AS feature_id, 'S1' AS sample_id, 1.0::DOUBLE AS value) TO '{TEST_DIR}/replaced.biom' (FORMAT BIOM);
 
@@ -47,7 +56,7 @@ COPY (SELECT 'not a BIOM file' AS line) TO '{TEST_DIR}/replaced.biom' (FORMAT CS
 statement error
 EXECUTE read_replaced;
 ----
-<REGEX>:IO Error: read_biom: cannot read '.*replaced\.biom': not an HDF5 file.*
+<REGEX>:IO Error: File is not a BIOM file: .*replaced\.biom.*
 
 # Basic single file read
 query III

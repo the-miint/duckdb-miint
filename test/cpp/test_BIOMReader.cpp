@@ -1,6 +1,7 @@
 #define CATCH_CONFIG_MAIN
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
+#include <chrono>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -119,8 +120,16 @@ TEST_CASE("BIOM IsBIOM refuses a file HDF5 cannot open, and the recorder keeps w
 #endif
 }
 
+namespace {
+herr_t SilentHdf5Handler(hid_t, void *) {
+	return 0;
+}
+} // namespace
+
 TEST_CASE("Hdf5FailureRecorder keeps the first failure's cause and restores HDF5's handler", "[BIOMReader]") {
-	H5Eset_auto(H5E_DEFAULT, nullptr, nullptr);
+	// A handler and data of the test's own, so a recorder that leaves any other handler behind is caught
+	int handler_data = 0;
+	H5Eset_auto2(H5E_DEFAULT, SilentHdf5Handler, &handler_data);
 	{
 		miint::Hdf5FailureRecorder failure;
 		REQUIRE(failure.Cause().empty());
@@ -134,13 +143,17 @@ TEST_CASE("Hdf5FailureRecorder keeps the first failure's cause and restores HDF5
 	H5E_auto2_t func = nullptr;
 	void *data = nullptr;
 	H5Eget_auto2(H5E_DEFAULT, &func, &data);
-	REQUIRE(func == nullptr);
+	H5Eset_auto2(H5E_DEFAULT, nullptr, nullptr);
+	REQUIRE((func == SilentHdf5Handler));
+	REQUIRE((data == &handler_data));
 }
 
 // An HDF5 file whose root has a format-version attribute of `n` integers, the first `first`
 namespace {
 std::filesystem::path WriteFormatVersionFile(const std::string &name, hsize_t n, int first) {
-	auto path = std::filesystem::temp_directory_path() / ("miint_" + name + "_" + std::to_string(getpid()) + ".h5");
+	auto path =
+	    std::filesystem::temp_directory_path() /
+	    ("miint_" + name + "_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".h5");
 	hid_t file = H5Fcreate(path.string().c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
 	REQUIRE(file >= 0);
 	hid_t space = H5Screate_simple(1, &n, nullptr);

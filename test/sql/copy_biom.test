@@ -285,6 +285,26 @@ COPY (SELECT 'F1' AS feature_id, NULL::UUID AS sample_id, 1.0::DOUBLE AS value) 
 ----
 NULL values not allowed in sample_id column
 
+# The same from a table, where the NULL is a later row of a column rather than a constant
+statement ok
+CREATE TABLE biom_null_ids AS SELECT * FROM (VALUES (1::BIGINT, 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'::UUID, 1.0::DOUBLE),
+                                                    (2::BIGINT, NULL::UUID, 2.0::DOUBLE),
+                                                    (NULL::BIGINT, 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'::UUID, 3.0::DOUBLE))
+                                    AS t(feature_id, sample_id, value);
+
+statement error
+COPY (SELECT * FROM biom_null_ids WHERE value <> 2.0) TO '{TEST_DIR}/null_bigint_table.biom' (FORMAT BIOM);
+----
+NULL values not allowed in feature_id column
+
+statement error
+COPY (SELECT * FROM biom_null_ids WHERE value <> 3.0) TO '{TEST_DIR}/null_uuid_table.biom' (FORMAT BIOM);
+----
+NULL values not allowed in sample_id column
+
+statement ok
+DROP TABLE biom_null_ids;
+
 # Any other type is refused when the COPY is planned, naming the column and the types it takes. An untyped
 # integer literal is INTEGER, and an untyped decimal literal is DECIMAL, not DOUBLE.
 statement error
@@ -355,8 +375,9 @@ TO '{TEST_DIR}/output_overwrite_test.biom' (FORMAT BIOM);
 ----
 Cannot overwrite existing file
 
-# DuckDB binds a prepared COPY again at EXECUTE, so a file made after PREPARE is refused too, and left as it
-# was.
+# A file made after PREPARE is refused too, and left as it was. DuckDB binds a prepared COPY again at EXECUTE only
+# when its query reads a table: the bind check refuses the file in this case, and the writer, which creates the
+# file only if none is there, in the next.
 statement ok
 PREPARE biom_planned_early AS COPY test_biom_single TO '{TEST_DIR}/made_after_prepare.biom' (FORMAT BIOM);
 
@@ -370,6 +391,24 @@ Cannot overwrite existing file
 
 query TTR
 SELECT feature_id, sample_id, value FROM read_biom('{TEST_DIR}/made_after_prepare.biom') ORDER BY ALL;
+----
+Feature1	Sample1	1.0
+Feature1	Sample2	2.0
+Feature2	Sample1	3.0
+
+statement ok
+PREPARE biom_from_values AS COPY (SELECT 'F9' AS feature_id, 'S9' AS sample_id, 9.0::DOUBLE AS value) TO '{TEST_DIR}/made_after_prepare_values.biom' (FORMAT BIOM);
+
+statement ok
+COPY test_biom_basic TO '{TEST_DIR}/made_after_prepare_values.biom' (FORMAT BIOM);
+
+statement error
+EXECUTE biom_from_values;
+----
+<REGEX>:IO Error: COPY FORMAT BIOM: cannot write '.*made_after_prepare_values\.biom': H5Fcreate failed: File exists.*
+
+query TTR
+SELECT feature_id, sample_id, value FROM read_biom('{TEST_DIR}/made_after_prepare_values.biom') ORDER BY ALL;
 ----
 Feature1	Sample1	1.0
 Feature1	Sample2	2.0
@@ -455,8 +494,7 @@ RESET threads;
 statement ok
 DROP TABLE biom_many;
 
-# OVERWRITE_OR_IGNORE replaces a partition's file of the same name, as that option asks: the writer does not
-# refuse an existing file itself, so this is DuckDB's rule, and a single target is refused at bind instead.
+# OVERWRITE_OR_IGNORE replaces a partition's file of the same name, as that option asks.
 statement ok
 COPY (SELECT 'F1' AS feature_id, 'S1' AS sample_id, 1.0::DOUBLE AS value, 1 AS grp) TO '{TEST_DIR}/biom_replaced' (FORMAT BIOM, PARTITION_BY (grp));
 

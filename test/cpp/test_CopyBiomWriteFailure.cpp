@@ -1,7 +1,6 @@
-// COPY FORMAT BIOM when its write fails partway, as on a full disk. HDF5 writes a compressed dataset's chunks
-// when the dataset closes, and the metadata it holds when the file closes, so a failure in either close must
-// reach the COPY. Left to the HDF5 objects' destructors, it was dropped: the COPY reported success, left a
-// file read_biom could not open, and the process crashed at exit.
+// COPY FORMAT BIOM when its write fails partway, as on a full disk. HDF5 can hold a dataset's data until the
+// dataset closes, and its metadata until the file closes, so a failure in either close must fail the COPY and
+// leave no file; an HDF5 object's destructor reports a failed close nowhere.
 //
 // The failure is made with a file-size limit (RLIMIT_FSIZE, with SIGXFSZ ignored, so a write past it fails
 // with EFBIG). Set here, in the process, the limit can sit one byte under the size the file needs, which no

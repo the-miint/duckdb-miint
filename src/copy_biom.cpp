@@ -6,6 +6,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/vector_operations/generic_executor.hpp"
+#include "duckdb/execution/operator/persistent/physical_copy_to_file.hpp"
 #include "duckdb/function/copy_function.hpp"
 #include "H5Cpp.h"
 #include <chrono>
@@ -134,6 +135,8 @@ static unique_ptr<FunctionData> BiomCopyBind(ClientContext &context, CopyFunctio
 struct BiomCopyGlobalState : public GlobalFunctionData {
 	// The target as DuckDB resolved it for this COPY (a file: URI becomes its local path).
 	string file_path;
+	// Whether a file already at file_path is replaced rather than refused
+	bool replace_existing = false;
 	mutex lock;
 	// Incremental dictionary building for optimal performance
 	unordered_map<string, int32_t> feature_map;
@@ -151,6 +154,15 @@ static unique_ptr<GlobalFunctionData> BiomCopyInitializeGlobal(ClientContext &co
 	auto gstate = make_uniq<BiomCopyGlobalState>();
 	gstate->file_path = file_path;
 	return gstate;
+}
+
+// A prepared COPY is bound again at EXECUTE only when its query reads a table, so the bind check alone can miss a
+// file made after PREPARE. Only OVERWRITE_OR_IGNORE into a directory replaces a file, as that option asks.
+static void BiomCopyInitializeOperator(GlobalFunctionData &gstate_p, const PhysicalOperator &op_p) {
+	auto &op = op_p.Cast<PhysicalCopyToFile>();
+	gstate_p.Cast<BiomCopyGlobalState>().replace_existing =
+	    (op.partition_output || op.per_thread_output) &&
+	    op.overwrite_mode == CopyOverwriteMode::COPY_OVERWRITE_OR_IGNORE;
 }
 
 //===--------------------------------------------------------------------===//
@@ -284,6 +296,8 @@ static void BiomCopyCombine(ExecutionContext &context, FunctionData &bind_data, 
 //===--------------------------------------------------------------------===//
 // HDF5 Writing Helpers
 //===--------------------------------------------------------------------===//
+// Each dataset is closed by an explicit close(), which throws: HDF5 can hold a dataset's data until it closes,
+// and a destructor's close would drop that write's failure.
 static string GetCurrentTimestamp() {
 	auto now = std::chrono::system_clock::now();
 	auto time_t_now = std::chrono::system_clock::to_time_t(now);
@@ -382,7 +396,6 @@ static void WriteStringDataset(H5::Group &group, const string &name, const std::
 	}
 
 	dataset.write(c_strs.data(), datatype);
-	// HDF5 can hold a dataset's data until it closes; a destructor's close would drop that write's failure
 	dataset.close();
 }
 
@@ -410,7 +423,6 @@ static void WriteNumericDataset(H5::Group &group, const string &name, const std:
 
 	H5::DataSet dataset = group.createDataSet(name, dtype, dataspace, plist);
 	dataset.write(data.data(), dtype);
-	// HDF5 can hold a dataset's data until it closes; a destructor's close would drop that write's failure
 	dataset.close();
 }
 
@@ -442,18 +454,17 @@ static void BiomCopyFinalize(ClientContext &context, FunctionData &bind_data, Gl
 	auto csr = table.ToCSR(); // observation/matrix
 	auto csc = table.ToCSC(); // sample/matrix
 
-	// Every HDF5 call below, the destructors that close the file and its objects and the failure recorder
-	// included, runs under miint::g_hdf5_mutex (BIOMReader.hpp): a partitioned or per-thread COPY finalizes
-	// several BIOM files at once, and other queries may be reading BIOM files. One BIOM write therefore
-	// holds up every other BIOM read and write until it is done.
-	std::lock_guard<std::mutex> hdf5_guard(miint::g_hdf5_mutex);
+	// The recorder holds miint::g_hdf5_mutex (BIOMReader.hpp) until it goes, so every HDF5 call below, the
+	// destructors that close the file and its objects included, runs under it: a partitioned or per-thread COPY
+	// finalizes several BIOM files at once, and other queries may be reading BIOM files. One BIOM write
+	// therefore holds up every other BIOM read and write until it is done.
 	miint::Hdf5FailureRecorder hdf5_failure;
 
 	// HDF5 throws H5::Exception, which is not a std::exception, so it is rethrown naming the file and why
 	// rather than reaching DuckDB as an unknown exception.
 	try {
 		// Create HDF5 file
-		H5::H5File file(gstate.file_path, H5F_ACC_TRUNC);
+		H5::H5File file(gstate.file_path, gstate.replace_existing ? H5F_ACC_TRUNC : H5F_ACC_EXCL);
 
 		// Write root attributes
 		WriteRootAttributes(file, nnz, n_features, n_samples, fdata.id, fdata.generated_by);
@@ -511,6 +522,7 @@ CopyFunction CopyBiomFunction::GetFunction() {
 	func.copy_to_sink = BiomCopySink;
 	func.copy_to_combine = BiomCopyCombine;
 	func.copy_to_finalize = BiomCopyFinalize;
+	func.initialize_operator = BiomCopyInitializeOperator;
 	return func;
 }
 

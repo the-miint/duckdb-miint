@@ -80,18 +80,25 @@ public:
 				global_state.current_file_idx++;
 			}
 
-			// The reader's destructor closes HDF5 handles, so it stays inside the lock.
+			// The recorder holds the HDF5 mutex, and the reader's destructor closes HDF5 handles, so the reader
+			// lives inside the recorder's scope.
+			bool is_biom = false;
 			{
-				std::lock_guard<std::mutex> hdf5_guard(miint::g_hdf5_mutex);
 				miint::Hdf5FailureRecorder hdf5_failure;
 				try {
-					auto reader = miint::BIOMReader(local_path);
-					table = reader.read();
+					is_biom = miint::BIOMReader::IsBIOM(local_path);
+					if (is_biom) {
+						auto reader = miint::BIOMReader(local_path);
+						table = reader.read();
+					}
 				} catch (const std::bad_alloc &) {
 					throw;
 				} catch (const std::exception &e) {
 					throw IOException("read_biom: cannot read '%s': %s", path, hdf5_failure.Explain(e.what()));
 				}
+			}
+			if (!is_biom) {
+				throw IOException("File is not a BIOM file: " + path);
 			}
 
 			total_rows = table.nnz();

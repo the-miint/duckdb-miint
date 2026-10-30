@@ -808,7 +808,7 @@ SELECT * FROM read_biom('some_file.biom');
 - Reads up to 4 files at a time, one thread per file
 - Zero values are not returned (sparse representation)
 - Supports reading multiple files which are concatenated in the output
-- A missing file and a file that is not BIOM are refused. A file HDF5 cannot open, being unreadable or damaged, is refused with HDF5's reason (`read_biom: cannot open '<file>': H5Fopen failed: truncated file ...`), and a read that fails names the file and why (`read_biom: cannot read '<file>': ...`)
+- A missing file and a file that is not BIOM are refused (`File not found: <file>`, `File is not a BIOM file: <file>`). A file HDF5 cannot open or read, being unreadable or damaged, is refused with the file and HDF5's reason (`read_biom: cannot read '<file>': H5Fopen failed: truncated file ...`)
 
 **Examples:**
 ```sql

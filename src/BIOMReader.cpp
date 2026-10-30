@@ -16,7 +16,9 @@ static herr_t KeepInnermostHdf5Error(unsigned n, const H5E_error2_t *err, void *
 	return 0;
 }
 
-std::string Hdf5ErrorCause(hid_t error_stack) {
+// The innermost entry of an HDF5 error stack, cut to the OS error when the entry quotes one (a failed open's
+// "error message = '...'"); empty for an empty stack
+static std::string Hdf5ErrorCause(hid_t error_stack) {
 	const char *innermost = nullptr;
 	H5Ewalk2(error_stack, H5E_WALK_UPWARD, KeepInnermostHdf5Error, &innermost);
 	if (!innermost) {
@@ -35,7 +37,7 @@ std::string Hdf5ErrorCause(hid_t error_stack) {
 	return cause;
 }
 
-Hdf5FailureRecorder::Hdf5FailureRecorder() {
+Hdf5FailureRecorder::Hdf5FailureRecorder() : hdf5_guard(g_hdf5_mutex) {
 	H5Eget_auto2(H5E_DEFAULT, &saved_func, &saved_data);
 	H5Eset_auto2(H5E_DEFAULT, Record, this);
 }
@@ -44,12 +46,17 @@ Hdf5FailureRecorder::~Hdf5FailureRecorder() {
 	H5Eset_auto2(H5E_DEFAULT, saved_func, saved_data);
 }
 
-// HDF5 calls this as a failing call returns, with that call's error stack
+// HDF5 calls this as a failing call returns, with that call's error stack. HDF5 is C, so no exception may
+// leave it: a cause that cannot be kept is left empty.
 herr_t Hdf5FailureRecorder::Record(hid_t error_stack, void *recorder) {
 	auto &self = *static_cast<Hdf5FailureRecorder *>(recorder);
 	if (!self.failed) {
 		self.failed = true;
-		self.cause = Hdf5ErrorCause(error_stack);
+		try {
+			self.cause = Hdf5ErrorCause(error_stack);
+		} catch (...) { // NOLINT: must not unwind through HDF5
+			self.cause.clear();
+		}
 	}
 	return 0;
 }
@@ -58,7 +65,8 @@ BIOMReader::BIOMReader(const std::string &path) {
 	// Check if file exists and get size
 	struct stat st;
 	if (stat(path.c_str(), &st) != 0) {
-		throw std::runtime_error(std::string("cannot stat the file: ") + std::strerror(errno));
+		const int stat_errno = errno;
+		throw std::runtime_error(std::string("cannot stat the file: ") + std::strerror(stat_errno));
 	}
 
 	htri_t is_hdf5 = -1;
