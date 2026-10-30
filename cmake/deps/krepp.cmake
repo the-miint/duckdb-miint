@@ -98,11 +98,8 @@ if(MIINT_KREPP_OPENMP_OK)
 else()
   set(MIINT_KREPP_WOPENMP 0)
 endif()
-# krepp's src/sdust.h, compiled into rqseq.cpp, is a copy of minimap2's sdust
-# with the same global names, so a link that pulls in both archives' copies
-# (tests_duckdb's does) fails with duplicate symbols. No miint TU includes
-# sdust.h, so unlike seq_nt4_table the rename needs no source-file property. See
-# docs/internals/embedded-tools.md, krepp.
+# The sdust and seq2nt4 renames: why, in docs/internals/embedded-tools.md, krepp
+# ("sdust collision").
 target_compile_definitions(
   krepp
   PRIVATE _WOPENMP=${MIINT_KREPP_WOPENMP}
