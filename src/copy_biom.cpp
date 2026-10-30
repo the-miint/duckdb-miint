@@ -2,6 +2,7 @@
 #include "copy_option_parsing.hpp"
 #include "BIOMReader.hpp"
 #include "BIOMTable.hpp"
+#include "id_column_utils.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/vector_operations/generic_executor.hpp"
@@ -26,6 +27,8 @@ struct BiomCopyBindData : public FunctionData {
 	idx_t feature_id_idx = DConstants::INVALID_INDEX;
 	idx_t sample_id_idx = DConstants::INVALID_INDEX;
 	idx_t value_idx = DConstants::INVALID_INDEX;
+	LogicalType feature_id_type;
+	LogicalType sample_id_type;
 
 	unique_ptr<FunctionData> Copy() const override {
 		auto result = make_uniq<BiomCopyBindData>();
@@ -37,6 +40,8 @@ struct BiomCopyBindData : public FunctionData {
 		result->feature_id_idx = feature_id_idx;
 		result->sample_id_idx = sample_id_idx;
 		result->value_idx = value_idx;
+		result->feature_id_type = feature_id_type;
+		result->sample_id_type = sample_id_type;
 		return result;
 	}
 
@@ -45,7 +50,8 @@ struct BiomCopyBindData : public FunctionData {
 		return file_path == other.file_path && id == other.id && generated_by == other.generated_by &&
 		       use_compression == other.use_compression && names == other.names &&
 		       feature_id_idx == other.feature_id_idx && sample_id_idx == other.sample_id_idx &&
-		       value_idx == other.value_idx;
+		       value_idx == other.value_idx && feature_id_type == other.feature_id_type &&
+		       sample_id_type == other.sample_id_type;
 	}
 };
 
@@ -89,16 +95,19 @@ static unique_ptr<FunctionData> BiomCopyBind(ClientContext &context, CopyFunctio
 		throw BinderException("COPY FORMAT BIOM requires 'value' column");
 	}
 
-	// Validate column types
-	if (sql_types[result->feature_id_idx].id() != LogicalTypeId::VARCHAR) {
-		throw BinderException("COPY FORMAT BIOM: 'feature_id' must be VARCHAR");
-	}
-	if (sql_types[result->sample_id_idx].id() != LogicalTypeId::VARCHAR) {
-		throw BinderException("COPY FORMAT BIOM: 'sample_id' must be VARCHAR");
+	// feature_id and sample_id are ids, so they take the id types and are written as their text
+	for (auto idx : {result->feature_id_idx, result->sample_id_idx}) {
+		if (!IsAllowedIdType(sql_types[idx])) {
+			throw BinderException("COPY FORMAT BIOM: column '%s' must be %s, got %s", result->names[idx],
+			                      AllowedIdTypeList(), sql_types[idx].ToString());
+		}
 	}
 	if (sql_types[result->value_idx].id() != LogicalTypeId::DOUBLE) {
-		throw BinderException("COPY FORMAT BIOM: 'value' must be DOUBLE");
+		throw BinderException("COPY FORMAT BIOM: column 'value' must be DOUBLE, got %s",
+		                      sql_types[result->value_idx].ToString());
 	}
+	result->feature_id_type = sql_types[result->feature_id_idx];
+	result->sample_id_type = sql_types[result->sample_id_idx];
 
 	// Parse optional parameters
 	for (auto &option : input.info.options) {
@@ -159,6 +168,11 @@ struct BiomCopyLocalState : public LocalFunctionData {
 	vector<string> local_feature_ids;
 	vector<string> local_sample_ids;
 	vector<double> local_values;
+	// One chunk's ids as text, reused across chunks
+	vector<string> chunk_feature_ids;
+	vector<bool> chunk_feature_nulls;
+	vector<string> chunk_sample_ids;
+	vector<bool> chunk_sample_nulls;
 };
 
 static unique_ptr<LocalFunctionData> BiomCopyInitializeLocal(ExecutionContext &context, FunctionData &bind_data) {
@@ -176,26 +190,23 @@ static void BiomCopySink(ExecutionContext &context, FunctionData &bind_data, Glo
 	auto &lstate = lstate_p.Cast<BiomCopyLocalState>();
 
 	// Process each row
-	UnifiedVectorFormat feature_data, sample_data, value_data;
+	ExtractIdColumnAsStrings(input, fdata.feature_id_idx, fdata.feature_id_type, lstate.chunk_feature_ids,
+	                         lstate.chunk_feature_nulls);
+	ExtractIdColumnAsStrings(input, fdata.sample_id_idx, fdata.sample_id_type, lstate.chunk_sample_ids,
+	                         lstate.chunk_sample_nulls);
 
-	input.data[fdata.feature_id_idx].ToUnifiedFormat(feature_data);
-	input.data[fdata.sample_id_idx].ToUnifiedFormat(sample_data);
+	UnifiedVectorFormat value_data;
 	input.data[fdata.value_idx].ToUnifiedFormat(value_data);
-
-	auto feature_strings = UnifiedVectorFormat::GetData<string_t>(feature_data);
-	auto sample_strings = UnifiedVectorFormat::GetData<string_t>(sample_data);
 	auto value_doubles = UnifiedVectorFormat::GetData<double>(value_data);
 
 	for (idx_t row = 0; row < input.size(); row++) {
-		auto feature_idx = feature_data.sel->get_index(row);
-		auto sample_idx = sample_data.sel->get_index(row);
 		auto value_idx = value_data.sel->get_index(row);
 
 		// Check for NULLs
-		if (!feature_data.validity.RowIsValid(feature_idx)) {
+		if (lstate.chunk_feature_nulls[row]) {
 			throw InvalidInputException("COPY FORMAT BIOM: NULL values not allowed in feature_id column");
 		}
-		if (!sample_data.validity.RowIsValid(sample_idx)) {
+		if (lstate.chunk_sample_nulls[row]) {
 			throw InvalidInputException("COPY FORMAT BIOM: NULL values not allowed in sample_id column");
 		}
 		if (!value_data.validity.RowIsValid(value_idx)) {
@@ -203,8 +214,8 @@ static void BiomCopySink(ExecutionContext &context, FunctionData &bind_data, Glo
 		}
 
 		// Get values
-		string feature_id = feature_strings[feature_idx].GetString();
-		string sample_id = sample_strings[sample_idx].GetString();
+		string &feature_id = lstate.chunk_feature_ids[row];
+		string &sample_id = lstate.chunk_sample_ids[row];
 		double value = value_doubles[value_idx];
 
 		// Validate feature_id and sample_id are not empty

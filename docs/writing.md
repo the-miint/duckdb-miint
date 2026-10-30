@@ -357,9 +357,11 @@ Round-trip via `read_sequences_sam('out.bam')` returns `read_id`/`sequence1`/`qu
 Write query results to BIOM (Biological Observation Matrix) format files. BIOM is an HDF5-based format commonly used for representing OGU/OTU/ASV tables in microbiome analyses.
 
 **Required columns:**
-- `feature_id` (VARCHAR): Feature/OGU/OTU/ASV identifier
-- `sample_id` (VARCHAR): Sample identifier
+- `feature_id` (VARCHAR, BIGINT or UUID): Feature/OGU/OTU/ASV identifier
+- `sample_id` (VARCHAR, BIGINT or UUID): Sample identifier
 - `value` (DOUBLE): Abundance/count value
+
+An id is written as its text, as `read_id` is elsewhere: BIGINT in decimal, UUID in the lowercase hyphenated form. `read_biom` returns ids as VARCHAR. A column of another type is refused when the COPY is planned, with an error naming the column. An untyped decimal literal such as `45.0` is DECIMAL, so cast a literal `value` to DOUBLE.
 
 BIOM is written to local files only; a remote target is refused. `PARTITION_BY` and `PER_THREAD_OUTPUT` write `.biom` files, each a complete table of its own rows: one per thread, and one or more per partition (DuckDB starts another file for a partition when more partitions are open than `partitioned_write_max_open_files`), so a (feature, sample) pair can be split across files. DuckDB leaves the partition columns out of the rows it writes unless `WRITE_PARTITION_COLUMNS true`, so partitioning by `sample_id` or `feature_id` needs it.
 
@@ -407,10 +409,10 @@ COPY (
 -- Convert any compatible table to BIOM format
 CREATE TABLE feature_counts AS
 SELECT * FROM (VALUES
-    ('OGU_001', 'Sample_A', 45.0),
-    ('OGU_001', 'Sample_B', 32.0),
-    ('OGU_002', 'Sample_A', 18.0),
-    ('OGU_002', 'Sample_B', 27.0)
+    ('OGU_001', 'Sample_A', 45.0::DOUBLE),
+    ('OGU_001', 'Sample_B', 32.0::DOUBLE),
+    ('OGU_002', 'Sample_A', 18.0::DOUBLE),
+    ('OGU_002', 'Sample_B', 27.0::DOUBLE)
 ) AS t(feature_id, sample_id, value);
 
 COPY (SELECT * FROM feature_counts)
@@ -440,9 +442,9 @@ COPY (
 -- Duplicates are automatically summed
 CREATE TABLE with_dups AS
 SELECT * FROM (VALUES
-    ('F1', 'S1', 10.0),
-    ('F1', 'S1', 5.0),   -- Same feature + sample
-    ('F2', 'S1', 8.0)
+    ('F1', 'S1', 10.0::DOUBLE),
+    ('F1', 'S1', 5.0::DOUBLE),   -- Same feature + sample
+    ('F2', 'S1', 8.0::DOUBLE)
 ) AS t(feature_id, sample_id, value);
 
 COPY (SELECT * FROM with_dups)
@@ -453,9 +455,9 @@ TO 'merged.biom' (FORMAT BIOM);
 -- Zeros are removed
 CREATE TABLE with_zeros AS
 SELECT * FROM (VALUES
-    ('F1', 'S1', 10.0),
-    ('F1', 'S2', 0.0),   -- Zero value
-    ('F2', 'S1', 8.0)
+    ('F1', 'S1', 10.0::DOUBLE),
+    ('F1', 'S2', 0.0::DOUBLE),   -- Zero value
+    ('F2', 'S1', 8.0::DOUBLE)
 ) AS t(feature_id, sample_id, value);
 
 COPY (SELECT * FROM with_zeros)
