@@ -251,8 +251,12 @@ FROM read_ena_sequences('ERR1074767', include_filepath => true) LIMIT 5;
   <accessions>; first error: <message>` at the end rather than return no rows;
   so does a single-run scan whose run fails mid-stream, rather than return its
   partial rows. A lateral call skips a failed run with a warning, even when
-  every run fails. On
-  a mid-stream failure (a connection dropped after some rows have been emitted,
+  every run fails. A connection that drops while a file opens or partway
+  through it is first retried by DuckDB's HTTP retry settings, as for
+  `read_fastx` (see [Reading](reading.md#fasta-and-fastq)); a scan of runs
+  several GB in size should raise them. A file still failing to open after its
+  retries is the open failure above, so the run is opened once more. On
+  a mid-stream failure (a connection still failing after its retries,
   or a malformed record or damaged gzip data found after the run has opened),
   the run is NOT retried — re-reading from scratch would emit the same reads
   again with duplicate `sequence_index` values downstream. Instead, the run is
