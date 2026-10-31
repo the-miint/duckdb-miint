@@ -29,14 +29,14 @@ enum GffColumn : idx_t { SEQID, SOURCE, TYPE, POSITION, STOP_POSITION, SCORE, ST
 
 // predict_genes' columns that Prodigal's GFF writes. genome_id may be missing (PARTITION_BY genome_id drops it from
 // each file's columns); a contig is then told from the next by read_id alone.
-const vector<string> kProdigalColumns = {"genome_id",    "read_id",       "gene_index",
-                                         "position",     "stop_position", "strand",
-                                         "partial_left", "partial_right", "start_type",
-                                         "rbs_motif",    "rbs_spacer",    "score",
-                                         "cscore",       "sscore",        "rscore",
-                                         "uscore",       "tscore",        "confidence",
-                                         "gc_content",   "contig_length", "translation_table",
-                                         "uses_sd",      "model_desc",    "model_gc_content"};
+const vector<string> kProdigalColumns = {"genome_id",       "read_id",       "gene_index",
+                                         "position",        "stop_position", "strand",
+                                         "partial_left",    "partial_right", "start_type",
+                                         "rbs_motif",       "rbs_spacer",    "score",
+                                         "cscore",          "sscore",        "rscore",
+                                         "uscore",          "tscore",        "confidence",
+                                         "gene_gc_content", "contig_length", "translation_table",
+                                         "uses_sd",         "model_desc",    "model_gc_content"};
 enum ProdigalColumn : idx_t {
 	P_GENOME_ID,
 	P_READ_ID,
@@ -56,7 +56,7 @@ enum ProdigalColumn : idx_t {
 	P_USCORE,
 	P_TSCORE,
 	P_CONFIDENCE,
-	P_GC_CONTENT,
+	P_GENE_GC_CONTENT,
 	P_CONTIG_LENGTH,
 	P_TRANSLATION_TABLE,
 	P_USES_SD,
@@ -135,6 +135,7 @@ unique_ptr<FunctionData> GffCopyBind(ClientContext &context, CopyFunctionBindInp
 	Value compression_param;
 	const vector<Value> *compression_level_values = nullptr;
 	bool source_set = false;
+	bool dialect_set = false;
 	for (auto &option : input.info.options) {
 		if (option.first == "compression") {
 			compression_param = option.second[0];
@@ -143,6 +144,13 @@ unique_ptr<FunctionData> GffCopyBind(ClientContext &context, CopyFunctionBindInp
 		} else if (option.first == "source") {
 			result->source = CopyOptionValue(option.first, option.second).ToString();
 			source_set = true;
+		} else if (option.first == "dialect") {
+			const auto dialect = StringUtil::Lower(CopyOptionValue(option.first, option.second).ToString());
+			if (dialect != "gff3" && dialect != "prodigal") {
+				throw BinderException("COPY FORMAT GFF: DIALECT must be 'gff3' or 'prodigal' (got '%s')", dialect);
+			}
+			result->prodigal = dialect == "prodigal";
+			dialect_set = true;
 		} else {
 			ThrowUnreadCopyOption("GFF", option.first);
 		}
@@ -153,16 +161,20 @@ unique_ptr<FunctionData> GffCopyBind(ClientContext &context, CopyFunctionBindInp
 		    GzipCompressionLevel(*compression_level_values, result->compression, result->file_path);
 	}
 
-	for (const auto &name : names) {
-		if (StringUtil::CIEquals(name.GetIdentifierName(), "gene_index")) {
-			result->prodigal = true;
+	if (!dialect_set) {
+		// predict_genes' rows are not GFF3 features; rather than fail on read_gff's missing columns, say what to add.
+		for (const auto &name : names) {
+			if (StringUtil::CIEquals(name.GetIdentifierName(), "gene_index")) {
+				throw BinderException("COPY FORMAT GFF: these look like predict_genes' columns; add DIALECT 'prodigal' "
+				                      "to write Prodigal's GFF");
+			}
 		}
 	}
 
 	if (!result->prodigal) {
 		if (source_set) {
-			throw BinderException("COPY FORMAT GFF: SOURCE is for predict_genes' columns; read_gff's columns carry "
-			                      "their own source");
+			throw BinderException("COPY FORMAT GFF: SOURCE is for DIALECT 'prodigal'; read_gff's columns carry their "
+			                      "own source");
 		}
 		result->columns = FindColumns(names, kGffColumns, "read_gff's columns");
 		const auto type = [&](GffColumn c) -> const LogicalType & {
@@ -454,7 +466,7 @@ void WriteProdigalRows(const GffCopyBindData &data, GffCopyGlobalState &state, D
 		       ";rbs_motif=" + text(P_RBS_MOTIF, row, "None") + ";rbs_spacer=" + text(P_RBS_SPACER, row, "None");
 		out +=
 		    Format(";gc_cont=%.3f;conf=%.2f;score=%.2f;cscore=%.2f;sscore=%.2f;rscore=%.2f;uscore=%.2f;tscore=%.2f;\n",
-		           required(P_GC_CONTENT, row).GetValue<double>(), required(P_CONFIDENCE, row).GetValue<double>(),
+		           required(P_GENE_GC_CONTENT, row).GetValue<double>(), required(P_CONFIDENCE, row).GetValue<double>(),
 		           score, required(P_CSCORE, row).GetValue<double>(), required(P_SSCORE, row).GetValue<double>(),
 		           required(P_RSCORE, row).GetValue<double>(), required(P_USCORE, row).GetValue<double>(),
 		           required(P_TSCORE, row).GetValue<double>());
@@ -489,6 +501,7 @@ void GffCopyOptions(ClientContext &, CopyOptionsInput &input) {
 	DeclareCopyOption(input, "compression", LogicalType::VARCHAR);
 	DeclareCompressionLevelCopyOption(input);
 	DeclareCopyOption(input, "source", LogicalType::VARCHAR);
+	DeclareCopyOption(input, "dialect", LogicalType::VARCHAR);
 }
 
 } // namespace

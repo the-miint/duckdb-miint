@@ -157,7 +157,7 @@ rscore	DOUBLE
 uscore	DOUBLE
 tscore	DOUBLE
 confidence	DOUBLE
-gc_content	DOUBLE
+gene_gc_content	DOUBLE
 protein	VARCHAR
 contig_length	BIGINT
 contig_gc_content	DOUBLE

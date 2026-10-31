@@ -1,7 +1,9 @@
 #!/bin/bash
-# A gpl-boundary that dies while training a genome fails the query; only Prodigal's own refusal to train is a
-# genome's training_failed row. A proxy in front of the real gpl-boundary exits on the first prodigal-train request.
-# Needs predict_genes compiled in, a gpl-boundary >= 0.5.0 (MIINT_GPL_BOUNDARY_PATH or on PATH) and python3.
+# Failures that are not a genome's: they fail the query instead of becoming a training_failed row.
+# - gpl-boundary dying while training a genome (a python3 proxy in front of the real gpl-boundary exits on the first
+#   prodigal-train request);
+# - a training_path to be written in a directory that cannot be written (skipped as root, who can write it).
+# Needs predict_genes compiled in and a gpl-boundary >= 0.5.0 (MIINT_GPL_BOUNDARY_PATH or on PATH).
 
 set -u
 
@@ -64,6 +66,10 @@ fi
 
 # A training_path to be written in a directory that cannot be written fails the call up front, rather than reading as
 # the genome failing to train.
+if [ "$(id -u)" = 0 ]; then
+    echo "  - running as root, which can write a 0555 directory: skipped"
+    exit $FAILED
+fi
 mkdir "$WORK/read_only"
 chmod 555 "$WORK/read_only"
 out=$(printf '%s\n' "CREATE TABLE c AS SELECT 'g' AS genome, * FROM read_fastx('data/prodigal/anthus_aco.fas');" \

@@ -56,7 +56,7 @@ CREATE MACRO as_cli(rel) AS TABLE
 SELECT read_id, gene_index, position, stop_position, strand,
        partial_left::INTEGER::VARCHAR || partial_right::INTEGER::VARCHAR AS partial, start_type,
        coalesce(rbs_motif, 'None') AS rbs_motif, coalesce(rbs_spacer, 'None') AS rbs_spacer,
-       printf('%.3f', gc_content) AS gc, printf('%.2f', confidence) AS conf, printf('%.2f', score) AS score,
+       printf('%.3f', gene_gc_content) AS gc, printf('%.2f', confidence) AS conf, printf('%.2f', score) AS score,
        printf('%.2f', cscore) AS cscore, printf('%.2f', sscore) AS sscore, printf('%.2f', rscore) AS rscore,
        printf('%.2f', uscore) AS uscore, printf('%.2f', tscore) AS tscore
 FROM query_table(rel) WHERE gene_index IS NOT NULL;
@@ -570,3 +570,30 @@ statement error
 SELECT * FROM predict_genes('anthus', genome_id := 'genome', training_path := '{TEST_DIR}/junk.trn');
 ----
 predict_genes: prodigal refused the call
+
+# -----------------------------------------------------------------------------
+# A contig's genes do not depend on the others called with it: a genome split in two gets the same genes, in
+# metagenomic mode and with a fixed model (so the batch size bounds memory, not results)
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE halves AS
+SELECT CASE WHEN sequence_index <= 11 THEN 'h1' ELSE 'h2' END AS genome, sequence_index, read_id, sequence1 FROM anthus;
+
+statement ok
+CREATE TABLE meta_halves AS SELECT * FROM predict_genes('halves', genome_id := 'genome', meta_mode := true);
+
+query I
+SELECT count(*) FROM ((SELECT * FROM as_cli('meta') EXCEPT ALL SELECT * FROM as_cli('meta_halves'))
+                      UNION ALL (SELECT * FROM as_cli('meta_halves') EXCEPT ALL SELECT * FROM as_cli('meta')));
+----
+0
+
+statement ok
+CREATE TABLE model_halves AS
+SELECT * FROM predict_genes('halves', genome_id := 'genome', training_path := '{TEST_DIR}/anthus.trn');
+
+query I
+SELECT count(*) FROM ((SELECT * FROM as_cli('single') EXCEPT ALL SELECT * FROM as_cli('model_halves'))
+                      UNION ALL (SELECT * FROM as_cli('model_halves') EXCEPT ALL SELECT * FROM as_cli('single')));
+----
+0

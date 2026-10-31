@@ -60,13 +60,15 @@ constexpr const char *kStatusTrainingFailed = "training_failed";
 
 // Ends an error about gpl-boundary output this miint cannot read.
 constexpr const char *kOutputMismatch =
-    "Is gpl-boundary a release this miint does not know? SELECT install_gpl_boundary(true) installs the latest";
+    "This gpl-boundary passed the release check but is not one this miint can read: upgrade miint, or set "
+    "MIINT_GPL_BOUNDARY_PATH to a gpl-boundary of the release this miint was built for";
 
 // The translation tables Prodigal takes, as gpl-boundary's prodigal tool lists them.
 const std::vector<int32_t> kTransTables = {4, 5, 9, 11, 13, 15, 21, 25, 26, 32};
 
-// Bases per prodigal batch. Metagenomic mode calls each contig on its own and single-genome mode calls a genome with
-// the one model trained on all of it, so this bounds memory, not results. (Training takes the genome whole.)
+// Bases per prodigal batch. Prodigal calls genes on each contig on its own, with the bin it picks (metagenomic mode)
+// or the one model (single-genome mode), so this bounds memory, not results; predict_genes.test checks that a
+// genome split in two gets the same genes. (Training takes a genome whole.)
 constexpr idx_t kBatchBases = idx_t(64) << 20;
 
 // Output columns.
@@ -89,7 +91,7 @@ enum OutputColumn : idx_t {
 	COL_USCORE,
 	COL_TSCORE,
 	COL_CONFIDENCE,
-	COL_GC_CONTENT,
+	COL_GENE_GC_CONTENT,
 	COL_PROTEIN,
 	COL_CONTIG_LENGTH,
 	COL_CONTIG_GC_CONTENT,
@@ -177,8 +179,8 @@ void ReadNamedParameters(const named_argument_map_t &params, PredictGenesBindDat
 		} else if (name == "method") {
 			const auto method = StringValue::Get(value);
 			if (!StringUtil::CIEquals(method, kPredictTool)) {
-				throw BinderException("%s: method '%s' is not supported; the only method is 'prodigal'", kFunction,
-				                      method);
+				throw BinderException("%s: method '%s' is not supported; the only method is '%s'", kFunction, method,
+				                      kPredictTool);
 			}
 		} else if (name == "order_by") {
 			data.order_column = StringValue::Get(value);
@@ -275,7 +277,7 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 	         "uscore",
 	         "tscore",
 	         "confidence",
-	         "gc_content",
+	         "gene_gc_content",
 	         "protein",
 	         "contig_length",
 	         "contig_gc_content",
@@ -755,7 +757,7 @@ idx_t Predict(ClientContext &context, PredictGenesGlobalState &g, const std::str
 		out.data[COL_USCORE].Reference(chunk->data[13]);
 		out.data[COL_TSCORE].Reference(chunk->data[14]);
 		out.data[COL_CONFIDENCE].Reference(chunk->data[15]);
-		out.data[COL_GC_CONTENT].Reference(chunk->data[16]);
+		out.data[COL_GENE_GC_CONTENT].Reference(chunk->data[16]);
 		out.data[COL_RBS_MOTIF].Reference(chunk->data[17]);
 		out.data[COL_RBS_SPACER].Reference(chunk->data[18]);
 		out.data[COL_PROTEIN].Reference(chunk->data[19]);
@@ -888,9 +890,9 @@ bool ProduceSingleGenome(ClientContext &context, PredictGenesGlobalState &g, con
 		try {
 			trained = Submit(g, kTrainTool, cfg.build(), EncodeContigs(contigs, 0, contigs.size()));
 		} catch (const gb::BatchRefused &e) {
-			// Only a refusal: the daemon dying or breaking the protocol fails the query. Input is checked before it is
-			// sent, and training_path's directory before the first call, so this is Prodigal declining to train on
-			// this genome (too little sequence, for one). The caller can rerun it in metagenomic mode.
+			// Only a refusal: the daemon dying or breaking the protocol fails the query. Input and training_path's
+			// directory are checked before (see InitGlobal), so this is Prodigal declining to train on this genome
+			// (too little sequence, for one). The caller can rerun it in metagenomic mode.
 			AppendStatusRow(context, g, genome, kStatusTrainingFailed, e.reason());
 			return true;
 		}

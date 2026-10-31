@@ -223,11 +223,11 @@ CREATE TABLE hand AS
 SELECT 'g' AS genome_id, 'c1' AS read_id, 1 AS gene_index, 1::BIGINT AS position, 301::BIGINT AS stop_position,
        '+' AS strand, false AS partial_left, true AS partial_right, 'ATG' AS start_type, 'AGGAG' AS rbs_motif,
        '5-10bp' AS rbs_spacer, 10.5 AS score, 9.0 AS cscore, 1.5 AS sscore, 0.0 AS rscore, 0.5 AS uscore,
-       1.0 AS tscore, 99.9 AS confidence, 0.4 AS gc_content, 1000::BIGINT AS contig_length, 11 AS translation_table,
+       1.0 AS tscore, 99.9 AS confidence, 0.4 AS gene_gc_content, 1000::BIGINT AS contig_length, 11 AS translation_table,
        true AS uses_sd, NULL::VARCHAR AS model_desc, 0.42 AS model_gc_content, 'ok' AS status;
 
 statement ok
-COPY hand TO '{TEST_DIR}/hand.gff' (FORMAT GFF);
+COPY hand TO '{TEST_DIR}/hand.gff' (FORMAT GFF, DIALECT 'prodigal');
 
 query I
 SELECT * FROM gff_lines('{TEST_DIR}/hand.gff');
@@ -244,7 +244,7 @@ COPY (SELECT * FROM hand
       UNION ALL SELECT * REPLACE ('c2' AS read_id, NULL::INTEGER AS gene_index, 'no_genes' AS status) FROM hand
       UNION ALL SELECT * REPLACE (NULL::VARCHAR AS read_id, NULL::INTEGER AS gene_index, 'no_genes' AS status) FROM hand
       UNION ALL SELECT * REPLACE ('h' AS genome_id) FROM hand)
-TO '{TEST_DIR}/hand_rows.gff' (FORMAT GFF, PRESERVE_ORDER true);
+TO '{TEST_DIR}/hand_rows.gff' (FORMAT GFF, DIALECT 'prodigal', PRESERVE_ORDER true);
 
 query I
 SELECT regexp_extract(line, '^(# Sequence Data: [^;]*|[^ ]* \| [^ ]* \| CDS)') FROM gff_lines('{TEST_DIR}/hand_rows.gff')
@@ -265,7 +265,7 @@ SELECT regexp_extract(line, 'ID=([0-9_]+)', 1) FROM gff_lines('{TEST_DIR}/hand_r
 # The same read_id in the next genome, right after it, is another contig.
 statement ok
 COPY (SELECT * FROM hand UNION ALL SELECT * REPLACE ('h' AS genome_id) FROM hand)
-TO '{TEST_DIR}/hand_two_genomes.gff' (FORMAT GFF, PRESERVE_ORDER true);
+TO '{TEST_DIR}/hand_two_genomes.gff' (FORMAT GFF, DIALECT 'prodigal', PRESERVE_ORDER true);
 
 query I
 SELECT regexp_extract(line, 'ID=([0-9_]+)', 1) FROM gff_lines('{TEST_DIR}/hand_two_genomes.gff') WHERE line LIKE '%ID=%';
@@ -275,110 +275,131 @@ SELECT regexp_extract(line, 'ID=([0-9_]+)', 1) FROM gff_lines('{TEST_DIR}/hand_t
 
 # Values the line needs are refused when NULL, rather than written as 'NULL' or read as 0.
 statement error
-COPY (SELECT * REPLACE (NULL AS position) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+COPY (SELECT * REPLACE (NULL AS position) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
 ----
 NULL position (row
 
 statement error
-COPY (SELECT * REPLACE (NULL AS stop_position) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+COPY (SELECT * REPLACE (NULL AS stop_position) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
 ----
 NULL stop_position (row
 
 statement error
-COPY (SELECT * REPLACE (NULL AS score) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+COPY (SELECT * REPLACE (NULL AS score) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
 ----
 NULL score (row
 
 statement error
-COPY (SELECT * REPLACE (NULL AS cscore) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+COPY (SELECT * REPLACE (NULL AS cscore) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
 ----
 NULL cscore (row
 
 statement error
-COPY (SELECT * REPLACE (NULL AS confidence) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+COPY (SELECT * REPLACE (NULL AS confidence) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
 ----
 NULL confidence (row
 
 statement error
-COPY (SELECT * REPLACE (NULL AS gc_content) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+COPY (SELECT * REPLACE (NULL AS gene_gc_content) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
 ----
-NULL gc_content (row
+NULL gene_gc_content (row
 
 statement error
-COPY (SELECT * REPLACE (NULL AS contig_length) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+COPY (SELECT * REPLACE (NULL AS contig_length) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
 ----
 NULL contig_length (row
 
 statement error
-COPY (SELECT * REPLACE (NULL AS model_gc_content) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+COPY (SELECT * REPLACE (NULL AS model_gc_content) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
 ----
 NULL model_gc_content (row
 
 statement error
-COPY (SELECT * REPLACE (NULL AS translation_table) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+COPY (SELECT * REPLACE (NULL AS translation_table) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
 ----
 NULL translation_table (row
 
 statement error
-COPY (SELECT * REPLACE (NULL AS uses_sd) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+COPY (SELECT * REPLACE (NULL AS uses_sd) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
 ----
 NULL uses_sd (row
 
 statement error
-COPY (SELECT * REPLACE (NULL AS partial_left) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+COPY (SELECT * REPLACE (NULL AS partial_left) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
 ----
 NULL partial_left (row
 
 statement error
-COPY (SELECT * REPLACE (NULL AS start_type) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+COPY (SELECT * REPLACE (NULL AS start_type) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
 ----
 NULL start_type (row
 
 statement error
-COPY (SELECT * REPLACE (NULL::VARCHAR AS read_id) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+COPY (SELECT * REPLACE (NULL::VARCHAR AS read_id) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
 ----
 NULL read_id
 
 statement error
-COPY (SELECT * REPLACE (E'c\t1' AS read_id) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+COPY (SELECT * REPLACE (E'c\t1' AS read_id) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
 ----
 control character
 
 statement error
-COPY (SELECT * REPLACE ('#c1' AS read_id) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+COPY (SELECT * REPLACE ('#c1' AS read_id) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
 ----
 starts with '#'
 
 statement error
-COPY (SELECT * REPLACE ('7' AS strand) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+COPY (SELECT * REPLACE ('7' AS strand) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
 ----
 strand
 
 statement error
-COPY (SELECT * REPLACE (E'AG\nGAG' AS rbs_motif) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+COPY (SELECT * REPLACE (E'AG\nGAG' AS rbs_motif) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
 ----
 rbs_motif
 
 statement error
-COPY hand TO '{TEST_DIR}/bad.gff' (FORMAT GFF, SOURCE E'a\tb');
+COPY hand TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal', SOURCE E'a\tb');
 ----
 SOURCE
 
 statement error
-COPY hand TO '{TEST_DIR}/bad.gff' (FORMAT GFF, SOURCE '');
+COPY hand TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal', SOURCE '');
 ----
 SOURCE
 
 # Without genome_id (PARTITION_BY drops it from each file), a contig is told from the next by read_id.
 statement ok
 COPY (SELECT * EXCLUDE (genome_id) FROM hand UNION ALL SELECT * EXCLUDE (genome_id) REPLACE ('c2' AS read_id) FROM hand)
-TO '{TEST_DIR}/hand_no_genome.gff' (FORMAT GFF, PRESERVE_ORDER true);
+TO '{TEST_DIR}/hand_no_genome.gff' (FORMAT GFF, DIALECT 'prodigal', PRESERVE_ORDER true);
 
 query I
 SELECT regexp_extract(line, 'ID=([0-9_]+)', 1) FROM gff_lines('{TEST_DIR}/hand_no_genome.gff') WHERE line LIKE '%ID=%';
 ----
 1_1
 2_1
+
+# DIALECT is explicit: predict_genes' columns without it are refused, naming it; an unknown dialect is refused;
+# 'gff3' is the default and may be named.
+statement error
+COPY hand TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+DIALECT 'prodigal'
+
+statement error
+COPY hand TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'genbank');
+----
+DIALECT must be 'gff3' or 'prodigal'
+
+statement ok
+COPY features TO '{TEST_DIR}/explicit_gff3.gff' (FORMAT GFF, DIALECT 'GFF3');
+
+query I
+SELECT count(*) FROM ((SELECT * FROM features EXCEPT ALL SELECT * FROM read_gff('{TEST_DIR}/explicit_gff3.gff'))
+                      UNION ALL (SELECT * FROM read_gff('{TEST_DIR}/explicit_gff3.gff') EXCEPT ALL SELECT * FROM features));
+----
+0
 
 # -----------------------------------------------------------------------------
 # More of what a GFF3 COPY refuses
@@ -424,7 +445,7 @@ SELECT * REPLACE ('c' || lpad((i // 7)::VARCHAR, 6, '0') AS read_id, (i % 7 + 1)
 FROM hand, range(300000) t(i) ORDER BY random();
 
 statement ok
-COPY (SELECT * EXCLUDE (i) FROM many ORDER BY read_id, gene_index) TO '{TEST_DIR}/many.gff' (FORMAT GFF);
+COPY (SELECT * EXCLUDE (i) FROM many ORDER BY read_id, gene_index) TO '{TEST_DIR}/many.gff' (FORMAT GFF, DIALECT 'prodigal');
 
 query II
 SELECT count(*) FILTER (WHERE line LIKE '# Sequence Data:%'), count(*) FILTER (WHERE line LIKE 'c%')

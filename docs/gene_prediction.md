@@ -1,6 +1,6 @@
 # Gene prediction
 
-`predict_genes` calls protein-coding genes in prokaryotic contigs, one row per gene. It runs [Prodigal](https://github.com/hyattpd/Prodigal) 2.6.5 (the-miint's fork) in the [gpl-boundary](internals/embedded-tools.md#gpl-boundary-process-isolation-host-for-gpl-tools) process, which miint starts for the call. Its genes, proteins and per-contig model data equal the Prodigal CLI's, field by field, for `-p single`, `-p meta`, `-c`, `-g 4` and `-m` on the contigs in `data/prodigal/`. To write them as Prodigal's GFF, see [`COPY ... (FORMAT GFF)`](writing.md#gff).
+`predict_genes` calls protein-coding genes in prokaryotic contigs, one row per gene. It runs [Prodigal](https://github.com/hyattpd/Prodigal) 2.6.5 (the-miint's fork) in the [gpl-boundary](internals/embedded-tools.md#gpl-boundary-process-isolation-host-for-gpl-tools) process, which miint starts for the call. Its genes, proteins and per-contig model data equal the Prodigal CLI's, field by field, for `-p single`, `-p meta`, `-c`, `-g 4` and `-m` on the contigs in `data/prodigal/`. To write them as Prodigal's GFF, see [`COPY ... (FORMAT GFF, DIALECT 'prodigal')`](writing.md#gff).
 
 ## predict_genes
 
@@ -22,7 +22,7 @@ Requires gpl-boundary 0.5.0 or later (`SELECT install_gpl_boundary();`, or `inst
 - `trans_table` (INTEGER, default 11): the NCBI translation table a model is trained with: 4, 5, 9, 11, 13, 15, 21, 25, 26 or 32. Metagenomic mode takes 11 only (its models choose 11 or 4 per contig).
 - `closed_ends` (BOOLEAN, default false): genes may not run off a contig's ends (`-c`).
 - `mask_regions` (BOOLEAN, default false): runs of N are treated as gaps, which genes do not cross (`-m`).
-- `training_path` (VARCHAR, single-genome mode only): a Prodigal model file (the CLI's `-t`). If it exists, every genome's genes are called with it, and no genome is trained; `trans_table` is then refused (the model holds it), and `closed_ends` and `mask_regions` should be what it was trained with (the model does not store them). If it does not exist, the relation must hold exactly one genome, and the file's directory must exist; a model is trained on it, written there, and used. A file Prodigal cannot read as a model fails the call.
+- `training_path` (VARCHAR, single-genome mode only): a Prodigal model file (the CLI's `-t`). If it exists, every genome's genes are called with it, and no genome is trained; `trans_table` is then refused (the model holds it), and `closed_ends` and `mask_regions` should be what it was trained with (the model does not store them). If it does not exist, the relation must hold exactly one genome, and the file's directory must exist and be writable; a model is trained on it, written there, and used. A file Prodigal cannot read as a model fails the call.
 
 **Output:** one row per gene; one row for each contig without genes, with its contig columns and NULL gene columns; and one row for each genome that failed training or has no genes at all, with only `genome_id`, `status` and `error`.
 
@@ -40,7 +40,7 @@ Requires gpl-boundary 0.5.0 or later (`SELECT install_gpl_boundary();`, or `inst
 | `score` | DOUBLE | `cscore + sscore` (the CLI's `score=`) |
 | `cscore`, `sscore`, `rscore`, `uscore`, `tscore` | DOUBLE | Coding, start, RBS, upstream and start-type scores |
 | `confidence` | DOUBLE | The CLI's `conf=`, 50 to 100 |
-| `gc_content` | DOUBLE | The gene's GC fraction |
+| `gene_gc_content` | DOUBLE | The gene's GC fraction (the CLI's `gc_cont=`) |
 | `protein` | VARCHAR | The translation (the CLI's `-a`): `*` for the stop codon, none where the gene runs off an end |
 | `contig_length` | BIGINT | The contig's length |
 | `contig_gc_content` | DOUBLE | The contig's GC fraction |

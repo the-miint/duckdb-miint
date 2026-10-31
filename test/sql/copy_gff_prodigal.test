@@ -1,5 +1,5 @@
 # name: test/sql/copy_gff_prodigal.test
-# description: COPY ... (FORMAT GFF) of predict_genes' columns writes Prodigal's own GFF, "# Model Data" included,
+# description: COPY ... (FORMAT GFF, DIALECT 'prodigal') of predict_genes' columns writes Prodigal's own GFF, "# Model Data" included,
 #              checked against the CLI's file on anthus_aco.fas (data/prodigal/README.md)
 # group: [sql]
 
@@ -22,7 +22,7 @@ SELECT i, replace(replace(replace(line, 'v2.6.3', 'v2.6.5'), E'\r', ''), E'\t', 
 
 statement ok
 COPY (SELECT * FROM predict_genes('anthus', genome_id := 'genome') ORDER BY read_id, gene_index)
-TO '{TEST_DIR}/single.gff' (FORMAT GFF);
+TO '{TEST_DIR}/single.gff' (FORMAT GFF, DIALECT 'prodigal');
 
 # The rows reach COPY in the CLI's contig order only if asked to; read_fastx's order is the file's.
 statement ok
@@ -31,7 +31,7 @@ CREATE TABLE contig_order AS SELECT read_id, row_number() OVER () AS seqnum FROM
 statement ok
 COPY (SELECT g.* FROM predict_genes('anthus', genome_id := 'genome') g JOIN contig_order USING (read_id)
       ORDER BY seqnum, gene_index)
-TO '{TEST_DIR}/single_cli_order.gff' (FORMAT GFF);
+TO '{TEST_DIR}/single_cli_order.gff' (FORMAT GFF, DIALECT 'prodigal');
 
 query I
 SELECT count(*) FROM ((SELECT * FROM lines_of('data/prodigal/ref_single.gff')
@@ -45,7 +45,7 @@ SELECT count(*) FROM ((SELECT * FROM lines_of('data/prodigal/ref_single.gff')
 statement ok
 COPY (SELECT g.* FROM predict_genes('anthus', genome_id := 'genome', meta_mode := true) g
       JOIN contig_order USING (read_id) ORDER BY seqnum, gene_index)
-TO '{TEST_DIR}/meta_cli_order.gff' (FORMAT GFF);
+TO '{TEST_DIR}/meta_cli_order.gff' (FORMAT GFF, DIALECT 'prodigal');
 
 query I
 SELECT count(*) FROM ((SELECT * FROM lines_of('data/prodigal/ref_meta.gff')
@@ -77,7 +77,7 @@ SELECT 'small' AS genome, sequence_index, read_id, sequence1 FROM anthus WHERE r
 
 statement ok
 COPY (SELECT * FROM predict_genes('two', genome_id := 'genome') ORDER BY genome_id, read_id, gene_index)
-TO '{TEST_DIR}/two.gff' (FORMAT GFF);
+TO '{TEST_DIR}/two.gff' (FORMAT GFF, DIALECT 'prodigal');
 
 query I
 SELECT count(*) FROM read_gff('{TEST_DIR}/two.gff');
@@ -87,7 +87,7 @@ SELECT count(*) FROM read_gff('{TEST_DIR}/two.gff');
 # SOURCE names the program in column 2.
 statement ok
 COPY (SELECT * FROM predict_genes('anthus', genome_id := 'genome', meta_mode := true) ORDER BY read_id, gene_index)
-TO '{TEST_DIR}/source.gff' (FORMAT GFF, SOURCE 'Prodigal_v2.6.5_miint');
+TO '{TEST_DIR}/source.gff' (FORMAT GFF, DIALECT 'prodigal', SOURCE 'Prodigal_v2.6.5_miint');
 
 query I
 SELECT DISTINCT source FROM read_gff('{TEST_DIR}/source.gff');
@@ -104,7 +104,7 @@ SELECT 'anthus' AS genome, 21 AS ord, 'tiny' AS read_id, repeat('ACGTTGCA', 6) A
 
 statement ok
 COPY (SELECT * FROM predict_genes('mixed', genome_id := 'genome', order_by := 'ord', meta_mode := true))
-TO '{TEST_DIR}/mixed.gff' (FORMAT GFF);
+TO '{TEST_DIR}/mixed.gff' (FORMAT GFF, DIALECT 'prodigal');
 
 query I
 SELECT count(*) FROM lines_of('{TEST_DIR}/mixed.gff') WHERE line LIKE '# Sequence Data:%';
@@ -136,7 +136,7 @@ SELECT * FROM anthus UNION ALL SELECT 'anthus2' AS genome, sequence_index, read_
 
 statement ok
 COPY (SELECT * FROM predict_genes('pair', genome_id := 'genome', meta_mode := true))
-TO '{TEST_DIR}/by_genome' (FORMAT GFF, PARTITION_BY (genome_id));
+TO '{TEST_DIR}/by_genome' (FORMAT GFF, DIALECT 'prodigal', PARTITION_BY (genome_id));
 
 query II
 SELECT regexp_extract(filename, 'genome_id=([^/]*)', 1) AS genome,
@@ -151,7 +151,7 @@ anthus2	[1, 2]
 # Each file is the one-genome run's.
 statement ok
 COPY (SELECT * FROM predict_genes('anthus', genome_id := 'genome', meta_mode := true))
-TO '{TEST_DIR}/meta_alone.gff' (FORMAT GFF);
+TO '{TEST_DIR}/meta_alone.gff' (FORMAT GFF, DIALECT 'prodigal');
 
 query I
 SELECT count(*) FROM ((SELECT * FROM lines_of('{TEST_DIR}/meta_alone.gff')

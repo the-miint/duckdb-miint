@@ -5,8 +5,7 @@
 
 namespace duckdb {
 
-// The Prodigal that gpl-boundary >= 0.5.0 runs (its --version names it), for messages and COPY FORMAT GFF's
-// version fields.
+// The Prodigal of the gpl-boundary release predict_genes is built for (0.5.0, whose --version lists it).
 constexpr const char *kProdigalVersion = "2.6.5";
 
 // predict_genes(relation, genome_id := 'col', method := 'prodigal', ...): prokaryotic gene calls, one row per gene,
