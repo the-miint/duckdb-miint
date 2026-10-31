@@ -12,6 +12,7 @@
 #include <compute_coverage_depth.hpp>
 #include <copy_fasta.hpp>
 #include <copy_fastq.hpp>
+#include <copy_gff.hpp>
 #include <copy_newick.hpp>
 #include <copy_sam.hpp>
 #include <copy_ubam.hpp>
@@ -153,6 +154,7 @@
 #include <install_gpl_boundary.hpp>
 #include <install_skb_arrow.hpp>
 #include <phylogeny_fasttree.hpp>
+#include <predict_genes.hpp>
 #include <skb_arrow_functions.hpp>
 #else
 #include <install_report.hpp>
@@ -482,6 +484,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 #ifdef MIINT_HAS_GPL_BOUNDARY
 	PhylogenyFastTreeTableFunction::Register(loader);
 	PhylogenyFastTreeAvailableScalar::Register(loader);
+	PredictGenesTableFunction::Register(loader);
 	InstallGplBoundaryScalar::Register(loader);
 	RegisterSkbArrowInstallFunctions(loader);
 	RegisterSkbArrowFunctions(loader);
@@ -543,6 +546,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 #endif
 	CopyFastqFunction::Register(loader);
 	CopyFastaFunction::Register(loader);
+	CopyGffFunction::Register(loader);
 	CopyNewickFunction::Register(loader);
 	CopySAMFunction::Register(loader);
 	CopyUBAMFunction::Register(loader);

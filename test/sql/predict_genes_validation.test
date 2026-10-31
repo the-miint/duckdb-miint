@@ -1,0 +1,174 @@
+# name: test/sql/predict_genes_validation.test
+# description: predict_genes bind-time checks. Bind never starts gpl-boundary, so these run wherever the function
+#              is compiled in (PREDICT_GENES_AVAILABLE); predict_genes.test runs it.
+# group: [sql]
+
+require miint
+
+require-env PREDICT_GENES_AVAILABLE
+
+statement ok
+CREATE TABLE contigs AS SELECT 'g' AS genome, 0 AS sequence_index, 'c1' AS read_id, 'ACGTACGTACGT' AS sequence1;
+
+# genome_id is required: it defines what a genome is.
+statement error
+SELECT * FROM predict_genes('contigs');
+----
+genome_id
+
+statement error
+SELECT * FROM predict_genes('contigs', genome_id := 'nope');
+----
+nope
+
+statement error
+SELECT * FROM predict_genes('contigs', genome_id := NULL);
+----
+genome_id
+
+statement error
+SELECT * FROM predict_genes('missing_table', genome_id := 'genome');
+----
+missing_table
+
+statement error
+SELECT * FROM predict_genes(NULL, genome_id := 'genome');
+----
+non-NULL
+
+# Only Prodigal so far.
+statement error
+SELECT * FROM predict_genes('contigs', genome_id := 'genome', method := 'glimmer');
+----
+glimmer
+
+statement error
+SELECT * FROM predict_genes('contigs', genome_id := 'genome', method := NULL);
+----
+method
+
+# The input's columns.
+statement ok
+CREATE TABLE no_seq AS SELECT 'g' AS genome, 0 AS sequence_index, 'c1' AS read_id;
+
+statement error
+SELECT * FROM predict_genes('no_seq', genome_id := 'genome');
+----
+sequence1
+
+statement ok
+CREATE TABLE no_id AS SELECT 'g' AS genome, 0 AS sequence_index, 'ACGT' AS sequence1;
+
+statement error
+SELECT * FROM predict_genes('no_id', genome_id := 'genome');
+----
+read_id
+
+statement ok
+CREATE TABLE double_genome AS SELECT 1.5::DOUBLE AS genome, 0 AS sequence_index, 'c1' AS read_id, 'ACGT' AS sequence1;
+
+statement error
+SELECT * FROM predict_genes('double_genome', genome_id := 'genome');
+----
+DOUBLE
+
+statement ok
+CREATE TABLE double_id AS SELECT 'g' AS genome, 0 AS sequence_index, 1.5::DOUBLE AS read_id, 'ACGT' AS sequence1;
+
+statement error
+SELECT * FROM predict_genes('double_id', genome_id := 'genome');
+----
+read_id
+
+statement ok
+CREATE TABLE int_seq AS SELECT 'g' AS genome, 0 AS sequence_index, 'c1' AS read_id, 7 AS sequence1;
+
+statement error
+SELECT * FROM predict_genes('int_seq', genome_id := 'genome');
+----
+sequence1
+
+# order_by: sequence_index by default, the column read_fastx adds; another relation names its own.
+statement ok
+CREATE TABLE no_index AS SELECT 'g' AS genome, 'c1' AS read_id, 'ACGT' AS sequence1, 'x' AS label;
+
+statement error
+SELECT * FROM predict_genes('no_index', genome_id := 'genome');
+----
+sequence_index
+
+statement error
+SELECT * FROM predict_genes('no_index', genome_id := 'genome', order_by := 'label');
+----
+order_by
+
+# Translation tables: Prodigal 2.6.5's, and metagenomic mode takes 11 only.
+statement error
+SELECT * FROM predict_genes('contigs', genome_id := 'genome', trans_table := 1);
+----
+trans_table
+
+statement error
+SELECT * FROM predict_genes('contigs', genome_id := 'genome', meta_mode := true, trans_table := 4);
+----
+trans_table
+
+# A model file is single-genome mode's.
+statement error
+SELECT * FROM predict_genes('contigs', genome_id := 'genome', meta_mode := true, training_path := 'x.trn');
+----
+training_path
+
+statement error
+SELECT * FROM predict_genes('contigs', genome_id := 'genome', training_path := '');
+----
+training_path
+
+# NULL knobs are refused rather than read as their defaults.
+statement error
+SELECT * FROM predict_genes('contigs', genome_id := 'genome', meta_mode := NULL);
+----
+meta_mode
+
+statement error
+SELECT * FROM predict_genes('contigs', genome_id := 'genome', closed_ends := NULL);
+----
+closed_ends
+
+# The output's columns, without running anything.
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM predict_genes('contigs', genome_id := 'genome'));
+----
+genome_id	VARCHAR
+read_id	VARCHAR
+gene_index	INTEGER
+position	BIGINT
+stop_position	BIGINT
+strand	VARCHAR
+partial_left	BOOLEAN
+partial_right	BOOLEAN
+start_type	VARCHAR
+rbs_motif	VARCHAR
+rbs_spacer	VARCHAR
+score	DOUBLE
+cscore	DOUBLE
+sscore	DOUBLE
+rscore	DOUBLE
+uscore	DOUBLE
+tscore	DOUBLE
+confidence	DOUBLE
+gc_content	DOUBLE
+protein	VARCHAR
+contig_length	BIGINT
+contig_gc_content	DOUBLE
+translation_table	INTEGER
+uses_sd	BOOLEAN
+meta_bin	INTEGER
+model_desc	VARCHAR
+model_gc_content	DOUBLE
+status	VARCHAR
+error	VARCHAR
+
+# EXPLAIN binds without running the call.
+statement ok
+EXPLAIN SELECT * FROM predict_genes('contigs', genome_id := 'genome');

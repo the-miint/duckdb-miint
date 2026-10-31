@@ -24,7 +24,9 @@ list(
   src/gpl_boundary/shm.cpp
   src/gpl_boundary/arrow_ipc.cpp
   src/install_gpl_boundary.cpp
+  src/gpl_boundary_version.cpp
   src/phylogeny_fasttree.cpp
+  src/predict_genes.cpp
   src/align_bowtie2_daemon_common.cpp
   src/align_bowtie2.cpp
   src/align_bowtie2_sharded.cpp

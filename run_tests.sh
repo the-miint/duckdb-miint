@@ -575,6 +575,9 @@ fi
 if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'phylogeny_fasttree' AND function_type = 'table';" | ./build/release/duckdb -csv -noheader 2>/dev/null | grep -q 1; then
     export PHYLOGENY_FASTTREE_AVAILABLE=1
 fi
+if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'predict_genes' AND function_type = 'table';" | ./build/release/duckdb -csv -noheader 2>/dev/null | grep -q 1; then
+    export PREDICT_GENES_AVAILABLE=1
+fi
 
 # Phase 5: real-data regression oracle.
 #

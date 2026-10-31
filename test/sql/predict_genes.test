@@ -1,0 +1,572 @@
+# name: test/sql/predict_genes.test
+# description: predict_genes(method := 'prodigal') against a real gpl-boundary daemon (>= 0.5.0), checked
+#              against the Prodigal CLI's own output on anthus_aco.fas (data/prodigal/README.md)
+# group: [sql]
+
+require miint
+
+require-env GPL_BOUNDARY_AVAILABLE
+
+statement ok
+CREATE TABLE anthus AS
+SELECT 'anthus' AS genome, sequence_index, read_id, sequence1 FROM read_fastx('data/prodigal/anthus_aco.fas');
+
+query I
+SELECT count(*) FROM anthus;
+----
+22
+
+# -----------------------------------------------------------------------------
+# Single-genome mode (the default): one model trained on the genome, then its genes.
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE single AS SELECT * FROM predict_genes('anthus', genome_id := 'genome');
+
+query IIII
+SELECT count(*), count(DISTINCT read_id), count(*) FILTER (WHERE status = 'ok'), count(error) FROM single;
+----
+129	22	129	0
+
+# The CLI's GFF, field by field, as the CLI prints each value. Read as text: the reference files keep
+# anthus_aco.fas's CR inside their "# Sequence Data" comments, which read_gff refuses.
+statement ok
+CREATE MACRO ref_genes(path) AS TABLE
+WITH lines AS (
+    SELECT string_split(line, E'\t') AS f
+    FROM (SELECT unnest(string_split(content, E'\n')) AS line FROM read_text(path))
+    WHERE line <> '' AND NOT starts_with(line, '#')
+)
+SELECT f[1] AS read_id, split_part(regexp_extract(f[9], 'ID=([^;]*)', 1), '_', 2)::INTEGER AS gene_index,
+       f[4]::BIGINT AS position, f[5]::BIGINT + 1 AS stop_position, f[7] AS strand,
+       regexp_extract(f[9], 'partial=([^;]*)', 1) AS partial,
+       regexp_extract(f[9], 'start_type=([^;]*)', 1) AS start_type,
+       regexp_extract(f[9], 'rbs_motif=([^;]*)', 1) AS rbs_motif,
+       regexp_extract(f[9], 'rbs_spacer=([^;]*)', 1) AS rbs_spacer,
+       regexp_extract(f[9], 'gc_cont=([^;]*)', 1) AS gc, regexp_extract(f[9], 'conf=([^;]*)', 1) AS conf,
+       regexp_extract(f[9], ';score=([^;]*)', 1) AS score, regexp_extract(f[9], 'cscore=([^;]*)', 1) AS cscore,
+       regexp_extract(f[9], 'sscore=([^;]*)', 1) AS sscore, regexp_extract(f[9], 'rscore=([^;]*)', 1) AS rscore,
+       regexp_extract(f[9], 'uscore=([^;]*)', 1) AS uscore, regexp_extract(f[9], 'tscore=([^;]*)', 1) AS tscore
+FROM lines;
+
+statement ok
+CREATE TABLE ref_single AS SELECT * FROM ref_genes('data/prodigal/ref_single.gff');
+
+statement ok
+CREATE MACRO as_cli(rel) AS TABLE
+SELECT read_id, gene_index, position, stop_position, strand,
+       partial_left::INTEGER::VARCHAR || partial_right::INTEGER::VARCHAR AS partial, start_type,
+       coalesce(rbs_motif, 'None') AS rbs_motif, coalesce(rbs_spacer, 'None') AS rbs_spacer,
+       printf('%.3f', gc_content) AS gc, printf('%.2f', confidence) AS conf, printf('%.2f', score) AS score,
+       printf('%.2f', cscore) AS cscore, printf('%.2f', sscore) AS sscore, printf('%.2f', rscore) AS rscore,
+       printf('%.2f', uscore) AS uscore, printf('%.2f', tscore) AS tscore
+FROM query_table(rel) WHERE gene_index IS NOT NULL;
+
+query I
+SELECT count(*) FROM ((SELECT * FROM ref_single EXCEPT ALL SELECT * FROM as_cli('single'))
+                      UNION ALL (SELECT * FROM as_cli('single') EXCEPT ALL SELECT * FROM ref_single));
+----
+0
+
+# Proteins equal the CLI's -a records (unwrapped; the header is <contig>_<gene_index>).
+query I
+SELECT count(*) FROM read_fastx('data/prodigal/ref_single.proteins') p
+FULL JOIN single s ON p.read_id = s.read_id || '_' || s.gene_index AND p.sequence1 = s.protein
+WHERE p.read_id IS NULL OR s.read_id IS NULL;
+----
+0
+
+# The CLI's per-contig "# Model Data" line: one model for the whole genome.
+statement ok
+CREATE MACRO model_data(path) AS TABLE
+WITH lines AS (
+    SELECT unnest(range(len(s))) AS i, unnest(s) AS line
+    FROM (SELECT string_split(content, E'\n') AS s FROM read_text(path))
+)
+SELECT regexp_extract(sd.line, 'seqhdr="([^"\r]*)', 1) AS read_id,
+       regexp_extract(md.line, 'run_type=([^;]*)', 1) AS run_type,
+       regexp_extract(md.line, 'model="([^"]*)"', 1) AS model,
+       regexp_extract(md.line, 'gc_cont=([^;]*)', 1) AS gc_cont,
+       regexp_extract(md.line, 'transl_table=([^;]*)', 1)::INTEGER AS transl_table,
+       regexp_extract(md.line, 'uses_sd=([^;]*)', 1) = '1' AS uses_sd,
+       regexp_extract(sd.line, 'seqlen=([^;]*)', 1)::BIGINT AS seqlen
+FROM lines sd JOIN lines md ON md.i = sd.i + 1
+WHERE sd.line LIKE '# Sequence Data:%' AND md.line LIKE '# Model Data:%';
+
+query I
+SELECT count(*) FROM (
+    (SELECT read_id, gc_cont, transl_table, uses_sd, seqlen FROM model_data('data/prodigal/ref_single.gff')
+     WHERE read_id IN (SELECT read_id FROM single)
+     EXCEPT
+     SELECT DISTINCT read_id, printf('%.2f', model_gc_content * 100), translation_table, uses_sd, contig_length
+     FROM single)
+    UNION ALL
+    (SELECT DISTINCT read_id, printf('%.2f', model_gc_content * 100), translation_table, uses_sd, contig_length
+     FROM single
+     EXCEPT
+     SELECT read_id, gc_cont, transl_table, uses_sd, seqlen FROM model_data('data/prodigal/ref_single.gff')));
+----
+0
+
+# Single-genome mode has no metagenomic bin.
+query II
+SELECT count(meta_bin), count(model_desc) FROM single;
+----
+0	0
+
+# -----------------------------------------------------------------------------
+# Metagenomic mode
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE meta AS SELECT * FROM predict_genes('anthus', genome_id := 'genome', meta_mode := true);
+
+statement ok
+CREATE TABLE ref_meta AS SELECT * FROM ref_genes('data/prodigal/ref_meta.gff');
+
+query II
+SELECT count(*), (SELECT count(*) FROM ref_meta) FROM meta;
+----
+22	22
+
+query I
+SELECT count(*) FROM ((SELECT * FROM ref_meta EXCEPT ALL SELECT * FROM as_cli('meta'))
+                      UNION ALL (SELECT * FROM as_cli('meta') EXCEPT ALL SELECT * FROM ref_meta));
+----
+0
+
+query I
+SELECT count(*) FROM read_fastx('data/prodigal/ref_meta.proteins') p
+FULL JOIN meta s ON p.read_id = s.read_id || '_' || s.gene_index AND p.sequence1 = s.protein
+WHERE p.read_id IS NULL OR s.read_id IS NULL;
+----
+0
+
+# Each contig's bin, as the CLI's Model Data names it.
+query I
+SELECT count(*) FROM (
+    (SELECT read_id, model, gc_cont, transl_table, uses_sd FROM model_data('data/prodigal/ref_meta.gff')
+     EXCEPT
+     SELECT DISTINCT read_id, model_desc, printf('%.2f', model_gc_content * 100), translation_table, uses_sd
+     FROM meta)
+    UNION ALL
+    (SELECT DISTINCT read_id, model_desc, printf('%.2f', model_gc_content * 100), translation_table, uses_sd
+     FROM meta
+     EXCEPT
+     SELECT read_id, model, gc_cont, transl_table, uses_sd FROM model_data('data/prodigal/ref_meta.gff')));
+----
+0
+
+query I
+SELECT bool_and(meta_bin = split_part(model_desc, '|', 1)::INTEGER) FROM meta;
+----
+true
+
+# -----------------------------------------------------------------------------
+# Several genomes: each is called on its own; a failure is reported for its genome only
+# -----------------------------------------------------------------------------
+
+# Three contigs (2,880 bp) are too little to train a model on.
+statement ok
+CREATE TABLE two AS
+SELECT * FROM anthus
+UNION ALL
+SELECT 'small' AS genome, sequence_index, read_id, sequence1 FROM anthus WHERE read_id IN ('61430_aco', '626029_aco', '630116_aco');
+
+statement ok
+CREATE TABLE two_single AS SELECT * FROM predict_genes('two', genome_id := 'genome');
+
+query IIII
+SELECT genome_id, count(*), any_value(status), count(error) FROM two_single GROUP BY genome_id ORDER BY genome_id;
+----
+anthus	129	ok	0
+small	1	training_failed	1
+
+# The failed genome's row carries only the genome and the failure.
+query IIIII
+SELECT read_id IS NULL, gene_index IS NULL, protein IS NULL, translation_table IS NULL, length(error) > 0
+FROM two_single WHERE genome_id = 'small';
+----
+true	true	true	true	true
+
+# The other genome's genes are those it gets on its own.
+statement ok
+CREATE TABLE two_anthus AS SELECT * FROM two_single WHERE genome_id = 'anthus';
+
+query I
+SELECT count(*) FROM ((SELECT * FROM as_cli('single') EXCEPT ALL SELECT * FROM as_cli('two_anthus'))
+                      UNION ALL (SELECT * FROM as_cli('two_anthus') EXCEPT ALL SELECT * FROM as_cli('single')));
+----
+0
+
+# The caller reruns the failed genome in metagenomic mode (as CheckM does).
+statement ok
+CREATE VIEW small_only AS SELECT * FROM two WHERE genome = 'small';
+
+query II
+SELECT count(*), bool_and(status = 'ok') FROM predict_genes('small_only', genome_id := 'genome', meta_mode := true);
+----
+3	true
+
+# -----------------------------------------------------------------------------
+# Identifier types are kept
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE int_ids AS
+SELECT 42::BIGINT AS genome, sequence_index, row_number() OVER (ORDER BY read_id)::BIGINT AS read_id, sequence1
+FROM anthus;
+
+query III
+SELECT typeof(genome_id), typeof(read_id), count(*) FROM predict_genes('int_ids', genome_id := 'genome', meta_mode := true)
+GROUP BY ALL;
+----
+BIGINT	BIGINT	22
+
+query II
+SELECT count(DISTINCT read_id), min(read_id) FROM predict_genes('int_ids', genome_id := 'genome', meta_mode := true);
+----
+22	1
+
+statement ok
+CREATE TABLE uuid_ids AS
+SELECT '7a7b8c8d-1111-4222-8333-944445555666'::UUID AS genome, sequence_index, read_id, sequence1 FROM anthus;
+
+query II
+SELECT typeof(genome_id), count(*) FROM predict_genes('uuid_ids', genome_id := 'genome', meta_mode := true) GROUP BY ALL;
+----
+UUID	22
+
+# genome_id names the column; the output's column is genome_id whatever the input's is called.
+query I
+SELECT count(*) FROM predict_genes('anthus', genome_id := 'genome', method := 'prodigal', meta_mode := true)
+WHERE genome_id = 'anthus';
+----
+22
+
+# order_by names another integer column for a relation without sequence_index.
+statement ok
+CREATE TABLE no_index AS SELECT genome, sequence_index AS ord, read_id, sequence1 FROM anthus;
+
+statement ok
+CREATE TABLE no_index_genes AS SELECT * FROM predict_genes('no_index', genome_id := 'genome', order_by := 'ord');
+
+query I
+SELECT count(*) FROM ((SELECT * FROM as_cli('single') EXCEPT ALL SELECT * FROM as_cli('no_index_genes'))
+                      UNION ALL (SELECT * FROM as_cli('no_index_genes') EXCEPT ALL SELECT * FROM as_cli('single')));
+----
+0
+
+# A view, and read_fastx's own shape with include_filepath as the genome.
+statement ok
+CREATE VIEW anthus_view AS
+SELECT * FROM read_fastx('data/prodigal/anthus_aco.fas', include_filepath := true);
+
+query II
+SELECT count(*), any_value(genome_id) FROM predict_genes('anthus_view', genome_id := 'filepath', meta_mode := true);
+----
+22	data/prodigal/anthus_aco.fas
+
+# An empty relation returns no rows.
+statement ok
+CREATE VIEW empty_view AS SELECT * FROM anthus WHERE false;
+
+query I
+SELECT count(*) FROM predict_genes('empty_view', genome_id := 'genome');
+----
+0
+
+# Rows with a NULL genome belong to no genome and are skipped.
+statement ok
+CREATE VIEW null_genome AS SELECT NULL::VARCHAR AS genome, sequence_index, read_id, sequence1 FROM anthus;
+
+query I
+SELECT count(*) FROM predict_genes('null_genome', genome_id := 'genome', meta_mode := true);
+----
+0
+
+# -----------------------------------------------------------------------------
+# A model file (the CLI's -t): written when missing, read when present
+# -----------------------------------------------------------------------------
+
+# Writing a model takes exactly one genome.
+statement error
+SELECT * FROM predict_genes('two', genome_id := 'genome', training_path := '{TEST_DIR}/two.trn');
+----
+training_path
+
+statement ok
+CREATE TABLE trained AS
+SELECT * FROM predict_genes('anthus', genome_id := 'genome', training_path := '{TEST_DIR}/anthus.trn');
+
+query I
+SELECT count(*) FROM ((SELECT * FROM as_cli('single') EXCEPT ALL SELECT * FROM as_cli('trained'))
+                      UNION ALL (SELECT * FROM as_cli('trained') EXCEPT ALL SELECT * FROM as_cli('single')));
+----
+0
+
+# Now present, the model calls every genome's genes: 'small' needs no training of its own.
+query II
+SELECT genome_id, bool_and(status = 'ok')
+FROM predict_genes('two', genome_id := 'genome', training_path := '{TEST_DIR}/anthus.trn')
+GROUP BY genome_id ORDER BY genome_id;
+----
+anthus	true
+small	true
+
+statement ok
+CREATE TABLE two_trained AS
+SELECT * FROM predict_genes('two', genome_id := 'genome', training_path := '{TEST_DIR}/anthus.trn')
+WHERE genome_id = 'anthus';
+
+query I
+SELECT count(*) FROM ((SELECT * FROM as_cli('single') EXCEPT ALL SELECT * FROM as_cli('two_trained'))
+                      UNION ALL (SELECT * FROM as_cli('two_trained') EXCEPT ALL SELECT * FROM as_cli('single')));
+----
+0
+
+# A genome with no genes: a row for each of its contigs (as for any contig without genes), then one for the
+# genome, both status no_genes. With open ends even poly-A gets an edge gene, so the model here is trained with
+# closed_ends, and the genomes are called with it.
+statement ok
+CREATE TABLE barren AS
+SELECT * FROM anthus
+UNION ALL
+SELECT 'barren' AS genome, 0 AS sequence_index, 'polyA' AS read_id, repeat('A', 2000) AS sequence1;
+
+statement ok
+SELECT * FROM predict_genes('anthus', genome_id := 'genome', training_path := '{TEST_DIR}/closed.trn',
+                            closed_ends := true);
+
+statement ok
+CREATE TABLE barren_genes AS
+SELECT * FROM predict_genes('barren', genome_id := 'genome', training_path := '{TEST_DIR}/closed.trn',
+                            closed_ends := true);
+
+# With closed ends, 4 of anthus' contigs have no genes, as in the CLI's -c run: rows of their own, and the genome,
+# which has genes, none.
+query IIIII
+SELECT count(*) FILTER (WHERE status = 'ok'), count(*) FILTER (WHERE status = 'no_genes' AND read_id IS NOT NULL),
+       count(*) FILTER (WHERE read_id IS NULL), count(DISTINCT read_id), count(error)
+FROM barren_genes WHERE genome_id = 'anthus';
+----
+107	4	0	22	0
+
+query IIIIIIII
+SELECT read_id, gene_index, contig_length, contig_gc_content, translation_table, model_desc, status, error
+FROM barren_genes WHERE genome_id = 'barren' ORDER BY read_id NULLS LAST;
+----
+polyA	NULL	2000	0.0	11	NULL	no_genes	NULL
+NULL	NULL	NULL	NULL	NULL	NULL	no_genes	NULL
+
+# The model holds the translation table.
+statement error
+SELECT * FROM predict_genes('anthus', genome_id := 'genome', training_path := '{TEST_DIR}/anthus.trn',
+                            trans_table := 4);
+----
+trans_table
+
+# -----------------------------------------------------------------------------
+# Input the daemon would refuse is refused by name
+# -----------------------------------------------------------------------------
+statement ok
+CREATE VIEW null_seq AS SELECT 'g' AS genome, 0 AS sequence_index, 'c1' AS read_id, NULL::VARCHAR AS sequence1;
+
+statement error
+SELECT * FROM predict_genes('null_seq', genome_id := 'genome', meta_mode := true);
+----
+c1
+
+statement ok
+CREATE VIEW empty_seq AS SELECT 'g' AS genome, 0 AS sequence_index, 'c1' AS read_id, '' AS sequence1;
+
+statement error
+SELECT * FROM predict_genes('empty_seq', genome_id := 'genome', meta_mode := true);
+----
+c1
+
+statement ok
+CREATE VIEW space_seq AS SELECT 'g' AS genome, 0 AS sequence_index, 'c1' AS read_id, 'ACGT ACGT' AS sequence1;
+
+statement error
+SELECT * FROM predict_genes('space_seq', genome_id := 'genome', meta_mode := true);
+----
+c1
+
+statement ok
+CREATE VIEW null_name AS SELECT 'g' AS genome, 0 AS sequence_index, NULL::VARCHAR AS read_id, 'ACGTACGT' AS sequence1;
+
+statement error
+SELECT * FROM predict_genes('null_name', genome_id := 'genome', meta_mode := true);
+----
+read_id
+
+statement ok
+CREATE VIEW paired AS
+SELECT 'g' AS genome, 0 AS sequence_index, 'c1' AS read_id, 'ACGTACGT' AS sequence1, 'ACGT' AS sequence2;
+
+statement error
+SELECT * FROM predict_genes('paired', genome_id := 'genome', meta_mode := true);
+----
+sequence2
+
+# -----------------------------------------------------------------------------
+# Single-genome options reach training: each run equals the CLI's with the same option (data/prodigal/README.md)
+# -----------------------------------------------------------------------------
+statement ok
+CREATE MACRO differs_from_cli(rel, ref) AS TABLE
+SELECT count(*) AS n FROM ((SELECT * FROM ref_genes(ref) EXCEPT ALL SELECT * FROM as_cli(rel))
+                           UNION ALL (SELECT * FROM as_cli(rel) EXCEPT ALL SELECT * FROM ref_genes(ref)));
+
+# -c
+statement ok
+CREATE TABLE closed_genes AS SELECT * FROM predict_genes('anthus', genome_id := 'genome', closed_ends := true);
+
+query I
+SELECT n FROM differs_from_cli('closed_genes', 'data/prodigal/ref_single_c.gff');
+----
+0
+
+# -g 4: the model is trained with table 4, and the proteins are translated with it.
+statement ok
+CREATE TABLE table4_genes AS SELECT * FROM predict_genes('anthus', genome_id := 'genome', trans_table := 4);
+
+query I
+SELECT n FROM differs_from_cli('table4_genes', 'data/prodigal/ref_single_g4.gff');
+----
+0
+
+query II
+SELECT DISTINCT translation_table, uses_sd FROM table4_genes;
+----
+4	false
+
+query I
+SELECT count(*) FROM read_fastx('data/prodigal/ref_single_g4.proteins') p
+FULL JOIN table4_genes s ON p.read_id = s.read_id || '_' || s.gene_index AND p.sequence1 = s.protein
+WHERE p.read_id IS NULL OR s.read_id IS NULL;
+----
+0
+
+# -m: on anthus_aco.fas it changes nothing, so on a copy with an N run inside each contig. Without it the CLI's
+# default; with it the CLI's -m.
+statement ok
+CREATE TABLE masked AS
+SELECT 'masked' AS genome, sequence_index, read_id, sequence1 FROM read_fastx('data/prodigal/anthus_masked.fas');
+
+statement ok
+CREATE TABLE masked_off AS SELECT * FROM predict_genes('masked', genome_id := 'genome');
+
+query I
+SELECT n FROM differs_from_cli('masked_off', 'data/prodigal/ref_masked.gff');
+----
+0
+
+statement ok
+CREATE TABLE masked_on AS SELECT * FROM predict_genes('masked', genome_id := 'genome', mask_regions := true);
+
+query I
+SELECT n FROM differs_from_cli('masked_on', 'data/prodigal/ref_masked_m.gff');
+----
+0
+
+# -----------------------------------------------------------------------------
+# Contig order is order_by's: here read_id order is the reverse of the file's, and the genes are the file order's
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE renamed AS
+SELECT genome, sequence_index, printf('r%03d', 100 - sequence_index) AS read_id, read_id AS original, sequence1
+FROM anthus;
+
+statement ok
+CREATE TABLE renamed_genes AS
+SELECT g.* REPLACE (r.original AS read_id)
+FROM predict_genes('renamed', genome_id := 'genome') g JOIN renamed r ON g.read_id = r.read_id;
+
+query I
+SELECT n FROM differs_from_cli('renamed_genes', 'data/prodigal/ref_single.gff');
+----
+0
+
+# -----------------------------------------------------------------------------
+# Two genomes that both train: each gets its own model, and the genes it gets on its own
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE pair AS
+SELECT * FROM anthus UNION ALL SELECT 'anthus2' AS genome, sequence_index, read_id, sequence1 FROM anthus;
+
+statement ok
+CREATE TABLE pair_genes AS SELECT * FROM predict_genes('pair', genome_id := 'genome');
+
+query II
+SELECT genome_id, count(*) FILTER (WHERE status = 'ok') FROM pair_genes GROUP BY genome_id ORDER BY genome_id;
+----
+anthus	129
+anthus2	129
+
+statement ok
+CREATE TABLE pair_second AS SELECT * FROM pair_genes WHERE genome_id = 'anthus2';
+
+query I
+SELECT n FROM differs_from_cli('pair_second', 'data/prodigal/ref_single.gff');
+----
+0
+
+# -----------------------------------------------------------------------------
+# Contigs without genes
+# -----------------------------------------------------------------------------
+
+# Metagenomic mode: a contig without genes (48 bp, too short for one) among others gets its own row, in its place;
+# the others' genes are unchanged, and the genome, which has genes, gets no row of its own.
+statement ok
+CREATE TABLE mixed AS
+SELECT genome, sequence_index * 2 AS ord, read_id, sequence1 FROM anthus
+UNION ALL
+SELECT 'anthus' AS genome, 21 AS ord, 'tiny' AS read_id, repeat('ACGTTGCA', 6) AS sequence1;
+
+statement ok
+CREATE TABLE mixed_genes AS
+SELECT * FROM predict_genes('mixed', genome_id := 'genome', order_by := 'ord', meta_mode := true);
+
+query I
+SELECT count(*) FROM ((SELECT * FROM as_cli('mixed_genes') EXCEPT ALL SELECT * FROM as_cli('meta'))
+                      UNION ALL (SELECT * FROM as_cli('meta') EXCEPT ALL SELECT * FROM as_cli('mixed_genes')));
+----
+0
+
+query II
+SELECT count(*) FILTER (WHERE status = 'ok'), list(read_id) FILTER (WHERE status <> 'ok') FROM mixed_genes;
+----
+22	[tiny]
+
+query IIIIIII
+SELECT gene_index IS NULL, protein IS NULL, contig_length, meta_bin IS NOT NULL, model_desc IS NOT NULL, status,
+       error IS NULL
+FROM mixed_genes WHERE read_id = 'tiny';
+----
+true	true	48	true	true	no_genes	true
+
+# Metagenomic mode, a genome without genes: its contig's row, then the genome's.
+statement ok
+CREATE TABLE polya AS SELECT 'barren' AS genome, 0 AS sequence_index, 'polyA' AS read_id, repeat('A', 2000) AS sequence1;
+
+query II
+SELECT read_id, status
+FROM predict_genes('polya', genome_id := 'genome', meta_mode := true, closed_ends := true)
+ORDER BY read_id NULLS LAST;
+----
+polyA	no_genes
+NULL	no_genes
+
+# -----------------------------------------------------------------------------
+# A model file that cannot be written or used fails the call, rather than one genome
+# -----------------------------------------------------------------------------
+statement error
+SELECT * FROM predict_genes('anthus', genome_id := 'genome', training_path := '{TEST_DIR}/no_such_dir/x.trn');
+----
+no_such_dir
+
+statement ok
+COPY (SELECT 'not a model' AS x) TO '{TEST_DIR}/junk.trn' (FORMAT CSV, HEADER false);
+
+statement error
+SELECT * FROM predict_genes('anthus', genome_id := 'genome', training_path := '{TEST_DIR}/junk.trn');
+----
+predict_genes: prodigal refused the call

@@ -1,0 +1,414 @@
+# name: test/sql/copy_gff.test
+# description: COPY ... (FORMAT GFF): GFF3 from read_gff's columns, and Prodigal's GFF from predict_genes' columns
+# group: [sql]
+
+require miint
+
+# A written file's lines, in order, with tabs shown as ' | '.
+statement ok
+CREATE MACRO gff_lines(path) AS TABLE
+SELECT replace(line, E'\t', ' | ') AS line FROM (
+    SELECT unnest(range(len(s))) AS i, unnest(s) AS line
+    FROM (SELECT string_split(rtrim(content, E'\n'), E'\n') AS s FROM read_text(path))
+) ORDER BY i;
+
+# -----------------------------------------------------------------------------
+# read_gff's columns: what read_gff reads, COPY writes, and read_gff reads back the same
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE features AS SELECT * FROM read_gff('data/gff/test.gff');
+
+statement ok
+COPY features TO '{TEST_DIR}/roundtrip.gff' (FORMAT GFF);
+
+query I
+SELECT count(*) FROM ((SELECT * FROM features EXCEPT ALL SELECT * FROM read_gff('{TEST_DIR}/roundtrip.gff'))
+                      UNION ALL
+                      (SELECT * FROM read_gff('{TEST_DIR}/roundtrip.gff') EXCEPT ALL SELECT * FROM features));
+----
+0
+
+# The file: the version directive, then one line per feature; end is stop_position - 1, NULL is '.'.
+query I
+SELECT line FROM gff_lines('{TEST_DIR}/roundtrip.gff');
+----
+##gff-version 3
+chr1 | NCBI | gene | 100 | 500 | . | + | . | ID=gene1;Name=TEST1;biotype=protein_coding
+chr1 | NCBI | mRNA | 100 | 500 | . | + | . | ID=transcript1;Parent=gene1;Name=TEST1-RA
+chr1 | NCBI | exon | 100 | 200 | . | + | . | ID=exon1;Parent=transcript1
+chr1 | NCBI | exon | 300 | 500 | 50.5 | + | . | ID=exon2;Parent=transcript1
+chr1 | NCBI | CDS | 150 | 200 | . | + | 0 | ID=cds1;Parent=transcript1
+chr1 | NCBI | CDS | 300 | 450 | . | + | 2 | ID=cds2;Parent=transcript1
+chr2 | Ensembl | gene | 1000 | 2000 | 100.0 | - | . | ID=gene2;Name=TEST2
+
+# Reserved characters in attribute keys and values are percent-encoded, and read_gff decodes them.
+statement ok
+CREATE TABLE encoded AS SELECT * FROM read_gff('data/gff/encoded.gff');
+
+statement ok
+COPY encoded TO '{TEST_DIR}/encoded.gff' (FORMAT GFF);
+
+query I
+SELECT count(*) FROM ((SELECT * FROM encoded EXCEPT ALL SELECT * FROM read_gff('{TEST_DIR}/encoded.gff'))
+                      UNION ALL
+                      (SELECT * FROM read_gff('{TEST_DIR}/encoded.gff') EXCEPT ALL SELECT * FROM encoded));
+----
+0
+
+statement ok
+COPY (SELECT 'c1' AS seqid, 'src' AS source, 'gene' AS type, 1 AS position, 11 AS stop_position, NULL::DOUBLE AS score,
+             NULL::VARCHAR AS strand, NULL::INTEGER AS phase,
+             MAP {'ID': 'a;b=c&d,e%f', 'Note': E'tab\there'} AS attributes)
+TO '{TEST_DIR}/reserved.gff' (FORMAT GFF);
+
+query I
+SELECT line FROM gff_lines('{TEST_DIR}/reserved.gff');
+----
+##gff-version 3
+c1 | src | gene | 1 | 10 | . | . | . | ID=a%3Bb%3Dc%26d%2Ce%25f;Note=tab%09here
+
+query II
+SELECT attributes['ID'], replace(attributes['Note'], E'\t', '<TAB>') FROM read_gff('{TEST_DIR}/reserved.gff');
+----
+a;b=c&d,e%f	tab<TAB>here
+
+# attributes may be text, written as given.
+statement ok
+COPY (SELECT 'c1' AS seqid, 'src' AS source, 'gene' AS type, 5 AS position, 6 AS stop_position, 1.5 AS score,
+             '-' AS strand, 1 AS phase, 'ID=g1;Note=raw' AS attributes)
+TO '{TEST_DIR}/text_attrs.gff' (FORMAT GFF);
+
+query I
+SELECT line FROM gff_lines('{TEST_DIR}/text_attrs.gff');
+----
+##gff-version 3
+c1 | src | gene | 5 | 5 | 1.5 | - | 1 | ID=g1;Note=raw
+
+# NULL or empty attributes are '.'.
+statement ok
+COPY (SELECT 'c1' AS seqid, 'src' AS source, 'gene' AS type, 5 AS position, 7 AS stop_position, NULL AS score,
+             '+' AS strand, NULL AS phase, NULL::MAP(VARCHAR, VARCHAR) AS attributes)
+TO '{TEST_DIR}/no_attrs.gff' (FORMAT GFF);
+
+query I
+SELECT line FROM gff_lines('{TEST_DIR}/no_attrs.gff');
+----
+##gff-version 3
+c1 | src | gene | 5 | 6 | . | + | . | .
+
+# gzip, by extension or by COMPRESSION.
+statement ok
+COPY features TO '{TEST_DIR}/roundtrip.gff.gz' (FORMAT GFF);
+
+query I
+SELECT count(*) FROM read_gff('{TEST_DIR}/roundtrip.gff.gz');
+----
+7
+
+statement ok
+COPY features TO '{TEST_DIR}/roundtrip_gz.gff' (FORMAT GFF, COMPRESSION gzip);
+
+# read_gff detects gzip by the .gz extension, so check the gzip magic instead.
+query I
+SELECT content[1:2] = '\x1F\x8B'::BLOB FROM read_blob('{TEST_DIR}/roundtrip_gz.gff');
+----
+true
+
+# An empty relation writes the version directive only.
+statement ok
+COPY (SELECT * FROM features WHERE false) TO '{TEST_DIR}/empty.gff' (FORMAT GFF);
+
+query I
+SELECT line FROM gff_lines('{TEST_DIR}/empty.gff');
+----
+##gff-version 3
+
+# -----------------------------------------------------------------------------
+# What COPY refuses
+# -----------------------------------------------------------------------------
+
+# A missing column, by name.
+statement error
+COPY (SELECT seqid, source, type, position, stop_position, score, strand, phase FROM features)
+TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+attributes
+
+statement error
+COPY (SELECT 'c1' AS seqid) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+source
+
+# Types.
+statement error
+COPY (SELECT seqid, source, type, 'x' AS position, stop_position, score, strand, phase, attributes FROM features)
+TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+position
+
+statement error
+COPY (SELECT seqid, source, type, position, stop_position, score, strand, phase, 42 AS attributes FROM features)
+TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+attributes
+
+# Values a GFF line cannot hold.
+statement error
+COPY (SELECT 'c1' AS seqid, 's' AS source, 't' AS type, 10 AS position, 10 AS stop_position, NULL AS score,
+             NULL AS strand, NULL AS phase, NULL AS attributes) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+stop_position
+
+statement error
+COPY (SELECT 'c1' AS seqid, 's' AS source, 't' AS type, 0 AS position, 10 AS stop_position, NULL AS score,
+             NULL AS strand, NULL AS phase, NULL AS attributes) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+position
+
+statement error
+COPY (SELECT 'c1' AS seqid, 's' AS source, 't' AS type, 1 AS position, 10 AS stop_position, NULL AS score,
+             'x' AS strand, NULL AS phase, NULL AS attributes) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+strand
+
+statement error
+COPY (SELECT 'c1' AS seqid, 's' AS source, 't' AS type, 1 AS position, 10 AS stop_position, NULL AS score,
+             NULL AS strand, 3 AS phase, NULL AS attributes) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+phase
+
+statement error
+COPY (SELECT NULL::VARCHAR AS seqid, 's' AS source, 't' AS type, 1 AS position, 10 AS stop_position, NULL AS score,
+             NULL AS strand, NULL AS phase, NULL AS attributes) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+seqid
+
+statement error
+COPY (SELECT E'c\t1' AS seqid, 's' AS source, 't' AS type, 1 AS position, 10 AS stop_position, NULL AS score,
+             NULL AS strand, NULL AS phase, NULL AS attributes) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+seqid
+
+statement error
+COPY (SELECT '#c1' AS seqid, 's' AS source, 't' AS type, 1 AS position, 10 AS stop_position, NULL AS score,
+             NULL AS strand, NULL AS phase, NULL AS attributes) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+seqid
+
+statement error
+COPY (SELECT 'c1' AS seqid, 's' AS source, 't' AS type, 1 AS position, 10 AS stop_position, NULL AS score,
+             NULL AS strand, NULL AS phase, MAP {'ID': NULL::VARCHAR} AS attributes)
+TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+ID
+
+statement error
+COPY (SELECT 'c1' AS seqid, 's' AS source, 't' AS type, 1 AS position, 10 AS stop_position, NULL AS score,
+             NULL AS strand, NULL AS phase, E'ID=a\nb' AS attributes) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+attributes
+
+# SOURCE is for predict_genes' columns only.
+statement error
+COPY features TO '{TEST_DIR}/bad.gff' (FORMAT GFF, SOURCE 'x');
+----
+SOURCE
+
+# -----------------------------------------------------------------------------
+# predict_genes' columns: Prodigal's GFF (copy_gff_prodigal.test checks it against the CLI's file); here, rows
+# built by hand, so without gpl-boundary
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE hand AS
+SELECT 'g' AS genome_id, 'c1' AS read_id, 1 AS gene_index, 1::BIGINT AS position, 301::BIGINT AS stop_position,
+       '+' AS strand, false AS partial_left, true AS partial_right, 'ATG' AS start_type, 'AGGAG' AS rbs_motif,
+       '5-10bp' AS rbs_spacer, 10.5 AS score, 9.0 AS cscore, 1.5 AS sscore, 0.0 AS rscore, 0.5 AS uscore,
+       1.0 AS tscore, 99.9 AS confidence, 0.4 AS gc_content, 1000::BIGINT AS contig_length, 11 AS translation_table,
+       true AS uses_sd, NULL::VARCHAR AS model_desc, 0.42 AS model_gc_content, 'ok' AS status;
+
+statement ok
+COPY hand TO '{TEST_DIR}/hand.gff' (FORMAT GFF);
+
+query I
+SELECT * FROM gff_lines('{TEST_DIR}/hand.gff');
+----
+##gff-version  3
+# Sequence Data: seqnum=1;seqlen=1000;seqhdr="c1"
+# Model Data: version=Prodigal.v2.6.5;run_type=Single;model="Ab initio";gc_cont=42.00;transl_table=11;uses_sd=1
+c1 | Prodigal_v2.6.5 | CDS | 1 | 300 | 10.5 | + | 0 | ID=1_1;partial=01;start_type=ATG;rbs_motif=AGGAG;rbs_spacer=5-10bp;gc_cont=0.400;conf=99.90;score=10.50;cscore=9.00;sscore=1.50;rscore=0.00;uscore=0.50;tscore=1.00;
+
+# A genome's own row (no contig) is skipped; a contig's row without a gene writes its header lines only; the same
+# read_id in another genome is another contig.
+statement ok
+COPY (SELECT * FROM hand
+      UNION ALL SELECT * REPLACE ('c2' AS read_id, NULL::INTEGER AS gene_index, 'no_genes' AS status) FROM hand
+      UNION ALL SELECT * REPLACE (NULL::VARCHAR AS read_id, NULL::INTEGER AS gene_index, 'no_genes' AS status) FROM hand
+      UNION ALL SELECT * REPLACE ('h' AS genome_id) FROM hand)
+TO '{TEST_DIR}/hand_rows.gff' (FORMAT GFF, PRESERVE_ORDER true);
+
+query I
+SELECT regexp_extract(line, '^(# Sequence Data: [^;]*|[^ ]* \| [^ ]* \| CDS)') FROM gff_lines('{TEST_DIR}/hand_rows.gff')
+WHERE line NOT LIKE '# Model Data%' AND line NOT LIKE '##%';
+----
+# Sequence Data: seqnum=1
+c1 | Prodigal_v2.6.5 | CDS
+# Sequence Data: seqnum=2
+# Sequence Data: seqnum=3
+c1 | Prodigal_v2.6.5 | CDS
+
+query I
+SELECT regexp_extract(line, 'ID=([0-9_]+)', 1) FROM gff_lines('{TEST_DIR}/hand_rows.gff') WHERE line LIKE '%ID=%';
+----
+1_1
+3_1
+
+# The same read_id in the next genome, right after it, is another contig.
+statement ok
+COPY (SELECT * FROM hand UNION ALL SELECT * REPLACE ('h' AS genome_id) FROM hand)
+TO '{TEST_DIR}/hand_two_genomes.gff' (FORMAT GFF, PRESERVE_ORDER true);
+
+query I
+SELECT regexp_extract(line, 'ID=([0-9_]+)', 1) FROM gff_lines('{TEST_DIR}/hand_two_genomes.gff') WHERE line LIKE '%ID=%';
+----
+1_1
+2_1
+
+# Values the line needs are refused when NULL, rather than written as 'NULL' or read as 0.
+statement error
+COPY (SELECT * REPLACE (NULL AS position) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+NULL position (row
+
+statement error
+COPY (SELECT * REPLACE (NULL AS stop_position) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+NULL stop_position (row
+
+statement error
+COPY (SELECT * REPLACE (NULL AS score) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+NULL score (row
+
+statement error
+COPY (SELECT * REPLACE (NULL AS cscore) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+NULL cscore (row
+
+statement error
+COPY (SELECT * REPLACE (NULL AS confidence) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+NULL confidence (row
+
+statement error
+COPY (SELECT * REPLACE (NULL AS gc_content) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+NULL gc_content (row
+
+statement error
+COPY (SELECT * REPLACE (NULL AS contig_length) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+NULL contig_length (row
+
+statement error
+COPY (SELECT * REPLACE (NULL AS model_gc_content) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+NULL model_gc_content (row
+
+statement error
+COPY (SELECT * REPLACE (NULL AS translation_table) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+NULL translation_table (row
+
+statement error
+COPY (SELECT * REPLACE (NULL AS uses_sd) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+NULL uses_sd (row
+
+statement error
+COPY (SELECT * REPLACE (NULL AS partial_left) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+NULL partial_left (row
+
+statement error
+COPY (SELECT * REPLACE (NULL AS start_type) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+NULL start_type (row
+
+statement error
+COPY (SELECT * REPLACE (NULL::VARCHAR AS read_id) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+NULL read_id
+
+statement error
+COPY (SELECT * REPLACE (E'c\t1' AS read_id) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+control character
+
+statement error
+COPY (SELECT * REPLACE ('#c1' AS read_id) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+starts with '#'
+
+statement error
+COPY (SELECT * REPLACE ('7' AS strand) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+strand
+
+statement error
+COPY (SELECT * REPLACE (E'AG\nGAG' AS rbs_motif) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+rbs_motif
+
+statement error
+COPY hand TO '{TEST_DIR}/bad.gff' (FORMAT GFF, SOURCE E'a\tb');
+----
+SOURCE
+
+statement error
+COPY hand TO '{TEST_DIR}/bad.gff' (FORMAT GFF, SOURCE '');
+----
+SOURCE
+
+# Without genome_id (PARTITION_BY drops it from each file), a contig is told from the next by read_id.
+statement ok
+COPY (SELECT * EXCLUDE (genome_id) FROM hand UNION ALL SELECT * EXCLUDE (genome_id) REPLACE ('c2' AS read_id) FROM hand)
+TO '{TEST_DIR}/hand_no_genome.gff' (FORMAT GFF, PRESERVE_ORDER true);
+
+query I
+SELECT regexp_extract(line, 'ID=([0-9_]+)', 1) FROM gff_lines('{TEST_DIR}/hand_no_genome.gff') WHERE line LIKE '%ID=%';
+----
+1_1
+2_1
+
+# -----------------------------------------------------------------------------
+# More of what a GFF3 COPY refuses
+# -----------------------------------------------------------------------------
+statement error
+COPY (SELECT '' AS seqid, 's' AS source, 't' AS type, 1 AS position, 10 AS stop_position, NULL AS score,
+             NULL AS strand, NULL AS phase, NULL AS attributes) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+empty seqid
+
+statement error
+COPY (SELECT 'c1' AS seqid, '' AS source, 't' AS type, 1 AS position, 10 AS stop_position, NULL AS score,
+             NULL AS strand, NULL AS phase, NULL AS attributes) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+empty source
+
+statement error
+COPY (SELECT 'c1' AS seqid, 's' AS source, '' AS type, 1 AS position, 10 AS stop_position, NULL AS score,
+             NULL AS strand, NULL AS phase, NULL AS attributes) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+empty type
+
+statement error
+COPY (SELECT 'c1' AS seqid, 's' AS source, 't' AS type, 1 AS position, 10 AS stop_position, NULL AS score,
+             NULL AS strand, NULL AS phase, E'ID=a\tb' AS attributes) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+attributes
+
+statement error
+COPY (SELECT 'c1' AS seqid, 's' AS source, 't' AS type, 1 AS position, 10 AS stop_position, NULL AS score,
+             NULL AS strand, NULL AS phase, E'ID=a\rb' AS attributes) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+attributes
