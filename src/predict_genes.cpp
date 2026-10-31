@@ -60,15 +60,14 @@ constexpr const char *kStatusTrainingFailed = "training_failed";
 
 // Ends an error about gpl-boundary output this miint cannot read.
 constexpr const char *kOutputMismatch =
-    "This gpl-boundary passed the release check but is not one this miint can read: upgrade miint, or set "
-    "MIINT_GPL_BOUNDARY_PATH to a gpl-boundary of the release this miint was built for";
+    "This gpl-boundary is 0.5.0 or later, but returned output that this miint cannot read: upgrade miint, or set "
+    "MIINT_GPL_BOUNDARY_PATH to a gpl-boundary of the release that this miint was built for";
 
 // The translation tables Prodigal takes, as gpl-boundary's prodigal tool lists them.
 const std::vector<int32_t> kTransTables = {4, 5, 9, 11, 13, 15, 21, 25, 26, 32};
 
 // Bases per prodigal batch. Prodigal calls genes on each contig on its own, with the bin it picks (metagenomic mode)
-// or the one model (single-genome mode), so this bounds memory, not results; predict_genes.test checks that a
-// genome split in two gets the same genes. (Training takes a genome whole.)
+// or the one model (single-genome mode), so this bounds memory, not results. (Training takes a genome whole.)
 constexpr idx_t kBatchBases = idx_t(64) << 20;
 
 // Output columns.

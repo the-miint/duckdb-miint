@@ -1,7 +1,7 @@
 #!/bin/bash
 # Failures that are not a genome's: they fail the query instead of becoming a training_failed row.
-# - gpl-boundary dying while training a genome (a python3 proxy in front of the real gpl-boundary exits on the first
-#   prodigal-train request);
+# - gpl-boundary dying while training a genome (needs python3: a proxy in front of the real gpl-boundary exits on
+#   the first prodigal-train request);
 # - a training_path to be written in a directory that cannot be written (skipped as root, who can write it).
 # Needs predict_genes compiled in and a gpl-boundary >= 0.5.0 (MIINT_GPL_BOUNDARY_PATH or on PATH).
 
@@ -13,8 +13,8 @@ if ! echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'predict_genes
     exit 0
 fi
 REAL="${MIINT_GPL_BOUNDARY_PATH:-$(command -v gpl-boundary || true)}"
-if [ -z "$REAL" ] || [ ! -x "$REAL" ] || ! command -v python3 > /dev/null; then
-    echo "gpl-boundary or python3 not found; skipping"
+if [ -z "$REAL" ] || [ ! -x "$REAL" ]; then
+    echo "gpl-boundary not found; skipping"
     exit 0
 fi
 
@@ -49,19 +49,23 @@ EOF
 chmod +x "$WORK/gpl-boundary"
 
 echo "predict_genes when gpl-boundary dies:"
-out=$(printf '%s\n' "CREATE TABLE c AS SELECT 'g' AS genome, * FROM read_fastx('data/prodigal/anthus_aco.fas');" \
-    "SELECT genome_id, status FROM predict_genes('c', genome_id := 'genome');" |
-    REAL_GPL_BOUNDARY="$REAL" MIINT_GPL_BOUNDARY_PATH="$WORK/gpl-boundary" $DUCKDB -no-agent -csv 2>&1)
-if echo "$out" | grep -q "training_failed"; then
-    echo "  ✗ the failure became a training_failed row:"
-    echo "$out" | sed 's/^/      /'
-    FAILED=1
-elif ! echo "$out" | grep -q "Error"; then
-    echo "  ✗ expected an error, got:"
-    echo "$out" | sed 's/^/      /'
-    FAILED=1
+if ! command -v python3 > /dev/null; then
+    echo "  - python3 not found: skipped"
 else
-    echo "  ✓ the query fails, naming the daemon's failure"
+    out=$(printf '%s\n' "CREATE TABLE c AS SELECT 'g' AS genome, * FROM read_fastx('data/prodigal/anthus_aco.fas');" \
+        "SELECT genome_id, status FROM predict_genes('c', genome_id := 'genome');" |
+        REAL_GPL_BOUNDARY="$REAL" MIINT_GPL_BOUNDARY_PATH="$WORK/gpl-boundary" $DUCKDB -no-agent -csv 2>&1)
+    if echo "$out" | grep -q "training_failed"; then
+        echo "  ✗ the failure became a training_failed row:"
+        echo "$out" | sed 's/^/      /'
+        FAILED=1
+    elif ! echo "$out" | grep -q "Error"; then
+        echo "  ✗ expected an error, got:"
+        echo "$out" | sed 's/^/      /'
+        FAILED=1
+    else
+        echo "  ✓ the query fails, naming the daemon's failure"
+    fi
 fi
 
 # A training_path to be written in a directory that cannot be written fails the call up front, rather than reading as

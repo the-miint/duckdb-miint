@@ -392,6 +392,22 @@ COPY hand TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'genbank');
 ----
 DIALECT must be 'gff3' or 'prodigal'
 
+# A dialect given the other dialect's columns fails on the columns it needs.
+statement error
+COPY features TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+predict_genes' columns
+
+statement error
+COPY hand TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'gff3');
+----
+read_gff's columns
+
+statement error
+COPY hand TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'GenBank');
+----
+got 'GenBank'
+
 statement ok
 COPY features TO '{TEST_DIR}/explicit_gff3.gff' (FORMAT GFF, DIALECT 'GFF3');
 

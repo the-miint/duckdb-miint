@@ -22,6 +22,10 @@ namespace {
 const string kProdigalSource = string("Prodigal_v") + kProdigalVersion;
 const string kProdigalModelVersion = string("Prodigal.v") + kProdigalVersion;
 
+// DIALECT's values.
+constexpr const char *kDialectGff3 = "gff3";
+constexpr const char *kDialectProdigal = "prodigal";
+
 // read_gff's columns, the input of a GFF3 COPY, in order.
 const vector<string> kGffColumns = {"seqid", "source", "type",  "position",  "stop_position",
                                     "score", "strand", "phase", "attributes"};
@@ -145,11 +149,12 @@ unique_ptr<FunctionData> GffCopyBind(ClientContext &context, CopyFunctionBindInp
 			result->source = CopyOptionValue(option.first, option.second).ToString();
 			source_set = true;
 		} else if (option.first == "dialect") {
-			const auto dialect = StringUtil::Lower(CopyOptionValue(option.first, option.second).ToString());
-			if (dialect != "gff3" && dialect != "prodigal") {
-				throw BinderException("COPY FORMAT GFF: DIALECT must be 'gff3' or 'prodigal' (got '%s')", dialect);
+			const auto given = CopyOptionValue(option.first, option.second).ToString();
+			if (!StringUtil::CIEquals(given, kDialectGff3) && !StringUtil::CIEquals(given, kDialectProdigal)) {
+				throw BinderException("COPY FORMAT GFF: DIALECT must be '%s' or '%s' (got '%s')", kDialectGff3,
+				                      kDialectProdigal, given);
 			}
-			result->prodigal = dialect == "prodigal";
+			result->prodigal = StringUtil::CIEquals(given, kDialectProdigal);
 			dialect_set = true;
 		} else {
 			ThrowUnreadCopyOption("GFF", option.first);
@@ -165,16 +170,18 @@ unique_ptr<FunctionData> GffCopyBind(ClientContext &context, CopyFunctionBindInp
 		// predict_genes' rows are not GFF3 features; rather than fail on read_gff's missing columns, say what to add.
 		for (const auto &name : names) {
 			if (StringUtil::CIEquals(name.GetIdentifierName(), "gene_index")) {
-				throw BinderException("COPY FORMAT GFF: these look like predict_genes' columns; add DIALECT 'prodigal' "
-				                      "to write Prodigal's GFF");
+				throw BinderException("COPY FORMAT GFF: these look like predict_genes' columns; add DIALECT '%s' to "
+				                      "write Prodigal's GFF",
+				                      kDialectProdigal);
 			}
 		}
 	}
 
 	if (!result->prodigal) {
 		if (source_set) {
-			throw BinderException("COPY FORMAT GFF: SOURCE is for DIALECT 'prodigal'; read_gff's columns carry their "
-			                      "own source");
+			throw BinderException("COPY FORMAT GFF: SOURCE is for DIALECT '%s'; read_gff's columns carry their own "
+			                      "source",
+			                      kDialectProdigal);
 		}
 		result->columns = FindColumns(names, kGffColumns, "read_gff's columns");
 		const auto type = [&](GffColumn c) -> const LogicalType & {

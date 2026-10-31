@@ -5,10 +5,10 @@
 
 namespace duckdb {
 
-// COPY ... TO 'x.gff' (FORMAT GFF). Two inputs:
-//   - read_gff's columns (seqid, source, type, position, stop_position, score, strand, phase, attributes): GFF3, a
-//     line per row;
-//   - predict_genes' columns (detected by gene_index): Prodigal's own GFF, with each contig's "# Sequence Data" and
+// COPY ... TO 'x.gff' (FORMAT GFF). Two dialects, chosen by DIALECT:
+//   - 'gff3' (default), from read_gff's columns (seqid, source, type, position, stop_position, score, strand, phase,
+//     attributes): a line per row;
+//   - 'prodigal', from predict_genes' columns: Prodigal's own GFF, with each contig's "# Sequence Data" and
 //     "# Model Data" lines, as `prodigal -f gff` writes it.
 class CopyGffFunction {
 public:
