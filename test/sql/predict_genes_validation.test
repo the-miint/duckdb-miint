@@ -36,7 +36,7 @@ SELECT * FROM predict_genes(NULL, genome_id := 'genome');
 ----
 non-NULL
 
-# Only Prodigal so far.
+# Prodigal is the only method.
 statement error
 SELECT * FROM predict_genes('contigs', genome_id := 'genome', method := 'glimmer');
 ----

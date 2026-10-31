@@ -66,7 +66,7 @@ out=$(run_with "$garbled")
 expect "an unreadable release is refused" "$out" "requires gpl-boundary >= 0\.5\.0.*unknown"
 
 # A binary upgraded in place (install_gpl_boundary(true) replaces it at the same path) is seen by the next query in
-# the same process: a refused release is not remembered. Its --version reads the release from a file.
+# the same process: a release too old for the caller is probed again. Its --version reads the release from a file.
 cat > "$WORK/upgraded" <<EOF
 #!/bin/bash
 if [ "\${1:-}" = --version ]; then

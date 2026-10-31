@@ -458,7 +458,7 @@ If it returns `false`, install the daemon with [`install_gpl_boundary()`](#insta
 
 ### `install_gpl_boundary([force])`
 
-Download a prebuilt `gpl-boundary` binary from the upstream GitHub releases and install it into miint's cache so subsequent [`phylogeny_fasttree(...)`](phylogeny.md#fasttree), [`align_bowtie2(...)`](alignment_reference.md), and `align_bowtie2_sharded(...)` calls find it without the user editing `PATH`.
+Download a prebuilt `gpl-boundary` binary from the upstream GitHub releases and install it into miint's cache so subsequent [`phylogeny_fasttree(...)`](phylogeny.md#fasttree), [`align_bowtie2(...)`](alignment_reference.md), `align_bowtie2_sharded(...)` and [`predict_genes(...)`](gene_prediction.md) calls find it without the user editing `PATH`.
 
 Drives the upstream `install.sh` (https://github.com/the-miint/GPL-boundary/releases/latest/download/install.sh), which detects the platform, downloads the matching tarball, verifies its SHA256 against the release's `SHA256SUMS`, and extracts the binary. Miint sets `INSTALL_DIR` to its cache (`$XDG_CACHE_HOME/miint/bin` or `$HOME/.cache/miint/bin`); `FindGplBoundary()` checks that location before falling through to `PATH`, so no user-side PATH editing is needed.
 

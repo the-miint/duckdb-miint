@@ -1,6 +1,7 @@
 #include "copy_gff.hpp"
 #include "copy_format_common.hpp"
 #include "copy_option_parsing.hpp"
+#include "predict_genes.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
@@ -17,10 +18,9 @@ namespace duckdb {
 
 namespace {
 
-// The program in column 2 of Prodigal's GFF and in its "# Model Data" version, for the Prodigal gpl-boundary
-// >= 0.5.0 runs (predict_genes requires it).
-constexpr const char *kProdigalSource = "Prodigal_v2.6.5";
-constexpr const char *kProdigalVersion = "Prodigal.v2.6.5";
+// The program in column 2 of Prodigal's GFF, and in its "# Model Data" version, as the CLI names them.
+const string kProdigalSource = string("Prodigal_v") + kProdigalVersion;
+const string kProdigalModelVersion = string("Prodigal.v") + kProdigalVersion;
 
 // read_gff's columns, the input of a GFF3 COPY, in order.
 const vector<string> kGffColumns = {"seqid", "source", "type",  "position",  "stop_position",
@@ -429,7 +429,7 @@ void WriteProdigalRows(const GffCopyBindData &data, GffCopyGlobalState &state, D
 			    Format("# Sequence Data: seqnum=%lld;seqlen=%lld;seqhdr=\"%s\"\n", static_cast<long long>(state.seqnum),
 			           static_cast<long long>(required(P_CONTIG_LENGTH, row).GetValue<int64_t>()), seqid.c_str());
 			out += Format("# Model Data: version=%s;run_type=%s;model=\"%s\";gc_cont=%.2f;transl_table=%d;uses_sd=%d\n",
-			              kProdigalVersion, model_desc.empty() ? "Single" : "Metagenomic",
+			              kProdigalModelVersion.c_str(), model_desc.empty() ? "Single" : "Metagenomic",
 			              model_desc.empty() ? "Ab initio" : model_desc.c_str(),
 			              required(P_MODEL_GC_CONTENT, row).GetValue<double>() * 100.0,
 			              required(P_TRANSLATION_TABLE, row).GetValue<int32_t>(),

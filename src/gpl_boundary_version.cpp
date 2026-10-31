@@ -8,7 +8,6 @@
 #include <map>
 #include <mutex>
 #include <tuple>
-#include <unistd.h>
 
 namespace duckdb {
 
@@ -19,24 +18,9 @@ namespace gb = ::duckdb::miint::gpl_boundary;
 // Run `<binary> --version` and parse its {"gpl_boundary":"X.Y.Z", ...}. False when it cannot be run or parsed.
 bool ProbeRelease(const std::string &binary_path, GplBoundaryRelease &out) {
 	try {
-		std::vector<std::string> argv = {binary_path, "--version"};
-		gb::ChildProcess child(argv);
-		auto drain = [](int fd, std::string &dst) {
-			if (fd < 0) {
-				return;
-			}
-			char buf[256];
-			ssize_t n;
-			while ((n = ::read(fd, buf, sizeof(buf))) > 0) {
-				dst.append(buf, static_cast<size_t>(n));
-			}
-		};
-		std::string out_text;
-		std::string err_text;
-		drain(child.stdout_fd(), out_text);
-		drain(child.stderr_fd(), err_text);
-		child.Wait();
-		return gb::ParseGplBoundaryVersion(out_text, out.major, out.minor, out.patch);
+		const auto result = gb::RunCapture({binary_path, "--version"});
+		return result.spawned && result.exited_normally && result.exit_code == 0 &&
+		       gb::ParseGplBoundaryVersion(result.stdout_text, out.major, out.minor, out.patch);
 	} catch (...) {
 		// Any spawn/read failure is "release undetermined", which the caller refuses.
 		return false;

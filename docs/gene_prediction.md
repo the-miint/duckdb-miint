@@ -1,6 +1,6 @@
 # Gene prediction
 
-`predict_genes` calls protein-coding genes in prokaryotic contigs, one row per gene. It runs [Prodigal](https://github.com/hyattpd/Prodigal) 2.6.5 (the-miint's fork) in the [gpl-boundary](internals/embedded-tools.md#gpl-boundary-process-isolation-host-for-gpl-tools) process, which miint starts for the call. Its genes, proteins and per-contig model data equal the Prodigal CLI's (`test/sql/predict_genes.test` checks them field by field against `prodigal -p single` and `-p meta` on `data/prodigal/anthus_aco.fas`). To write them as Prodigal's GFF, see [`COPY ... (FORMAT GFF)`](writing.md#gff).
+`predict_genes` calls protein-coding genes in prokaryotic contigs, one row per gene. It runs [Prodigal](https://github.com/hyattpd/Prodigal) 2.6.5 (the-miint's fork) in the [gpl-boundary](internals/embedded-tools.md#gpl-boundary-process-isolation-host-for-gpl-tools) process, which miint starts for the call. Its genes, proteins and per-contig model data equal the Prodigal CLI's, field by field, for `-p single`, `-p meta`, `-c`, `-g 4` and `-m` on the contigs in `data/prodigal/`. To write them as Prodigal's GFF, see [`COPY ... (FORMAT GFF)`](writing.md#gff).
 
 ## predict_genes
 

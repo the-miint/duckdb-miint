@@ -62,4 +62,23 @@ else
     echo "  ✓ the query fails, naming the daemon's failure"
 fi
 
+# A training_path to be written in a directory that cannot be written fails the call up front, rather than reading as
+# the genome failing to train.
+mkdir "$WORK/read_only"
+chmod 555 "$WORK/read_only"
+out=$(printf '%s\n' "CREATE TABLE c AS SELECT 'g' AS genome, * FROM read_fastx('data/prodigal/anthus_aco.fas');" \
+    "SELECT genome_id, status FROM predict_genes('c', genome_id := 'genome', training_path := '$WORK/read_only/m.trn');" |
+    MIINT_GPL_BOUNDARY_PATH="$REAL" $DUCKDB -no-agent -csv 2>&1)
+chmod 755 "$WORK/read_only"
+expect_error() {
+    if echo "$2" | grep -q "$3"; then
+        echo "  ✓ $1"
+    else
+        echo "  ✗ $1: expected /$3/ in:"
+        echo "$2" | sed 's/^/      /'
+        FAILED=1
+    fi
+}
+expect_error "an unwritable training_path directory is refused" "$out" "is not writable"
+
 exit $FAILED

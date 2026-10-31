@@ -447,7 +447,10 @@ SubmitResult Session::Submit(const std::string &tool, const std::string &config_
 		throw std::runtime_error("gpl_boundary: batch reply was not a JSON object: " + reply);
 	}
 	yj::yyjson_val *success = yj::yyjson_obj_get(root, "success");
-	if (!success || !yj::yyjson_is_true(success)) {
+	if (!yj::yyjson_is_bool(success)) {
+		throw std::runtime_error("gpl_boundary: batch reply has no boolean success: " + reply);
+	}
+	if (!yj::yyjson_is_true(success)) {
 		const std::string err = get_str(root, "error");
 		// Fold any final stderr into the rolling tail. The per-batch PumpStderr
 		// above already captured this batch's output; this catches bytes the
@@ -462,7 +465,7 @@ SubmitResult Session::Submit(const std::string &tool, const std::string &config_
 			msg += "\n--- daemon stderr ---\n";
 			msg += stderr_tail_;
 		}
-		throw std::runtime_error(msg);
+		throw BatchRefused(msg, err.empty() ? reply : err);
 	}
 
 	// MVP correlation: at most one Submit is outstanding at a time (caller

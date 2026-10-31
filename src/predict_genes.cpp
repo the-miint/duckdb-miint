@@ -33,6 +33,7 @@
 #include <filesystem>
 #include <stdexcept>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 namespace duckdb {
@@ -44,17 +45,28 @@ namespace yj = duckdb_yyjson;
 
 constexpr const char *kFunction = "predict_genes";
 
-// gpl-boundary 0.5.0 is the first with prodigal-train, proteins and the per-contig output, at these schema
-// versions (its PR #8, "For miint").
+// gpl-boundary 0.5.0 is the first with prodigal-train, proteins and the per-contig output (model GC included), at
+// these schema versions; it runs Prodigal kProdigalVersion.
 constexpr GplBoundaryRelease kMinRelease {0, 5, 0};
+constexpr const char *kPredictTool = "prodigal";
+constexpr const char *kTrainTool = "prodigal-train";
 constexpr uint32_t kProdigalSchemaVersion = 2;
 constexpr uint32_t kProdigalTrainSchemaVersion = 1;
 
-// The translation tables Prodigal 2.6.5 takes (gpl-boundary src/tools/prodigal.rs, TRANS_TABLES).
+// The status column's values.
+constexpr const char *kStatusOk = "ok";
+constexpr const char *kStatusNoGenes = "no_genes";
+constexpr const char *kStatusTrainingFailed = "training_failed";
+
+// Ends an error about gpl-boundary output this miint cannot read.
+constexpr const char *kOutputMismatch =
+    "Is gpl-boundary a release this miint does not know? SELECT install_gpl_boundary(true) installs the latest";
+
+// The translation tables Prodigal takes, as gpl-boundary's prodigal tool lists them.
 const std::vector<int32_t> kTransTables = {4, 5, 9, 11, 13, 15, 21, 25, 26, 32};
 
-// Bases per prodigal batch. A single-genome batch may hold part of a genome (the model is trained once, from the
-// whole genome), and a metagenomic batch part of a sample, so this bounds memory, not results.
+// Bases per prodigal batch. Metagenomic mode calls each contig on its own and single-genome mode calls a genome with
+// the one model trained on all of it, so this bounds memory, not results. (Training takes the genome whole.)
 constexpr idx_t kBatchBases = idx_t(64) << 20;
 
 // Output columns.
@@ -151,22 +163,6 @@ std::string TransTableList() {
 	return out;
 }
 
-bool IsIntegerType(const LogicalType &t) {
-	switch (t.id()) {
-	case LogicalTypeId::TINYINT:
-	case LogicalTypeId::SMALLINT:
-	case LogicalTypeId::INTEGER:
-	case LogicalTypeId::BIGINT:
-	case LogicalTypeId::UTINYINT:
-	case LogicalTypeId::USMALLINT:
-	case LogicalTypeId::UINTEGER:
-	case LogicalTypeId::UBIGINT:
-		return true;
-	default:
-		return false;
-	}
-}
-
 void ReadNamedParameters(const named_argument_map_t &params, PredictGenesBindData &data) {
 	bool has_genome_id = false;
 	for (const auto &kv : params) {
@@ -180,7 +176,7 @@ void ReadNamedParameters(const named_argument_map_t &params, PredictGenesBindDat
 			has_genome_id = true;
 		} else if (name == "method") {
 			const auto method = StringValue::Get(value);
-			if (!StringUtil::CIEquals(method, "prodigal")) {
+			if (!StringUtil::CIEquals(method, kPredictTool)) {
 				throw BinderException("%s: method '%s' is not supported; the only method is 'prodigal'", kFunction,
 				                      method);
 			}
@@ -207,8 +203,8 @@ void ReadNamedParameters(const named_argument_map_t &params, PredictGenesBindDat
 		                      kFunction);
 	}
 	if (std::find(kTransTables.begin(), kTransTables.end(), data.trans_table) == kTransTables.end()) {
-		throw BinderException("%s: trans_table %d is not one Prodigal 2.6.5 supports (%s)", kFunction, data.trans_table,
-		                      TransTableList());
+		throw BinderException("%s: trans_table %d is not one Prodigal %s supports (%s)", kFunction, data.trans_table,
+		                      kProdigalVersion, TransTableList());
 	}
 	if (data.meta_mode && data.trans_table != 11) {
 		throw BinderException("%s: metagenomic mode (meta_mode := true) takes trans_table 11 only: its models choose "
@@ -255,7 +251,7 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 			throw BinderException("%s: genome_id column '%s' must be %s (got %s)", kFunction, data->genome_column,
 			                      AllowedIdTypeList(), data->genome_type.ToString());
 		}
-		if (!IsIntegerType(probe->GetTypes()[1])) {
+		if (!probe->GetTypes()[1].IsIntegral()) {
 			throw BinderException("%s: order_by column '%s' must be an integer type (got %s)", kFunction,
 			                      data->order_column, probe->GetTypes()[1].ToString());
 		}
@@ -482,21 +478,6 @@ bool NextIsSameGenome(PredictGenesGlobalState &g, const PredictGenesBindData &da
 // Calling the daemon
 // =============================================================================
 
-// A batch the daemon refused (its {success:false}), as opposed to a daemon that died or broke the protocol.
-// Session::Submit reports both as std::runtime_error; only a refusal is prefixed this way.
-constexpr const char *kBatchFailedPrefix = "gpl_boundary: batch failed (batch_id=";
-
-bool IsBatchRefusal(const std::runtime_error &e) {
-	return StringUtil::StartsWith(e.what(), kBatchFailedPrefix);
-}
-
-// The daemon's own message, without Session's prefix.
-std::string RefusalMessage(const std::runtime_error &e) {
-	std::string msg = e.what();
-	const auto close = msg.find("): ");
-	return close == std::string::npos ? msg : msg.substr(close + 3);
-}
-
 std::vector<uint8_t> EncodeContigs(const std::vector<Contig> &contigs, idx_t begin, idx_t end) {
 	bt2_daemon::LoadedSubjects input;
 	input.names.reserve(end - begin);
@@ -512,10 +493,9 @@ gb::SubmitResult Submit(PredictGenesGlobalState &g, const std::string &tool, con
                         const std::vector<uint8_t> &input) {
 	try {
 		return g.session->Submit(tool, config, input.data(), input.size());
+	} catch (const gb::BatchRefused &) {
+		throw; // The caller decides what a refusal means.
 	} catch (const std::runtime_error &e) {
-		if (IsBatchRefusal(e)) {
-			throw; // The caller decides what a refusal means.
-		}
 		throw IOException("%s: %s", kFunction, e.what());
 	}
 }
@@ -531,8 +511,7 @@ std::vector<unique_ptr<DataChunk>> DecodeOutput(ClientContext &context, const gb
 		}
 	}
 	if (!output) {
-		throw IOException("%s: gpl-boundary's prodigal returned no '%s' output. gpl-boundary version drift?", kFunction,
-		                  label);
+		throw IOException("%s: gpl-boundary's prodigal returned no '%s' output. %s", kFunction, label, kOutputMismatch);
 	}
 	std::vector<unique_ptr<DataChunk>> chunks;
 	try {
@@ -546,9 +525,8 @@ std::vector<unique_ptr<DataChunk>> DecodeOutput(ClientContext &context, const gb
 			got_names.push_back(n);
 		}
 		if (got_names != names || table.GetTypes() != types) {
-			throw IOException("%s: gpl-boundary's prodigal '%s' output has columns (%s), not (%s). gpl-boundary "
-			                  "version drift?",
-			                  kFunction, label, StringUtil::Join(got_names, ", "), StringUtil::Join(names, ", "));
+			throw IOException("%s: gpl-boundary's prodigal '%s' output has columns (%s), not (%s). %s", kFunction,
+			                  label, StringUtil::Join(got_names, ", "), StringUtil::Join(names, ", "), kOutputMismatch);
 		}
 		const auto &columns = table.GetColumns();
 		while (true) {
@@ -636,7 +614,7 @@ void AppendBarrenContigRow(ClientContext &context, PredictGenesGlobalState &g, c
 		out.data[COL_MODEL_DESC].SetValue(0, Value(ci.model_desc));
 	}
 	out.data[COL_MODEL_GC_CONTENT].SetValue(0, Value::DOUBLE(ci.model_gc_content));
-	out.data[COL_STATUS].SetValue(0, Value("no_genes"));
+	out.data[COL_STATUS].SetValue(0, Value(kStatusNoGenes));
 	out.SetChildCardinality(1);
 	g.rows->Append(out);
 }
@@ -647,13 +625,10 @@ idx_t Predict(ClientContext &context, PredictGenesGlobalState &g, const std::str
               const std::vector<Contig> &contigs, idx_t begin, idx_t end) {
 	gb::SubmitResult result;
 	try {
-		result = Submit(g, "prodigal", config, EncodeContigs(contigs, begin, end));
-	} catch (const std::runtime_error &e) {
-		if (!IsBatchRefusal(e)) {
-			throw;
-		}
+		result = Submit(g, kPredictTool, config, EncodeContigs(contigs, begin, end));
+	} catch (const gb::BatchRefused &e) {
 		// Input is checked before it is sent, so this is the call itself refused (a model file it cannot use, say).
-		throw InvalidInputException("%s: prodigal refused the call: %s", kFunction, RefusalMessage(e));
+		throw InvalidInputException("%s: prodigal refused the call: %s", kFunction, e.reason());
 	}
 	const auto gene_chunks = DecodeOutput(context, result, "genes", kGenesNames, kGenesTypes);
 	const auto contig_chunks = DecodeOutput(context, result, "contigs", kContigsNames, kContigsTypes);
@@ -698,8 +673,9 @@ idx_t Predict(ClientContext &context, PredictGenesGlobalState &g, const std::str
 			if (info[next_contig].n_genes != 0) {
 				throw IOException(
 				    "%s: gpl-boundary's prodigal reported %d genes on contig %llu of a batch but returned "
-				    "none. gpl-boundary version drift?",
-				    kFunction, info[next_contig].n_genes, static_cast<unsigned long long>(next_contig + 1));
+				    "none. %s",
+				    kFunction, info[next_contig].n_genes, static_cast<unsigned long long>(next_contig + 1),
+				    kOutputMismatch);
 			}
 			AppendBarrenContigRow(context, g, contigs[begin + next_contig], info[next_contig]);
 		}
@@ -783,17 +759,15 @@ idx_t Predict(ClientContext &context, PredictGenesGlobalState &g, const std::str
 		out.data[COL_RBS_MOTIF].Reference(chunk->data[17]);
 		out.data[COL_RBS_SPACER].Reference(chunk->data[18]);
 		out.data[COL_PROTEIN].Reference(chunk->data[19]);
-		ConstantVector::Reference(out.data[COL_STATUS], Value("ok"), count_t(n));
+		ConstantVector::Reference(out.data[COL_STATUS], Value(kStatusOk), count_t(n));
 		out.SetChildCardinality(n);
 		// The genes in order, with a row for each contig without genes between them.
 		idx_t from = 0;
 		for (idx_t r = 0; r < n; r++) {
 			const idx_t contig = static_cast<idx_t>(seq_index[r] - 1);
 			if (contig + 1 < next_contig) {
-				throw IOException(
-				    "%s: gpl-boundary's prodigal returned genes out of contig order. gpl-boundary version "
-				    "drift?",
-				    kFunction);
+				throw IOException("%s: gpl-boundary's prodigal returned genes out of contig order. %s", kFunction,
+				                  kOutputMismatch);
 			}
 			if (contig > next_contig) {
 				if (r > from) {
@@ -878,8 +852,8 @@ Model ParseTrainResult(const std::string &json) {
 	yj::yyjson_doc_free(doc);
 	if (!ok) {
 		throw IOException("%s: prodigal-train's result lacks training_path, training_sha256, closed_ends or "
-		                  "mask_regions: %s. gpl-boundary version drift?",
-		                  kFunction, json);
+		                  "mask_regions: %s. %s",
+		                  kFunction, json, kOutputMismatch);
 	}
 	return m;
 }
@@ -912,26 +886,23 @@ bool ProduceSingleGenome(ClientContext &context, PredictGenesGlobalState &g, con
 		cfg.append_bool("mask_regions", data.mask_regions);
 		gb::SubmitResult trained;
 		try {
-			trained = Submit(g, "prodigal-train", cfg.build(), EncodeContigs(contigs, 0, contigs.size()));
-		} catch (const std::runtime_error &e) {
-			if (!IsBatchRefusal(e)) {
-				throw; // The daemon or the protocol failed: the query fails.
-			}
-			// Input is checked before it is sent, and training_path's directory before the call, so a refusal here
-			// is Prodigal declining to train on this genome (too little sequence, for one). The caller can rerun it in
-			// metagenomic mode.
-			AppendStatusRow(context, g, genome, "training_failed", RefusalMessage(e));
+			trained = Submit(g, kTrainTool, cfg.build(), EncodeContigs(contigs, 0, contigs.size()));
+		} catch (const gb::BatchRefused &e) {
+			// Only a refusal: the daemon dying or breaking the protocol fails the query. Input is checked before it is
+			// sent, and training_path's directory before the first call, so this is Prodigal declining to train on
+			// this genome (too little sequence, for one). The caller can rerun it in metagenomic mode.
+			AppendStatusRow(context, g, genome, kStatusTrainingFailed, e.reason());
 			return true;
 		}
 		model = ParseTrainResult(trained.result_json);
 		if (g.write_user_model) {
-			// The user's model now exists; were there another genome, it would be called with it.
+			// The user's model now exists; it is this call's fixed model from here on.
 			g.fixed_model = model;
 			g.have_fixed_model = true;
 		}
 	}
 	if (PredictInBatches(context, g, data, contigs, &model) == 0) {
-		AppendStatusRow(context, g, genome, "no_genes", std::string());
+		AppendStatusRow(context, g, genome, kStatusNoGenes, std::string());
 	}
 	return true;
 }
@@ -961,7 +932,7 @@ bool ProduceMetaBatch(ClientContext &context, PredictGenesGlobalState &g, const 
 	g.current_genome_genes += Predict(context, g, PredictConfig(data, nullptr), batch, 0, batch.size());
 	if (!genome_continues) {
 		if (g.current_genome_genes == 0) {
-			AppendStatusRow(context, g, genome, "no_genes", std::string());
+			AppendStatusRow(context, g, genome, kStatusNoGenes, std::string());
 		}
 		g.in_genome = false;
 	}
@@ -984,7 +955,7 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 		                  kFunction);
 	}
 	RequireGplBoundaryAtLeast(gpl_path, kFunction, kMinRelease,
-	                          "Prodigal 2.6.5's prodigal-train, proteins and per-contig model data");
+	                          "Prodigal's prodigal-train, proteins and per-contig model data");
 
 	auto &fs = FileSystem::GetFileSystem(context);
 	auto conn = make_uniq<Connection>(MakeReadOnlyHelperConnection(context));
@@ -1017,11 +988,18 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 				    "train a model per genome",
 				    kFunction, data.training_path, data.relation, static_cast<long long>(n_genomes));
 			}
+			// Checked here, so that prodigal-train refusing to write it is not taken for the genome failing to train.
 			const auto parent = std::filesystem::path(data.training_path).parent_path();
-			if (!parent.empty() && !fs.DirectoryExists(parent.string())) {
+			const auto dir = parent.empty() ? std::string(".") : parent.string();
+			if (!fs.DirectoryExists(dir)) {
 				throw InvalidInputException("%s: training_path '%s' does not exist, so a model would be written there, "
 				                            "but its directory '%s' does not exist",
-				                            kFunction, data.training_path, parent.string());
+				                            kFunction, data.training_path, dir);
+			}
+			if (::access(dir.c_str(), W_OK) != 0) {
+				throw InvalidInputException("%s: training_path '%s' does not exist, so a model would be written there, "
+				                            "but its directory '%s' is not writable",
+				                            kFunction, data.training_path, dir);
 			}
 			g->train_path = data.training_path;
 			g->write_user_model = true;
@@ -1041,14 +1019,13 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	const auto check_tool = [&](const char *tool, uint32_t expected) {
 		const auto got = g->session->tool_schema_version(tool);
 		if (got != expected) {
-			throw IOException("%s: gpl-boundary's %s has schema_version %u; miint is built for %u. gpl-boundary "
-			                  "version drift?",
-			                  kFunction, tool, got, expected);
+			throw IOException("%s: gpl-boundary's %s has schema_version %u; miint is built for %u. %s", kFunction, tool,
+			                  got, expected, kOutputMismatch);
 		}
 	};
-	check_tool("prodigal", kProdigalSchemaVersion);
+	check_tool(kPredictTool, kProdigalSchemaVersion);
 	if (!data.meta_mode && !g->have_fixed_model) {
-		check_tool("prodigal-train", kProdigalTrainSchemaVersion);
+		check_tool(kTrainTool, kProdigalTrainSchemaVersion);
 	}
 
 	// One genome after another, each's contigs in order_by order (the file's, for read_fastx), as the CLI reads them.

@@ -412,3 +412,22 @@ COPY (SELECT 'c1' AS seqid, 's' AS source, 't' AS type, 1 AS position, 10 AS sto
              NULL AS strand, NULL AS phase, E'ID=a\rb' AS attributes) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
 ----
 attributes
+
+# The rows reach the writer in the query's order with a parallel source: one header per contig (here 300,000 rows of
+# 42,858 contigs, shuffled, then ordered).
+statement ok
+SET threads = 8;
+
+statement ok
+CREATE TABLE many AS
+SELECT * REPLACE ('c' || lpad((i // 7)::VARCHAR, 6, '0') AS read_id, (i % 7 + 1)::INTEGER AS gene_index)
+FROM hand, range(300000) t(i) ORDER BY random();
+
+statement ok
+COPY (SELECT * EXCLUDE (i) FROM many ORDER BY read_id, gene_index) TO '{TEST_DIR}/many.gff' (FORMAT GFF);
+
+query II
+SELECT count(*) FILTER (WHERE line LIKE '# Sequence Data:%'), count(*) FILTER (WHERE line LIKE 'c%')
+FROM gff_lines('{TEST_DIR}/many.gff');
+----
+42858	300000
