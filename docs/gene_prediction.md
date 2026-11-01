@@ -10,7 +10,7 @@ predict_genes(relation, genome_id := 'col', [method := 'prodigal'], [order_by :=
               [training_path := 'model.trn'])
 ```
 
-Requires gpl-boundary 0.5.0 or later (`SELECT install_gpl_boundary();`, or `install_gpl_boundary(true)` to replace an older one). Not available on Windows or in WASM.
+Requires gpl-boundary 0.5.0 or later (`SELECT install_gpl_boundary();`, or `install_gpl_boundary(true)` to replace an older one). Its `prodigal` and `prodigal-train` must report Prodigal 2.6.5 in `gpl-boundary --version`, the version `COPY ... (FORMAT GFF, DIALECT 'prodigal')` names: `predict_genes` refuses another, since its output would be labeled with the wrong version. Not available on Windows or in WASM.
 
 **Parameters:**
 

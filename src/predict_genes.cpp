@@ -31,6 +31,8 @@
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
+#include <map>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <unistd.h>
@@ -46,7 +48,7 @@ namespace yj = duckdb_yyjson;
 constexpr const char *kFunction = "predict_genes";
 
 // gpl-boundary 0.5.0 is the first with prodigal-train, proteins and the per-contig output (model GC included), at
-// these schema versions; it runs Prodigal kProdigalVersion.
+// these schema versions. Both tools must report Prodigal kProdigalVersion (RequireProdigalVersion).
 constexpr GplBoundaryRelease kMinRelease {0, 5, 0};
 constexpr const char *kPredictTool = "prodigal";
 constexpr const char *kTrainTool = "prodigal-train";
@@ -366,6 +368,48 @@ struct PredictGenesGlobalState : public GlobalTableFunctionState {
 		}
 	}
 };
+
+// Refuse a gpl-boundary whose `--version` does not list prodigal and prodigal-train at kProdigalVersion: COPY GFF names
+// that version, and the translation tables accepted at bind are its. Probed on every call, so a binary replaced in
+// place is seen by the next query.
+void RequireProdigalVersion(const std::string &gpl_path) {
+	std::string text;
+	try {
+		const auto result = gb::RunCapture({gpl_path, "--version"});
+		if (result.spawned && result.exited_normally && result.exit_code == 0) {
+			text = result.stdout_text;
+		}
+	} catch (...) {
+		// Undetermined, so refused below.
+	}
+	std::map<std::string, std::string> versions;
+	std::unique_ptr<yj::yyjson_doc, decltype(&yj::yyjson_doc_free)> doc(yj::yyjson_read(text.c_str(), text.size(), 0),
+	                                                                    &yj::yyjson_doc_free);
+	if (doc) {
+		auto *tools = yj::yyjson_obj_get(yj::yyjson_doc_get_root(doc.get()), "tools");
+		size_t idx, max;
+		yj::yyjson_val *tool;
+		yyjson_arr_foreach(tools, idx, max, tool) {
+			const char *name = yj::yyjson_get_str(yj::yyjson_obj_get(tool, "name"));
+			const char *version = yj::yyjson_get_str(yj::yyjson_obj_get(tool, "version"));
+			if (name && version) {
+				versions[name] = version;
+			}
+		}
+	}
+	for (const char *tool : {kPredictTool, kTrainTool}) {
+		auto it = versions.find(tool);
+		if (it != versions.end() && it->second == kProdigalVersion) {
+			continue;
+		}
+		const std::string found = it == versions.end() ? std::string("no version for it") : "version " + it->second;
+		throw IOException("%s requires a gpl-boundary whose %s is version %s (the version COPY GFF names, and whose "
+		                  "translation tables it accepts), but the binary at %s reports %s. Point "
+		                  "MIINT_GPL_BOUNDARY_PATH at a gpl-boundary that ships %s %s, or use a miint release that "
+		                  "supports this one.",
+		                  kFunction, tool, kProdigalVersion, gpl_path, found, tool, kProdigalVersion);
+	}
+}
 
 std::string MakeTempModelDir() {
 	const char *tmp = std::getenv("TMPDIR");
@@ -957,6 +1001,7 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	}
 	RequireGplBoundaryAtLeast(gpl_path, kFunction, kMinRelease,
 	                          "Prodigal's prodigal-train, proteins and per-contig model data");
+	RequireProdigalVersion(gpl_path);
 
 	auto &fs = FileSystem::GetFileSystem(context);
 	auto conn = make_uniq<Connection>(MakeReadOnlyHelperConnection(context));
