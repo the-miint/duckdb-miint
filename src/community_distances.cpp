@@ -365,8 +365,8 @@ double MorisitaHornFromMoments(double dot, double sum_i, double sum_j, double ss
 	return 1.0 - 2.0 * dot / ((lx + ly) * sum_i * sum_j);
 }
 
-// Uninitialized doubles on the boundary Eigen's own storage would have had: where a
-// buffer starts can change a product's reduction order (miint_aligned_vector.hpp).
+// Uninitialized doubles aligned to kSimdAlignment, so any peel Eigen does over them
+// depends on the shape alone (miint_aligned_vector.hpp).
 struct AlignedDelete {
 	void operator()(double *p) const {
 		::operator delete (p, std::align_val_t {kSimdAlignment});
