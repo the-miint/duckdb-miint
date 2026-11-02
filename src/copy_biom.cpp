@@ -1,10 +1,12 @@
 #include "copy_biom.hpp"
-#include "copy_option_parsing.hpp"
+#include "copy_format_common.hpp"
 #include "BIOMReader.hpp"
 #include "BIOMTable.hpp"
+#include "id_column_utils.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/vector_operations/generic_executor.hpp"
+#include "duckdb/execution/operator/persistent/physical_copy_to_file.hpp"
 #include "duckdb/function/copy_function.hpp"
 #include "H5Cpp.h"
 #include <chrono>
@@ -26,6 +28,8 @@ struct BiomCopyBindData : public FunctionData {
 	idx_t feature_id_idx = DConstants::INVALID_INDEX;
 	idx_t sample_id_idx = DConstants::INVALID_INDEX;
 	idx_t value_idx = DConstants::INVALID_INDEX;
+	LogicalType feature_id_type;
+	LogicalType sample_id_type;
 
 	unique_ptr<FunctionData> Copy() const override {
 		auto result = make_uniq<BiomCopyBindData>();
@@ -37,6 +41,8 @@ struct BiomCopyBindData : public FunctionData {
 		result->feature_id_idx = feature_id_idx;
 		result->sample_id_idx = sample_id_idx;
 		result->value_idx = value_idx;
+		result->feature_id_type = feature_id_type;
+		result->sample_id_type = sample_id_type;
 		return result;
 	}
 
@@ -45,7 +51,8 @@ struct BiomCopyBindData : public FunctionData {
 		return file_path == other.file_path && id == other.id && generated_by == other.generated_by &&
 		       use_compression == other.use_compression && names == other.names &&
 		       feature_id_idx == other.feature_id_idx && sample_id_idx == other.sample_id_idx &&
-		       value_idx == other.value_idx;
+		       value_idx == other.value_idx && feature_id_type == other.feature_id_type &&
+		       sample_id_type == other.sample_id_type;
 	}
 };
 
@@ -89,16 +96,19 @@ static unique_ptr<FunctionData> BiomCopyBind(ClientContext &context, CopyFunctio
 		throw BinderException("COPY FORMAT BIOM requires 'value' column");
 	}
 
-	// Validate column types
-	if (sql_types[result->feature_id_idx].id() != LogicalTypeId::VARCHAR) {
-		throw BinderException("COPY FORMAT BIOM: 'feature_id' must be VARCHAR");
-	}
-	if (sql_types[result->sample_id_idx].id() != LogicalTypeId::VARCHAR) {
-		throw BinderException("COPY FORMAT BIOM: 'sample_id' must be VARCHAR");
+	// feature_id and sample_id are ids, so they take the id types and are written as their text
+	for (auto idx : {result->feature_id_idx, result->sample_id_idx}) {
+		if (!IsAllowedIdType(sql_types[idx])) {
+			throw BinderException("COPY FORMAT BIOM: column '%s' must be %s, got %s", result->names[idx],
+			                      AllowedIdTypeList(), sql_types[idx].ToString());
+		}
 	}
 	if (sql_types[result->value_idx].id() != LogicalTypeId::DOUBLE) {
-		throw BinderException("COPY FORMAT BIOM: 'value' must be DOUBLE");
+		throw BinderException("COPY FORMAT BIOM: column 'value' must be DOUBLE, got %s",
+		                      sql_types[result->value_idx].ToString());
 	}
+	result->feature_id_type = sql_types[result->feature_id_idx];
+	result->sample_id_type = sql_types[result->sample_id_idx];
 
 	// Parse optional parameters
 	for (auto &option : input.info.options) {
@@ -106,14 +116,7 @@ static unique_ptr<FunctionData> BiomCopyBind(ClientContext &context, CopyFunctio
 		auto &values = option.second;
 
 		if (key == "compression") {
-			string comp_str = StringUtil::Lower(values[0].ToString());
-			if (comp_str == "gzip" || comp_str == "gz") {
-				result->use_compression = true;
-			} else if (comp_str == "none") {
-				result->use_compression = false;
-			} else {
-				throw InvalidInputException("COPY FORMAT BIOM: compression must be 'gzip', 'gz', or 'none'");
-			}
+			result->use_compression = CompressionValueIsGzip(values[0]);
 		} else if (key == "id") {
 			result->id = values[0].ToString();
 		} else if (key == "generated_by") {
@@ -132,6 +135,8 @@ static unique_ptr<FunctionData> BiomCopyBind(ClientContext &context, CopyFunctio
 struct BiomCopyGlobalState : public GlobalFunctionData {
 	// The target as DuckDB resolved it for this COPY (a file: URI becomes its local path).
 	string file_path;
+	// Whether a file already at file_path is replaced rather than refused
+	bool replace_existing = false;
 	mutex lock;
 	// Incremental dictionary building for optimal performance
 	unordered_map<string, int32_t> feature_map;
@@ -151,6 +156,22 @@ static unique_ptr<GlobalFunctionData> BiomCopyInitializeGlobal(ClientContext &co
 	return gstate;
 }
 
+// EXECUTE need not bind a prepared COPY again (DuckDB does not for a query that reads no table), so the bind
+// check can miss a file made after PREPARE. Only OVERWRITE_OR_IGNORE into a directory replaces a file, as that
+// option asks.
+static void BiomCopyInitializeOperator(GlobalFunctionData &gstate_p, const PhysicalOperator &op_p) {
+	auto &op = op_p.Cast<PhysicalCopyToFile>();
+	// DuckDB would rename the temporary file over the target, whatever is there by then
+	if (op.use_tmp_file) {
+		throw InvalidInputException("COPY FORMAT BIOM: cannot write '%s' with USE_TMP_FILE true: BIOM never replaces "
+		                            "its target",
+		                            op.file_path);
+	}
+	gstate_p.Cast<BiomCopyGlobalState>().replace_existing =
+	    (op.partition_output || op.per_thread_output) &&
+	    op.overwrite_mode == CopyOverwriteMode::COPY_OVERWRITE_OR_IGNORE;
+}
+
 //===--------------------------------------------------------------------===//
 // Local State
 //===--------------------------------------------------------------------===//
@@ -159,6 +180,11 @@ struct BiomCopyLocalState : public LocalFunctionData {
 	vector<string> local_feature_ids;
 	vector<string> local_sample_ids;
 	vector<double> local_values;
+	// One chunk's ids as text, reused across chunks
+	vector<string> chunk_feature_ids;
+	vector<bool> chunk_feature_nulls;
+	vector<string> chunk_sample_ids;
+	vector<bool> chunk_sample_nulls;
 };
 
 static unique_ptr<LocalFunctionData> BiomCopyInitializeLocal(ExecutionContext &context, FunctionData &bind_data) {
@@ -176,26 +202,23 @@ static void BiomCopySink(ExecutionContext &context, FunctionData &bind_data, Glo
 	auto &lstate = lstate_p.Cast<BiomCopyLocalState>();
 
 	// Process each row
-	UnifiedVectorFormat feature_data, sample_data, value_data;
+	ExtractIdColumnAsStrings(input, fdata.feature_id_idx, fdata.feature_id_type, lstate.chunk_feature_ids,
+	                         lstate.chunk_feature_nulls);
+	ExtractIdColumnAsStrings(input, fdata.sample_id_idx, fdata.sample_id_type, lstate.chunk_sample_ids,
+	                         lstate.chunk_sample_nulls);
 
-	input.data[fdata.feature_id_idx].ToUnifiedFormat(feature_data);
-	input.data[fdata.sample_id_idx].ToUnifiedFormat(sample_data);
+	UnifiedVectorFormat value_data;
 	input.data[fdata.value_idx].ToUnifiedFormat(value_data);
-
-	auto feature_strings = UnifiedVectorFormat::GetData<string_t>(feature_data);
-	auto sample_strings = UnifiedVectorFormat::GetData<string_t>(sample_data);
 	auto value_doubles = UnifiedVectorFormat::GetData<double>(value_data);
 
 	for (idx_t row = 0; row < input.size(); row++) {
-		auto feature_idx = feature_data.sel->get_index(row);
-		auto sample_idx = sample_data.sel->get_index(row);
 		auto value_idx = value_data.sel->get_index(row);
 
 		// Check for NULLs
-		if (!feature_data.validity.RowIsValid(feature_idx)) {
+		if (lstate.chunk_feature_nulls[row]) {
 			throw InvalidInputException("COPY FORMAT BIOM: NULL values not allowed in feature_id column");
 		}
-		if (!sample_data.validity.RowIsValid(sample_idx)) {
+		if (lstate.chunk_sample_nulls[row]) {
 			throw InvalidInputException("COPY FORMAT BIOM: NULL values not allowed in sample_id column");
 		}
 		if (!value_data.validity.RowIsValid(value_idx)) {
@@ -203,8 +226,8 @@ static void BiomCopySink(ExecutionContext &context, FunctionData &bind_data, Glo
 		}
 
 		// Get values
-		string feature_id = feature_strings[feature_idx].GetString();
-		string sample_id = sample_strings[sample_idx].GetString();
+		string &feature_id = lstate.chunk_feature_ids[row];
+		string &sample_id = lstate.chunk_sample_ids[row];
 		double value = value_doubles[value_idx];
 
 		// Validate feature_id and sample_id are not empty
@@ -280,6 +303,8 @@ static void BiomCopyCombine(ExecutionContext &context, FunctionData &bind_data, 
 //===--------------------------------------------------------------------===//
 // HDF5 Writing Helpers
 //===--------------------------------------------------------------------===//
+// Each dataset is closed by an explicit close(), which throws: HDF5 can hold a dataset's data until it closes,
+// and a destructor's close would drop that write's failure.
 static string GetCurrentTimestamp() {
 	auto now = std::chrono::system_clock::now();
 	auto time_t_now = std::chrono::system_clock::to_time_t(now);
@@ -350,7 +375,7 @@ static void WriteStringDataset(H5::Group &group, const string &name, const std::
 		hsize_t dims[1] = {0};
 		H5::DataSpace dataspace(1, dims);
 		H5::StrType datatype(H5::PredType::C_S1, H5T_VARIABLE);
-		H5::DataSet dataset = group.createDataSet(name, datatype, dataspace);
+		group.createDataSet(name, datatype, dataspace).close();
 		return;
 	}
 
@@ -378,6 +403,7 @@ static void WriteStringDataset(H5::Group &group, const string &name, const std::
 	}
 
 	dataset.write(c_strs.data(), datatype);
+	dataset.close();
 }
 
 template <typename T>
@@ -387,7 +413,7 @@ static void WriteNumericDataset(H5::Group &group, const string &name, const std:
 		// Write empty dataset
 		hsize_t dims[1] = {0};
 		H5::DataSpace dataspace(1, dims);
-		H5::DataSet dataset = group.createDataSet(name, dtype, dataspace);
+		group.createDataSet(name, dtype, dataspace).close();
 		return;
 	}
 
@@ -404,43 +430,12 @@ static void WriteNumericDataset(H5::Group &group, const string &name, const std:
 
 	H5::DataSet dataset = group.createDataSet(name, dtype, dataspace, plist);
 	dataset.write(data.data(), dtype);
+	dataset.close();
 }
 
 //===--------------------------------------------------------------------===//
 // Finalize
 //===--------------------------------------------------------------------===//
-static herr_t KeepInnermostHdf5Error(unsigned n, const H5E_error2_t *err, void *cause) {
-	if (n == 0) {
-		*static_cast<const char **>(cause) = err->desc;
-	}
-	return 0;
-}
-
-// Why an HDF5 call failed: the call the exception names, plus the innermost entry of HDF5's error stack,
-// cut to the OS error when the entry quotes one (a failed open's "error message = '...'"). This HDF5 is not
-// built thread-safe, so the stack is the process's: the caller holds miint::g_hdf5_mutex from before the
-// failed call through this walk, so the entry is this write's. Unwinding closes the HDF5 objects before
-// the catch, and a close clears the stack or leaves its own error, so a failure after the file is open
-// may name only the call, or a close's error.
-static string Hdf5FailureReason(const H5::Exception &e) {
-	const char *innermost = nullptr;
-	H5Ewalk2(H5E_DEFAULT, H5E_WALK_UPWARD, KeepInnermostHdf5Error, &innermost);
-	if (!innermost || !*innermost) {
-		return e.getDetailMsg();
-	}
-	string cause = innermost;
-	static const string os_error_tag = "error message = '";
-	const auto tag = cause.find(os_error_tag);
-	if (tag != string::npos) {
-		const auto start = tag + os_error_tag.size();
-		const auto end = cause.find('\'', start);
-		if (end != string::npos) {
-			cause = cause.substr(start, end - start);
-		}
-	}
-	return e.getDetailMsg() + ": " + cause;
-}
-
 static void BiomCopyFinalize(ClientContext &context, FunctionData &bind_data, GlobalFunctionData &gstate_p) {
 	auto &fdata = bind_data.Cast<BiomCopyBindData>();
 	auto &gstate = gstate_p.Cast<BiomCopyGlobalState>();
@@ -466,54 +461,52 @@ static void BiomCopyFinalize(ClientContext &context, FunctionData &bind_data, Gl
 	auto csr = table.ToCSR(); // observation/matrix
 	auto csc = table.ToCSC(); // sample/matrix
 
-	// Every HDF5 call below, the destructors that close the file and its objects and the error-stack walk
-	// included, runs under miint::g_hdf5_mutex (BIOMReader.hpp): a partitioned or per-thread COPY finalizes
-	// several BIOM files at once, and other queries may be reading BIOM files. One BIOM write therefore
-	// holds up every other BIOM read and write until it is done.
-	std::lock_guard<std::mutex> hdf5_guard(miint::g_hdf5_mutex);
+	// The recorder holds miint::g_hdf5_mutex (BIOMReader.hpp) until it goes, so every HDF5 call below, the
+	// destructors that close the file and its objects included, runs under it: a partitioned or per-thread COPY
+	// finalizes several BIOM files at once, and other queries may be reading BIOM files. One BIOM write
+	// therefore holds up every other BIOM read and write until it is done.
+	miint::Hdf5FailureRecorder hdf5_failure;
 
 	// HDF5 throws H5::Exception, which is not a std::exception, so it is rethrown naming the file and why
 	// rather than reaching DuckDB as an unknown exception.
 	try {
 		// Create HDF5 file
-		H5::H5File file(gstate.file_path, H5F_ACC_TRUNC);
+		H5::H5File file(gstate.file_path, gstate.replace_existing ? H5F_ACC_TRUNC : H5F_ACC_EXCL);
 
 		// Write root attributes
 		WriteRootAttributes(file, nnz, n_features, n_samples, fdata.id, fdata.generated_by);
 
-		// Create groups
-		H5::Group obs_group = file.createGroup("/observation");
-		H5::Group obs_matrix_group = file.createGroup("/observation/matrix");
-		H5::Group obs_metadata_group = file.createGroup("/observation/metadata");
-		H5::Group obs_group_metadata_group = file.createGroup("/observation/group-metadata");
-
-		H5::Group samp_group = file.createGroup("/sample");
-		H5::Group samp_matrix_group = file.createGroup("/sample/matrix");
-		H5::Group samp_metadata_group = file.createGroup("/sample/metadata");
-		H5::Group samp_group_metadata_group = file.createGroup("/sample/group-metadata");
+		// Create groups. Each is closed at once, and the datasets are written by their full paths.
+		for (auto group :
+		     {"/observation", "/observation/matrix", "/observation/metadata", "/observation/group-metadata", "/sample",
+		      "/sample/matrix", "/sample/metadata", "/sample/group-metadata"}) {
+			file.createGroup(group).close();
+		}
 
 		// Write observation (feature) IDs
-		WriteStringDataset(obs_group, "ids", table.FeatureIDs(), fdata.use_compression);
+		WriteStringDataset(file, miint::OBS_IDS, table.FeatureIDs(), fdata.use_compression);
 
 		// Write observation/matrix (CSR)
-		WriteNumericDataset(obs_matrix_group, "data", csr.data, H5::PredType::NATIVE_DOUBLE, fdata.use_compression);
-		WriteNumericDataset(obs_matrix_group, "indices", csr.indices, H5::PredType::NATIVE_INT32,
-		                    fdata.use_compression);
-		WriteNumericDataset(obs_matrix_group, "indptr", csr.indptr, H5::PredType::NATIVE_INT32, fdata.use_compression);
+		WriteNumericDataset(file, miint::OBS_DATA, csr.data, H5::PredType::NATIVE_DOUBLE, fdata.use_compression);
+		WriteNumericDataset(file, miint::OBS_INDICES, csr.indices, H5::PredType::NATIVE_INT32, fdata.use_compression);
+		WriteNumericDataset(file, miint::OBS_INDPTR, csr.indptr, H5::PredType::NATIVE_INT32, fdata.use_compression);
 
 		// Write sample IDs
-		WriteStringDataset(samp_group, "ids", table.SampleIDs(), fdata.use_compression);
+		WriteStringDataset(file, miint::SAMPLE_IDS, table.SampleIDs(), fdata.use_compression);
 
 		// Write sample/matrix (CSC)
-		WriteNumericDataset(samp_matrix_group, "data", csc.data, H5::PredType::NATIVE_DOUBLE, fdata.use_compression);
-		WriteNumericDataset(samp_matrix_group, "indices", csc.indices, H5::PredType::NATIVE_INT32,
+		WriteNumericDataset(file, miint::SAMPLE_DATA, csc.data, H5::PredType::NATIVE_DOUBLE, fdata.use_compression);
+		WriteNumericDataset(file, miint::SAMPLE_INDICES, csc.indices, H5::PredType::NATIVE_INT32,
 		                    fdata.use_compression);
-		WriteNumericDataset(samp_matrix_group, "indptr", csc.indptr, H5::PredType::NATIVE_INT32, fdata.use_compression);
+		WriteNumericDataset(file, miint::SAMPLE_INDPTR, csc.indptr, H5::PredType::NATIVE_INT32, fdata.use_compression);
 
-		// Close file
+		// Every object in the file is closed by now, so this close writes what HDF5 still holds, and a failure
+		// throws here; with an object open, HDF5 would put the write off until that object's destructor.
 		file.close();
 	} catch (const H5::Exception &e) {
-		throw IOException("COPY FORMAT BIOM: cannot write '%s': %s", gstate.file_path, Hdf5FailureReason(e));
+		// The call the exception names, and the cause the recorder took as the first HDF5 call failed
+		throw IOException("COPY FORMAT BIOM: cannot write '%s': %s", gstate.file_path,
+		                  hdf5_failure.Explain(e.getDetailMsg()));
 	}
 }
 
@@ -536,6 +529,7 @@ CopyFunction CopyBiomFunction::GetFunction() {
 	func.copy_to_sink = BiomCopySink;
 	func.copy_to_combine = BiomCopyCombine;
 	func.copy_to_finalize = BiomCopyFinalize;
+	func.initialize_operator = BiomCopyInitializeOperator;
 	return func;
 }
 

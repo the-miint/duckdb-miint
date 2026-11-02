@@ -653,4 +653,8 @@ if(BUILD_UNITTESTS)
     test/cpp/test_RypeFilterSchedule.cpp)
   target_link_libraries(tests_duckdb Catch2::Catch2WithMain duckdb_static)
   link_extension_libraries(tests_duckdb "")
+  # Sets RLIMIT_FSIZE, so POSIX only
+  if(MIINT_ENABLE_HDF5 AND UNIX)
+    target_sources(tests_duckdb PRIVATE test/cpp/test_CopyBiomWriteFailure.cpp)
+  endif()
 endif()

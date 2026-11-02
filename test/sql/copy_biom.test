@@ -257,12 +257,112 @@ TO '{TEST_DIR}/error6.biom' (FORMAT BIOM);
 ----
 NULL
 
+# feature_id and sample_id are ids, so each takes VARCHAR, BIGINT or UUID, as a read_id does, and is
+# written as its text: BIGINT in decimal, UUID in the lowercase hyphenated form. The two columns here
+# have different types, so reading one with the other's type would show.
+statement ok
+COPY (SELECT * FROM (VALUES (10::BIGINT, 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'::UUID, 1.0::DOUBLE),
+                            (-5::BIGINT, 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'::UUID, 2.0::DOUBLE),
+                            (10::BIGINT, '00000000-0000-0000-0000-000000000001'::UUID, 3.0::DOUBLE))
+      AS t(feature_id, sample_id, value))
+TO '{TEST_DIR}/id_types.biom' (FORMAT BIOM);
+
+query TTR
+SELECT feature_id, sample_id, value FROM read_biom('{TEST_DIR}/id_types.biom') ORDER BY value;
+----
+10	a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11	1.0
+-5	a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11	2.0
+10	00000000-0000-0000-0000-000000000001	3.0
+
+# A NULL id is refused whatever its type.
+statement error
+COPY (SELECT NULL::BIGINT AS feature_id, 'S1' AS sample_id, 1.0::DOUBLE AS value) TO '{TEST_DIR}/null_bigint.biom' (FORMAT BIOM);
+----
+NULL values not allowed in feature_id column
+
+statement error
+COPY (SELECT 'F1' AS feature_id, NULL::UUID AS sample_id, 1.0::DOUBLE AS value) TO '{TEST_DIR}/null_uuid.biom' (FORMAT BIOM);
+----
+NULL values not allowed in sample_id column
+
+# The same from a table, where the NULL is a later row of a column rather than a constant
+statement ok
+CREATE TABLE biom_null_ids AS SELECT * FROM (VALUES (1::BIGINT, 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'::UUID, 1.0::DOUBLE),
+                                                    (2::BIGINT, NULL::UUID, 2.0::DOUBLE),
+                                                    (NULL::BIGINT, 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'::UUID, 3.0::DOUBLE))
+                                    AS t(feature_id, sample_id, value);
+
+statement error
+COPY (SELECT * FROM biom_null_ids WHERE value <> 2.0) TO '{TEST_DIR}/null_bigint_table.biom' (FORMAT BIOM);
+----
+NULL values not allowed in feature_id column
+
+statement error
+COPY (SELECT * FROM biom_null_ids WHERE value <> 3.0) TO '{TEST_DIR}/null_uuid_table.biom' (FORMAT BIOM);
+----
+NULL values not allowed in sample_id column
+
+statement ok
+DROP TABLE biom_null_ids;
+
+# Any other type is refused when the COPY is planned, naming the column and the types it takes. An untyped
+# integer literal is INTEGER, and an untyped decimal literal is DECIMAL, not DOUBLE.
+statement error
+COPY (SELECT 1 AS feature_id, 'S1' AS sample_id, 1.0::DOUBLE AS value) TO '{TEST_DIR}/int_id.biom' (FORMAT BIOM);
+----
+Binder Error: COPY FORMAT BIOM: column 'feature_id' must be VARCHAR, BIGINT, or UUID, got INTEGER
+
+statement error
+COPY (SELECT 'F1' AS feature_id, 'S1'::BLOB AS sample_id, 1.0::DOUBLE AS value) TO '{TEST_DIR}/blob_id.biom' (FORMAT BIOM);
+----
+Binder Error: COPY FORMAT BIOM: column 'sample_id' must be VARCHAR, BIGINT, or UUID, got BLOB
+
+statement error
+COPY (SELECT 'F1' AS feature_id, 'S1' AS sample_id, 1.0 AS value) TO '{TEST_DIR}/decimal_value.biom' (FORMAT BIOM);
+----
+Binder Error: COPY FORMAT BIOM: column 'value' must be DOUBLE, got DECIMAL(2,1)
+
 # Test 19: Error - invalid COMPRESSION parameter
 statement error
 COPY (SELECT feature_id, sample_id, value FROM test_biom_basic)
 TO '{TEST_DIR}/error7.biom' (FORMAT BIOM, COMPRESSION 'invalid');
 ----
-compression
+Binder Error: COMPRESSION must be 'gzip', 'gz', 'none' or 'uncompressed', got 'invalid'
+
+# COMPRESSION takes the values it takes in the text formats, in any case: 'gzip' or 'gz', and 'none' or
+# 'uncompressed'. HDF5 has no zstd filter here, so zstd is refused as any other value is.
+statement error
+COPY test_biom_basic TO '{TEST_DIR}/zstd.biom' (FORMAT BIOM, COMPRESSION 'zstd');
+----
+Binder Error: COMPRESSION must be 'gzip', 'gz', 'none' or 'uncompressed', got 'zstd'
+
+statement ok
+CREATE TABLE biom_compressible AS
+SELECT 'F' || (r % 50) AS feature_id, 'S' || (r // 50) AS sample_id, (r + 1)::DOUBLE AS value FROM range(2000) t(r);
+
+foreach comp gzip GZ none Uncompressed
+
+statement ok
+COPY biom_compressible TO '{TEST_DIR}/comp_{comp}.biom' (FORMAT BIOM, COMPRESSION '{comp}');
+
+query IR
+SELECT count(*), sum(value) FROM read_biom('{TEST_DIR}/comp_{comp}.biom');
+----
+2000	2001000.0
+
+endloop
+
+# 'uncompressed' writes what 'none' writes, and 'gz' what 'gzip' writes; the gzip file is the smaller.
+query III
+SELECT max(size) FILTER (filename LIKE '%comp_none.biom') = max(size) FILTER (filename LIKE '%comp_Uncompressed.biom'),
+       max(size) FILTER (filename LIKE '%comp_gzip.biom') = max(size) FILTER (filename LIKE '%comp_GZ.biom'),
+       max(size) FILTER (filename LIKE '%comp_gzip.biom') < max(size) FILTER (filename LIKE '%comp_none.biom')
+FROM read_blob('{TEST_DIR}/comp_*.biom');
+----
+true	true	true
+
+statement ok
+DROP TABLE biom_compressible;
 
 # Test 20: Error - cannot overwrite existing file (file exists protection)
 statement ok
@@ -274,6 +374,79 @@ COPY (SELECT feature_id, sample_id, value FROM test_biom_basic)
 TO '{TEST_DIR}/output_overwrite_test.biom' (FORMAT BIOM);
 ----
 Cannot overwrite existing file
+
+# A file made after PREPARE is refused too, and left as it was. DuckDB binds this prepared COPY, whose query reads
+# a table, again at EXECUTE, so the bind check refuses the file. It does not bind the next one, from values,
+# again, so the writer, which creates the file only if none is there, refuses it.
+statement ok
+PREPARE biom_planned_early AS COPY test_biom_single TO '{TEST_DIR}/made_after_prepare.biom' (FORMAT BIOM);
+
+statement ok
+COPY test_biom_basic TO '{TEST_DIR}/made_after_prepare.biom' (FORMAT BIOM);
+
+statement error
+EXECUTE biom_planned_early;
+----
+Cannot overwrite existing file
+
+query TTR
+SELECT feature_id, sample_id, value FROM read_biom('{TEST_DIR}/made_after_prepare.biom') ORDER BY ALL;
+----
+Feature1	Sample1	1.0
+Feature1	Sample2	2.0
+Feature2	Sample1	3.0
+
+statement ok
+PREPARE biom_from_values AS COPY (SELECT 'F9' AS feature_id, 'S9' AS sample_id, 9.0::DOUBLE AS value) TO '{TEST_DIR}/made_after_prepare_values.biom' (FORMAT BIOM);
+
+statement ok
+COPY test_biom_basic TO '{TEST_DIR}/made_after_prepare_values.biom' (FORMAT BIOM);
+
+statement error
+EXECUTE biom_from_values;
+----
+<REGEX>:IO Error: COPY FORMAT BIOM: cannot write '.*made_after_prepare_values\.biom': H5Fcreate failed: File exists.*
+
+query TTR
+SELECT feature_id, sample_id, value FROM read_biom('{TEST_DIR}/made_after_prepare_values.biom') ORDER BY ALL;
+----
+Feature1	Sample1	1.0
+Feature1	Sample2	2.0
+Feature2	Sample1	3.0
+
+# USE_TMP_FILE true has DuckDB rename a temporary file over the target, which would replace a file made after
+# PREPARE, so it is refused. DuckDB takes the option before BIOM sees the COPY, so the refusal comes when the
+# COPY runs, and the file is left as it was.
+statement ok
+PREPARE biom_tmp_file AS COPY (SELECT 'F9' AS feature_id, 'S9' AS sample_id, 9.0::DOUBLE AS value) TO '{TEST_DIR}/made_after_prepare_tmp.biom' (FORMAT BIOM, USE_TMP_FILE true);
+
+statement ok
+COPY test_biom_basic TO '{TEST_DIR}/made_after_prepare_tmp.biom' (FORMAT BIOM);
+
+statement error
+EXECUTE biom_tmp_file;
+----
+<REGEX>:Invalid Input Error: COPY FORMAT BIOM: cannot write '.*made_after_prepare_tmp\.biom' with USE_TMP_FILE true: BIOM never replaces its target.*
+
+query TTR
+SELECT feature_id, sample_id, value FROM read_biom('{TEST_DIR}/made_after_prepare_tmp.biom') ORDER BY ALL;
+----
+Feature1	Sample1	1.0
+Feature1	Sample2	2.0
+Feature2	Sample1	3.0
+
+statement error
+COPY test_biom_single TO '{TEST_DIR}/tmp_file_refused.biom' (FORMAT BIOM, USE_TMP_FILE true);
+----
+<REGEX>:Invalid Input Error: COPY FORMAT BIOM: cannot write '.*tmp_file_refused\.biom' with USE_TMP_FILE true: BIOM never replaces its target.*
+
+query I
+SELECT count(*) FROM glob('{TEST_DIR}/*tmp_file_refused.biom');
+----
+0
+
+statement ok
+COPY test_biom_single TO '{TEST_DIR}/tmp_file_false.biom' (FORMAT BIOM, USE_TMP_FILE false);
 
 # An option BIOM does not have is refused and named, and GENERATED_BY with no value is refused.
 statement error
@@ -354,6 +527,40 @@ RESET threads;
 
 statement ok
 DROP TABLE biom_many;
+
+# OVERWRITE_OR_IGNORE replaces a partition's file of the same name, as that option asks.
+statement ok
+COPY (SELECT 'F1' AS feature_id, 'S1' AS sample_id, 1.0::DOUBLE AS value, 1 AS grp) TO '{TEST_DIR}/biom_replaced' (FORMAT BIOM, PARTITION_BY (grp));
+
+statement ok
+COPY (SELECT 'F2' AS feature_id, 'S2' AS sample_id, 9.0::DOUBLE AS value, 1 AS grp) TO '{TEST_DIR}/biom_replaced' (FORMAT BIOM, PARTITION_BY (grp), OVERWRITE_OR_IGNORE);
+
+query TTR
+SELECT feature_id, sample_id, value FROM read_biom('{TEST_DIR}/biom_replaced/*/*.biom');
+----
+F2	S2	9.0
+
+# OVERWRITE empties the directory first, so the files it writes are new ones
+statement ok
+COPY (SELECT 'F3' AS feature_id, 'S3' AS sample_id, 7.0::DOUBLE AS value, 1 AS grp) TO '{TEST_DIR}/biom_replaced' (FORMAT BIOM, PARTITION_BY (grp), OVERWRITE);
+
+query TTR
+SELECT feature_id, sample_id, value FROM read_biom('{TEST_DIR}/biom_replaced/*/*.biom');
+----
+F3	S3	7.0
+
+# OVERWRITE_OR_IGNORE replaces a per-thread file of the same name too. One row is sunk by one thread, so each
+# COPY writes data_0.biom.
+statement ok
+COPY (SELECT 'F1' AS feature_id, 'S1' AS sample_id, 1.0::DOUBLE AS value) TO '{TEST_DIR}/biom_thread_replaced' (FORMAT BIOM, PER_THREAD_OUTPUT true);
+
+statement ok
+COPY (SELECT 'F2' AS feature_id, 'S2' AS sample_id, 9.0::DOUBLE AS value) TO '{TEST_DIR}/biom_thread_replaced' (FORMAT BIOM, PER_THREAD_OUTPUT true, OVERWRITE_OR_IGNORE);
+
+query TTR
+SELECT feature_id, sample_id, value FROM read_biom('{TEST_DIR}/biom_thread_replaced/*.biom');
+----
+F2	S2	9.0
 
 # Test 21: concurrent COPY TO BIOM and read_biom return correct values
 concurrentloop i 0 8
