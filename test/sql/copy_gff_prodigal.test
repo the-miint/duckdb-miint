@@ -1,6 +1,5 @@
 # name: test/sql/copy_gff_prodigal.test
-# description: COPY ... (FORMAT GFF, DIALECT 'prodigal') of predict_genes' columns writes Prodigal's own GFF, "# Model Data" included,
-#              checked against the CLI's file on anthus_aco.fas (data/prodigal/README.md)
+# description: COPY ... (FORMAT GFF, DIALECT 'prodigal') of predict_genes' columns writes Prodigal's own GFF, "# Model Data" included, checked against the CLI's file on anthus_aco.fas (data/prodigal/README.md)
 # group: [sql]
 
 require miint

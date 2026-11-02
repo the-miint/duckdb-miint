@@ -1,6 +1,5 @@
 # name: test/sql/predict_genes_validation.test
-# description: predict_genes bind-time checks. Bind never starts gpl-boundary, so these run wherever the function
-#              is compiled in (PREDICT_GENES_AVAILABLE); predict_genes.test runs it.
+# description: predict_genes bind-time checks. Bind never starts gpl-boundary, so these run wherever the function is compiled in (PREDICT_GENES_AVAILABLE); predict_genes.test runs it.
 # group: [sql]
 
 require miint

@@ -1,6 +1,5 @@
 # name: test/sql/predict_genes.test
-# description: predict_genes(method := 'prodigal') against a real gpl-boundary daemon (>= 0.5.0), checked
-#              against the Prodigal CLI's own output on anthus_aco.fas (data/prodigal/README.md)
+# description: predict_genes(method := 'prodigal') against a real gpl-boundary daemon (>= 0.5.0), checked against the Prodigal CLI's own output on anthus_aco.fas (data/prodigal/README.md)
 # group: [sql]
 
 require miint
