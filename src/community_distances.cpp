@@ -1,5 +1,6 @@
 #include "community_distances.hpp"
 #include "community_distances_gram.hpp"
+#include "miint_aligned_vector.hpp"
 
 #include <algorithm>
 #include <array>
@@ -8,6 +9,7 @@
 #include <functional>
 #include <limits>
 #include <memory>
+#include <new>
 #include <stdexcept>
 #include <thread>
 
@@ -363,6 +365,24 @@ double MorisitaHornFromMoments(double dot, double sum_i, double sum_j, double ss
 	return 1.0 - 2.0 * dot / ((lx + ly) * sum_i * sum_j);
 }
 
+// Uninitialized doubles on the boundary Eigen's own storage would have had: where a
+// buffer starts can change a product's reduction order (miint_aligned_vector.hpp).
+struct AlignedDelete {
+	void operator()(double *p) const {
+		::operator delete (p, std::align_val_t {kSimdAlignment});
+	}
+};
+using AlignedDoubles = std::unique_ptr<double[], AlignedDelete>;
+
+AlignedDoubles AllocateAlignedDoubles(uint64_t count) {
+	// uint64 for the same reason as PairCount: n * n wraps a 32-bit size_t (wasm32).
+	if (count > std::numeric_limits<size_t>::max() / sizeof(double)) {
+		throw std::bad_alloc();
+	}
+	return AlignedDoubles(static_cast<double *>(
+	    ::operator new (static_cast<size_t>(count) * sizeof(double), std::align_val_t {kSimdAlignment})));
+}
+
 // All pairwise distances for a GEMM-eligible metric, from a dense row-major
 // operand. `n_cached_tail` has the same meaning as in the sparse entry point, and
 // is honoured in the PRODUCT as well as the fill loop: the tail x tail triangle is
@@ -374,10 +394,10 @@ std::vector<double> CondensedViaGram(const double *M, uint32_t n, uint32_t f, Me
 	// materialized the operand itself can binarize while doing so and say so, which
 	// saves holding a SECOND n x f matrix; the jaccard branch below reads only the Gram
 	// and its diagonal, never the raw values, so a binarized operand loses it nothing.
-	std::unique_ptr<double[]> binary;
+	AlignedDoubles binary;
 	const double *operand = M;
 	if (m == Metric::Jaccard && !operand_prebinarized) {
-		binary.reset(new double[static_cast<size_t>(n) * f]);
+		binary = AllocateAlignedDoubles(static_cast<uint64_t>(n) * f);
 		for (uint32_t i = 0; i < n; ++i) {
 			const double *xi = M + static_cast<size_t>(i) * f;
 			double *bi = binary.get() + static_cast<size_t>(i) * f;
@@ -394,7 +414,7 @@ std::vector<double> CondensedViaGram(const double *M, uint32_t n, uint32_t f, Me
 	// product and never read by the loops below (they take S(j,i) with j > i, and the
 	// diagonal), so zeroing it is half an n x n memset and -- worse -- half an n x n of
 	// first-touch RSS.
-	std::unique_ptr<double[]> gram(new double[static_cast<size_t>(n) * n]);
+	const AlignedDoubles gram = AllocateAlignedDoubles(static_cast<uint64_t>(n) * n);
 	CommunityDistancesGramLower(operand, n, f, n_cached_tail, gram.get());
 	auto S = [&](uint32_t row, uint32_t col) { // column-major, as Eigen wrote it
 		return gram[static_cast<size_t>(col) * n + row];

@@ -390,11 +390,10 @@ list(
 
 # The sparse and dense distance kernels must round every multiply-add the same
 # way to stay bit-identical (community_distances.hpp), and contraction lets the
-# compiler fuse a scalar loop's into FMAs but not a vectorized loop's. The file
-# must not include Eigen: Eigen's templates are shared with other files, and the
-# linker would keep one copy, built either way, for all of them. Its product is
-# in community_distances_gram.cpp. MSVC-style compilers are skipped: DuckDB
-# gives cl.exe no -march, and baseline x64 has no FMA.
+# compiler fuse them in one kernel and not in the other. The file must not
+# include Eigen (docs/internals/embedded-tools.md, "The two Eigen defines"); its
+# product is in community_distances_gram.cpp. MSVC-style compilers are skipped:
+# DuckDB gives cl.exe no -march, and baseline x64 has no FMA.
 if(NOT MSVC)
   set_source_files_properties(src/community_distances.cpp
                               PROPERTIES COMPILE_OPTIONS -ffp-contract=off)
