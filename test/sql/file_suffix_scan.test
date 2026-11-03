@@ -1,0 +1,290 @@
+# name: test/sql/file_suffix_scan.test
+# description: A file named in FROM is read by the miint reader its suffix names, as DuckDB reads foo.parquet
+# group: [sql]
+
+require miint
+
+# read_jplace and read_gff read zstd through read_json and read_csv, which need parquet's
+# zstd file system; the unclaimed .zst files below are written with it too.
+require parquet
+
+# The progress bar can poll read_json's progress (under read_jplace) as its file closes, which
+# fails as an INTERNAL dereference of a NULL handle in a few percent of runs of this file; the
+# explicit read_jplace calls fail it as the replacement scans do.
+statement ok
+SET enable_progress_bar = false;
+
+# FROM 'x.fq' is shorthand for FROM read_fastx('x.fq') and nothing else: each claimed suffix
+# must give exactly the rows its reader gives for the same path. Suffixes with no committed
+# fixture are written here with miint's COPY formats.
+
+statement ok
+COPY (FROM read_fastx('data/fastq/test_r2.fq')) TO '{TEST_DIR}/fss.fq' (FORMAT FASTQ);
+
+statement ok
+COPY (FROM read_fastx('data/fastq/test_r2.fq')) TO '{TEST_DIR}/fss.fastq' (FORMAT FASTQ);
+
+statement ok
+COPY (FROM read_fastx('data/fastq/test_r2.fq')) TO '{TEST_DIR}/fss.fq.gz' (FORMAT FASTQ);
+
+statement ok
+COPY (FROM read_fastx('data/fastq/test_r2.fq')) TO '{TEST_DIR}/fss_glob_1.fq' (FORMAT FASTQ);
+
+statement ok
+COPY (FROM read_fastx('data/fastq/test_r2.fq')) TO '{TEST_DIR}/fss_glob_2.fq' (FORMAT FASTQ);
+
+statement ok
+COPY (FROM read_fastx('data/fastq/test_r2.fq')) TO '{TEST_DIR}/fss.fa' (FORMAT FASTA);
+
+statement ok
+COPY (FROM read_fastx('data/fastq/test_r2.fq')) TO '{TEST_DIR}/fss.fasta' (FORMAT FASTA);
+
+statement ok
+COPY (FROM read_fastx('data/fastq/test_r2.fq')) TO '{TEST_DIR}/fss.fna' (FORMAT FASTA);
+
+statement ok
+COPY (FROM read_fastx('data/fastq/test_r2.fq')) TO '{TEST_DIR}/fss.ffn' (FORMAT FASTA);
+
+statement ok
+COPY (FROM read_fastx('data/fastq/test_r2.fq')) TO '{TEST_DIR}/fss.frn' (FORMAT FASTA);
+
+statement ok
+COPY (FROM read_fastx('data/fastq/test_r2.fq')) TO '{TEST_DIR}/fss.fasta.gz' (FORMAT FASTA);
+
+# .faa holds protein, which read_fastx reads as it reads nucleotides.
+statement ok
+COPY (SELECT 'p1' AS read_id, 'MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQ' AS sequence1) TO '{TEST_DIR}/fss.faa' (FORMAT FASTA);
+
+statement ok
+COPY (FROM read_newick('data/newick/simple.nwk')) TO '{TEST_DIR}/fss.newick' (FORMAT NEWICK);
+
+statement ok
+COPY (FROM read_newick('data/newick/simple.nwk')) TO '{TEST_DIR}/fss.tre' (FORMAT NEWICK);
+
+statement ok
+COPY (FROM read_newick('data/newick/simple.nwk')) TO '{TEST_DIR}/fss.tree' (FORMAT NEWICK);
+
+statement ok
+CREATE TABLE by_suffix AS
+          SELECT 'fq' AS suffix, t::VARCHAR AS row_text FROM '{TEST_DIR}/fss.fq' t
+UNION ALL SELECT 'fastq', t::VARCHAR FROM '{TEST_DIR}/fss.fastq' t
+UNION ALL SELECT 'fq.gz', t::VARCHAR FROM '{TEST_DIR}/fss.fq.gz' t
+UNION ALL SELECT 'fq glob', t::VARCHAR FROM '{TEST_DIR}/fss_glob_*.fq' t
+UNION ALL SELECT 'fa', t::VARCHAR FROM '{TEST_DIR}/fss.fa' t
+UNION ALL SELECT 'fasta', t::VARCHAR FROM '{TEST_DIR}/fss.fasta' t
+UNION ALL SELECT 'fna', t::VARCHAR FROM '{TEST_DIR}/fss.fna' t
+UNION ALL SELECT 'ffn', t::VARCHAR FROM '{TEST_DIR}/fss.ffn' t
+UNION ALL SELECT 'frn', t::VARCHAR FROM '{TEST_DIR}/fss.frn' t
+UNION ALL SELECT 'faa', t::VARCHAR FROM '{TEST_DIR}/fss.faa' t
+UNION ALL SELECT 'fasta.gz', t::VARCHAR FROM '{TEST_DIR}/fss.fasta.gz' t
+UNION ALL SELECT 'nwk', t::VARCHAR FROM 'data/newick/simple.nwk' t
+UNION ALL SELECT 'nwk.gz', t::VARCHAR FROM 'data/newick/simple.nwk.gz' t
+UNION ALL SELECT 'newick', t::VARCHAR FROM '{TEST_DIR}/fss.newick' t
+UNION ALL SELECT 'tre', t::VARCHAR FROM '{TEST_DIR}/fss.tre' t
+UNION ALL SELECT 'tree', t::VARCHAR FROM '{TEST_DIR}/fss.tree' t
+UNION ALL SELECT 'sam', t::VARCHAR FROM 'data/sam/foo_has_header.sam' t
+UNION ALL SELECT 'sam.gz', t::VARCHAR FROM 'data/sam/foo_has_header.sam.gz' t
+UNION ALL SELECT 'bam', t::VARCHAR FROM 'data/sam/foo_has_header.bam' t
+UNION ALL SELECT 'paf', t::VARCHAR FROM 'data/paf/k12_minimap2.paf' t
+UNION ALL SELECT 'paf.gz', t::VARCHAR FROM 'data/paf/k12_minimap2.paf.gz' t
+UNION ALL SELECT 'gfa', t::VARCHAR FROM 'data/gfa/spec_example.gfa' t
+UNION ALL SELECT 'gfa.gz', t::VARCHAR FROM 'data/myloasm/ecoli_sim/final_contig_graph.gfa.gz' t
+UNION ALL SELECT 'jplace', t::VARCHAR FROM 'data/jplace/test.jplace' t
+UNION ALL SELECT 'jplace.gz', t::VARCHAR FROM 'data/jplace/test.jplace.gz' t
+UNION ALL SELECT 'jplace.zst', t::VARCHAR FROM 'data/jplace/test.jplace.zst' t
+UNION ALL SELECT 'gff', t::VARCHAR FROM 'data/gff/test.gff' t
+UNION ALL SELECT 'gff3', t::VARCHAR FROM 'data/gff/test.gff3' t
+UNION ALL SELECT 'gff.gz', t::VARCHAR FROM 'data/gff/test.gff.gz' t
+UNION ALL SELECT 'gff.zst', t::VARCHAR FROM 'data/gff/test.gff.zst' t
+UNION ALL SELECT 'mzML', t::VARCHAR FROM 'data/mzml/basic_3spectra.mzML' t
+UNION ALL SELECT 'mzXML', t::VARCHAR FROM 'data/mzxml/basic_3spectra.mzXML' t
+UNION ALL SELECT 'sff', t::VARCHAR FROM 'data/sff/basic_2reads.sff' t;
+
+statement ok
+CREATE TABLE by_reader AS
+          SELECT 'fq' AS suffix, t::VARCHAR AS row_text FROM read_fastx('{TEST_DIR}/fss.fq') t
+UNION ALL SELECT 'fastq', t::VARCHAR FROM read_fastx('{TEST_DIR}/fss.fastq') t
+UNION ALL SELECT 'fq.gz', t::VARCHAR FROM read_fastx('{TEST_DIR}/fss.fq.gz') t
+UNION ALL SELECT 'fq glob', t::VARCHAR FROM read_fastx('{TEST_DIR}/fss_glob_*.fq') t
+UNION ALL SELECT 'fa', t::VARCHAR FROM read_fastx('{TEST_DIR}/fss.fa') t
+UNION ALL SELECT 'fasta', t::VARCHAR FROM read_fastx('{TEST_DIR}/fss.fasta') t
+UNION ALL SELECT 'fna', t::VARCHAR FROM read_fastx('{TEST_DIR}/fss.fna') t
+UNION ALL SELECT 'ffn', t::VARCHAR FROM read_fastx('{TEST_DIR}/fss.ffn') t
+UNION ALL SELECT 'frn', t::VARCHAR FROM read_fastx('{TEST_DIR}/fss.frn') t
+UNION ALL SELECT 'faa', t::VARCHAR FROM read_fastx('{TEST_DIR}/fss.faa') t
+UNION ALL SELECT 'fasta.gz', t::VARCHAR FROM read_fastx('{TEST_DIR}/fss.fasta.gz') t
+UNION ALL SELECT 'nwk', t::VARCHAR FROM read_newick('data/newick/simple.nwk') t
+UNION ALL SELECT 'nwk.gz', t::VARCHAR FROM read_newick('data/newick/simple.nwk.gz') t
+UNION ALL SELECT 'newick', t::VARCHAR FROM read_newick('{TEST_DIR}/fss.newick') t
+UNION ALL SELECT 'tre', t::VARCHAR FROM read_newick('{TEST_DIR}/fss.tre') t
+UNION ALL SELECT 'tree', t::VARCHAR FROM read_newick('{TEST_DIR}/fss.tree') t
+UNION ALL SELECT 'sam', t::VARCHAR FROM read_alignments('data/sam/foo_has_header.sam') t
+UNION ALL SELECT 'sam.gz', t::VARCHAR FROM read_alignments('data/sam/foo_has_header.sam.gz') t
+UNION ALL SELECT 'bam', t::VARCHAR FROM read_alignments('data/sam/foo_has_header.bam') t
+UNION ALL SELECT 'paf', t::VARCHAR FROM read_paf('data/paf/k12_minimap2.paf') t
+UNION ALL SELECT 'paf.gz', t::VARCHAR FROM read_paf('data/paf/k12_minimap2.paf.gz') t
+UNION ALL SELECT 'gfa', t::VARCHAR FROM read_gfa('data/gfa/spec_example.gfa') t
+UNION ALL SELECT 'gfa.gz', t::VARCHAR FROM read_gfa('data/myloasm/ecoli_sim/final_contig_graph.gfa.gz') t
+UNION ALL SELECT 'jplace', t::VARCHAR FROM read_jplace('data/jplace/test.jplace') t
+UNION ALL SELECT 'jplace.gz', t::VARCHAR FROM read_jplace('data/jplace/test.jplace.gz') t
+UNION ALL SELECT 'jplace.zst', t::VARCHAR FROM read_jplace('data/jplace/test.jplace.zst') t
+UNION ALL SELECT 'gff', t::VARCHAR FROM read_gff('data/gff/test.gff') t
+UNION ALL SELECT 'gff3', t::VARCHAR FROM read_gff('data/gff/test.gff3') t
+UNION ALL SELECT 'gff.gz', t::VARCHAR FROM read_gff('data/gff/test.gff.gz') t
+UNION ALL SELECT 'gff.zst', t::VARCHAR FROM read_gff('data/gff/test.gff.zst') t
+UNION ALL SELECT 'mzML', t::VARCHAR FROM read_mzml('data/mzml/basic_3spectra.mzML') t
+UNION ALL SELECT 'mzXML', t::VARCHAR FROM read_mzxml('data/mzxml/basic_3spectra.mzXML') t
+UNION ALL SELECT 'sff', t::VARCHAR FROM read_sequences_sff('data/sff/basic_2reads.sff') t;
+
+# Every suffix reached a reader that returned the fixture's records...
+query II
+SELECT suffix, count(*) FROM by_suffix GROUP BY ALL ORDER BY ALL
+----
+bam	4
+fa	2
+faa	1
+fasta	2
+fasta.gz	2
+fastq	2
+ffn	2
+fna	2
+fq	2
+fq glob	4
+fq.gz	2
+frn	2
+gfa	10
+gfa.gz	181
+gff	7
+gff.gz	7
+gff.zst	7
+gff3	7
+jplace	3
+jplace.gz	3
+jplace.zst	3
+mzML	3
+mzXML	3
+newick	5
+nwk	5
+nwk.gz	5
+paf	7
+paf.gz	7
+sam	4
+sam.gz	4
+sff	2
+tre	5
+tree	5
+
+# ...and they are its reader's records, row for row.
+query I
+SELECT count(*) FROM ((FROM by_suffix EXCEPT ALL FROM by_reader) UNION ALL (FROM by_reader EXCEPT ALL FROM by_suffix))
+----
+0
+
+# The replacement names the table after the file, as DuckDB's own scans do.
+query I
+SELECT fss.read_id FROM '{TEST_DIR}/fss.faa'
+----
+p1
+
+# FROM fss.fq, run from the directory holding fss.fq, parses as schema fss and table fq,
+# and FROM fss.fq.gz as catalog, schema and table: the path is the whole qualified name.
+# Quoting the first part only lets the test name a directory.
+query I
+SELECT count(*) FROM "{TEST_DIR}/fss".fq
+----
+2
+
+query I
+SELECT count(*) FROM "{TEST_DIR}/fss".fq.gz
+----
+2
+
+# A table of that name is read before any file.
+statement ok
+CREATE SCHEMA "{TEST_DIR}/fss";
+
+statement ok
+CREATE TABLE "{TEST_DIR}/fss".fq AS SELECT 'the table' AS source;
+
+query I
+SELECT source FROM "{TEST_DIR}/fss".fq
+----
+the table
+
+statement ok
+DROP SCHEMA "{TEST_DIR}/fss" CASCADE;
+
+# A compressed form its reader cannot open is not claimed, so DuckDB says no reader handles
+# the file instead of the reader failing on bytes it cannot parse. DuckDB says so only for a
+# file that exists; what these files hold is never read.
+statement ok
+COPY (SELECT 1 AS x) TO '{TEST_DIR}/fss_unclaimed.fq.zst' (FORMAT csv, COMPRESSION zstd);
+
+statement ok
+COPY (SELECT 1 AS x) TO '{TEST_DIR}/fss_unclaimed.nwk.zst' (FORMAT csv, COMPRESSION zstd);
+
+statement ok
+COPY (SELECT 1 AS x) TO '{TEST_DIR}/fss_unclaimed.sam.zst' (FORMAT csv, COMPRESSION zstd);
+
+statement ok
+COPY (SELECT 1 AS x) TO '{TEST_DIR}/fss_unclaimed.paf.zst' (FORMAT csv, COMPRESSION zstd);
+
+statement ok
+COPY (SELECT 1 AS x) TO '{TEST_DIR}/fss_unclaimed.gfa.zst' (FORMAT csv, COMPRESSION zstd);
+
+statement ok
+COPY (SELECT 1 AS x) TO '{TEST_DIR}/fss_unclaimed.bam.gz' (FORMAT csv, COMPRESSION gzip);
+
+statement ok
+COPY (SELECT 1 AS x) TO '{TEST_DIR}/fss_unclaimed.mzml.gz' (FORMAT csv, COMPRESSION gzip);
+
+statement ok
+COPY (SELECT 1 AS x) TO '{TEST_DIR}/fss_unclaimed.mzxml.gz' (FORMAT csv, COMPRESSION gzip);
+
+statement ok
+COPY (SELECT 1 AS x) TO '{TEST_DIR}/fss_unclaimed.sff.gz' (FORMAT csv, COMPRESSION gzip);
+
+statement error
+FROM '{TEST_DIR}/fss_unclaimed.fq.zst'
+----
+No extension found that is capable of reading the file
+
+statement error
+FROM '{TEST_DIR}/fss_unclaimed.nwk.zst'
+----
+No extension found that is capable of reading the file
+
+statement error
+FROM '{TEST_DIR}/fss_unclaimed.sam.zst'
+----
+No extension found that is capable of reading the file
+
+statement error
+FROM '{TEST_DIR}/fss_unclaimed.paf.zst'
+----
+No extension found that is capable of reading the file
+
+statement error
+FROM '{TEST_DIR}/fss_unclaimed.gfa.zst'
+----
+No extension found that is capable of reading the file
+
+statement error
+FROM '{TEST_DIR}/fss_unclaimed.bam.gz'
+----
+No extension found that is capable of reading the file
+
+statement error
+FROM '{TEST_DIR}/fss_unclaimed.mzml.gz'
+----
+No extension found that is capable of reading the file
+
+statement error
+FROM '{TEST_DIR}/fss_unclaimed.mzxml.gz'
+----
+No extension found that is capable of reading the file
+
+statement error
+FROM '{TEST_DIR}/fss_unclaimed.sff.gz'
+----
+No extension found that is capable of reading the file

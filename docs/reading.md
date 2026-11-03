@@ -6,6 +6,7 @@ A reader expands each path it is given as DuckDB's own readers do: a `file:` URI
 
 ## Table of contents
 
+- [Reading a file by its name](#reading-a-file-by-its-name) - `FROM 'reads.fq.gz'`, as DuckDB reads `FROM 'x.parquet'`.
 - [FASTA / FASTQ](#fasta-and-fastq) - FASTA and FASTQ sequence files.
 - [SAM / BAM](#sam-and-bam) - SAM and BAM alignment files.
   - [`read_alignment_header(path)`](#read_alignment_headerpath) - A header's `@SQ` lines as `(tid, reference, length)`.
@@ -27,6 +28,38 @@ A reader expands each path it is given as DuckDB's own readers do: a `file:` URI
 - [Newick](#newick) - Phylogenies in Newick.
 - [GFFv3](#gff) - GFF formatted annotation data.
 - [Coordinate conventions](#coordinate-conventions) - How positions on references and on reads are reported, and how each format is converted.
+
+### Reading a file by its name
+
+With miint loaded, a file named in `FROM` is read by the reader its suffix names, as DuckDB reads `FROM 'x.parquet'` with `read_parquet`. `FROM 'reads.fq.gz'` is `FROM read_fastx('reads.fq.gz')`:
+
+```sql
+SELECT * FROM 'reads.fq.gz';
+SELECT * FROM 'alignments/*.bam';  -- a glob, which the reader expands
+SELECT * FROM tree.nwk;            -- a file in the current directory needs no quotes
+```
+
+| Suffix | Reader | Also read compressed as |
+|---|---|---|
+| `.fa` `.fasta` `.fna` `.faa` `.ffn` `.frn` `.fq` `.fastq` | `read_fastx` | `.gz` |
+| `.sam` | `read_alignments` | `.gz` |
+| `.bam` | `read_alignments` | |
+| `.nwk` `.newick` `.tre` `.tree` | `read_newick` | `.gz` |
+| `.paf` | `read_paf` | `.gz` |
+| `.gfa` | `read_gfa` | `.gz` |
+| `.jplace` | `read_jplace` | `.gz`, `.zst` |
+| `.gff` `.gff3` | `read_gff` | `.gz`, `.zst` |
+| `.mzML` | `read_mzml` | |
+| `.mzXML` | `read_mzxml` | |
+| `.sff` | `read_sequences_sff` | |
+| `.biom` | `read_biom`, in a build that reads BIOM | |
+
+- Case is ignored, so `.mzML` and `.mzml` are both read by `read_mzml`.
+- Only the path is passed. For any other parameter, such as `sequence2` for paired-end reads or `include_filepath`, call the reader.
+- A compressed form the table does not list is not read: DuckDB reports that no extension can read the file, rather than the reader failing on bytes it cannot parse.
+- A table or view of the same name is read instead of the file, as for DuckDB's own formats.
+- The result is named after the file up to its first `.`, so `SELECT reads.read_id FROM 'reads.fq.gz'` works.
+- DuckDB autoloads only its own extensions by file name, so a session must `LOAD miint` first.
 
 ### FASTA and FASTQ
 
@@ -912,7 +945,7 @@ SELECT * FROM read_jplace_newick('some_data.jplace');
 ```
 
 **Parameters:**
-- `path` (VARCHAR): Path to jplace file(s), supports glob patterns (e.g., `'data/*.jplace'`)
+- `path` (VARCHAR): Path to jplace file(s), supports glob patterns (e.g., `'data/*.jplace'`). gzip (`.gz`) and zstd (`.zst`) files are read as `read_json` reads them; zstd needs DuckDB's parquet extension, which most DuckDB builds include.
 
 **Output schema:**
 
@@ -1134,7 +1167,7 @@ WHERE is_tip ORDER BY depth DESC;
 Read GFF3 (General Feature Format) annotation files. GFF is a standard format for genomic feature annotations including genes, transcripts, exons, and other biological features.
 
 **Parameters:**
-- `path` (VARCHAR): Path to GFF/GFF3 file
+- `path` (VARCHAR): Path to GFF/GFF3 file. gzip (`.gz`) and zstd (`.zst`) files are read as `read_csv` reads them; zstd needs DuckDB's parquet extension, which most DuckDB builds include.
 
 **Output schema:**
 - `seqid` (VARCHAR): Sequence/chromosome identifier

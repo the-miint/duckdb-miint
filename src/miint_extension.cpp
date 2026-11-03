@@ -60,6 +60,7 @@
 #include "duckdb/main/database.hpp"
 #include <sequence_functions.hpp>
 #include <qc_functions.hpp>
+#include <file_suffix_scan.hpp>
 #include <formula_function.hpp>
 #include <massql_function.hpp>
 #include <woltka_ogu_function.hpp>
@@ -574,6 +575,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	}
 
 	MIINTMacros::Register(loader);
+
+	// FROM 'reads.fq.gz' reads with read_fastx, as FROM 'x.parquet' reads with read_parquet.
+	RegisterFileSuffixScan(loader);
 
 	RypeClassifyTableFunction::Register(loader);
 	RypeFilterTableFunction::Register(loader);

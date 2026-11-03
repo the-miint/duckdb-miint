@@ -1,0 +1,9 @@
+##gff-version 3
+##sequence-region chr1 1 1000
+chr1	NCBI	gene	100	500	.	+	.	ID=gene1;Name=TEST1;biotype=protein_coding
+chr1	NCBI	mRNA	100	500	.	+	.	ID=transcript1;Parent=gene1;Name=TEST1-RA
+chr1	NCBI	exon	100	200	.	+	.	ID=exon1;Parent=transcript1
+chr1	NCBI	exon	300	500	50.5	+	.	ID=exon2;Parent=transcript1
+chr1	NCBI	CDS	150	200	.	+	0	ID=cds1;Parent=transcript1
+chr1	NCBI	CDS	300	450	.	+	2	ID=cds2;Parent=transcript1
+chr2	Ensembl	gene	1000	2000	100.0	-	.	ID=gene2;Name=TEST2
