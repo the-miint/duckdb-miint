@@ -85,7 +85,7 @@ jobs:
       - name: Check formatting of cmake/
         run: |
           python3 -m pip install --user 'cmake-format==0.6.13'
-          cmake-format --check cmake/*.cmake cmake/deps/*.cmake cmake/scripts/*.cmake
+          cmake-format --check $(git ls-files 'cmake/*.cmake')
 
   test-with-bowtie2:
     name: Test with Bowtie2
