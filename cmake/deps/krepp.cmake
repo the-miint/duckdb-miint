@@ -98,9 +98,18 @@ if(MIINT_KREPP_OPENMP_OK)
 else()
   set(MIINT_KREPP_WOPENMP 0)
 endif()
+# The sdust and seq2nt4 renames: why, in docs/internals/embedded-tools.md, krepp
+# ("sdust collision").
 target_compile_definitions(
-  krepp PRIVATE _WOPENMP=${MIINT_KREPP_WOPENMP} _WLCURL=0
-                seq_nt4_table=krepp_seq_nt4_table)
+  krepp
+  PRIVATE _WOPENMP=${MIINT_KREPP_WOPENMP}
+          _WLCURL=0
+          seq_nt4_table=krepp_seq_nt4_table
+          sdust=krepp_sdust
+          sdust_core=krepp_sdust_core
+          sdust_buf_init=krepp_sdust_buf_init
+          sdust_buf_destroy=krepp_sdust_buf_destroy
+          seq2nt4=krepp_seq2nt4)
 if(MIINT_KREPP_OPENMP_OK)
   # Apple Clang rejects a bare -fopenmp and wants the preprocessor form, with
   # libomp linked separately - the same choice the skbb/unifrac sub-makes make

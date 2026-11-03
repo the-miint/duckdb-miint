@@ -13,7 +13,7 @@ Options follow DuckDB's rules for COPY options in every format here, as they do 
 - An option the format does not have is refused, and the error may suggest options with similar names. The names of DuckDB's own COPY options, such as `OVERWRITE`, are not refused as unknown; DuckDB handles them, and refuses those a format cannot support, such as `FILE_SIZE_BYTES`.
 - Other values are cast to the option's type, so `COMPRESSION_LEVEL '3'` is level 3 and `COMPRESSION_LEVEL 1.6` is level 2. An option with no value or a NULL value is refused.
 
-`COMPRESSION` takes the same values in the text formats, FASTQ, FASTA, NEWICK and SAM, in any case: `'gzip'` or `'gz'`, and `'none'` or `'uncompressed'`. Without it, a path ending in `.gz` is written as gzip. zstd (`'zstd'`, or a `.zst` path) is refused. BAM's and BIOM's `COMPRESSION` differ; see [SAM / BAM](#sam-and-bam) and [BIOM](#biom).
+`COMPRESSION` takes the same values in the text formats, FASTQ, FASTA, NEWICK and SAM, in any case: `'gzip'` or `'gz'`, and `'none'` or `'uncompressed'`. Without it, a path ending in `.gz` is written as gzip. zstd (`'zstd'`, or a `.zst` path) is refused. BIOM's `COMPRESSION` takes the same values but sets HDF5's compression inside the file, and BAM's takes only gzip; see [BIOM](#biom) and [SAM / BAM](#sam-and-bam).
 
 FASTQ, FASTA and NEWICK write a path with a URI scheme other than `file://` (`s3://`, `https://`, `az://`, ...) through DuckDB's file systems, which load the extension that serves the scheme. For a scheme no file system serves, DuckDB opens the path as a local file, as it does for its own formats. SAM, BAM, UBAM and BIOM write local files only and refuse a remote target. In every format a `file:` URI is the local file it names, as DuckDB reads it (`file:///p`, `file://localhost/p` and `file:/p` are `/p`; on Windows, `file:///C:/p` is `C:/p`), and gzip output to it takes `COMPRESSION_LEVEL` as any local path does.
 
@@ -357,14 +357,18 @@ Round-trip via `read_sequences_sam('out.bam')` returns `read_id`/`sequence1`/`qu
 Write query results to BIOM (Biological Observation Matrix) format files. BIOM is an HDF5-based format commonly used for representing OGU/OTU/ASV tables in microbiome analyses.
 
 **Required columns:**
-- `feature_id` (VARCHAR): Feature/OGU/OTU/ASV identifier
-- `sample_id` (VARCHAR): Sample identifier
+- `feature_id` (VARCHAR, BIGINT or UUID): Feature/OGU/OTU/ASV identifier
+- `sample_id` (VARCHAR, BIGINT or UUID): Sample identifier
 - `value` (DOUBLE): Abundance/count value
+
+An id is written as its text, as `read_id` is elsewhere: BIGINT in decimal, UUID in the lowercase hyphenated form. `read_biom` returns ids as VARCHAR. A column of another type is refused when the COPY is planned, with an error naming the column. An untyped decimal literal such as `45.0` is DECIMAL, so cast a literal `value` to DOUBLE.
 
 BIOM is written to local files only; a remote target is refused. `PARTITION_BY` and `PER_THREAD_OUTPUT` write `.biom` files, each a complete table of its own rows: one per thread, and one or more per partition (DuckDB starts another file for a partition when more partitions are open than `partitioned_write_max_open_files`), so a (feature, sample) pair can be split across files. DuckDB leaves the partition columns out of the rows it writes unless `WRITE_PARTITION_COLUMNS true`, so partitioning by `sample_id` or `feature_id` needs it.
 
+A target file that already exists is refused, and so is one made between `PREPARE` and `EXECUTE`; the file is left as it was. The error is `Cannot overwrite existing file`, or `H5Fcreate failed: File exists` when DuckDB does not bind the COPY again at `EXECUTE`. `USE_TMP_FILE true`, which has DuckDB rename a temporary file over the target, is refused when the COPY runs. With `PARTITION_BY` or `PER_THREAD_OUTPUT` and `OVERWRITE_OR_IGNORE`, a file of the same name already in the directory is replaced, as that option asks. A write that fails partway, on a full disk for example, fails the COPY with an IO Error naming the file, the HDF5 call that failed and the system's reason, such as `No space left on device`, and DuckDB removes the file the failed COPY created.
+
 **Parameters:**
-- `COMPRESSION` (default: 'gzip'): HDF5's compression of the datasets inside the file, `'gzip'` (or `'gz'`; deflate level 4, h5py's default) or `'none'`. The `.biom` file itself is always HDF5, never gzip, whatever its name.
+- `COMPRESSION` (default: 'gzip'): HDF5's compression of the datasets inside the file, `'gzip'` or `'gz'` (deflate level 4, h5py's default), or `'none'` or `'uncompressed'`, in any case. Any other value, zstd included, is refused. The `.biom` file itself is always HDF5, never gzip, whatever its name.
 - `ID` (default: 'No Table ID'): Custom table identifier for BIOM metadata
 - `GENERATED_BY` (default: 'miint'): Tool/version string for provenance tracking
 
@@ -407,10 +411,10 @@ COPY (
 -- Convert any compatible table to BIOM format
 CREATE TABLE feature_counts AS
 SELECT * FROM (VALUES
-    ('OGU_001', 'Sample_A', 45.0),
-    ('OGU_001', 'Sample_B', 32.0),
-    ('OGU_002', 'Sample_A', 18.0),
-    ('OGU_002', 'Sample_B', 27.0)
+    ('OGU_001', 'Sample_A', 45.0::DOUBLE),
+    ('OGU_001', 'Sample_B', 32.0::DOUBLE),
+    ('OGU_002', 'Sample_A', 18.0::DOUBLE),
+    ('OGU_002', 'Sample_B', 27.0::DOUBLE)
 ) AS t(feature_id, sample_id, value);
 
 COPY (SELECT * FROM feature_counts)
@@ -440,9 +444,9 @@ COPY (
 -- Duplicates are automatically summed
 CREATE TABLE with_dups AS
 SELECT * FROM (VALUES
-    ('F1', 'S1', 10.0),
-    ('F1', 'S1', 5.0),   -- Same feature + sample
-    ('F2', 'S1', 8.0)
+    ('F1', 'S1', 10.0::DOUBLE),
+    ('F1', 'S1', 5.0::DOUBLE),   -- Same feature + sample
+    ('F2', 'S1', 8.0::DOUBLE)
 ) AS t(feature_id, sample_id, value);
 
 COPY (SELECT * FROM with_dups)
@@ -453,9 +457,9 @@ TO 'merged.biom' (FORMAT BIOM);
 -- Zeros are removed
 CREATE TABLE with_zeros AS
 SELECT * FROM (VALUES
-    ('F1', 'S1', 10.0),
-    ('F1', 'S2', 0.0),   -- Zero value
-    ('F2', 'S1', 8.0)
+    ('F1', 'S1', 10.0::DOUBLE),
+    ('F1', 'S2', 0.0::DOUBLE),   -- Zero value
+    ('F2', 'S1', 8.0::DOUBLE)
 ) AS t(feature_id, sample_id, value);
 
 COPY (SELECT * FROM with_zeros)
@@ -463,10 +467,6 @@ TO 'sparse.biom' (FORMAT BIOM);
 
 -- Result: Only F1,S1,10.0 and F2,S1,8.0 (zero removed)
 ```
-
-**Compression options:**
-- `'gzip'`: Good compression, widely compatible (recommended)
-- `'none'`: No compression, fastest but largest files
 
 **Compatibility:**
 - Output files are compatible with:

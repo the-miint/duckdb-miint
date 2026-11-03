@@ -75,10 +75,13 @@ void FlushFormatBuffer(FormatWriterState &local_state, CopyFileHandle &file, mut
 // Common Helper Functions
 //===--------------------------------------------------------------------===//
 // COMPRESSION for the formats that write text: the value given, or, with none (a NULL compression_param),
-// gzip for a path ending in .gz. A binary or HDF5 format checks its own values.
+// gzip for a path ending in .gz. A format whose COMPRESSION takes other values checks its own.
 FileCompressionType DetectCompressionType(const string &file_path, const Value &compression_param);
 // Whether a COMPRESSION value names gzip: 'gzip' or 'gz', in any case.
 bool IsGzipCompressionName(const string &name);
+// A COMPRESSION value of a format that writes gzip or nothing: true for 'gzip' or 'gz', false for 'none' or
+// 'uncompressed', in any case; any other value is refused.
+bool CompressionValueIsGzip(const Value &compression);
 string SubstituteOrientation(const string &path, const string &orientation);
 bool HasOrientationPlaceholder(const string &path);
 
