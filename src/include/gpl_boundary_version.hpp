@@ -21,4 +21,7 @@ struct GplBoundaryRelease {
 void RequireGplBoundaryAtLeast(const std::string &binary_path, const char *caller, GplBoundaryRelease required,
                                const char *needed_for);
 
+// The gpl-boundary binary FindGplBoundary finds, or an IOException (naming `caller`) that says how to install one.
+std::string FindGplBoundaryOrThrow(const char *caller);
+
 } // namespace duckdb

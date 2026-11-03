@@ -67,4 +67,22 @@ void RequireGplBoundaryAtLeast(const std::string &binary_path, const char *calle
 	                  caller, ToString(required), needed_for, binary_path, found_text, ToString(required));
 }
 
+std::string FindGplBoundaryOrThrow(const char *caller) {
+	auto path = gb::FindGplBoundary();
+	if (path.empty()) {
+		throw IOException("%s: gpl-boundary binary not found. To install:\n"
+		                  "  Easiest:  SELECT install_gpl_boundary();   "
+		                  "-- downloads a prebuilt binary into miint's cache dir\n"
+		                  "  Manual:   curl -fsSL "
+		                  "https://github.com/the-miint/GPL-boundary/releases/latest/download/install.sh | sh\n"
+		                  "  Source:   https://github.com/the-miint/GPL-boundary#building-from-source\n"
+		                  "Currently supported prebuilt platforms: Linux x86_64, macOS arm64. macOS Intel users "
+		                  "must build from source.\n"
+		                  "If gpl-boundary is installed at a non-standard location, set "
+		                  "MIINT_GPL_BOUNDARY_PATH=<absolute path>.",
+		                  caller);
+	}
+	return path;
+}
+
 } // namespace duckdb

@@ -1051,17 +1051,7 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	const auto &data = input.bind_data->Cast<PredictGenesBindData>();
 	auto g = make_uniq<PredictGenesGlobalState>();
 
-	const std::string gpl_path = gb::FindGplBoundary();
-	if (gpl_path.empty()) {
-		throw IOException("%s: gpl-boundary binary not found. To install:\n"
-		                  "  Easiest:  SELECT install_gpl_boundary();   "
-		                  "-- downloads a prebuilt binary into miint's cache dir\n"
-		                  "  Manual:   curl -fsSL "
-		                  "https://github.com/the-miint/GPL-boundary/releases/latest/download/install.sh | sh\n"
-		                  "If gpl-boundary is installed at a non-standard location, set "
-		                  "MIINT_GPL_BOUNDARY_PATH=<absolute path>.",
-		                  kFunction);
-	}
+	const std::string gpl_path = FindGplBoundaryOrThrow(kFunction);
 	RequireGplBoundaryAtLeast(gpl_path, kFunction, kMinRelease,
 	                          "Prodigal's prodigal-train, proteins and per-contig model data");
 	RequireProdigalVersion(gpl_path);

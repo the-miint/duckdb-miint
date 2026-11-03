@@ -9,6 +9,7 @@
 
 #include "gpl_boundary/process.hpp"
 #include "gpl_boundary/session.hpp"
+#include "gpl_boundary_version.hpp"
 
 #include <filesystem>
 #include <memory>
@@ -27,16 +28,7 @@ namespace gb = ::duckdb::miint::gpl_boundary;
 // align-time `memory_mapped` knob (the reason align_bowtie2* gate on >= 0.4.2),
 // so index-building stays usable on any daemon that advertises bowtie2-build.
 std::unique_ptr<gb::Session> SpawnBuildSession() {
-	const std::string gpl_path = gb::FindGplBoundary();
-	if (gpl_path.empty()) {
-		throw IOException("save_bowtie2_index: gpl-boundary binary not found. To install:\n"
-		                  "  Easiest:  SELECT install_gpl_boundary();   "
-		                  "-- downloads a prebuilt binary into miint's cache dir\n"
-		                  "  Manual:   curl -fsSL "
-		                  "https://github.com/the-miint/GPL-boundary/releases/latest/download/install.sh | sh\n"
-		                  "If gpl-boundary is installed at a non-standard location, set "
-		                  "MIINT_GPL_BOUNDARY_PATH=<absolute path>.");
-	}
+	const std::string gpl_path = FindGplBoundaryOrThrow("save_bowtie2_index");
 	std::vector<std::string> argv = {gpl_path};
 	gb::ChildProcess child(argv);
 	auto session = std::make_unique<gb::Session>(std::move(child));
