@@ -292,3 +292,12 @@ statement error
 SELECT * FROM predict_genes('chunks', mapping_table := 'fmapping');
 ----
 mapping_table 'fmapping' must have read_id and genome_id
+
+# The key is the same type in both.
+statement ok
+CREATE TABLE int_mapping AS SELECT 1 AS read_id, 'g' AS genome_id;
+
+statement error
+SELECT * FROM predict_genes('chunks', mapping_table := 'int_mapping');
+----
+read_id is VARCHAR in 'chunks' but INTEGER in mapping_table 'int_mapping'; the two must be the same type

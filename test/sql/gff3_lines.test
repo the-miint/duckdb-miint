@@ -124,6 +124,34 @@ SELECT replace(line, E'\t', ' | ') FROM gff3_lines('empty_text_attrs');
 ##gff-version 3
 c1 | src | gene | 5 | 6 | . | + | . | .
 
+# A token without '=' is a key with a NULL value to read_gff, and is written as the key alone: an attributes column
+# ending in ';' (as Prodigal writes it), or '.', reads back the same.
+statement ok
+COPY (SELECT * FROM (VALUES ('##gff-version 3'), (E'c1\tProdigal\tCDS\t1\t90\t5.0\t+\t0\tID=1_1;partial=00;'),
+                            (E'c1\tsrc\tgene\t5\t9\t.\t+\t.\t.'), (E'c1\tsrc\tgene\t5\t9\t.\t+\t.\tID=a;flag')))
+TO '{TEST_DIR}/null_values_in.gff' (FORMAT CSV, HEADER false, QUOTE '', ESCAPE '');
+
+statement ok
+CREATE TABLE null_values AS SELECT * FROM read_gff('{TEST_DIR}/null_values_in.gff');
+
+statement ok
+COPY (SELECT line FROM gff3_lines('null_values')) TO '{TEST_DIR}/null_values.gff' (FORMAT CSV, HEADER false, QUOTE '', ESCAPE '');
+
+query I
+SELECT line FROM file_lines('{TEST_DIR}/null_values.gff');
+----
+##gff-version 3
+c1 | Prodigal | CDS | 1 | 90 | 5.0 | + | 0 | ID=1_1;partial=00;
+c1 | src | gene | 5 | 9 | . | + | . | .
+c1 | src | gene | 5 | 9 | . | + | . | ID=a;flag
+
+query I
+SELECT count(*) FROM ((SELECT * FROM null_values EXCEPT ALL SELECT * FROM read_gff('{TEST_DIR}/null_values.gff'))
+                      UNION ALL
+                      (SELECT * FROM read_gff('{TEST_DIR}/null_values.gff') EXCEPT ALL SELECT * FROM null_values));
+----
+0
+
 # gzip, by extension, as COPY ... (FORMAT CSV) does.
 statement ok
 COPY (SELECT line FROM gff3_lines('features')) TO '{TEST_DIR}/roundtrip.gff.gz' (FORMAT CSV, HEADER false, QUOTE '', ESCAPE '');
@@ -292,13 +320,6 @@ SELECT * FROM gff3_lines('bad');
 ----
 empty type
 
-statement ok
-CREATE OR REPLACE VIEW bad AS SELECT * REPLACE (MAP {'ID': NULL::VARCHAR} AS attributes) FROM one;
-
-statement error
-SELECT * FROM gff3_lines('bad');
-----
-attribute 'ID' (row 1) is NULL
 
 statement ok
 CREATE OR REPLACE VIEW bad AS SELECT * REPLACE (E'ID=a\nb' AS attributes) FROM one;
@@ -306,7 +327,7 @@ CREATE OR REPLACE VIEW bad AS SELECT * REPLACE (E'ID=a\nb' AS attributes) FROM o
 statement error
 SELECT * FROM gff3_lines('bad');
 ----
-attributes text (row 1) has a tab or line break
+attributes text (row 1) has a control character
 
 statement ok
 CREATE OR REPLACE VIEW bad AS SELECT * REPLACE (E'ID=a\tb' AS attributes) FROM one;
@@ -314,7 +335,7 @@ CREATE OR REPLACE VIEW bad AS SELECT * REPLACE (E'ID=a\tb' AS attributes) FROM o
 statement error
 SELECT * FROM gff3_lines('bad');
 ----
-attributes text (row 1) has a tab or line break
+attributes text (row 1) has a control character
 
 statement ok
 CREATE OR REPLACE VIEW bad AS SELECT * REPLACE (E'ID=a\rb' AS attributes) FROM one;
@@ -322,7 +343,15 @@ CREATE OR REPLACE VIEW bad AS SELECT * REPLACE (E'ID=a\rb' AS attributes) FROM o
 statement error
 SELECT * FROM gff3_lines('bad');
 ----
-attributes text (row 1) has a tab or line break
+attributes text (row 1) has a control character
+
+statement ok
+CREATE OR REPLACE VIEW bad AS SELECT * REPLACE (E'ID=a\x01b' AS attributes) FROM one;
+
+statement error
+SELECT * FROM gff3_lines('bad');
+----
+attributes text (row 1) has a control character
 
 # The row named is the relation's.
 statement ok

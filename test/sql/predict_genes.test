@@ -714,6 +714,18 @@ SELECT * FROM predict_genes('anthus_chunks', mapping_table := 'twice_mapping', m
 ----
 maps read_id '61430_aco' more than once
 
+# Only the relation's keys mapped to a genome are checked: a key mapped twice that it does not have, or a second
+# mapping to NULL, is not one it reads.
+statement ok
+CREATE TABLE other_twice_mapping AS
+SELECT * FROM anthus_mapping UNION ALL SELECT 'not_here', 'a' UNION ALL SELECT 'not_here', 'b'
+UNION ALL SELECT '61430_aco', NULL;
+
+query I
+SELECT count(*) FROM predict_genes('anthus_chunks', mapping_table := 'other_twice_mapping', meta_mode := true);
+----
+22
+
 # A model is trained on a single chunked genome and written to training_path, as for contigs.
 statement ok
 SELECT * FROM predict_genes('anthus_chunks', mapping_table := 'anthus_mapping', training_path := '{TEST_DIR}/chunked.trn');

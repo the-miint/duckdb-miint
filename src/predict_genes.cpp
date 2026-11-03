@@ -33,6 +33,7 @@
 #include <filesystem>
 #include <map>
 #include <memory>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <unistd.h>
@@ -248,19 +249,18 @@ void ReadNamedParameters(const named_argument_map_t &params, PredictGenesBindDat
 	}
 }
 
-// Whether `relation` has a column `name`. A LIMIT 0 probe works for tables and views.
-bool HasColumn(ClientContext &context, const std::string &relation, const std::string &name) {
+// The column names of `relation`, lowercased. A LIMIT 0 probe works for tables and views.
+std::set<std::string> ColumnNames(ClientContext &context, const std::string &relation) {
 	auto conn = MakeReadOnlyHelperConnection(context);
 	auto probe = conn.Query("SELECT * FROM " + SQLIdentifier::ToString(relation) + " LIMIT 0");
 	if (probe->HasError()) {
 		throw BinderException("%s: cannot read '%s': %s", kFunction, relation, probe->GetError());
 	}
+	std::set<std::string> names;
 	for (const auto &n : probe->GetNames()) {
-		if (StringUtil::CIEquals(n.GetIdentifierName(), name)) {
-			return true;
-		}
+		names.insert(StringUtil::Lower(n.GetIdentifierName()));
 	}
-	return false;
+	return names;
 }
 
 // Contigs, one per row: read_id and sequence1, grouped into genomes by the genome_id column.
@@ -302,7 +302,7 @@ void BindContigs(ClientContext &context, PredictGenesBindData &data) {
 
 // Chunked contigs, as genomes are stored in blocks: rows of (read_id or feature_idx, chunk_index, chunk_data), a
 // contig's sequence its rows' chunk_data in chunk_index order. mapping_table maps each key to its genome_id.
-void BindChunked(ClientContext &context, PredictGenesBindData &data) {
+void BindChunked(ClientContext &context, PredictGenesBindData &data, const std::set<std::string> &columns) {
 	if (data.mapping_table.empty()) {
 		throw BinderException("%s: '%s' is chunked (it has chunk_data), so mapping_table, a table or view of "
 		                      "(read_id or feature_idx, genome_id) that maps each contig to its genome, is required",
@@ -318,8 +318,8 @@ void BindChunked(ClientContext &context, PredictGenesBindData &data) {
 		                      "in the order of their keys",
 		                      kFunction);
 	}
-	const bool has_read_id = HasColumn(context, data.relation, "read_id");
-	const bool has_feature_idx = HasColumn(context, data.relation, "feature_idx");
+	const bool has_read_id = columns.count("read_id") > 0;
+	const bool has_feature_idx = columns.count("feature_idx") > 0;
 	if (has_read_id == has_feature_idx) {
 		throw BinderException("%s: chunked '%s' must have one key column, read_id or feature_idx, naming each "
 		                      "chunk's contig (it has %s)",
@@ -356,6 +356,11 @@ void BindChunked(ClientContext &context, PredictGenesBindData &data) {
 		throw BinderException("%s: mapping_table '%s' must have %s and genome_id: %s", kFunction, data.mapping_table,
 		                      data.key_column, mapping->GetError());
 	}
+	if (mapping->GetTypes()[0] != data.read_id_type) {
+		throw BinderException("%s: %s is %s in '%s' but %s in mapping_table '%s'; the two must be the same type",
+		                      kFunction, data.key_column, data.read_id_type.ToString(), data.relation,
+		                      mapping->GetTypes()[0].ToString(), data.mapping_table);
+	}
 	data.genome_type = mapping->GetTypes()[1];
 	if (!IsAllowedIdType(data.genome_type)) {
 		throw BinderException("%s: genome_id column of mapping_table '%s' must be %s (got %s)", kFunction,
@@ -373,12 +378,13 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 	RejectCTERelationName(input, data->relation);
 	ReadNamedParameters(input.named_parameters, *data);
 
-	data->chunked = HasColumn(context, data->relation, "chunk_data");
+	const auto columns = ColumnNames(context, data->relation);
+	data->chunked = columns.count("chunk_data") > 0;
 	if (data->chunked) {
 		if (!data->mapping_table.empty()) {
 			RejectCTERelationName(input, data->mapping_table);
 		}
-		BindChunked(context, *data);
+		BindChunked(context, *data, columns);
 	} else {
 		BindContigs(context, *data);
 	}
@@ -537,13 +543,17 @@ void RequireProdigalVersion(const std::string &gpl_path) {
 // (config_params' trans_table allowed_values), rather than keep a list of its own.
 void RequireTransTable(const std::string &gpl_path, int32_t trans_table) {
 	std::string text;
+	bool ran = false;
 	try {
 		const auto result = gb::RunCapture({gpl_path, "--describe", kTrainTool});
-		if (result.spawned && result.exited_normally && result.exit_code == 0) {
-			text = result.stdout_text;
-		}
+		ran = result.spawned && result.exited_normally && result.exit_code == 0;
+		text = result.stdout_text;
 	} catch (...) {
 		// Undetermined, so refused below.
+	}
+	if (!ran) {
+		throw IOException("%s: could not run `%s --describe %s` to read the translation tables it takes", kFunction,
+		                  gpl_path, kTrainTool);
 	}
 	std::unique_ptr<yj::yyjson_doc, decltype(&yj::yyjson_doc_free)> doc(yj::yyjson_read(text.c_str(), text.size(), 0),
 	                                                                    &yj::yyjson_doc_free);
@@ -1189,11 +1199,14 @@ std::string GenomeCountQuery(const PredictGenesBindData &data) {
 	       " IN (SELECT " + key + " FROM " + relation + ")";
 }
 
-// A key mapped twice would put its contig in two genomes, or twice in one.
+// A key mapped twice would put its contig in two genomes, or twice in one. Only the relation's keys, mapped to a
+// genome, are checked: ContigsQuery reads no other.
 void RequireOneGenomePerKey(Connection &conn, const PredictGenesBindData &data) {
 	const auto key = SQLIdentifier::ToString(data.key_column);
-	auto result = conn.Query("SELECT " + key + "::VARCHAR FROM " + SQLIdentifier::ToString(data.mapping_table) +
-	                         " WHERE " + key + " IS NOT NULL GROUP BY " + key + " HAVING count(*) > 1 LIMIT 1");
+	auto result =
+	    conn.Query("SELECT " + key + "::VARCHAR FROM " + SQLIdentifier::ToString(data.mapping_table) +
+	               " WHERE genome_id IS NOT NULL AND " + key + " IN (SELECT " + key + " FROM " +
+	               SQLIdentifier::ToString(data.relation) + ") GROUP BY " + key + " HAVING count(*) > 1 LIMIT 1");
 	if (result->HasError()) {
 		throw InvalidInputException("%s: cannot read mapping_table '%s': %s", kFunction, data.mapping_table,
 		                            result->GetError());
