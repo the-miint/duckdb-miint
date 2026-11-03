@@ -220,10 +220,13 @@ const std::string GFF3_LINES = // NOLINT
     "line break, say); give attributes as a MAP to have them encoded', n)) "
     "                WHEN attributes_json->>'$' = '' THEN '.' "
     "                ELSE attributes_json->>'$' END "
-    "         WHEN json_type(attributes_json) <> 'OBJECT' "
+    "         WHEN NOT starts_with(typeof(attributes), 'MAP(') "
     "         THEN error(printf('gff3_lines: attributes must be MAP(VARCHAR, VARCHAR) or VARCHAR (got %s)', "
     "                           typeof(attributes))) "
-    "         WHEN len(attributes_entries) = 0 THEN '.' "
+    "         WHEN len(attributes_entries) = 0 "
+    // read_gff never reads {'': NULL} alone (';' alone is not a line it reads), and it would write an empty column.
+    "           OR (len(attributes_entries) = 1 AND attributes_entries[1].key = '' "
+    "               AND attributes_entries[1].value IS NULL) THEN '.' "
     // A NULL value is a token without '=', as read_gff reads one (an attributes column ending in ';' has an
     // empty one, and '.' is one): written as the key alone, so it reads back the same.
     "         ELSE array_to_string(list_transform(attributes_entries, "

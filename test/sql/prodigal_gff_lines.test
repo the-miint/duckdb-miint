@@ -165,6 +165,18 @@ SELECT count(*) FROM prodigal_gff_lines('pair') WHERE line LIKE '##gff-version%'
 ----
 1
 
+# The same read_id on both sides of the genome boundary: two contigs.
+statement ok
+CREATE TABLE same_id_pair AS SELECT * FROM meta WHERE read_id = (SELECT max(read_id) FROM meta) ORDER BY gene_index;
+
+statement ok
+INSERT INTO same_id_pair SELECT * REPLACE ('anthus2' AS genome_id) FROM meta WHERE read_id = (SELECT max(read_id) FROM meta) ORDER BY gene_index;
+
+query I
+SELECT count(*) FROM prodigal_gff_lines('same_id_pair') WHERE line LIKE '# Sequence Data:%';
+----
+2
+
 # -----------------------------------------------------------------------------
 # Rows built by hand
 # -----------------------------------------------------------------------------
@@ -487,6 +499,14 @@ starts with '#'
 
 statement ok
 CREATE OR REPLACE VIEW bad AS SELECT * REPLACE ('7' AS strand) FROM hand;
+
+statement error
+SELECT * FROM prodigal_gff_lines('bad');
+----
+strand must be '+' or '-'
+
+statement ok
+CREATE OR REPLACE VIEW bad AS SELECT * REPLACE ('.' AS strand) FROM hand;
 
 statement error
 SELECT * FROM prodigal_gff_lines('bad');

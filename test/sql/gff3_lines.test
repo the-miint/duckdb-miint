@@ -113,6 +113,30 @@ SELECT replace(line, E'\t', ' | ') FROM gff3_lines('no_attrs');
 c1 | src | gene | 5 | 6 | . | + | . | .
 c1 | src | gene | 5 | 6 | . | + | . | .
 
+# A lone empty key with no value is '.' too, rather than an empty column.
+statement ok
+CREATE VIEW empty_key_attrs AS
+SELECT 'c1' AS seqid, 'src' AS source, 'gene' AS type, 5 AS position, 7 AS stop_position, NULL AS score,
+       '?' AS strand, NULL AS phase, MAP {'': NULL::VARCHAR} AS attributes;
+
+query I
+SELECT replace(line, E'\t', ' | ') FROM gff3_lines('empty_key_attrs');
+----
+##gff-version 3
+c1 | src | gene | 5 | 6 | . | ? | . | .
+
+# DEL (0x7F) is a control character, encoded.
+statement ok
+CREATE VIEW del_attrs AS
+SELECT 'c1' AS seqid, 'src' AS source, 'gene' AS type, 5 AS position, 7 AS stop_position, NULL AS score,
+       '+' AS strand, NULL AS phase, MAP {'Note': 'a' || chr(127) || 'b'} AS attributes;
+
+query I
+SELECT replace(line, E'\t', ' | ') FROM gff3_lines('del_attrs');
+----
+##gff-version 3
+c1 | src | gene | 5 | 6 | . | + | . | Note=a%7Fb
+
 statement ok
 CREATE VIEW empty_text_attrs AS
 SELECT 'c1' AS seqid, 'src' AS source, 'gene' AS type, 5 AS position, 7 AS stop_position, NULL AS score,
@@ -352,6 +376,23 @@ statement error
 SELECT * FROM gff3_lines('bad');
 ----
 attributes text (row 1) has a control character
+
+# attributes of another type, a STRUCT among them, are refused.
+statement ok
+CREATE OR REPLACE VIEW bad AS SELECT * REPLACE ({'ID': 'a'} AS attributes) FROM one;
+
+statement error
+SELECT * FROM gff3_lines('bad');
+----
+attributes must be MAP(VARCHAR, VARCHAR) or VARCHAR (got STRUCT(
+
+statement ok
+CREATE OR REPLACE VIEW bad AS SELECT * REPLACE (5 AS attributes) FROM one;
+
+statement error
+SELECT * FROM gff3_lines('bad');
+----
+attributes must be MAP(VARCHAR, VARCHAR) or VARCHAR (got INTEGER)
 
 # The row named is the relation's.
 statement ok

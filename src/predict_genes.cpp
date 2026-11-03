@@ -624,10 +624,10 @@ std::string GenomeText(const Value &genome) {
 
 // Prodigal drops any character outside 'A'..'z', shifting every coordinate after it, so gpl-boundary refuses one;
 // refusing it here names the contig and its genome before a daemon round trip.
-void CheckContig(const Contig &c) {
+void CheckContig(const Contig &c, const PredictGenesBindData &data) {
 	if (c.sequence.empty()) {
-		throw InvalidInputException("%s: contig '%s' of genome '%s' has an empty sequence1", kFunction, c.name,
-		                            GenomeText(c.genome));
+		throw InvalidInputException("%s: contig '%s' of genome '%s' has an empty %s", kFunction, c.name,
+		                            GenomeText(c.genome), data.chunked ? "chunk_data" : "sequence1");
 	}
 	for (idx_t i = 0; i < c.sequence.size(); i++) {
 		const char ch = c.sequence[i];
@@ -672,7 +672,7 @@ bool FetchContig(PredictGenesGlobalState &g, const PredictGenesBindData &data, C
 		                            kFunction, out.name, GenomeText(out.genome));
 	}
 	out.sequence = StringValue::Get(sequence);
-	CheckContig(out);
+	CheckContig(out, data);
 	return true;
 }
 
@@ -1174,6 +1174,9 @@ std::string ContigsQuery(const PredictGenesBindData &data) {
 		       SQLIdentifier::ToString(data.order_column) + ", read_id";
 	}
 	const auto key = SQLIdentifier::ToString(data.key_column);
+	// A BLOB's bytes, as they are: a ::VARCHAR cast would write a byte DuckDB escapes as the four characters '\xHH'.
+	const std::string chunk_text =
+	    data.chunk_data_type.id() == LogicalTypeId::BLOB ? "decode(c.chunk_data)" : "c.chunk_data";
 	return StringUtil::Format(
 	    "SELECT m.genome_id, c.%s AS read_id, "
 	    "CASE WHEN count(c.chunk_data) <> count(*) "
@@ -1182,10 +1185,11 @@ std::string ContigsQuery(const PredictGenesBindData &data) {
 	    "       OR count(DISTINCT c.chunk_index) <> count(*) "
 	    "     THEN error(printf('%s: the chunk_index values of contig ''%%s'' are not 0, 1, 2, ... with none missing "
 	    "or repeated', c.%s::VARCHAR)) "
-	    "     ELSE string_agg(c.chunk_data::VARCHAR, '' ORDER BY c.chunk_index) END AS sequence1 "
+	    "     ELSE string_agg(%s, '' ORDER BY c.chunk_index) END AS sequence1 "
 	    "FROM %s c JOIN %s m ON c.%s = m.%s WHERE m.genome_id IS NOT NULL "
 	    "GROUP BY m.genome_id, c.%s ORDER BY m.genome_id, c.%s",
-	    key, kFunction, key, kFunction, key, relation, SQLIdentifier::ToString(data.mapping_table), key, key, key, key);
+	    key, kFunction, key, kFunction, key, chunk_text, relation, SQLIdentifier::ToString(data.mapping_table), key,
+	    key, key, key);
 }
 
 // The number of genomes ContigsQuery returns.

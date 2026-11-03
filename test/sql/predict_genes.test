@@ -668,6 +668,55 @@ SELECT count(*), count(DISTINCT read_id), any_value(typeof(read_id)) FROM predic
 ----
 129	22	BIGINT
 
+# A BLOB's bytes are the contig, as they are, not the text DuckDB prints for them: as text, 0x5C would be the four
+# characters '\x5C', lengthening the contig and shifting every coordinate after it.
+statement ok
+CREATE TABLE odd_blob_chunks AS
+SELECT feature_idx, chunk_index,
+       CASE WHEN feature_idx = 1 AND chunk_index = 0 THEN 'ACGT\x5CACGT'::BLOB ELSE chunk_data END AS chunk_data
+FROM feature_chunks;
+
+query I
+SELECT DISTINCT contig_length = (SELECT sum(octet_length(chunk_data)) FROM odd_blob_chunks WHERE feature_idx = 1)
+FROM predict_genes('odd_blob_chunks', mapping_table := 'feature_mapping', meta_mode := true) WHERE read_id = 1;
+----
+true
+
+# A byte outside 'A'..'z' is refused at its own position.
+statement ok
+CREATE OR REPLACE TABLE odd_blob_chunks AS
+SELECT feature_idx, chunk_index,
+       CASE WHEN feature_idx = 1 AND chunk_index = 0 THEN 'ACGT\xC3\xA9ACGT'::BLOB ELSE chunk_data END AS chunk_data
+FROM feature_chunks;
+
+statement error
+SELECT * FROM predict_genes('odd_blob_chunks', mapping_table := 'feature_mapping', meta_mode := true);
+----
+contig '1' of genome 'anthus' has character 0xc3 at position 5
+
+# Bytes that are not UTF-8 are refused.
+statement ok
+CREATE OR REPLACE TABLE odd_blob_chunks AS
+SELECT feature_idx, chunk_index,
+       CASE WHEN feature_idx = 1 AND chunk_index = 0 THEN 'ACGT\xAAACGT'::BLOB ELSE chunk_data END AS chunk_data
+FROM feature_chunks;
+
+statement error
+SELECT * FROM predict_genes('odd_blob_chunks', mapping_table := 'feature_mapping', meta_mode := true);
+----
+could not convert blob to UTF8
+
+# A contig whose chunks are all empty is named as such.
+statement ok
+CREATE TABLE empty_chunks AS
+SELECT read_id, chunk_index, CASE WHEN read_id = '61430_aco' THEN '' ELSE chunk_data END AS chunk_data
+FROM anthus_chunks;
+
+statement error
+SELECT * FROM predict_genes('empty_chunks', mapping_table := 'anthus_mapping', meta_mode := true);
+----
+contig '61430_aco' of genome 'anthus' has an empty chunk_data
+
 # Chunks whose key mapping_table does not map, or maps to a NULL genome, are skipped, as rows with a NULL genome_id
 # are.
 statement ok
@@ -694,6 +743,17 @@ CREATE TABLE repeated_chunks AS SELECT * FROM anthus_chunks UNION ALL SELECT * F
 
 statement error
 SELECT * FROM predict_genes('repeated_chunks', mapping_table := 'anthus_mapping', meta_mode := true);
+----
+the chunk_index values of contig '61430_aco'
+
+# A repeated index that also leaves one out: as many rows as indices, the largest one less than their count.
+statement ok
+CREATE TABLE repeated_gap_chunks AS
+SELECT * REPLACE (CASE WHEN read_id = '61430_aco' AND chunk_index = 1 THEN 0 ELSE chunk_index END AS chunk_index)
+FROM anthus_chunks;
+
+statement error
+SELECT * FROM predict_genes('repeated_gap_chunks', mapping_table := 'anthus_mapping', meta_mode := true);
 ----
 the chunk_index values of contig '61430_aco'
 

@@ -27,7 +27,7 @@ Requires gpl-boundary 0.5.0 or later (`SELECT install_gpl_boundary();`, or `inst
 
 ### Chunked input
 
-Genomes stored in blocks, a row per block of a contig's sequence, are read as they are. The relation has `chunk_data` (VARCHAR or BLOB), `chunk_index` (an integer, 0, 1, 2, ... within a contig) and one key column naming the contig, `read_id` or `feature_idx` (VARCHAR, BIGINT or UUID). A contig's sequence is its rows' `chunk_data` joined in `chunk_index` order. `mapping_table` (VARCHAR, required) names a table or view of the key column, of the same type, and `genome_id` (VARCHAR, BIGINT or UUID) that puts each contig in its genome. In place of `genome_id` and `order_by`:
+Genomes stored in blocks, a row per block of a contig's sequence, are read as they are. The relation has `chunk_data` (VARCHAR or BLOB, read byte for byte as stored; a BLOB must be UTF-8), `chunk_index` (an integer, 0, 1, 2, ... within a contig) and one key column naming the contig, `read_id` or `feature_idx` (VARCHAR, BIGINT or UUID). A contig's sequence is its rows' `chunk_data` joined in `chunk_index` order. `mapping_table` (VARCHAR, required) names a table or view of the key column, of the same type, and `genome_id` (VARCHAR, BIGINT or UUID) that puts each contig in its genome. In place of `genome_id` and `order_by`:
 
 - A genome's contigs are given to Prodigal in key order.
 - `read_id` in the output is the key, in its type.
