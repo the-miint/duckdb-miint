@@ -225,6 +225,7 @@ list(
   src/cluster_upgma_function.cpp
   src/community_distances.cpp
   src/community_distances_function.cpp
+  src/community_distances_gram.cpp
   src/compress_intervals.cpp
   src/compute_coverage_depth.cpp
   src/compute_msa_consensus.cpp
@@ -387,6 +388,17 @@ list(
   src/zip_utils.cpp
   third_party/microtar/microtar.c)
 
+# The sparse and dense distance kernels must round every multiply-add the same
+# way to stay bit-identical (community_distances.hpp), and contraction lets the
+# compiler fuse them in one kernel and not in the other. The file must not
+# include Eigen (docs/internals/embedded-tools.md, "The two Eigen defines"); its
+# product is in community_distances_gram.cpp. MSVC-style compilers are skipped:
+# DuckDB gives cl.exe no -march, and baseline x64 has no FMA.
+if(NOT MSVC)
+  set_source_files_properties(src/community_distances.cpp
+                              PROPERTIES COMPILE_OPTIONS -ffp-contract=off)
+endif()
+
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/isa_dispatch.cmake)
 miint_add_isa_variants(mmvec_kernel src/mmvec_kernel.cpp)
 
@@ -405,6 +417,7 @@ list(
   src/cluster_kmeans.cpp
   src/cluster_upgma.cpp
   src/community_distances.cpp
+  src/community_distances_gram.cpp
   src/CoverageDepthCalculator.cpp
   src/CumulativeCoverageAccumulator.cpp
   src/deblur.cpp
