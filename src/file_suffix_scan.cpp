@@ -1,4 +1,5 @@
 #include "file_suffix_scan.hpp"
+#include "table_function_common.hpp"
 
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -40,11 +41,13 @@ constexpr SuffixReader SUFFIX_READERS[] = {
 #endif
 };
 
-// The reader for path's suffix, or nullptr. Case is ignored: data.mzML is read_mzml's.
+// The reader for path's suffix, or nullptr. The format's suffix is matched in any case
+// (data.mzML is read_mzml's), the compression's as written: read_newick, read_paf and
+// read_gfa take a file for gzip only by a lower-case .gz.
 const char *ReaderFor(const string &path) {
+	const bool gzip = IsGzipped(path);
+	const bool zstd = StringUtil::EndsWith(path, ".zst");
 	auto name = StringUtil::Lower(path);
-	const bool gzip = StringUtil::EndsWith(name, ".gz");
-	const bool zstd = StringUtil::EndsWith(name, ".zst");
 	if (gzip) {
 		name.resize(name.size() - 3);
 	} else if (zstd) {

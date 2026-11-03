@@ -54,7 +54,7 @@ SELECT * FROM tree.nwk;            -- a file in the current directory needs no q
 | `.sff` | `read_sequences_sff` | |
 | `.biom` | `read_biom`, in a build that reads BIOM | |
 
-- Case is ignored, so `.mzML` and `.mzml` are both read by `read_mzml`.
+- The format's suffix is matched in any case, so `.mzML` and `.mzml` are both read by `read_mzml`. The compression suffix must be lower case, `.gz` or `.zst`: `read_newick`, `read_paf` and `read_gfa` take a file for gzip only by a lower-case `.gz`.
 - Only the path is passed. For any other parameter, such as `sequence2` for paired-end reads or `include_filepath`, call the reader.
 - A compressed form the table does not list is not read: DuckDB reports that no extension can read the file, rather than the reader failing on bytes it cannot parse.
 - A table or view of the same name is read instead of the file, as for DuckDB's own formats.

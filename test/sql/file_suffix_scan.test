@@ -51,6 +51,10 @@ COPY (FROM read_fastx('data/fastq/test_r2.fq')) TO '{TEST_DIR}/fss.frn' (FORMAT 
 statement ok
 COPY (FROM read_fastx('data/fastq/test_r2.fq')) TO '{TEST_DIR}/fss.fasta.gz' (FORMAT FASTA);
 
+# The format's suffix is matched in any case.
+statement ok
+COPY (FROM read_fastx('data/fastq/test_r2.fq')) TO '{TEST_DIR}/fss_upper.FASTA.gz' (FORMAT FASTA);
+
 # .faa holds protein, which read_fastx reads as it reads nucleotides.
 statement ok
 COPY (SELECT 'p1' AS read_id, 'MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQ' AS sequence1) TO '{TEST_DIR}/fss.faa' (FORMAT FASTA);
@@ -77,6 +81,7 @@ UNION ALL SELECT 'ffn', t::VARCHAR FROM '{TEST_DIR}/fss.ffn' t
 UNION ALL SELECT 'frn', t::VARCHAR FROM '{TEST_DIR}/fss.frn' t
 UNION ALL SELECT 'faa', t::VARCHAR FROM '{TEST_DIR}/fss.faa' t
 UNION ALL SELECT 'fasta.gz', t::VARCHAR FROM '{TEST_DIR}/fss.fasta.gz' t
+UNION ALL SELECT 'FASTA.gz', t::VARCHAR FROM '{TEST_DIR}/fss_upper.FASTA.gz' t
 UNION ALL SELECT 'nwk', t::VARCHAR FROM 'data/newick/simple.nwk' t
 UNION ALL SELECT 'nwk.gz', t::VARCHAR FROM 'data/newick/simple.nwk.gz' t
 UNION ALL SELECT 'newick', t::VARCHAR FROM '{TEST_DIR}/fss.newick' t
@@ -113,6 +118,7 @@ UNION ALL SELECT 'ffn', t::VARCHAR FROM read_fastx('{TEST_DIR}/fss.ffn') t
 UNION ALL SELECT 'frn', t::VARCHAR FROM read_fastx('{TEST_DIR}/fss.frn') t
 UNION ALL SELECT 'faa', t::VARCHAR FROM read_fastx('{TEST_DIR}/fss.faa') t
 UNION ALL SELECT 'fasta.gz', t::VARCHAR FROM read_fastx('{TEST_DIR}/fss.fasta.gz') t
+UNION ALL SELECT 'FASTA.gz', t::VARCHAR FROM read_fastx('{TEST_DIR}/fss_upper.FASTA.gz') t
 UNION ALL SELECT 'nwk', t::VARCHAR FROM read_newick('data/newick/simple.nwk') t
 UNION ALL SELECT 'nwk.gz', t::VARCHAR FROM read_newick('data/newick/simple.nwk.gz') t
 UNION ALL SELECT 'newick', t::VARCHAR FROM read_newick('{TEST_DIR}/fss.newick') t
@@ -140,6 +146,7 @@ UNION ALL SELECT 'sff', t::VARCHAR FROM read_sequences_sff('data/sff/basic_2read
 query II
 SELECT suffix, count(*) FROM by_suffix GROUP BY ALL ORDER BY ALL
 ----
+FASTA.gz	2
 bam	4
 fa	2
 faa	1
@@ -244,6 +251,11 @@ COPY (SELECT 1 AS x) TO '{TEST_DIR}/fss_unclaimed.mzxml.gz' (FORMAT csv, COMPRES
 statement ok
 COPY (SELECT 1 AS x) TO '{TEST_DIR}/fss_unclaimed.sff.gz' (FORMAT csv, COMPRESSION gzip);
 
+# read_newick, read_paf and read_gfa take a file for gzip only by a lower-case .gz, so the
+# compression suffix is matched as written: read_newick would parse X.NWK.GZ's gzip bytes.
+statement ok
+COPY (SELECT 1 AS x) TO '{TEST_DIR}/fss_unclaimed.NWK.GZ' (FORMAT csv, COMPRESSION gzip);
+
 statement error
 FROM '{TEST_DIR}/fss_unclaimed.fq.zst'
 ----
@@ -286,5 +298,10 @@ No extension found that is capable of reading the file
 
 statement error
 FROM '{TEST_DIR}/fss_unclaimed.sff.gz'
+----
+No extension found that is capable of reading the file
+
+statement error
+FROM '{TEST_DIR}/fss_unclaimed.NWK.GZ'
 ----
 No extension found that is capable of reading the file
