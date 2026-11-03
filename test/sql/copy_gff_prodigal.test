@@ -601,6 +601,27 @@ COPY features TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
 ----
 the query has no read_id column; it needs predict_genes' columns
 
+# predict_genes' column types are checked as the query is bound, naming the column.
+statement error
+COPY (SELECT * REPLACE ('x' AS position) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+COPY FORMAT GFF: position must be an integer (got VARCHAR)
+
+statement error
+COPY (SELECT * REPLACE ('x' AS score) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+COPY FORMAT GFF: score must be a number (got VARCHAR)
+
+statement error
+COPY (SELECT * REPLACE (1 AS uses_sd) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+COPY FORMAT GFF: uses_sd must be BOOLEAN (got INTEGER)
+
+statement error
+COPY (SELECT * REPLACE (1 AS strand) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+COPY FORMAT GFF: strand must be VARCHAR (got INTEGER)
+
 # PARTITION_BY is (genome_id), and needs the column.
 statement error
 COPY hand TO '{TEST_DIR}/bad_dir' (FORMAT GFF, DIALECT 'prodigal', PARTITION_BY (read_id));

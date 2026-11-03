@@ -463,6 +463,26 @@ COPY features TO '{TEST_DIR}/bad.gff' (FORMAT GFF, APPEND true);
 COPY FORMAT GFF does not take APPEND
 
 statement error
+COPY features TO '{TEST_DIR}/bad.gff' (FORMAT GFF, FILE_SIZE_BYTES 1000);
+----
+COPY FORMAT GFF does not take FILE_SIZE_BYTES
+
+statement error
+COPY features TO '{TEST_DIR}/bad.gff' (FORMAT GFF, PRESERVE_ORDER false);
+----
+COPY FORMAT GFF does not take PRESERVE_ORDER
+
+statement error
+COPY features TO '{TEST_DIR}/bad_dir' (FORMAT GFF, WRITE_PARTITION_COLUMNS true);
+----
+COPY FORMAT GFF does not take WRITE_PARTITION_COLUMNS
+
+statement error
+COPY features TO '{TEST_DIR}/bad_dir' (FORMAT GFF, PARTITION_BY (seqid), PARTITION_PATH 'x_' || seqid);
+----
+COPY FORMAT GFF does not take PARTITION_PATH
+
+statement error
 COPY features TO '{TEST_DIR}/bad_dir' (FORMAT GFF, PARTITION_BY (seqid));
 ----
 PARTITION_BY is (genome_id) with DIALECT 'prodigal'
@@ -483,14 +503,23 @@ COPY (SELECT 'c1' AS read_id, 1 AS gene_index) TO '{TEST_DIR}/bad.gff' (FORMAT G
 ----
 these look like predict_genes' columns; add DIALECT 'prodigal'
 
-# attributes types are checked as the query is bound: a STRUCT or JSON is refused even when every value is NULL.
+# read_gff's columns with a gene_index too are GFF3.
+statement ok
+COPY (SELECT *, 1 AS gene_index FROM features) TO '{TEST_DIR}/with_gene_index.gff' (FORMAT GFF);
+
+query I
+SELECT count(*) FROM read_gff('{TEST_DIR}/with_gene_index.gff');
+----
+7
+
+# Types are checked as the query is bound: a column of the wrong type is refused even when every value is NULL.
 statement error
 COPY (SELECT * REPLACE (NULL::STRUCT(ID VARCHAR) AS attributes) FROM features) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
 ----
 attributes must be MAP(VARCHAR, VARCHAR) or VARCHAR (got STRUCT(ID VARCHAR))
 
 statement error
-COPY (SELECT * REPLACE ('{"ID": "x"}'::JSON AS attributes) FROM features) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+COPY (SELECT * REPLACE (NULL::JSON AS attributes) FROM features) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
 ----
 attributes must be MAP(VARCHAR, VARCHAR) or VARCHAR (got JSON)
 
@@ -498,3 +527,13 @@ statement error
 COPY (SELECT * REPLACE (MAP {'k': 3} AS attributes) FROM features) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
 ----
 attributes must be MAP(VARCHAR, VARCHAR) or VARCHAR (got MAP(VARCHAR, INTEGER))
+
+statement error
+COPY (SELECT * REPLACE (NULL::VARCHAR AS score) FROM features) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+score must be a number (got VARCHAR)
+
+statement error
+COPY (SELECT * REPLACE (NULL::DOUBLE AS position) FROM features) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+position must be an integer (got DOUBLE)

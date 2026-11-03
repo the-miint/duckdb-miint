@@ -3,8 +3,8 @@
 #include "copy_option_parsing.hpp"
 #include "predict_genes.hpp"
 
+#include "duckdb/common/sql_identifier.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/parser/keyword_helper.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/query_node.hpp"
 #include "duckdb/parser/statement/copy_statement.hpp"
@@ -101,6 +101,30 @@ void CheckGff3Types(const vector<string> &names, const vector<LogicalType> &type
 	RequireType(text(type(8)) || IsTextMap(type(8)), "attributes", type(8), "MAP(VARCHAR, VARCHAR) or VARCHAR");
 }
 
+// predict_genes' column types (read_id aside, which may be any key type), checked as the query is bound: the
+// line's printf would otherwise fail on a wrong type without naming the column.
+void CheckProdigalTypes(const vector<string> &names, const vector<LogicalType> &types) {
+	const auto cols = FindColumns(names, kProdigalColumns, "predict_genes' columns");
+	for (idx_t i = 0; i < kProdigalColumns.size(); i++) {
+		const auto &name = kProdigalColumns[i];
+		const auto &t = types[cols[i]];
+		if (IsNullType(t) || name == "read_id") {
+			continue;
+		}
+		if (name == "gene_index" || name == "position" || name == "stop_position" || name == "contig_length" ||
+		    name == "translation_table") {
+			RequireType(t.IsIntegral(), name, t, "an integer");
+		} else if (name == "partial_left" || name == "partial_right" || name == "uses_sd") {
+			RequireType(t.id() == LogicalTypeId::BOOLEAN, name, t, "BOOLEAN");
+		} else if (name == "strand" || name == "start_type" || name == "rbs_motif" || name == "rbs_spacer" ||
+		           name == "model_desc") {
+			RequireType(IsPlainVarchar(t), name, t, "VARCHAR");
+		} else {
+			RequireType(t.IsNumeric(), name, t, "a number");
+		}
+	}
+}
+
 bool HasColumn(const vector<string> &names, const char *name) {
 	for (const auto &n : names) {
 		if (StringUtil::CIEquals(n, name)) {
@@ -142,6 +166,12 @@ BoundStatement GffCopyPlan(Binder &binder, CopyStatement &stmt) {
 		}
 	}
 
+	// PARTITION_PATH is a parsed option, bound against the partition columns later; the rewrite would pass it on
+	// to the CSV writer unchecked, so it is refused here, as DuckDB refuses it for its own rewritten formats.
+	if (info.parsed_options.find("partition_path") != info.parsed_options.end()) {
+		throw BinderException("COPY FORMAT GFF does not take PARTITION_PATH");
+	}
+
 	// The query's columns, to check them here and name what is missing, rather than fail inside the macro.
 	vector<string> names;
 	vector<LogicalType> types;
@@ -156,7 +186,11 @@ BoundStatement GffCopyPlan(Binder &binder, CopyStatement &stmt) {
 	}
 
 	const bool prodigal = dialect == kDialectProdigal;
-	if (!dialect_set && HasColumn(names, "gene_index")) {
+	bool has_gff_columns = true;
+	for (const auto &c : kGffColumns) {
+		has_gff_columns = has_gff_columns && HasColumn(names, c.c_str());
+	}
+	if (!dialect_set && !has_gff_columns && HasColumn(names, "gene_index")) {
 		// predict_genes' rows are not GFF3 features; rather than fail on read_gff's missing columns, say what to add.
 		throw BinderException("COPY FORMAT GFF: these look like predict_genes' columns; add DIALECT '%s' to write "
 		                      "Prodigal's GFF",
@@ -194,7 +228,7 @@ BoundStatement GffCopyPlan(Binder &binder, CopyStatement &stmt) {
 				                      source);
 			}
 		}
-		FindColumns(names, kProdigalColumns, "predict_genes' columns");
+		CheckProdigalTypes(names, types);
 		const bool has_genome = HasColumn(names, "genome_id");
 		if (per_genome && !has_genome) {
 			throw BinderException("COPY FORMAT GFF: PARTITION_BY (genome_id), but the query has no genome_id column");
@@ -207,7 +241,7 @@ BoundStatement GffCopyPlan(Binder &binder, CopyStatement &stmt) {
 		sql = StringUtil::Format("WITH %s AS (SELECT 1)%s SELECT %sline FROM _miint_prodigal_gff_lines('%s', source := "
 		                         "%s, per_genome := %s)",
 		                         kInput, with_genome, per_genome ? "genome_id, " : "",
-		                         has_genome ? kInput : kInputWithGenome, KeywordHelper::WriteQuoted(source, '\''),
+		                         has_genome ? kInput : kInputWithGenome, SQLString::ToString(source),
 		                         per_genome ? "true" : "false");
 	}
 
