@@ -42,8 +42,8 @@ constexpr FormatReader FORMAT_READERS[] = {
 };
 
 // The reader for path, or nullptr. The format's suffix is matched in any case (data.mzML is
-// read_mzml's), the compression's as written: a reader that decides gzip by name does so with
-// IsGzipped, which takes only a lower-case .gz.
+// read_mzml's). The compression's is matched as written for every reader, since miint's own
+// readers that decide gzip by name use IsGzipped, which takes only a lower-case .gz.
 const char *ReaderFor(const string &path) {
 	const bool gzip = IsGzipped(path);
 	const bool zstd = StringUtil::EndsWith(path, ".zst");

@@ -17,9 +17,9 @@ SET enable_progress_bar = false;
 # FROM 'x.fq' is shorthand for FROM read_fastx('x.fq') and nothing else: each claimed suffix
 # must give exactly the rows its reader gives for the same path. Each row of FORMAT_READERS
 # is tested once per compression, read where the row claims it and refused where it does not.
-# Suffixes with no committed fixture are written here with miint's COPY formats. The committed
-# .gz and .zst fixtures are `gzip -n` and `zstd` of their uncompressed siblings, and
-# data/gff/test.gff3 is a copy of data/gff/test.gff.
+# Suffixes with no committed fixture are written here with miint's COPY formats. The .gz and
+# .zst fixtures under data/gff, data/jplace and data/sam are `gzip -n` and `zstd` of their
+# uncompressed siblings, and data/gff/test.gff3 is a copy of data/gff/test.gff.
 
 statement ok
 COPY (FROM read_fastx('data/fastq/test_r2.fq')) TO '{TEST_DIR}/fss.fq' (FORMAT FASTQ);
