@@ -119,7 +119,7 @@ SELECT count(meta_bin), count(model_desc) FROM single;
 statement ok
 CREATE TABLE meta AS SELECT * FROM predict_genes('anthus', genome_id := 'genome', meta_mode := true);
 
-# prodigal_gff_lines.test reads this output, and the single-genome one, saved (data/prodigal/README.md); they are
+# copy_gff_prodigal.test reads this output, and the single-genome one, saved (data/prodigal/README.md); they are
 # still predict_genes' output.
 query II
 SELECT (SELECT count(*) FROM ((SELECT * FROM single EXCEPT ALL FROM read_csv('data/prodigal/anthus_single_genes.csv.gz'))

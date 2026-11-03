@@ -1,7 +1,7 @@
 #!/bin/bash
 # predict_genes refuses a gpl-boundary whose prodigal or prodigal-train is not Prodigal 2.6.5 (the version
-# prodigal_gff_lines names), or does not say, before it starts the daemon; and checks again on every call, so a
-# binary swapped in place is seen. (The release gate itself: gpl_boundary_version.sh.) The fake binaries are bash
+# COPY FORMAT GFF's DIALECT 'prodigal' names), or does not say, before it starts the daemon; and checks again on
+# every call, so a binary swapped in place is seen. (The release gate itself: gpl_boundary_version.sh.) The fake binaries are bash
 # scripts answering --version, so this needs predict_genes compiled in, not gpl-boundary installed.
 
 set -u

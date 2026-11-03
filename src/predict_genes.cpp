@@ -499,7 +499,8 @@ struct PredictGenesGlobalState : public GlobalTableFunctionState {
 };
 
 // Refuse a gpl-boundary whose `--version` does not list prodigal and prodigal-train at kProdigalVersion, the version
-// prodigal_gff_lines names. Probed on every call, so a binary replaced in place is seen by the next query.
+// COPY FORMAT GFF's DIALECT 'prodigal' names. Probed on every call, so a binary replaced in place is seen by the next
+// query.
 void RequireProdigalVersion(const std::string &gpl_path) {
 	std::string text;
 	try {
@@ -531,7 +532,8 @@ void RequireProdigalVersion(const std::string &gpl_path) {
 			continue;
 		}
 		const std::string found = it == versions.end() ? std::string("no version for it") : "version " + it->second;
-		throw IOException("%s requires a gpl-boundary whose %s is version %s (the version prodigal_gff_lines names), "
+		throw IOException("%s requires a gpl-boundary whose %s is version %s (the version COPY FORMAT GFF's DIALECT "
+		                  "'prodigal' names), "
 		                  "but the binary at %s reports %s. Point "
 		                  "MIINT_GPL_BOUNDARY_PATH at a gpl-boundary that ships %s %s, or use a miint release that "
 		                  "supports this one.",
@@ -813,7 +815,7 @@ void AppendStatusRow(ClientContext &context, PredictGenesGlobalState &g, const V
 	g.rows->Append(out);
 }
 
-// A row of a contig without genes: its contig columns, every gene column NULL. prodigal_gff_lines writes its header
+// A row of a contig without genes: its contig columns, every gene column NULL. COPY FORMAT GFF writes its header
 // lines from it, as the CLI does for such a contig.
 void AppendBarrenContigRow(ClientContext &context, PredictGenesGlobalState &g, const Contig &c, const ContigInfo &ci) {
 	DataChunk out;

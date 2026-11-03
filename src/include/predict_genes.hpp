@@ -6,7 +6,7 @@
 namespace duckdb {
 
 // The Prodigal predict_genes is built for. predict_genes refuses a gpl-boundary whose --version lists another. A
-// literal too, for prodigal_gff_lines' SQL (miint_macros.hpp).
+// literal too, for COPY FORMAT GFF's Prodigal SQL (miint_macros.hpp).
 #define PRODIGAL_VERSION_LITERAL "2.6.5"
 constexpr const char *kProdigalVersion = PRODIGAL_VERSION_LITERAL;
 

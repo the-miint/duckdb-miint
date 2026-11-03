@@ -131,9 +131,10 @@ const std::string READ_GFF = // NOLINT
     ") "
     "WHERE keep; ";
 
-// gff3_lines(relation) / prodigal_gff_lines(relation, ...)
+// _miint_gff3_lines(relation) / _miint_prodigal_gff_lines(relation, ...)
 //
-// GFF files as lines, one row each, for COPY ... (FORMAT CSV, HEADER false, QUOTE '', ESCAPE '') to write. The rows
+// COPY ... (FORMAT GFF)'s internals (src/copy_gff.cpp): GFF files as lines, one row each, which the CSV writer
+// (HEADER false, QUOTE '', ESCAPE '') writes. The rows
 // are numbered in the relation's order (row_number() OVER ()), and the lines come out in that order.
 
 // A GFF3 column 9 key or value, with the characters GFF3 reserves there (and '%' and control characters)
@@ -177,51 +178,52 @@ const std::string MIINT_GFF_INTEGRAL = // NOLINT
 // so the end written is stop_position - 1. attributes is a MAP, encoded, or text, written as given; to tell them
 // apart in one expression, it goes through JSON (an OBJECT or a string).
 const std::string GFF3_LINES = // NOLINT
-    "CREATE OR REPLACE MACRO gff3_lines(relation) AS TABLE "
+    "CREATE OR REPLACE MACRO _miint_gff3_lines(relation) AS TABLE "
     "SELECT CASE WHEN raw_line IS NULL "
-    "            THEN error(printf('gff3_lines: row %d has a NULL where its line needs a value', n)) "
+    "            THEN error(printf('COPY FORMAT GFF: row %d has a NULL where its line needs a value', n)) "
     "            ELSE raw_line END AS line "
     "FROM ( "
     "  SELECT 0 AS n, '##gff-version 3' AS raw_line "
     "  UNION ALL "
     "  SELECT n, "
-    "    _miint_gff_text('gff3_lines', seqid, 'seqid', n, true) || chr(9) || "
-    "    _miint_gff_text('gff3_lines', source, 'source', n, false) || chr(9) || "
-    "    _miint_gff_text('gff3_lines', type, 'type', n, false) || chr(9) || "
+    "    _miint_gff_text('COPY FORMAT GFF', seqid, 'seqid', n, true) || chr(9) || "
+    "    _miint_gff_text('COPY FORMAT GFF', source, 'source', n, false) || chr(9) || "
+    "    _miint_gff_text('COPY FORMAT GFF', type, 'type', n, false) || chr(9) || "
     "    CASE WHEN NOT _miint_gff_integral(position) "
-    "         THEN error(printf('gff3_lines: position must be an integer (got %s)', typeof(position))) "
+    "         THEN error(printf('COPY FORMAT GFF: position must be an integer (got %s)', typeof(position))) "
     "         WHEN position IS NULL OR TRY_CAST(position AS HUGEINT) < 1 "
-    "         THEN error(printf('gff3_lines: position must be at least 1 (row %d has %s)', n, position::VARCHAR)) "
+    "         THEN error(printf('COPY FORMAT GFF: position must be at least 1 (row %d has %s)', n, position::VARCHAR)) "
     "         ELSE position::VARCHAR END || chr(9) || "
     "    CASE WHEN NOT _miint_gff_integral(stop_position) "
-    "         THEN error(printf('gff3_lines: stop_position must be an integer (got %s)', typeof(stop_position))) "
+    "         THEN error(printf('COPY FORMAT GFF: stop_position must be an integer (got %s)', typeof(stop_position))) "
     "         WHEN stop_position IS NULL OR TRY_CAST(stop_position AS HUGEINT) <= TRY_CAST(position AS HUGEINT) "
-    "         THEN error(printf('gff3_lines: stop_position must be greater than position (row %d has %s and %s)', "
+    "         THEN error(printf('COPY FORMAT GFF: stop_position must be greater than position (row %d has %s and %s)', "
     "                           n, position::VARCHAR, stop_position::VARCHAR)) "
     "         ELSE (TRY_CAST(stop_position AS HUGEINT) - 1)::VARCHAR END || chr(9) || "
     "    CASE WHEN score IS NULL THEN '.' "
     "         WHEN typeof(score) = 'VARCHAR' OR TRY_CAST(score::VARCHAR AS DOUBLE) IS NULL "
-    "         THEN error(printf('gff3_lines: score must be a number (got %s)', typeof(score))) "
+    "         THEN error(printf('COPY FORMAT GFF: score must be a number (got %s)', typeof(score))) "
     "         ELSE score::DOUBLE::VARCHAR END || chr(9) || "
     "    CASE WHEN strand IS NULL THEN '.' "
     "         WHEN strand::VARCHAR IN ('+', '-', '.', '?') THEN strand::VARCHAR "
-    "         ELSE error(printf('gff3_lines: strand must be ''+'', ''-'', ''.'', ''?'' or NULL (row %d has ''%s'')', "
+    "         ELSE error(printf('COPY FORMAT GFF: strand must be ''+'', ''-'', ''.'', ''?'' or NULL (row %d has "
+    "''%s'')', "
     "                           n, strand::VARCHAR)) END || chr(9) || "
     "    CASE WHEN NOT _miint_gff_integral(phase) "
-    "         THEN error(printf('gff3_lines: phase must be an integer (got %s)', typeof(phase))) "
+    "         THEN error(printf('COPY FORMAT GFF: phase must be an integer (got %s)', typeof(phase))) "
     "         WHEN phase IS NULL THEN '.' "
     "         WHEN TRY_CAST(phase AS HUGEINT) BETWEEN 0 AND 2 THEN phase::VARCHAR "
-    "         ELSE error(printf('gff3_lines: phase must be 0, 1, 2 or NULL (row %d has %s)', n, phase::VARCHAR)) "
+    "         ELSE error(printf('COPY FORMAT GFF: phase must be 0, 1, 2 or NULL (row %d has %s)', n, phase::VARCHAR)) "
     "    END || chr(9) || "
     "    CASE WHEN attributes_json IS NULL THEN '.' "
     "         WHEN json_type(attributes_json) = 'VARCHAR' THEN "
     "           CASE WHEN regexp_matches(attributes_json->>'$', '[[:cntrl:]]') "
-    "                THEN error(printf('gff3_lines: attributes text (row %d) has a control character (a tab or "
+    "                THEN error(printf('COPY FORMAT GFF: attributes text (row %d) has a control character (a tab or "
     "line break, say); give attributes as a MAP to have them encoded', n)) "
     "                WHEN attributes_json->>'$' = '' THEN '.' "
     "                ELSE attributes_json->>'$' END "
     "         WHEN NOT starts_with(typeof(attributes), 'MAP(') "
-    "         THEN error(printf('gff3_lines: attributes must be MAP(VARCHAR, VARCHAR) or VARCHAR (got %s)', "
+    "         THEN error(printf('COPY FORMAT GFF: attributes must be MAP(VARCHAR, VARCHAR) or VARCHAR (got %s)', "
     "                           typeof(attributes))) "
     "         WHEN len(attributes_entries) = 0 "
     // read_gff never reads {'': NULL} alone (';' alone is not a line it reads), and it would write an empty column.
@@ -250,7 +252,7 @@ const std::string GFF3_LINES = // NOLINT
 // writes its header lines only, as the CLI does. With per_genome, each genome starts its own file: its own version
 // line, and seqnum from 1, for COPY's PARTITION_BY (genome_id).
 const std::string PRODIGAL_GFF_LINES = // NOLINT
-    "CREATE OR REPLACE MACRO prodigal_gff_lines(relation, source := 'Prodigal_v" PRODIGAL_VERSION_LITERAL
+    "CREATE OR REPLACE MACRO _miint_prodigal_gff_lines(relation, source := 'Prodigal_v" PRODIGAL_VERSION_LITERAL
     "', per_genome := false) AS TABLE "
     "WITH numbered AS ( "
     "  SELECT row_number() OVER () AS n, * FROM query_table(relation) "
@@ -271,47 +273,47 @@ const std::string PRODIGAL_GFF_LINES = // NOLINT
     "    CASE WHEN per_genome AND new_genome THEN ['##gff-version  3'] ELSE [] END || "
     "    CASE WHEN new_contig THEN [ "
     "      printf('# Sequence Data: seqnum=%d;seqlen=%d;seqhdr=\"%s\"', seqnum, "
-    "             _miint_gff_required('prodigal_gff_lines', contig_length, 'contig_length', n), "
-    "             _miint_gff_text('prodigal_gff_lines', read_id, 'read_id', n, true)), "
+    "             _miint_gff_required('COPY FORMAT GFF', contig_length, 'contig_length', n), "
+    "             _miint_gff_text('COPY FORMAT GFF', read_id, 'read_id', n, true)), "
     "      printf('# Model Data: version=Prodigal.v" PRODIGAL_VERSION_LITERAL
     ";run_type=%s;model=\"%s\";gc_cont=%.2f;transl_table=%d;uses_sd=%d', "
     "             CASE WHEN model_desc IS NULL THEN 'Single' ELSE 'Metagenomic' END, "
     "             CASE WHEN model_desc IS NULL THEN 'Ab initio' "
-    "                  ELSE _miint_gff_text('prodigal_gff_lines', model_desc, 'model_desc', n, false) END, "
-    "             _miint_gff_required('prodigal_gff_lines', model_gc_content, 'model_gc_content', n) * 100.0, "
-    "             _miint_gff_required('prodigal_gff_lines', translation_table, 'translation_table', n), "
-    "             _miint_gff_required('prodigal_gff_lines', uses_sd, 'uses_sd', n)::INTEGER) "
+    "                  ELSE _miint_gff_text('COPY FORMAT GFF', model_desc, 'model_desc', n, false) END, "
+    "             _miint_gff_required('COPY FORMAT GFF', model_gc_content, 'model_gc_content', n) * 100.0, "
+    "             _miint_gff_required('COPY FORMAT GFF', translation_table, 'translation_table', n), "
+    "             _miint_gff_required('COPY FORMAT GFF', uses_sd, 'uses_sd', n)::INTEGER) "
     "    ] ELSE [] END || "
     "    CASE WHEN gene_index IS NULL THEN [] ELSE [ "
-    "      _miint_gff_text('prodigal_gff_lines', read_id, 'read_id', n, true) || chr(9) || "
+    "      _miint_gff_text('COPY FORMAT GFF', read_id, 'read_id', n, true) || chr(9) || "
     "      CASE WHEN source = '' OR regexp_matches(source, '[[:cntrl:]]') "
-    "           THEN error(printf('prodigal_gff_lines: source ''%s'' is empty or has a control character, which a "
+    "           THEN error(printf('COPY FORMAT GFF: source ''%s'' is empty or has a control character, which a "
     "GFF line cannot hold', source)) "
     "           ELSE source END || chr(9) || 'CDS' || chr(9) || "
     "      printf('%d\t%d\t%.1f\t%s\t0\tID=%d_%d;partial=%d%d;start_type=%s;rbs_motif=%s;rbs_spacer=%s;gc_cont=%.3f;"
     "conf=%.2f;score=%.2f;cscore=%.2f;sscore=%.2f;rscore=%.2f;uscore=%.2f;tscore=%.2f;', "
-    "             _miint_gff_required('prodigal_gff_lines', position, 'position', n), "
-    "             _miint_gff_required('prodigal_gff_lines', stop_position, 'stop_position', n) - 1, "
-    "             _miint_gff_required('prodigal_gff_lines', score, 'score', n), "
-    "             CASE WHEN _miint_gff_required('prodigal_gff_lines', strand, 'strand', n) IN ('+', '-') THEN strand "
-    "                  ELSE error(printf('prodigal_gff_lines: strand must be ''+'' or ''-'' (row %d has ''%s'')', "
+    "             _miint_gff_required('COPY FORMAT GFF', position, 'position', n), "
+    "             _miint_gff_required('COPY FORMAT GFF', stop_position, 'stop_position', n) - 1, "
+    "             _miint_gff_required('COPY FORMAT GFF', score, 'score', n), "
+    "             CASE WHEN _miint_gff_required('COPY FORMAT GFF', strand, 'strand', n) IN ('+', '-') THEN strand "
+    "                  ELSE error(printf('COPY FORMAT GFF: strand must be ''+'' or ''-'' (row %d has ''%s'')', "
     "                                    n, strand::VARCHAR)) END, "
     "             seqnum, gene_index, "
-    "             _miint_gff_required('prodigal_gff_lines', partial_left, 'partial_left', n)::INTEGER, "
-    "             _miint_gff_required('prodigal_gff_lines', partial_right, 'partial_right', n)::INTEGER, "
-    "             _miint_gff_text('prodigal_gff_lines', start_type, 'start_type', n, false), "
+    "             _miint_gff_required('COPY FORMAT GFF', partial_left, 'partial_left', n)::INTEGER, "
+    "             _miint_gff_required('COPY FORMAT GFF', partial_right, 'partial_right', n)::INTEGER, "
+    "             _miint_gff_text('COPY FORMAT GFF', start_type, 'start_type', n, false), "
     "             CASE WHEN rbs_motif IS NULL THEN 'None' "
-    "                  ELSE _miint_gff_text('prodigal_gff_lines', rbs_motif, 'rbs_motif', n, false) END, "
+    "                  ELSE _miint_gff_text('COPY FORMAT GFF', rbs_motif, 'rbs_motif', n, false) END, "
     "             CASE WHEN rbs_spacer IS NULL THEN 'None' "
-    "                  ELSE _miint_gff_text('prodigal_gff_lines', rbs_spacer, 'rbs_spacer', n, false) END, "
-    "             _miint_gff_required('prodigal_gff_lines', gene_gc_content, 'gene_gc_content', n), "
-    "             _miint_gff_required('prodigal_gff_lines', confidence, 'confidence', n), "
+    "                  ELSE _miint_gff_text('COPY FORMAT GFF', rbs_spacer, 'rbs_spacer', n, false) END, "
+    "             _miint_gff_required('COPY FORMAT GFF', gene_gc_content, 'gene_gc_content', n), "
+    "             _miint_gff_required('COPY FORMAT GFF', confidence, 'confidence', n), "
     "             score, "
-    "             _miint_gff_required('prodigal_gff_lines', cscore, 'cscore', n), "
-    "             _miint_gff_required('prodigal_gff_lines', sscore, 'sscore', n), "
-    "             _miint_gff_required('prodigal_gff_lines', rscore, 'rscore', n), "
-    "             _miint_gff_required('prodigal_gff_lines', uscore, 'uscore', n), "
-    "             _miint_gff_required('prodigal_gff_lines', tscore, 'tscore', n)) "
+    "             _miint_gff_required('COPY FORMAT GFF', cscore, 'cscore', n), "
+    "             _miint_gff_required('COPY FORMAT GFF', sscore, 'sscore', n), "
+    "             _miint_gff_required('COPY FORMAT GFF', rscore, 'rscore', n), "
+    "             _miint_gff_required('COPY FORMAT GFF', uscore, 'uscore', n), "
+    "             _miint_gff_required('COPY FORMAT GFF', tscore, 'tscore', n)) "
     "    ] END AS lines "
     "  FROM seqnums "
     ") "
@@ -319,7 +321,7 @@ const std::string PRODIGAL_GFF_LINES = // NOLINT
     // above run; refused here instead of written as an empty line.
     "SELECT genome_id, "
     "  CASE WHEN line IS NULL "
-    "       THEN error(printf('prodigal_gff_lines: row %d has a NULL where its line needs a value', n)) "
+    "       THEN error(printf('COPY FORMAT GFF: row %d has a NULL where its line needs a value', n)) "
     "       ELSE line END AS line "
     "FROM ( "
     "  SELECT NULL AS genome_id, 0 AS n, 0 AS k, '##gff-version  3' AS line WHERE NOT per_genome "
@@ -2989,8 +2991,8 @@ public:
 		register_macro(MIINT_GFF_TEXT, "_miint_gff_text");
 		register_macro(MIINT_GFF_REQUIRED, "_miint_gff_required");
 		register_macro(MIINT_GFF_INTEGRAL, "_miint_gff_integral");
-		register_macro(GFF3_LINES, "gff3_lines");
-		register_macro(PRODIGAL_GFF_LINES, "prodigal_gff_lines");
+		register_macro(GFF3_LINES, "_miint_gff3_lines");
+		register_macro(PRODIGAL_GFF_LINES, "_miint_prodigal_gff_lines");
 		// The _miint_gfa_ helpers before the views that use them.
 		register_macro(MIINT_GFA_INTEGER_TAG, "_miint_gfa_integer_tag");
 		register_macro(MIINT_GFA_SEGMENT_LABEL, "_miint_gfa_segment_label");

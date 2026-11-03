@@ -38,7 +38,7 @@ byte, to check the single-genome options against the CLI. The GFFs' carriage ret
 | `ref_masked.gff.gz` | `prodigal -i anthus_masked.fas -p single -f gff -o ref_masked.gff` |
 | `ref_masked_m.gff.gz`, `ref_masked_m.proteins.gz` | `prodigal -i anthus_masked.fas -p single -m -f gff -o ref_masked_m.gff -a ref_masked_m.proteins` |
 
-`predict_genes`' own output on `anthus_aco.fas`, for `prodigal_gff_lines.test` to run without gpl-boundary
+`predict_genes`' own output on `anthus_aco.fas`, for `copy_gff_prodigal.test` to run without gpl-boundary
 (`predict_genes.test` checks it is still `predict_genes`' output):
 
 | File | Query |

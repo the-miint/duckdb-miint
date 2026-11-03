@@ -1,5 +1,5 @@
-# name: test/sql/gff3_lines.test
-# description: gff3_lines(relation): GFF3 lines from read_gff's columns, which COPY ... (FORMAT CSV) writes as a file
+# name: test/sql/copy_gff.test
+# description: COPY ... (FORMAT GFF): GFF3 from read_gff's columns, written by DuckDB's CSV writer
 # group: [sql]
 
 require miint
@@ -13,13 +13,13 @@ SELECT replace(line, E'\t', ' | ') AS line FROM (
 ) ORDER BY i;
 
 # -----------------------------------------------------------------------------
-# What read_gff reads, gff3_lines writes, and read_gff reads back the same
+# What read_gff reads, COPY writes, and read_gff reads back the same
 # -----------------------------------------------------------------------------
 statement ok
 CREATE TABLE features AS SELECT * FROM read_gff('data/gff/test.gff');
 
 statement ok
-COPY (SELECT line FROM gff3_lines('features')) TO '{TEST_DIR}/roundtrip.gff' (FORMAT CSV, HEADER false, QUOTE '', ESCAPE '');
+COPY features TO '{TEST_DIR}/roundtrip.gff' (FORMAT GFF);
 
 query I
 SELECT count(*) FROM ((SELECT * FROM features EXCEPT ALL SELECT * FROM read_gff('{TEST_DIR}/roundtrip.gff'))
@@ -46,7 +46,7 @@ statement ok
 CREATE TABLE encoded AS SELECT * FROM read_gff('data/gff/encoded.gff');
 
 statement ok
-COPY (SELECT line FROM gff3_lines('encoded')) TO '{TEST_DIR}/encoded.gff' (FORMAT CSV, HEADER false, QUOTE '', ESCAPE '');
+COPY encoded TO '{TEST_DIR}/encoded.gff' (FORMAT GFF);
 
 query I
 SELECT count(*) FROM ((SELECT * FROM encoded EXCEPT ALL SELECT * FROM read_gff('{TEST_DIR}/encoded.gff'))
@@ -61,7 +61,7 @@ SELECT 'c1' AS seqid, 'src' AS source, 'gene' AS type, 1 AS position, 11 AS stop
        NULL::VARCHAR AS strand, NULL::INTEGER AS phase, MAP {'ID': 'a;b=c&d,e%f', 'Note': E'tab\there'} AS attributes;
 
 statement ok
-COPY (SELECT line FROM gff3_lines('reserved')) TO '{TEST_DIR}/reserved.gff' (FORMAT CSV, HEADER false, QUOTE '', ESCAPE '');
+COPY reserved TO '{TEST_DIR}/reserved.gff' (FORMAT GFF);
 
 query I
 SELECT line FROM file_lines('{TEST_DIR}/reserved.gff');
@@ -80,8 +80,11 @@ CREATE VIEW plain AS
 SELECT 'c1' AS seqid, 'src' AS source, 'gene' AS type, 1 AS position, 2 AS stop_position, NULL AS score,
        NULL AS strand, NULL AS phase, MAP {'Note': 'a "b" é'} AS attributes;
 
+statement ok
+COPY plain TO '{TEST_DIR}/plain.gff' (FORMAT GFF);
+
 query I
-SELECT replace(line, E'\t', ' | ') FROM gff3_lines('plain');
+SELECT line FROM file_lines('{TEST_DIR}/plain.gff');
 ----
 ##gff-version 3
 c1 | src | gene | 1 | 1 | . | . | . | Note=a "b" é
@@ -92,8 +95,11 @@ CREATE VIEW text_attrs AS
 SELECT 'c1' AS seqid, 'src' AS source, 'gene' AS type, 5 AS position, 6 AS stop_position, 1.5 AS score,
        '-' AS strand, 1 AS phase, 'ID=g1;Note=raw' AS attributes;
 
+statement ok
+COPY text_attrs TO '{TEST_DIR}/text_attrs.gff' (FORMAT GFF);
+
 query I
-SELECT replace(line, E'\t', ' | ') FROM gff3_lines('text_attrs');
+SELECT line FROM file_lines('{TEST_DIR}/text_attrs.gff');
 ----
 ##gff-version 3
 c1 | src | gene | 5 | 5 | 1.5 | - | 1 | ID=g1;Note=raw
@@ -106,8 +112,11 @@ SELECT 'c1' AS seqid, 'src' AS source, 'gene' AS type, 5 AS position, 7 AS stop_
 UNION ALL
 SELECT 'c1', 'src', 'gene', 5, 7, NULL, '+', NULL, MAP {};
 
+statement ok
+COPY no_attrs TO '{TEST_DIR}/no_attrs.gff' (FORMAT GFF);
+
 query I
-SELECT replace(line, E'\t', ' | ') FROM gff3_lines('no_attrs');
+SELECT line FROM file_lines('{TEST_DIR}/no_attrs.gff');
 ----
 ##gff-version 3
 c1 | src | gene | 5 | 6 | . | + | . | .
@@ -119,8 +128,11 @@ CREATE VIEW empty_key_attrs AS
 SELECT 'c1' AS seqid, 'src' AS source, 'gene' AS type, 5 AS position, 7 AS stop_position, NULL AS score,
        '?' AS strand, NULL AS phase, MAP {'': NULL::VARCHAR} AS attributes;
 
+statement ok
+COPY empty_key_attrs TO '{TEST_DIR}/empty_key_attrs.gff' (FORMAT GFF);
+
 query I
-SELECT replace(line, E'\t', ' | ') FROM gff3_lines('empty_key_attrs');
+SELECT line FROM file_lines('{TEST_DIR}/empty_key_attrs.gff');
 ----
 ##gff-version 3
 c1 | src | gene | 5 | 6 | . | ? | . | .
@@ -131,8 +143,11 @@ CREATE VIEW del_attrs AS
 SELECT 'c1' AS seqid, 'src' AS source, 'gene' AS type, 5 AS position, 7 AS stop_position, NULL AS score,
        '+' AS strand, NULL AS phase, MAP {'Note': 'a' || chr(127) || 'b'} AS attributes;
 
+statement ok
+COPY del_attrs TO '{TEST_DIR}/del_attrs.gff' (FORMAT GFF);
+
 query I
-SELECT replace(line, E'\t', ' | ') FROM gff3_lines('del_attrs');
+SELECT line FROM file_lines('{TEST_DIR}/del_attrs.gff');
 ----
 ##gff-version 3
 c1 | src | gene | 5 | 6 | . | + | . | Note=a%7Fb
@@ -142,8 +157,11 @@ CREATE VIEW empty_text_attrs AS
 SELECT 'c1' AS seqid, 'src' AS source, 'gene' AS type, 5 AS position, 7 AS stop_position, NULL AS score,
        '+' AS strand, NULL AS phase, '' AS attributes;
 
+statement ok
+COPY empty_text_attrs TO '{TEST_DIR}/empty_text_attrs.gff' (FORMAT GFF);
+
 query I
-SELECT replace(line, E'\t', ' | ') FROM gff3_lines('empty_text_attrs');
+SELECT line FROM file_lines('{TEST_DIR}/empty_text_attrs.gff');
 ----
 ##gff-version 3
 c1 | src | gene | 5 | 6 | . | + | . | .
@@ -159,7 +177,7 @@ statement ok
 CREATE TABLE null_values AS SELECT * FROM read_gff('{TEST_DIR}/null_values_in.gff');
 
 statement ok
-COPY (SELECT line FROM gff3_lines('null_values')) TO '{TEST_DIR}/null_values.gff' (FORMAT CSV, HEADER false, QUOTE '', ESCAPE '');
+COPY null_values TO '{TEST_DIR}/null_values.gff' (FORMAT GFF);
 
 query I
 SELECT line FROM file_lines('{TEST_DIR}/null_values.gff');
@@ -176,9 +194,9 @@ SELECT count(*) FROM ((SELECT * FROM null_values EXCEPT ALL SELECT * FROM read_g
 ----
 0
 
-# gzip, by extension, as COPY ... (FORMAT CSV) does.
+# gzip, by extension, as the CSV writer does.
 statement ok
-COPY (SELECT line FROM gff3_lines('features')) TO '{TEST_DIR}/roundtrip.gff.gz' (FORMAT CSV, HEADER false, QUOTE '', ESCAPE '');
+COPY features TO '{TEST_DIR}/roundtrip.gff.gz' (FORMAT GFF);
 
 query I
 SELECT count(*) FROM read_gff('{TEST_DIR}/roundtrip.gff.gz');
@@ -189,8 +207,11 @@ SELECT count(*) FROM read_gff('{TEST_DIR}/roundtrip.gff.gz');
 statement ok
 CREATE VIEW no_features AS SELECT * FROM features WHERE false;
 
+statement ok
+COPY no_features TO '{TEST_DIR}/no_features.gff' (FORMAT GFF);
+
 query I
-SELECT line FROM gff3_lines('no_features');
+SELECT line FROM file_lines('{TEST_DIR}/no_features.gff');
 ----
 ##gff-version 3
 
@@ -205,15 +226,18 @@ SELECT 'c' || lpad(i::VARCHAR, 6, '0') AS seqid, 's' AS source, 'gene' AS type, 
        NULL AS score, NULL AS strand, NULL AS phase, NULL AS attributes
 FROM range(300000) t(i) ORDER BY random();
 
+statement ok
+COPY many TO '{TEST_DIR}/many.gff' (FORMAT GFF);
+
 query I
 SELECT count(*) FROM (
-    SELECT split_part(line, E'\t', 1) AS seqid, row_number() OVER () - 1 AS n FROM gff3_lines('many')
+    SELECT split_part(line, ' | ', 1) AS seqid, row_number() OVER () - 1 AS n FROM file_lines('{TEST_DIR}/many.gff')
 ) l JOIN (SELECT seqid, row_number() OVER () AS n FROM many) t USING (n) WHERE l.seqid <> t.seqid;
 ----
 0
 
 # -----------------------------------------------------------------------------
-# What gff3_lines refuses
+# What COPY refuses
 # -----------------------------------------------------------------------------
 
 # A missing column, by name.
@@ -221,7 +245,7 @@ statement ok
 CREATE VIEW missing_attributes AS SELECT seqid, source, type, position, stop_position, score, strand, phase FROM features;
 
 statement error
-SELECT * FROM gff3_lines('missing_attributes');
+COPY missing_attributes TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
 ----
 attributes
 
@@ -230,7 +254,7 @@ statement ok
 CREATE VIEW text_position AS SELECT * REPLACE ('x' AS position) FROM features;
 
 statement error
-SELECT * FROM gff3_lines('text_position');
+COPY text_position TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
 ----
 position must be an integer
 
@@ -238,7 +262,7 @@ statement ok
 CREATE VIEW number_attributes AS SELECT * REPLACE (42 AS attributes) FROM features;
 
 statement error
-SELECT * FROM gff3_lines('number_attributes');
+COPY number_attributes TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
 ----
 attributes must be MAP(VARCHAR, VARCHAR) or VARCHAR
 
@@ -246,7 +270,7 @@ statement ok
 CREATE VIEW text_score AS SELECT * REPLACE ('5' AS score) FROM features;
 
 statement error
-SELECT * FROM gff3_lines('text_score');
+COPY text_score TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
 ----
 score must be a number
 
@@ -254,7 +278,7 @@ statement ok
 CREATE VIEW double_phase AS SELECT * REPLACE (1.5 AS phase) FROM features;
 
 statement error
-SELECT * FROM gff3_lines('double_phase');
+COPY double_phase TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
 ----
 phase must be an integer
 
@@ -268,7 +292,7 @@ statement ok
 CREATE VIEW bad AS SELECT * REPLACE (1 AS stop_position) FROM one;
 
 statement error
-SELECT * FROM gff3_lines('bad');
+COPY bad TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
 ----
 stop_position must be greater than position
 
@@ -276,7 +300,7 @@ statement ok
 CREATE OR REPLACE VIEW bad AS SELECT * REPLACE (0 AS position) FROM one;
 
 statement error
-SELECT * FROM gff3_lines('bad');
+COPY bad TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
 ----
 position must be at least 1
 
@@ -284,7 +308,7 @@ statement ok
 CREATE OR REPLACE VIEW bad AS SELECT * REPLACE ('x' AS strand) FROM one;
 
 statement error
-SELECT * FROM gff3_lines('bad');
+COPY bad TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
 ----
 strand must be
 
@@ -292,7 +316,7 @@ statement ok
 CREATE OR REPLACE VIEW bad AS SELECT * REPLACE (3 AS phase) FROM one;
 
 statement error
-SELECT * FROM gff3_lines('bad');
+COPY bad TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
 ----
 phase must be 0, 1, 2 or NULL
 
@@ -300,7 +324,7 @@ statement ok
 CREATE OR REPLACE VIEW bad AS SELECT * REPLACE (NULL::VARCHAR AS seqid) FROM one;
 
 statement error
-SELECT * FROM gff3_lines('bad');
+COPY bad TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
 ----
 NULL seqid
 
@@ -308,7 +332,7 @@ statement ok
 CREATE OR REPLACE VIEW bad AS SELECT * REPLACE (E'c\t1' AS seqid) FROM one;
 
 statement error
-SELECT * FROM gff3_lines('bad');
+COPY bad TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
 ----
 control character
 
@@ -316,7 +340,7 @@ statement ok
 CREATE OR REPLACE VIEW bad AS SELECT * REPLACE ('#c1' AS seqid) FROM one;
 
 statement error
-SELECT * FROM gff3_lines('bad');
+COPY bad TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
 ----
 starts with '#'
 
@@ -324,7 +348,7 @@ statement ok
 CREATE OR REPLACE VIEW bad AS SELECT * REPLACE ('' AS seqid) FROM one;
 
 statement error
-SELECT * FROM gff3_lines('bad');
+COPY bad TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
 ----
 empty seqid
 
@@ -332,7 +356,7 @@ statement ok
 CREATE OR REPLACE VIEW bad AS SELECT * REPLACE ('' AS source) FROM one;
 
 statement error
-SELECT * FROM gff3_lines('bad');
+COPY bad TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
 ----
 empty source
 
@@ -340,7 +364,7 @@ statement ok
 CREATE OR REPLACE VIEW bad AS SELECT * REPLACE ('' AS type) FROM one;
 
 statement error
-SELECT * FROM gff3_lines('bad');
+COPY bad TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
 ----
 empty type
 
@@ -349,7 +373,7 @@ statement ok
 CREATE OR REPLACE VIEW bad AS SELECT * REPLACE (E'ID=a\nb' AS attributes) FROM one;
 
 statement error
-SELECT * FROM gff3_lines('bad');
+COPY bad TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
 ----
 attributes text (row 1) has a control character
 
@@ -357,7 +381,7 @@ statement ok
 CREATE OR REPLACE VIEW bad AS SELECT * REPLACE (E'ID=a\tb' AS attributes) FROM one;
 
 statement error
-SELECT * FROM gff3_lines('bad');
+COPY bad TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
 ----
 attributes text (row 1) has a control character
 
@@ -365,7 +389,7 @@ statement ok
 CREATE OR REPLACE VIEW bad AS SELECT * REPLACE (E'ID=a\rb' AS attributes) FROM one;
 
 statement error
-SELECT * FROM gff3_lines('bad');
+COPY bad TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
 ----
 attributes text (row 1) has a control character
 
@@ -373,7 +397,7 @@ statement ok
 CREATE OR REPLACE VIEW bad AS SELECT * REPLACE (E'ID=a\x01b' AS attributes) FROM one;
 
 statement error
-SELECT * FROM gff3_lines('bad');
+COPY bad TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
 ----
 attributes text (row 1) has a control character
 
@@ -382,7 +406,7 @@ statement ok
 CREATE OR REPLACE VIEW bad AS SELECT * REPLACE ({'ID': 'a'} AS attributes) FROM one;
 
 statement error
-SELECT * FROM gff3_lines('bad');
+COPY bad TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
 ----
 attributes must be MAP(VARCHAR, VARCHAR) or VARCHAR (got STRUCT(
 
@@ -390,7 +414,7 @@ statement ok
 CREATE OR REPLACE VIEW bad AS SELECT * REPLACE (5 AS attributes) FROM one;
 
 statement error
-SELECT * FROM gff3_lines('bad');
+COPY bad TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
 ----
 attributes must be MAP(VARCHAR, VARCHAR) or VARCHAR (got INTEGER)
 
@@ -402,6 +426,75 @@ statement ok
 INSERT INTO two_rows SELECT * REPLACE ('#c2' AS seqid) FROM one;
 
 statement error
-SELECT * FROM gff3_lines('two_rows');
+COPY two_rows TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
 ----
 (row 2)
+
+# -----------------------------------------------------------------------------
+# COPY options
+# -----------------------------------------------------------------------------
+
+# FORMAT GFF is the default for a .gff path; COMPRESSION is the CSV writer's.
+statement ok
+COPY features TO '{TEST_DIR}/by_extension.gff';
+
+query I
+SELECT count(*) FROM read_gff('{TEST_DIR}/by_extension.gff');
+----
+7
+
+statement ok
+COPY features TO '{TEST_DIR}/explicit_gzip.gff' (FORMAT GFF, COMPRESSION gzip);
+
+query I
+SELECT hex(content[1:2]) FROM read_blob('{TEST_DIR}/explicit_gzip.gff');
+----
+1F8B
+
+# Options that would break the file are refused.
+statement error
+COPY features TO '{TEST_DIR}/bad.gff' (FORMAT GFF, PER_THREAD_OUTPUT true);
+----
+COPY FORMAT GFF does not take PER_THREAD_OUTPUT
+
+statement error
+COPY features TO '{TEST_DIR}/bad.gff' (FORMAT GFF, APPEND true);
+----
+COPY FORMAT GFF does not take APPEND
+
+statement error
+COPY features TO '{TEST_DIR}/bad_dir' (FORMAT GFF, PARTITION_BY (seqid));
+----
+PARTITION_BY is (genome_id) with DIALECT 'prodigal'
+
+statement error
+COPY features TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'gtf');
+----
+DIALECT must be 'gff3' or 'prodigal' (got 'gtf')
+
+statement error
+COPY features TO '{TEST_DIR}/bad.gff' (FORMAT GFF, SOURCE 'x');
+----
+SOURCE is for DIALECT 'prodigal'
+
+# predict_genes' columns without DIALECT 'prodigal': named, rather than failed on read_gff's columns.
+statement error
+COPY (SELECT 'c1' AS read_id, 1 AS gene_index) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+these look like predict_genes' columns; add DIALECT 'prodigal'
+
+# attributes types are checked as the query is bound: a STRUCT or JSON is refused even when every value is NULL.
+statement error
+COPY (SELECT * REPLACE (NULL::STRUCT(ID VARCHAR) AS attributes) FROM features) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+attributes must be MAP(VARCHAR, VARCHAR) or VARCHAR (got STRUCT(ID VARCHAR))
+
+statement error
+COPY (SELECT * REPLACE ('{"ID": "x"}'::JSON AS attributes) FROM features) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+attributes must be MAP(VARCHAR, VARCHAR) or VARCHAR (got JSON)
+
+statement error
+COPY (SELECT * REPLACE (MAP {'k': 3} AS attributes) FROM features) TO '{TEST_DIR}/bad.gff' (FORMAT GFF);
+----
+attributes must be MAP(VARCHAR, VARCHAR) or VARCHAR (got MAP(VARCHAR, INTEGER))
