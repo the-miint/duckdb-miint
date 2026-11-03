@@ -934,3 +934,36 @@ SELECT (SELECT md5(model_blob) FROM fit_classifier('train_data', 'class_metadata
      = (SELECT md5(model_blob) FROM fit_regressor('train_data', 'train_metadata', n_estimators := 40, random_state := 5, threads := 4, name := 't'));
 ----
 true	true
+
+# --- max_execution_time ---
+
+# Every sc function reads its data relation through the same loop, which checks
+# the deadline between chunks, so a query past max_execution_time stops while the
+# cells are still being read. Three million cells over 1000 samples take about a
+# second to read and fit with one tree, twenty times the 50 ms deadline. The fit
+# returns one row, so DuckDB's own check, made on every 256th chunk of output,
+# cannot end the query in the loop's place.
+statement ok
+CREATE VIEW big_cells AS
+  SELECT 's' || (i % 1000) AS sample_id, 'f' || (i // 1000) AS feature_id, (hash(i) % 7 + 1)::DOUBLE AS value
+  FROM range(3000000) t(i);
+
+statement ok
+CREATE TABLE big_cells_meta AS SELECT 's' || i AS sample_id, (i % 10)::DOUBLE AS value FROM range(1000) t(i);
+
+statement ok
+SET max_execution_time = 50;
+
+statement error
+SELECT count(*) FROM fit_regressor('big_cells', 'big_cells_meta', n_estimators := 1, random_state := 1, threads := 1, name := 'big');
+----
+Query exceeded maximum execution time
+
+statement ok
+RESET max_execution_time;
+
+# The connection still works.
+query I
+SELECT count(*) FROM fit_regressor('train_data', 'train_metadata', n_estimators := 5, random_state := 5, name := 't');
+----
+1

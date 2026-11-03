@@ -424,3 +424,36 @@ SELECT count(*) FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, n_anch
 WHERE batch IS NULL AND batch_anchor_m2 IS NOT NULL;
 ----
 0
+
+# ── max_execution_time stops a run between batches ──────────────────────────────
+# The run checks the query's deadline before every batch, so a query past
+# max_execution_time ends there instead of at the last batch. 3000 samples in
+# batches of 10 against 1000 anchors take about 1.5 s on one thread, thirty times
+# the 50 ms deadline.
+statement ok
+CREATE TABLE big_pts AS
+SELECT i AS idx, 'b' || i AS id, sin(i * 1.1) AS x, cos(i * 0.7) AS y, sin(i * 0.37 + 2.0) AS z
+FROM range(3000) t(i);
+
+statement ok
+CREATE TABLE big_dcoo AS
+SELECT a.id AS sample_a, b.id AS sample_b,
+       sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z)) AS distance
+FROM big_pts a JOIN big_pts b ON a.idx < b.idx;
+
+statement ok
+SET max_execution_time = 50;
+
+statement error
+SELECT count(*) FROM progressive_pcoa_from_distances('big_dcoo', n_dims := 3, n_anchors := 1000, batch_size := 10, seed := 42, threads := 1);
+----
+Query exceeded maximum execution time
+
+statement ok
+RESET max_execution_time;
+
+# The connection still works.
+query I
+SELECT count(*) FROM progressive_pcoa_from_distances('dcoo', n_dims := 3, n_anchors := 15, batch_size := 12, seed := 42);
+----
+150

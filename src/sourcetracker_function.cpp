@@ -328,9 +328,7 @@ struct St3ResultDeleter {
 }
 
 void CheckInterrupt(ClientContext &context) {
-	if (context.IsInterrupted()) {
-		throw InterruptException();
-	}
+	context.BlockingInterruptCheck();
 }
 
 // ---------------------------------------------------------------------------
