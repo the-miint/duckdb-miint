@@ -7,7 +7,8 @@ DuckDB tutorial.
 **Sources:** the DuckDB internals docs (`duckdb.org/docs/current/internals/`) and the
 "Design and Implementation of DuckDB Internals" course (Torsten Grust, U Tübingen,
 `github.com/DBatUTuebingen/DiDi`, combined deck at `blobs.duckdb.org/slides/DiDi.pdf`).
-Version-specific claims below are as of DuckDB v1.4/v1.5 — re-verify when we bump.
+Version-specific claims below are as of DuckDB v1.4/v1.5 unless they name 2.0 — re-verify when
+we bump.
 
 ## Storage
 
@@ -73,6 +74,11 @@ and a shared working directory: most runs segfaulted, and some reported `Invalid
 (byte sequence mismatch) detected in segment statistics update`, which was another process's
 bytes rather than invalid input. A per-process `temp_directory` removed every failure. miint
 never sets `temp_directory`; a caller running concurrent processes sets one per process.
+
+**On DuckDB 2.0, `NULL AS x` in a CTAS makes a column of type `"NULL"`.** On 1.5.5 the same
+column was INTEGER. A function that checks a column's type then refuses it, as the RYpe
+functions refuse a `sequence2` made this way; `NULL::VARCHAR AS x` keeps a usable type. Test
+fixtures that build an all-NULL column cast it.
 
 ## Execution format (vectors)
 
@@ -197,6 +203,94 @@ estimate (`src/include/ena_object_insert_op.hpp`). A table function without a
 (`duckdb/src/execution/operator/scan/physical_table_scan.cpp`), so a table function that
 blocks in `InitGlobal` needs nothing added. An iterative fit that stops early has no known
 total, so its iteration count is not a progress fraction.
+
+### Interrupts and `max_execution_time` (DuckDB 2.0)
+
+**`IsInterrupted()` does not see `max_execution_time`.** It reads only the interrupt flag that
+Ctrl-C or `Interrupt()` sets. The deadline is enforced by `ClientContext::InterruptCheck()`,
+which reads the clock on every 256th call on a thread, and by `BlockingInterruptCheck()`, which
+reads it on every call; both throw "Query exceeded maximum execution time"
+(`duckdb/src/main/client_context.cpp`). DuckDB's pipeline executor calls `InterruptCheck()`
+between chunks, which does nothing for an `InitGlobal` or `Execute` that runs for an hour
+before it returns. So a long step checks for itself: `InterruptCheck()` in a hot loop,
+`BlockingInterruptCheck()` between coarse steps (a batch, a wave, one library call). Either
+may be called from a worker thread of the function's own: they read an atomic and the clock.
+The deadline tests in `progressive_pcoa_from_distances.test`, `sc_fit.test` and `sc_shap.test`
+stop a run partway; the one in `sourcetracker.test` stops a run that can only be checked
+between phases.
+
+### Waiting and background work (DuckDB 2.0)
+
+Verified on DuckDB 2.0 (`d54cbbe`). `rype_filter` uses all of it: `src/rype_filter.cpp`, with
+its state machine in `src/include/rype_filter_schedule.hpp`.
+
+**A table function can wait without holding a thread.** It parks: it sets
+`async_result = AsyncResultType::BLOCKED`, keeps a copy of `*input.interrupt_state`, and returns.
+Calling `Callback()` on that copy later puts the task back on the queue. The rules:
+
+- Park only when `results_execution_mode == AsyncResultsExecutionMode::TASK_EXECUTOR` and
+  `interrupt_state` is set. A synchronous scan has no task to wake, and neither has a function
+  another operator drives: a positional join, or a LATERAL `in_out_function`, which gets
+  neither (`physical_tableinout_function.cpp`). Such a function needs a second way to wait,
+  a timed condition-variable wait with an interrupt check each time round
+  (`RypeFilterTableFunction::Execute`).
+- Register the waiter last, under the lock every wake-up takes, so no wake-up falls between
+  the check and the registration. Wake by swapping the waiter list out under the lock, then
+  call `Callback()` after unlocking.
+- Never call back one registration twice, and never one the calling thread made in this call.
+  `Executor::RescheduleTask` spins until the task has returned from its call. A thread that
+  has just started background jobs therefore looks again instead of parking: starting a job
+  can fail, and the failure wakes every parked thread, its own registration included.
+- Set `async_result` on every return. An empty chunk left at the default (`IMPLICIT`) reads
+  as FINISHED, and the scan ends with work still to emit.
+
+**Background jobs go on the async pool.** A `TaskExecutor(context, TaskSchedulerType::ASYNC)`
+(`duckdb/src/include/duckdb/parallel/task_executor.hpp`) runs `BaseExecutorTask`s that no
+pipeline task waits on. Points that are easy to get wrong:
+
+- Idle regular workers take async tasks too (`TaskScheduler::ExecuteForever`,
+  `duckdb/src/parallel/task_scheduler.cpp`), so `async_threads` does not cap how many run.
+- `NumberOfAsyncThreads()` is 0 in a build without threads (WASM), and `SET async_threads = 0`
+  makes it 0 anywhere. Keep an inline path that runs the job on the calling thread.
+- A `ScheduleTask` that fails retires the task, which calls its `Cancel()`, and rethrows.
+  `Cancel()` must change whatever the waiters watch, on every path, or they wait for a job
+  that will never run (`FilterJobTask::Cancel`).
+- `CancelAndDrain()` waits for running jobs to finish. Call it before freeing anything the jobs
+  share, and give them that state by `shared_ptr`, so no job depends on the global state's
+  lifetime (`RypeFilterTableFunction::GlobalState::~GlobalState`). The wait means a job's own
+  sleeps, waits and pipe reads delay teardown unless something can cut them short.
+- A library error kept in a thread-local, such as `rype_get_last_error()`, is read inside the
+  job that made the call.
+
+**A COPY whose format declares no `execution_mode` runs the whole pipeline on one thread.**
+`PhysicalCopyToFile` is then a sequential sink, and the pipeline, source included, is one task
+whatever the source's `MaxThreads()` (`plan_copy_to_file.cpp`, `pipeline.cpp`). No miint COPY
+format declares one. For FASTQ that is deliberate: an in-order feed to htslib's BGZF writer
+gives a deterministic file, and split R1/R2 output has to write mates in step. A table
+function with heavy per-row work therefore runs it on its own jobs and only emits from
+`Execute`, and is timed through the sink its users write to. `rype_filter` into
+`COPY ... (FORMAT FASTQ)` took 83 s against the native pipeline's 28 s, mapping on that one
+thread, until its alignment moved onto async jobs; a CTAS of the same query never showed it.
+
+### Output order costs threads and memory
+
+Verified on DuckDB 2.0 (`d54cbbe`). Under the default `preserve_insertion_order`:
+
+- **A source that declares no order and no batch index runs its consumer on one thread.** A
+  table function left at `INSERTION_ORDER` without `get_partition_data` gets a
+  `SOURCE_ORDERED` result sink (`physical_result_collector.cpp`), which is not a parallel sink
+  (`PhysicalResultSink::ParallelSink`), and a CTAS gets a single-threaded insert
+  (`plan_create_table.cpp`). Its own threads then go unused. A function whose rows come out
+  in no fixed order sets `order_preservation_type = OrderPreservationType::NO_ORDER`, as
+  `align_minimap2` and `place_krepp` do.
+- **Order-keeping sinks hold every batch until enough follow it.** `PhysicalBatchInsert`
+  keeps each batch unmerged, about 7 KB even for a few rows, until consecutive batches add up
+  to a row group. A batch index per small work unit made 60k rows in 7-row batches run out of
+  memory under a 64 MB limit at 8 threads.
+- **A thread that never emits holds the minimum batch index**, so no later batch can be
+  flushed past it. A task that waits on background work without emitting stalls an
+  order-keeping sink; finish the task (return FINISHED) once it has nothing left to claim.
+- Keep batch indexes coarse, or declare `NO_ORDER` when the order means nothing.
 
 ## Optimizer
 

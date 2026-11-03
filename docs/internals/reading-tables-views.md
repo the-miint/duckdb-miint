@@ -33,9 +33,9 @@ while (auto chunk = result->Fetch()) {
 
 `Connection::Query` holds the entire result in memory. For a relation that can be
 large, stream it instead with `SubmitStream(conn, query)`
-(`src/include/miint_streaming_query.hpp`): the producer then runs ahead of `Fetch()`
-only up to the connection's `max_streaming_buffer_size`. Its `HasError()` /
-`GetError()` / `Fetch()` behave as above.
+(`src/include/miint_streaming_query.hpp`): rows are then produced as `Fetch()` asks for
+them (see "Streaming a relation" below). Its `HasError()` / `GetError()` / `Fetch()`
+behave as above.
 
 ## TEMP tables and views
 
@@ -110,9 +110,11 @@ Two things to keep in mind if you do this:
 
 - The scan must be single-threaded (`MaxThreads() == 1`) if the helper work is stateful,
   as it is here — otherwise several `Execute` calls issue overlapping nested queries.
-- Poll `context.IsInterrupted()` around the work and throw `InterruptException`. Nothing else
+- Call `context.BlockingInterruptCheck()` between the steps of the work. Nothing else
   will: a blocked `Execute` is not a place DuckDB can cancel on its own, so long work
-  behind a helper connection is uninterruptible unless the caller checks.
+  behind a helper connection is uninterruptible unless the caller checks. Not
+  `IsInterrupted()`, which misses `max_execution_time` (`duckdb-engine-notes.md`,
+  "Interrupts and `max_execution_time`").
 
 Failing only the *drop* half is cheap to fix rather than document around, and worth
 checking for before writing a caveat: `mzml_peak_pair` already suffixed its two temp
@@ -124,6 +126,25 @@ nothing else.
 Stream with `SubmitStream`, as above. Precedents: `src/alignment_slice.cpp` and
 `src/rype_input_stream.cpp`. Check streaming by measurement: peak RSS stays flat as the
 input grows.
+
+**A streamed result does not read ahead (DuckDB 2.0).** The thread calling `Fetch()` runs
+the producer, so rows are decoded while the consumer fetches and not while it computes.
+`max_streaming_buffer_size` does not change that. Measured with `rype_filter` over
+`read_fastx`: decoding (14.9 s alone) and RYpe (about 13 s) ran one after the other, 29.8 s
+in all, and raising the helper's buffer to 2 GB and 4 GB gave 30.5 s and 31.0 s. To overlap
+the scan with heavy work per batch, fetch on a job of your own into a byte-capped queue:
+`RypeInputStream::SetReadAhead` (`src/rype_input_stream.cpp`) does, and the same run took
+24.4 s.
+
+**Fetched chunks are flat copies.** `BufferedData::CopyForBuffering` copies each chunk
+(`DataChunk::Copy`) before it is buffered, so a fetched chunk's vectors are flat and share no
+buffer with the scan. Holding one, or reading it from another thread, is safe.
+
+**A cast in the helper's SELECT is not free of side effects.** A VARCHAR→BLOB cast reads a
+backslash escape (`'\x47'`) as the byte it names, fails the query on a malformed one
+(`'\z'`), and refuses a byte above 127. Select the column as it is and reinterpret it on the
+C++ side: `RypeInputStream` reads a VARCHAR sequence as BLOB in place, since the two share
+a physical type, and the RYpe functions refuse a sequence column of any other type at bind.
 
 ## Read the relation ONCE (#229)
 
@@ -262,8 +283,9 @@ cannot distinguish a self-backed stream from an external one; `ClientContext::
 Interrupt()` does not help (verified — it returns cleanly and the query stays
 hung, because the threads are parked in a pthread mutex rather than polling the
 interrupt flag); and DuckDB 1.5 has no statement-timeout setting. (2.0's
-`max_execution_time` is enforced through the same interrupt checks, which parked
-threads never reach.) Stock DuckDB silently returns 0 rows for the same construct,
+`max_execution_time` would not help either: only `InterruptCheck()` and
+`BlockingInterruptCheck()` enforce it, and threads waiting on a mutex call neither.)
+Stock DuckDB silently returns 0 rows for the same construct,
 which is its own defect.
 
 The user-facing remedy is to materialize first — `.read_all()`, or a TEMP table.

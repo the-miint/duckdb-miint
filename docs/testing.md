@@ -35,6 +35,10 @@ make test
 
 `build/release/duckdb`, `test/unittest`, `extension/miint/tests`, `extension/miint/tests_duckdb` and the loadable `miint.duckdb_extension` are separate build targets, so after an incremental `ninja` of one of them the others can be stale. Rebuild every binary you probe with, e.g. `ninja -C build/release duckdb test/unittest extension/miint/tests extension/miint/tests_duckdb`.
 
+**Build with `DUCKDB_VERSION=v2.0.0 bash build.sh` before running `run_tests.sh`.** DuckDB 2.0 takes its version from that variable, not from git tags. Without it the build names itself by its commit, the httpfs pass's `INSTALL httpfs` finds no such version to download (HTTP 404), and `run_tests.sh` exits 1 after a passing main pass, with the httpfs files and the shell tests not run. CI sets the same variable (`.github/workflows/MainDistributionPipeline.yml`).
+
+**Keeping a build to compare against.** A mutation check runs a test against a deliberately broken build, so it matters which code a binary runs. `unittest` loads miint from `build/release/src/libduckdb.so`, which it finds through its RUNPATH, so a copy of the `unittest` binary runs whatever that library holds after the next build. Copy `libduckdb.so` with it and point `LD_LIBRARY_PATH` at the copy, which takes precedence over RUNPATH. `tests`, `tests_duckdb` and the shell link everything statically, so a copy of one of them stays as built.
+
 **Test file structure:**
 SQL logic tests consist of statements and expected outputs. Each test file follows this format:
 
@@ -83,6 +87,9 @@ File not found: nonexistent.fastq
 - Keep test data files small and focused
 - Use clear, descriptive comments for each test section
 - A test that reads through a glob and asserts `filepath` values selects `replace(filepath, '\', '/')`: glob expansion returns native separators on Windows. A single path or an explicit path list keeps the caller's string and needs no wrapping.
+- Pin an error that must come before any work with `EXPLAIN`: it binds and plans the query without running `InitGlobal` or the scan. For a function that loads an index, a nonexistent index path shows the same thing, since a check made after the load would fail on the missing file instead.
+- A `max_execution_time` test (`SET max_execution_time`, then `statement error` expecting "Query exceeded maximum execution time") needs work many times longer than the deadline, and a query that returns few rows. DuckDB checks the deadline itself on every 256th chunk a thread pushes, so a query with many chunks of output can be stopped by that check at the end, and the test then passes against a function that never checks. `sc_fit.test` returns one row for this reason.
+- `typeof()` is folded to a constant when the query binds, so it reports the bound type, as `DESCRIBE` does, not the type of the vectors a run returns. To check what a run returns, compare values in the input's own type.
 - Write files under `{TEST_DIR}`, the per-process scratch directory unittest substitutes into a test's SQL. Under `MIINT_TEST_JOBS`, test files and the C++ tests run at the same time in one working directory, so any other path a test writes must be one no other test reads or writes. For the same reason the parallel runner gives each SQL process a spill directory under its `{TEST_DIR}` (`docs/internals/duckdb-engine-notes.md`, "Storage").
 
 **Guards and skipped tests:**

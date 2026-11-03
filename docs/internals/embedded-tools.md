@@ -60,6 +60,7 @@ Run-time / conditional: `MIINT_USE_JEMALLOC` is set when DuckDB's jemalloc is li
   - *Load a prebuilt index's hash tables on several threads*, which `rype_filter` uses (`Minimap2IndexReader`'s `n_threads`). Sent upstream as [lh3/minimap2#1367](https://github.com/lh3/minimap2/pull/1367); the fork commit can go once it merges. A WASM build without pthreads loads on one thread.
 - **Purpose:** Long-read / spliced alignment
 - **Build:** Makefile; produces `libminimap2.a` with `HAVE_KALLOC`
+- **Forcing a rebuild:** `minimap2_build` is an ExternalProject without `BUILD_ALWAYS`, so an edit under `ext/minimap2/` is not rebuilt by `bash build.sh` or `ninja`. Touch `build/release/extension/miint/minimap2_build-prefix/src/minimap2_build-stamp/minimap2_build-patch` and run `ninja` twice: the first run rebuilds `libminimap2.a`, and only the second relinks the binaries against it. Before trusting a result, check that each binary you run is newer than `build/release/extension/miint/minimap2/lib/libminimap2.a`; a test and a mutation check have both passed against binaries that still held the old library.
 - **SIMD / arch:**
   - Native ARM64 → `aarch64=1`
   - macOS cross → arch-specific `-arch` flag
