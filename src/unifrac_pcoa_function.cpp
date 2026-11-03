@@ -2393,8 +2393,8 @@ MakeComputedBlockRun(const ProgressivePcoaData &data, const miint::progressive::
 // because the source issues queries on the context that is running the scan.
 unique_ptr<miint::progressive::ProgressivePcoaRun> MakeProgressiveRun(ClientContext &context,
                                                                       const ProgressivePcoaData &data) {
-	// Cooperative cancellation. The core polls this before every batch, which is the
-	// only thing standing between a user and an uninterruptible multi-hour query.
+	// Cooperative cancellation. The core polls this before every batch, which bounds
+	// the wait for a cancel to one block rather than one wave of a multi-hour run.
 	// BlockingInterruptCheck sees both Ctrl-C and max_execution_time. Polled from
 	// worker threads too, which the core joins before the wave returns
 	// (docs/internals/duckdb-engine-notes.md, "Interrupts and max_execution_time").

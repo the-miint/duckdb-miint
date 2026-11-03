@@ -355,8 +355,8 @@ that used to work now fails here, a filter upstream dropped a sample from one si
 ### The sampler cannot be interrupted
 
 The Gibbs sampler runs as one call into st3, and Ctrl-C and a `max_execution_time` deadline
-are honoured before it starts and after it returns, not inside it. On a large table with many sinks and high `restarts`,
-a cancelled query keeps its cores busy until the sampler finishes.
+are honoured before it starts and after it returns, not inside it. On a large table with many
+sinks and high `restarts`, a cancelled query keeps its cores busy until the sampler finishes.
 
 ### Running out of memory ends the process
 

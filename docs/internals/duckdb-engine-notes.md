@@ -77,8 +77,8 @@ never sets `temp_directory`; a caller running concurrent processes sets one per 
 
 **On DuckDB 2.0, `NULL AS x` in a CTAS makes a column of type `"NULL"`.** On 1.5.5 the same
 column was INTEGER. A function that checks a column's type then refuses it, as
-`rype_classify`, `rype_log_ratio` and `rype_filter` refuse a `sequence2` made this way; `NULL::VARCHAR AS x` keeps a usable type. Test
-fixtures that build an all-NULL column cast it.
+`rype_classify`, `rype_log_ratio` and `rype_filter` refuse a `sequence2` made this way;
+`NULL::VARCHAR AS x` keeps a usable type. Test fixtures that build an all-NULL column cast it.
 
 ## Execution format (vectors)
 
@@ -268,7 +268,8 @@ format declares one. The FASTQ format needs its rows in order: an in-order feed 
 BGZF writer gives a deterministic file, and split R1/R2 output writes mates in step. A table
 function with heavy per-row work therefore does that work on its own jobs and only emits from
 `Execute` (`rype_filter` maps reads on async jobs). Time such a function through the sink its
-users write to: a CTAS is a parallel sink, so it does not show the problem.
+users write to: a CTAS of a source that declares `NO_ORDER` is a parallel sink, so it does not
+show the problem.
 
 ### Output order costs threads and memory
 
@@ -282,8 +283,8 @@ Verified on DuckDB 2.0 (`d54cbbe`). Under the default `preserve_insertion_order`
   in no fixed order sets `order_preservation_type = OrderPreservationType::NO_ORDER`.
 - **Order-keeping sinks hold every batch until enough follow it.** `PhysicalBatchInsert`
   keeps each batch unmerged, at a cost of its own even when it holds a few rows, until
-  consecutive batches add up to a row group. A batch index per small work unit made 60k rows in 7-row batches run out of
-  memory under a 64 MB limit at 8 threads.
+  consecutive batches add up to a row group. A batch index per small work unit made 60k rows
+  in 7-row batches run out of memory under a 64 MB limit at 8 threads.
 - **A thread that never emits holds the minimum batch index**, so no later batch can be
   flushed past it. A task that waits on background work without emitting stalls an
   order-keeping sink; finish the task (return FINISHED) once it has nothing left to claim.
