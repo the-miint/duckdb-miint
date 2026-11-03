@@ -75,8 +75,9 @@ using WavePrefetch = std::function<void(const std::vector<std::vector<std::strin
 // A run at the scale this core exists for takes hours, so there has to be a way
 // out of it; polling per batch rather than per wave is what bounds the wait to one
 // block. It is called from the thread that will run that batch, so with
-// batch_workers > 1 it is called CONCURRENTLY and must be thread-safe (reading an
-// atomic flag is the intended use). An abort inside a parallel wave still lets the
+// batch_workers > 1 it is called CONCURRENTLY and must be thread-safe (DuckDB's
+// BlockingInterruptCheck, which reads an atomic flag and the clock, is the intended
+// use). An abort inside a parallel wave still lets the
 // wave's in-flight batches finish — their work is discarded — because every other
 // batch of that wave polls and throws too.
 using InterruptCheck = std::function<void()>;

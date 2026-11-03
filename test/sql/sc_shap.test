@@ -542,8 +542,8 @@ true
 # is checked between batches: a query past max_execution_time ends at the next one
 # instead of explaining every sample. 126 samples one at a time over 1000 trees
 # take about 1.1 s, twenty times the 50 ms deadline. top_k := 1 keeps the output to
-# one chunk, so DuckDB's own deadline check cannot end the query in the function's
-# place (docs/testing.md).
+# one chunk, so DuckDB's own deadline check is unlikely to end the query in the
+# function's place (docs/testing.md).
 statement ok
 CREATE TABLE shp_big_model AS
   SELECT * FROM fit_regressor('shp_counts', 'shp_month', n_estimators := 1000, random_state := 7, name := 'big');

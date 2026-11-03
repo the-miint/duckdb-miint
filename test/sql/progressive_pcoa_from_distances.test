@@ -425,12 +425,16 @@ WHERE batch IS NULL AND batch_anchor_m2 IS NOT NULL;
 ----
 0
 
-# ── max_execution_time stops a run between batches ──────────────────────────────
-# The run checks the query's deadline before every batch, so a query past
-# max_execution_time ends there instead of at the last batch. 1500 samples in
-# batches of 2 against 1200 anchors take about a second on one thread, twenty
-# times the 50 ms deadline. One axis keeps the output to one chunk, so DuckDB's
-# own deadline check cannot end the query in the run's place (docs/testing.md).
+# ── max_execution_time stops a run before it ends ───────────────────────────────
+# The run checks the query's deadline between waves and before every batch, so a
+# query past max_execution_time ends at the next check instead of at the last
+# batch. Each of those checks raises this error, so the test shows that the run
+# honours the deadline, not which check did; test/cpp/test_ProgressivePcoa.cpp
+# ("a progressive run can be interrupted between batches") pins the per-batch
+# poll. 1500 samples in batches of 2 against 1200 anchors take about a second on
+# one thread, twenty times the 50 ms deadline. One axis keeps the output to one
+# chunk, so DuckDB's own deadline check is unlikely to end the query in the run's
+# place (docs/testing.md).
 statement ok
 CREATE TABLE big_pts AS
 SELECT i AS idx, 'b' || i AS id, sin(i * 1.1) AS x, cos(i * 0.7) AS y, sin(i * 0.37 + 2.0) AS z

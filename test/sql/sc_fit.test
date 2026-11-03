@@ -939,20 +939,21 @@ true	true
 
 # Every sc function reads its data relation through the same loop, which checks
 # the deadline between chunks, so a query past max_execution_time stops while the
-# cells are still being read. Three million cells over 1000 samples take about a
-# second to read and fit with one tree, twenty times the 50 ms deadline. The fit
-# returns one row, so DuckDB's own deadline check cannot end the query in the
-# loop's place (docs/testing.md).
+# cells are still being read. Nothing checks once the read is done, so the margin
+# is the read alone: six million cells over 1000 samples take about 380 ms to
+# read, fifteen times the 25 ms deadline. The fit returns one row, so DuckDB's own
+# deadline check is unlikely to end the query in the loop's place
+# (docs/testing.md).
 statement ok
 CREATE VIEW big_cells AS
   SELECT 's' || (i % 1000) AS sample_id, 'f' || (i // 1000) AS feature_id, (hash(i) % 7 + 1)::DOUBLE AS value
-  FROM range(3000000) t(i);
+  FROM range(6000000) t(i);
 
 statement ok
 CREATE TABLE big_cells_meta AS SELECT 's' || i AS sample_id, (i % 10)::DOUBLE AS value FROM range(1000) t(i);
 
 statement ok
-SET max_execution_time = 50;
+SET max_execution_time = 25;
 
 statement error
 SELECT count(*) FROM fit_regressor('big_cells', 'big_cells_meta', n_estimators := 1, random_state := 1, threads := 1, name := 'big');

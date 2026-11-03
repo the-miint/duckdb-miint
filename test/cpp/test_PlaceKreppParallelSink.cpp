@@ -1,10 +1,9 @@
 // place_krepp's consumer runs on every thread.
 //
-// DuckDB decides at planning whether the sink a source feeds may run on several threads. Under the
-// default preserve_insertion_order, a table function that declares neither an order nor a batch
-// index gets a sink that keeps the source's order by taking one thread: a SELECT's result sink and
-// a CTAS's insert are then single-threaded, and so is the whole pipeline, place_krepp included,
-// whatever its MaxThreads. place_krepp's rows come out in no fixed order, so it must not get one.
+// Under the default preserve_insertion_order, a table function that declares neither an order nor
+// a batch index feeds a sink that keeps the order by running on one thread, and the whole pipeline
+// with it (docs/internals/duckdb-engine-notes.md, "Output order costs threads and memory").
+// place_krepp's rows come out in no fixed order, so its SELECT and INSERT must get parallel sinks.
 //
 // The SQL tests cannot see this: the rows, and their count, are the same on one thread as on many.
 // The test asks the planner instead, which needs a bind and no krepp index.

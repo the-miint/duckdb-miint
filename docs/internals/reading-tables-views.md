@@ -129,12 +129,10 @@ input grows.
 
 **A streamed result does not read ahead (DuckDB 2.0).** The thread calling `Fetch()` runs
 the producer, so rows are decoded while the consumer fetches and not while it computes.
-`max_streaming_buffer_size` does not change that. Measured with `rype_filter` over
-`read_fastx`: decoding (14.9 s alone) and RYpe (about 13 s) ran one after the other, 29.8 s
-in all, and raising the helper's buffer to 2 GB and 4 GB gave 30.5 s and 31.0 s. To overlap
-the scan with heavy work per batch, fetch on a job of your own into a byte-capped queue:
-`RypeInputStream::SetReadAhead` (`src/rype_input_stream.cpp`) does, and the same run took
-24.4 s.
+`max_streaming_buffer_size` does not change that: with `rype_filter` over `read_fastx`,
+decoding and RYpe ran one after the other whatever the helper's buffer size. To overlap the
+scan with heavy work per batch, fetch on a job of your own into a byte-capped queue, as
+`RypeInputStream::SetReadAhead` (`src/rype_input_stream.cpp`) does.
 
 **Fetched chunks are flat copies.** `BufferedData::CopyForBuffering` copies each chunk
 (`DataChunk::Copy`) before it is buffered, so a fetched chunk's vectors are flat and share no
@@ -283,8 +281,8 @@ cannot distinguish a self-backed stream from an external one; `ClientContext::
 Interrupt()` does not help (verified — it returns cleanly and the query stays
 hung, because the threads are parked in a pthread mutex rather than polling the
 interrupt flag); and DuckDB 1.5 has no statement-timeout setting. (2.0's
-`max_execution_time` would not help either: only `InterruptCheck()` and
-`BlockingInterruptCheck()` enforce it, and threads waiting on a mutex call neither.)
+`max_execution_time` would not help either: it is enforced only by DuckDB's interrupt
+checks and between statements, and threads waiting on a mutex reach neither.)
 Stock DuckDB silently returns 0 rows for the same construct,
 which is its own defect.
 
