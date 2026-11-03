@@ -36,7 +36,7 @@ With miint loaded, a file named in `FROM` is read by the reader its suffix names
 ```sql
 SELECT * FROM 'reads.fq.gz';
 SELECT * FROM 'alignments/*.bam';  -- a glob, which the reader expands
-SELECT * FROM tree.nwk;            -- a file in the current directory needs no quotes
+SELECT * FROM tree.nwk;            -- a name made of plain words needs no quotes
 ```
 
 | Suffix | Reader | Also read compressed as |
@@ -52,13 +52,15 @@ SELECT * FROM tree.nwk;            -- a file in the current directory needs no q
 | `.mzML` | `read_mzml` | |
 | `.mzXML` | `read_mzxml` | |
 | `.sff` | `read_sequences_sff` | |
-| `.biom` | `read_biom`, in a build that reads BIOM | |
+| `.biom` | `read_biom`, in a build with [`MIINT_ENABLE_HDF5`](installation.md#optional-feature-flags) | |
 
-- The format's suffix is matched in any case, so `.mzML` and `.mzml` are both read by `read_mzml`. The compression suffix must be lower case, `.gz` or `.zst`: `read_newick`, `read_paf` and `read_gfa` take a file for gzip only by a lower-case `.gz`.
+- The format's suffix is matched in any case, so `.mzML` and `.mzml` are both read by `read_mzml`. The compression suffix must be lower case: `.gz` or `.zst`.
 - Only the path is passed. For any other parameter, such as `sequence2` for paired-end reads or `include_filepath`, call the reader.
-- A compressed form the table does not list is not read: DuckDB reports that no extension can read the file, rather than the reader failing on bytes it cannot parse.
-- A table or view of the same name is read instead of the file, as for DuckDB's own formats.
-- The result is named after the file up to its first `.`, so `SELECT reads.read_id FROM 'reads.fq.gz'` works.
+- A compressed form the table does not list is not read, so DuckDB reports its own error (that no extension can read the file, or for a missing file that there is no such table) rather than the reader failing on bytes it cannot parse.
+- `.tre` and `.tree` are read as Newick. A NEXUS file under those names fails as a Newick parse error naming the file.
+- A table or view of the same name is read instead of the file, as for DuckDB's own formats. A name that matches no table is read as a file, so a mistyped `results.tree` reports a missing file rather than a missing table.
+- Without quotes, each dotted part of the name must be a plain identifier (`tree.nwk`, `reads.fq.gz`). Quote any other path.
+- A single file's result is named after the file up to its first `.`, so `SELECT reads.read_id FROM 'reads.fq.gz'` works.
 - DuckDB autoloads only its own extensions by file name, so a session must `LOAD miint` first.
 
 ### FASTA and FASTQ
@@ -945,7 +947,7 @@ SELECT * FROM read_jplace_newick('some_data.jplace');
 ```
 
 **Parameters:**
-- `path` (VARCHAR): Path to jplace file(s), supports glob patterns (e.g., `'data/*.jplace'`). gzip (`.gz`) and zstd (`.zst`) files are read as `read_json` reads them; zstd needs DuckDB's parquet extension, which most DuckDB builds include.
+- `path` (VARCHAR): Path to jplace file(s), supports glob patterns (e.g., `'data/*.jplace'`). gzip (`.gz`) and zstd (`.zst`) files are read as `read_json` reads them; zstd is read through DuckDB's parquet extension, so parquet must be loaded or loadable.
 
 **Output schema:**
 
@@ -1167,7 +1169,7 @@ WHERE is_tip ORDER BY depth DESC;
 Read GFF3 (General Feature Format) annotation files. GFF is a standard format for genomic feature annotations including genes, transcripts, exons, and other biological features.
 
 **Parameters:**
-- `path` (VARCHAR): Path to GFF/GFF3 file. gzip (`.gz`) and zstd (`.zst`) files are read as `read_csv` reads them; zstd needs DuckDB's parquet extension, which most DuckDB builds include.
+- `path` (VARCHAR): Path to GFF/GFF3 file. gzip (`.gz`) and zstd (`.zst`) files are read as `read_csv` reads them; zstd is read through DuckDB's parquet extension, so parquet must be loaded or loadable.
 
 **Output schema:**
 - `seqid` (VARCHAR): Sequence/chromosome identifier

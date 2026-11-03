@@ -15,8 +15,11 @@ statement ok
 SET enable_progress_bar = false;
 
 # FROM 'x.fq' is shorthand for FROM read_fastx('x.fq') and nothing else: each claimed suffix
-# must give exactly the rows its reader gives for the same path. Suffixes with no committed
-# fixture are written here with miint's COPY formats.
+# must give exactly the rows its reader gives for the same path. Each row of FORMAT_READERS
+# is tested once per compression, read where the row claims it and refused where it does not.
+# Suffixes with no committed fixture are written here with miint's COPY formats. The committed
+# .gz and .zst fixtures are `gzip -n` and `zstd` of their uncompressed siblings, and
+# data/gff/test.gff3 is a copy of data/gff/test.gff.
 
 statement ok
 COPY (FROM read_fastx('data/fastq/test_r2.fq')) TO '{TEST_DIR}/fss.fq' (FORMAT FASTQ);
@@ -251,8 +254,19 @@ COPY (SELECT 1 AS x) TO '{TEST_DIR}/fss_unclaimed.mzxml.gz' (FORMAT csv, COMPRES
 statement ok
 COPY (SELECT 1 AS x) TO '{TEST_DIR}/fss_unclaimed.sff.gz' (FORMAT csv, COMPRESSION gzip);
 
-# read_newick, read_paf and read_gfa take a file for gzip only by a lower-case .gz, so the
-# compression suffix is matched as written: read_newick would parse X.NWK.GZ's gzip bytes.
+statement ok
+COPY (SELECT 1 AS x) TO '{TEST_DIR}/fss_unclaimed.bam.zst' (FORMAT csv, COMPRESSION zstd);
+
+statement ok
+COPY (SELECT 1 AS x) TO '{TEST_DIR}/fss_unclaimed.mzml.zst' (FORMAT csv, COMPRESSION zstd);
+
+statement ok
+COPY (SELECT 1 AS x) TO '{TEST_DIR}/fss_unclaimed.mzxml.zst' (FORMAT csv, COMPRESSION zstd);
+
+statement ok
+COPY (SELECT 1 AS x) TO '{TEST_DIR}/fss_unclaimed.sff.zst' (FORMAT csv, COMPRESSION zstd);
+
+# The compression suffix is matched as written (see ReaderFor), so X.NWK.GZ is not claimed.
 statement ok
 COPY (SELECT 1 AS x) TO '{TEST_DIR}/fss_unclaimed.NWK.GZ' (FORMAT csv, COMPRESSION gzip);
 
@@ -298,6 +312,26 @@ No extension found that is capable of reading the file
 
 statement error
 FROM '{TEST_DIR}/fss_unclaimed.sff.gz'
+----
+No extension found that is capable of reading the file
+
+statement error
+FROM '{TEST_DIR}/fss_unclaimed.bam.zst'
+----
+No extension found that is capable of reading the file
+
+statement error
+FROM '{TEST_DIR}/fss_unclaimed.mzml.zst'
+----
+No extension found that is capable of reading the file
+
+statement error
+FROM '{TEST_DIR}/fss_unclaimed.mzxml.zst'
+----
+No extension found that is capable of reading the file
+
+statement error
+FROM '{TEST_DIR}/fss_unclaimed.sff.zst'
 ----
 No extension found that is capable of reading the file
 

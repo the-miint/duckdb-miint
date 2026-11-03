@@ -14,51 +14,49 @@ namespace duckdb {
 
 namespace {
 
-// A suffix claims only the compressed forms its reader opens, so a file the reader cannot read
-// is reported by DuckDB as one no reader handles, not as a parse error from the reader.
-// read_jplace and read_gff read zstd because they are macros over read_json and read_csv.
-struct SuffixReader {
-	const char *suffix;
+// A reader claims only the compressed forms it opens, so any other falls through to DuckDB's
+// own error instead of reaching a reader that would parse its compressed bytes. read_jplace and
+// read_gff read zstd because they are macros over read_json and read_csv.
+struct FormatReader {
 	const char *reader;
 	bool reads_gzip;
 	bool reads_zstd;
+	const char *suffixes[8];
 };
 
-constexpr SuffixReader SUFFIX_READERS[] = {
-    {".fa", "read_fastx", true, false},       {".fasta", "read_fastx", true, false},
-    {".fna", "read_fastx", true, false},      {".faa", "read_fastx", true, false},
-    {".ffn", "read_fastx", true, false},      {".frn", "read_fastx", true, false},
-    {".fq", "read_fastx", true, false},       {".fastq", "read_fastx", true, false},
-    {".sam", "read_alignments", true, false}, {".bam", "read_alignments", false, false},
-    {".nwk", "read_newick", true, false},     {".newick", "read_newick", true, false},
-    {".tre", "read_newick", true, false},     {".tree", "read_newick", true, false},
-    {".paf", "read_paf", true, false},        {".gfa", "read_gfa", true, false},
-    {".jplace", "read_jplace", true, true},   {".gff", "read_gff", true, true},
-    {".gff3", "read_gff", true, true},        {".mzml", "read_mzml", false, false},
-    {".mzxml", "read_mzxml", false, false},   {".sff", "read_sequences_sff", false, false},
+constexpr FormatReader FORMAT_READERS[] = {
+    {"read_fastx", true, false, {".fa", ".fasta", ".fna", ".faa", ".ffn", ".frn", ".fq", ".fastq"}},
+    {"read_alignments", true, false, {".sam"}},
+    {"read_alignments", false, false, {".bam"}},
+    {"read_newick", true, false, {".nwk", ".newick", ".tre", ".tree"}},
+    {"read_paf", true, false, {".paf"}},
+    {"read_gfa", true, false, {".gfa"}},
+    {"read_jplace", true, true, {".jplace"}},
+    {"read_gff", true, true, {".gff", ".gff3"}},
+    {"read_mzml", false, false, {".mzml"}},
+    {"read_mzxml", false, false, {".mzxml"}},
+    {"read_sequences_sff", false, false, {".sff"}},
 #ifdef MIINT_HAS_HDF5
-    {".biom", "read_biom", false, false},
+    {"read_biom", false, false, {".biom"}},
 #endif
 };
 
-// The reader for path's suffix, or nullptr. The format's suffix is matched in any case
-// (data.mzML is read_mzml's), the compression's as written: read_newick, read_paf and
-// read_gfa take a file for gzip only by a lower-case .gz.
+// The reader for path, or nullptr. The format's suffix is matched in any case (data.mzML is
+// read_mzml's), the compression's as written: a reader that decides gzip by name does so with
+// IsGzipped, which takes only a lower-case .gz.
 const char *ReaderFor(const string &path) {
 	const bool gzip = IsGzipped(path);
 	const bool zstd = StringUtil::EndsWith(path, ".zst");
 	auto name = StringUtil::Lower(path);
-	if (gzip) {
-		name.resize(name.size() - 3);
-	} else if (zstd) {
-		name.resize(name.size() - 4);
+	if (gzip || zstd) {
+		name.resize(name.rfind('.'));
 	}
-	for (const auto &entry : SUFFIX_READERS) {
-		if (StringUtil::EndsWith(name, entry.suffix)) {
-			if ((gzip && !entry.reads_gzip) || (zstd && !entry.reads_zstd)) {
-				return nullptr;
+	for (const auto &format : FORMAT_READERS) {
+		for (const char *suffix : format.suffixes) {
+			if (suffix && StringUtil::EndsWith(name, suffix)) {
+				const bool opens = (!gzip || format.reads_gzip) && (!zstd || format.reads_zstd);
+				return opens ? format.reader : nullptr;
 			}
-			return entry.reader;
 		}
 	}
 	return nullptr;

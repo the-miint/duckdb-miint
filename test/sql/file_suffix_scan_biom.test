@@ -6,6 +6,9 @@ require miint
 
 require-env HDF5_AVAILABLE
 
+# Writes the .zst file below with parquet's zstd file system.
+require parquet
+
 # FROM 'x.biom' is shorthand for FROM read_biom('x.biom') and nothing else.
 query I
 SELECT count(*) FROM 'data/biom/test.biom'
@@ -18,12 +21,20 @@ SELECT count(*) FROM ((FROM 'data/biom/test.biom' EXCEPT ALL FROM read_biom('dat
 ----
 0
 
-# A .biom file is HDF5 and never gzip, so .biom.gz is not claimed: DuckDB says no reader
-# handles it instead of read_biom failing on it. What the file holds is never read.
+# A .biom file is HDF5, never gzip or zstd, so neither is claimed: DuckDB says no reader
+# handles it instead of read_biom failing on it. What the files hold is never read.
 statement ok
 COPY (SELECT 1 AS x) TO '{TEST_DIR}/fss_unclaimed.biom.gz' (FORMAT csv, COMPRESSION gzip);
 
+statement ok
+COPY (SELECT 1 AS x) TO '{TEST_DIR}/fss_unclaimed.biom.zst' (FORMAT csv, COMPRESSION zstd);
+
 statement error
 FROM '{TEST_DIR}/fss_unclaimed.biom.gz'
+----
+No extension found that is capable of reading the file
+
+statement error
+FROM '{TEST_DIR}/fss_unclaimed.biom.zst'
 ----
 No extension found that is capable of reading the file

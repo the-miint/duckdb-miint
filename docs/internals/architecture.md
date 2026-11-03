@@ -154,7 +154,7 @@ Currently used by `align_minimap2` + `save_minimap2_index` (both sides), `copy_s
 5. Create SQL test in `test/sql/`
 6. If the function should run per-sample (partitioning an input relation by a column), follow `docs/internals/per-sample-pattern.md`
 7. If an argument names a relation to read, follow `docs/internals/reading-tables-views.md`, including its [CTE guard](reading-tables-views.md#ctes-reject-them-in-bind) and the matching `cte_relation_name_guard` test case
-8. If it reads a file format, add the format's suffixes to `SUFFIX_READERS` in `src/file_suffix_scan.cpp`, with only the compressions the reader opens, so `FROM 'x.<suffix>'` reads with it; add the cases to `test/sql/file_suffix_scan.test` and the table in [reading.md](../reading.md#reading-a-file-by-its-name)
+8. If it reads a file format, add a row to `FORMAT_READERS` in `src/file_suffix_scan.cpp` with the format's suffixes and only the compressions the reader opens, so `FROM 'x.<suffix>'` reads with it; add the cases to `test/sql/file_suffix_scan.test` and the table in [reading.md](../reading.md#reading-a-file-by-its-name). A reader built only with an optional library goes under its `MIINT_HAS_*` guard, with its cases in a test file that has the matching `require-env`, as `.biom` does.
 
 <a name="no-work-in-bind"></a>
 ### Do the work in `InitGlobal` / `Execute` — never in `Bind`
