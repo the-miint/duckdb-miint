@@ -101,12 +101,8 @@ SELECT * FROM predict_genes('no_index', genome_id := 'genome', order_by := 'labe
 ----
 order_by
 
-# Translation tables: Prodigal 2.6.5's, and metagenomic mode takes 11 only.
-statement error
-SELECT * FROM predict_genes('contigs', genome_id := 'genome', trans_table := 1);
-----
-trans_table
-
+# Metagenomic mode takes translation table 11 only. (The tables single-genome mode takes are gpl-boundary's, read
+# when the call runs: predict_genes.test.)
 statement error
 SELECT * FROM predict_genes('contigs', genome_id := 'genome', meta_mode := true, trans_table := 4);
 ----

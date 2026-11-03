@@ -373,6 +373,12 @@ SELECT * FROM predict_genes('anthus', genome_id := 'genome', training_path := '{
 ----
 trans_table
 
+# The translation tables are the ones gpl-boundary's prodigal-train lists (--describe), named in the error.
+statement error
+SELECT * FROM predict_genes('anthus', genome_id := 'genome', trans_table := 1);
+----
+predict_genes: trans_table 1 is not one gpl-boundary's prodigal-train takes (4, 5, 9, 11, 13, 15, 21, 25, 26, 32)
+
 # -----------------------------------------------------------------------------
 # Input the daemon would refuse is refused by name
 # -----------------------------------------------------------------------------

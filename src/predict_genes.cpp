@@ -65,9 +65,6 @@ constexpr const char *kOutputMismatch =
     "This gpl-boundary is 0.5.0 or later, but returned output that this miint cannot read: upgrade miint, or set "
     "MIINT_GPL_BOUNDARY_PATH to a gpl-boundary of the release that this miint was built for";
 
-// The translation tables Prodigal takes, as gpl-boundary's prodigal tool lists them.
-const std::vector<int32_t> kTransTables = {4, 5, 9, 11, 13, 15, 21, 25, 26, 32};
-
 // Bases per prodigal batch. Prodigal calls genes on each contig on its own, with the bin it picks (metagenomic mode)
 // or the one model (single-genome mode), so this bounds memory, not results. (Training takes a genome whole.)
 constexpr idx_t kBatchBases = idx_t(64) << 20;
@@ -123,6 +120,42 @@ const vector<LogicalType> kContigsTypes = {
     LogicalType::INTEGER, LogicalType::VARCHAR, LogicalType::INTEGER, LogicalType::DOUBLE,  LogicalType::DOUBLE,
     LogicalType::INTEGER, LogicalType::BOOLEAN, LogicalType::INTEGER, LogicalType::VARCHAR, LogicalType::INTEGER};
 
+// The outputs' columns, by position in kGenesNames and kContigsNames.
+enum GenesColumn : idx_t {
+	G_SEQ_INDEX,
+	G_SEQ_NAME,
+	G_GENE_INDEX,
+	G_BEGIN,
+	G_END,
+	G_STRAND,
+	G_PARTIAL_LEFT,
+	G_PARTIAL_RIGHT,
+	G_START_TYPE,
+	G_SCORE,
+	G_CSCORE,
+	G_SSCORE,
+	G_RSCORE,
+	G_USCORE,
+	G_TSCORE,
+	G_CONFIDENCE,
+	G_GC_CONT,
+	G_RBS_MOTIF,
+	G_RBS_SPACER,
+	G_PROTEIN
+};
+enum ContigsColumn : idx_t {
+	C_SEQ_INDEX,
+	C_SEQ_NAME,
+	C_LENGTH,
+	C_GC_CONTENT,
+	C_MODEL_GC_CONTENT,
+	C_TRANSLATION_TABLE,
+	C_USES_SD,
+	C_META_BIN,
+	C_MODEL_DESC,
+	C_N_GENES
+};
+
 // Prodigal's start codon types (the genes output's start_type), as its GFF names them.
 const char *const kStartTypes[] = {"ATG", "GTG", "TTG", "Edge"};
 
@@ -157,14 +190,6 @@ struct PredictGenesBindData : public TableFunctionData {
 		       has_sequence2 == o.has_sequence2 && genome_type == o.genome_type && read_id_type == o.read_id_type;
 	}
 };
-
-std::string TransTableList() {
-	std::string out;
-	for (auto t : kTransTables) {
-		out += (out.empty() ? "" : ", ") + std::to_string(t);
-	}
-	return out;
-}
 
 void ReadNamedParameters(const named_argument_map_t &params, PredictGenesBindData &data) {
 	bool has_genome_id = false;
@@ -204,10 +229,6 @@ void ReadNamedParameters(const named_argument_map_t &params, PredictGenesBindDat
 	if (!has_genome_id) {
 		throw BinderException("%s: genome_id (the name of the column that groups contigs into genomes) is required",
 		                      kFunction);
-	}
-	if (std::find(kTransTables.begin(), kTransTables.end(), data.trans_table) == kTransTables.end()) {
-		throw BinderException("%s: trans_table %d is not one Prodigal %s supports (%s)", kFunction, data.trans_table,
-		                      kProdigalVersion, TransTableList());
 	}
 	if (data.meta_mode && data.trans_table != 11) {
 		throw BinderException("%s: metagenomic mode (meta_mode := true) takes trans_table 11 only: its models choose "
@@ -369,9 +390,8 @@ struct PredictGenesGlobalState : public GlobalTableFunctionState {
 	}
 };
 
-// Refuse a gpl-boundary whose `--version` does not list prodigal and prodigal-train at kProdigalVersion: COPY GFF names
-// that version, and the translation tables accepted at bind are its. Probed on every call, so a binary replaced in
-// place is seen by the next query.
+// Refuse a gpl-boundary whose `--version` does not list prodigal and prodigal-train at kProdigalVersion, the version
+// prodigal_gff_lines names. Probed on every call, so a binary replaced in place is seen by the next query.
 void RequireProdigalVersion(const std::string &gpl_path) {
 	std::string text;
 	try {
@@ -403,12 +423,55 @@ void RequireProdigalVersion(const std::string &gpl_path) {
 			continue;
 		}
 		const std::string found = it == versions.end() ? std::string("no version for it") : "version " + it->second;
-		throw IOException("%s requires a gpl-boundary whose %s is version %s (the version COPY GFF names, and whose "
-		                  "translation tables it accepts), but the binary at %s reports %s. Point "
+		throw IOException("%s requires a gpl-boundary whose %s is version %s (the version prodigal_gff_lines names), "
+		                  "but the binary at %s reports %s. Point "
 		                  "MIINT_GPL_BOUNDARY_PATH at a gpl-boundary that ships %s %s, or use a miint release that "
 		                  "supports this one.",
 		                  kFunction, tool, kProdigalVersion, gpl_path, found, tool, kProdigalVersion);
 	}
+}
+
+// Refuse a trans_table that gpl-boundary's prodigal-train does not take, as its `--describe` lists them
+// (config_params' trans_table allowed_values), rather than keep a list of its own.
+void RequireTransTable(const std::string &gpl_path, int32_t trans_table) {
+	std::string text;
+	try {
+		const auto result = gb::RunCapture({gpl_path, "--describe", kTrainTool});
+		if (result.spawned && result.exited_normally && result.exit_code == 0) {
+			text = result.stdout_text;
+		}
+	} catch (...) {
+		// Undetermined, so refused below.
+	}
+	std::unique_ptr<yj::yyjson_doc, decltype(&yj::yyjson_doc_free)> doc(yj::yyjson_read(text.c_str(), text.size(), 0),
+	                                                                    &yj::yyjson_doc_free);
+	yj::yyjson_val *allowed = nullptr;
+	if (doc) {
+		auto *params = yj::yyjson_obj_get(yj::yyjson_doc_get_root(doc.get()), "config_params");
+		size_t idx, max;
+		yj::yyjson_val *param;
+		yyjson_arr_foreach(params, idx, max, param) {
+			const char *name = yj::yyjson_get_str(yj::yyjson_obj_get(param, "name"));
+			if (name && std::string(name) == "trans_table") {
+				allowed = yj::yyjson_obj_get(param, "allowed_values");
+			}
+		}
+	}
+	if (!yj::yyjson_is_arr(allowed)) {
+		throw IOException("%s: cannot read the translation tables gpl-boundary's %s takes from `%s --describe %s`. %s",
+		                  kFunction, kTrainTool, gpl_path, kTrainTool, kOutputMismatch);
+	}
+	std::string list;
+	size_t idx, max;
+	yj::yyjson_val *value;
+	yyjson_arr_foreach(allowed, idx, max, value) {
+		if (yj::yyjson_is_int(value) && yj::yyjson_get_int(value) == trans_table) {
+			return;
+		}
+		list += (list.empty() ? "" : ", ") + std::to_string(yj::yyjson_get_int(value));
+	}
+	throw InvalidInputException("%s: trans_table %d is not one gpl-boundary's %s takes (%s)", kFunction, trans_table,
+	                            kTrainTool, list);
 }
 
 std::string MakeTempModelDir() {
@@ -638,7 +701,7 @@ void AppendStatusRow(ClientContext &context, PredictGenesGlobalState &g, const V
 	g.rows->Append(out);
 }
 
-// A row of a contig without genes: its contig columns, every gene column NULL. COPY FORMAT GFF writes its header
+// A row of a contig without genes: its contig columns, every gene column NULL. prodigal_gff_lines writes its header
 // lines from it, as the CLI does for such a contig.
 void AppendBarrenContigRow(ClientContext &context, PredictGenesGlobalState &g, const Contig &c, const ContigInfo &ci) {
 	DataChunk out;
@@ -681,17 +744,17 @@ idx_t Predict(ClientContext &context, PredictGenesGlobalState &g, const std::str
 	// seq_index is the contig's 1-based position in the batch.
 	std::vector<ContigInfo> info(end - begin);
 	for (const auto &chunk : contig_chunks) {
-		const auto *seq_index = FlatVector::GetData<int32_t>(chunk->data[0]);
-		const auto *length = FlatVector::GetData<int32_t>(chunk->data[2]);
-		const auto *gc = FlatVector::GetData<double>(chunk->data[3]);
+		const auto *seq_index = FlatVector::GetData<int32_t>(chunk->data[C_SEQ_INDEX]);
+		const auto *length = FlatVector::GetData<int32_t>(chunk->data[C_LENGTH]);
+		const auto *gc = FlatVector::GetData<double>(chunk->data[C_GC_CONTENT]);
 		// The GC of the model that called the contig: its bin's, or the single-genome model's (the CLI's Model Data
 		// gc_cont / 100)
-		const auto *model_gc = FlatVector::GetData<double>(chunk->data[4]);
-		const auto *table = FlatVector::GetData<int32_t>(chunk->data[5]);
-		const auto *uses_sd = FlatVector::GetData<bool>(chunk->data[6]);
-		const auto *meta_bin = FlatVector::GetData<int32_t>(chunk->data[7]);
-		const auto *model_desc = FlatVector::GetData<string_t>(chunk->data[8]);
-		const auto *contig_genes = FlatVector::GetData<int32_t>(chunk->data[9]);
+		const auto *model_gc = FlatVector::GetData<double>(chunk->data[C_MODEL_GC_CONTENT]);
+		const auto *table = FlatVector::GetData<int32_t>(chunk->data[C_TRANSLATION_TABLE]);
+		const auto *uses_sd = FlatVector::GetData<bool>(chunk->data[C_USES_SD]);
+		const auto *meta_bin = FlatVector::GetData<int32_t>(chunk->data[C_META_BIN]);
+		const auto *model_desc = FlatVector::GetData<string_t>(chunk->data[C_MODEL_DESC]);
+		const auto *contig_genes = FlatVector::GetData<int32_t>(chunk->data[C_N_GENES]);
 		for (idx_t r = 0; r < chunk->size(); r++) {
 			if (seq_index[r] < 1 || static_cast<idx_t>(seq_index[r]) > info.size()) {
 				throw IOException("%s: gpl-boundary's prodigal returned contig seq_index %d for a batch of %llu",
@@ -702,9 +765,9 @@ idx_t Predict(ClientContext &context, PredictGenesGlobalState &g, const std::str
 			ci.gc_content = gc[r];
 			ci.translation_table = table[r];
 			ci.uses_sd = uses_sd[r];
-			ci.has_meta_bin = !FlatVector::IsNull(chunk->data[7], r);
+			ci.has_meta_bin = !FlatVector::IsNull(chunk->data[C_META_BIN], r);
 			ci.meta_bin = ci.has_meta_bin ? meta_bin[r] : 0;
-			ci.has_model_desc = !FlatVector::IsNull(chunk->data[8], r);
+			ci.has_model_desc = !FlatVector::IsNull(chunk->data[C_MODEL_DESC], r);
 			ci.model_desc = ci.has_model_desc ? model_desc[r].GetString() : std::string();
 			ci.model_gc_content = model_gc[r];
 			ci.n_genes = contig_genes[r];
@@ -732,14 +795,14 @@ idx_t Predict(ClientContext &context, PredictGenesGlobalState &g, const std::str
 	for (const auto &chunk : gene_chunks) {
 		out.Reset();
 		const idx_t n = chunk->size();
-		const auto *seq_index = FlatVector::GetData<int32_t>(chunk->data[0]);
-		const auto *gene_index = FlatVector::GetData<int32_t>(chunk->data[2]);
-		const auto *gene_begin = FlatVector::GetData<int32_t>(chunk->data[3]);
-		const auto *gene_end = FlatVector::GetData<int32_t>(chunk->data[4]);
-		const auto *strand = FlatVector::GetData<int32_t>(chunk->data[5]);
-		const auto *partial_left = FlatVector::GetData<bool>(chunk->data[6]);
-		const auto *partial_right = FlatVector::GetData<bool>(chunk->data[7]);
-		const auto *start_type = FlatVector::GetData<int32_t>(chunk->data[8]);
+		const auto *seq_index = FlatVector::GetData<int32_t>(chunk->data[G_SEQ_INDEX]);
+		const auto *gene_index = FlatVector::GetData<int32_t>(chunk->data[G_GENE_INDEX]);
+		const auto *gene_begin = FlatVector::GetData<int32_t>(chunk->data[G_BEGIN]);
+		const auto *gene_end = FlatVector::GetData<int32_t>(chunk->data[G_END]);
+		const auto *strand = FlatVector::GetData<int32_t>(chunk->data[G_STRAND]);
+		const auto *partial_left = FlatVector::GetData<bool>(chunk->data[G_PARTIAL_LEFT]);
+		const auto *partial_right = FlatVector::GetData<bool>(chunk->data[G_PARTIAL_RIGHT]);
+		const auto *start_type = FlatVector::GetData<int32_t>(chunk->data[G_START_TYPE]);
 
 		auto *o_gene_index = FlatVector::GetDataMutable<int32_t>(out.data[COL_GENE_INDEX]);
 		auto *o_position = FlatVector::GetDataMutable<int64_t>(out.data[COL_POSITION]);
@@ -793,17 +856,17 @@ idx_t Predict(ClientContext &context, PredictGenesGlobalState &g, const std::str
 			FlatVector::SetNull(out.data[COL_ERROR], r, true);
 		}
 		// Columns that pass through as they are: the scores, the RBS fields and the protein.
-		out.data[COL_SCORE].Reference(chunk->data[9]);
-		out.data[COL_CSCORE].Reference(chunk->data[10]);
-		out.data[COL_SSCORE].Reference(chunk->data[11]);
-		out.data[COL_RSCORE].Reference(chunk->data[12]);
-		out.data[COL_USCORE].Reference(chunk->data[13]);
-		out.data[COL_TSCORE].Reference(chunk->data[14]);
-		out.data[COL_CONFIDENCE].Reference(chunk->data[15]);
-		out.data[COL_GENE_GC_CONTENT].Reference(chunk->data[16]);
-		out.data[COL_RBS_MOTIF].Reference(chunk->data[17]);
-		out.data[COL_RBS_SPACER].Reference(chunk->data[18]);
-		out.data[COL_PROTEIN].Reference(chunk->data[19]);
+		out.data[COL_SCORE].Reference(chunk->data[G_SCORE]);
+		out.data[COL_CSCORE].Reference(chunk->data[G_CSCORE]);
+		out.data[COL_SSCORE].Reference(chunk->data[G_SSCORE]);
+		out.data[COL_RSCORE].Reference(chunk->data[G_RSCORE]);
+		out.data[COL_USCORE].Reference(chunk->data[G_USCORE]);
+		out.data[COL_TSCORE].Reference(chunk->data[G_TSCORE]);
+		out.data[COL_CONFIDENCE].Reference(chunk->data[G_CONFIDENCE]);
+		out.data[COL_GENE_GC_CONTENT].Reference(chunk->data[G_GC_CONT]);
+		out.data[COL_RBS_MOTIF].Reference(chunk->data[G_RBS_MOTIF]);
+		out.data[COL_RBS_SPACER].Reference(chunk->data[G_RBS_SPACER]);
+		out.data[COL_PROTEIN].Reference(chunk->data[G_PROTEIN]);
 		ConstantVector::Reference(out.data[COL_STATUS], Value(kStatusOk), count_t(n));
 		out.SetChildCardinality(n);
 		// The genes in order, with a row for each contig without genes between them.
@@ -1052,6 +1115,9 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 		} else {
 			g->temp_dir = MakeTempModelDir();
 			g->train_path = g->temp_dir + "/genome.trn";
+		}
+		if (data.trans_table_set && !g->have_fixed_model) {
+			RequireTransTable(gpl_path, data.trans_table);
 		}
 	}
 
