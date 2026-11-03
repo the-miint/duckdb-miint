@@ -78,7 +78,7 @@ SELECT c.* FROM contigs c JOIN genes g ON c.filepath = g.genome_id WHERE g.statu
 INSERT INTO genes SELECT * FROM predict_genes('failed', genome_id := 'filepath', meta_mode := true);
 ```
 
-**Errors:** a contig with a NULL `read_id`, a NULL or empty `sequence1`, a non-NULL `sequence2`, or a character outside `A`..`z` (which Prodigal would drop, moving every coordinate after it) fails the call, naming the contig and its genome.
+**Errors:** a contig with a NULL `read_id`, a NULL or empty `sequence1` (for chunked input, an empty `chunk_data`), a non-NULL `sequence2`, or a character outside `A`..`z` (which Prodigal would drop, moving every coordinate after it) fails the call, naming the contig and its genome.
 
 **Order and resources:** genomes come out in `genome_id` order, each genome's genes and gene-less contigs in `order_by` order of their contigs, then the genome's own row if it has one. One genome is in memory at a time (in metagenomic mode, up to 64 MiB of bases of one), and genomes are called one after another in one gpl-boundary process. In single-genome mode, each genome's model is written to a temporary directory (`$TMPDIR/miint-prodigal-*`), removed when the query ends.
 
