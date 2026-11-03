@@ -52,7 +52,7 @@ echo "predict_genes when gpl-boundary dies:"
 if ! command -v python3 > /dev/null; then
     echo "  - python3 not found: skipped"
 else
-    out=$(printf '%s\n' "CREATE TABLE c AS SELECT 'g' AS genome, * FROM read_fastx('data/prodigal/anthus_aco.fas');" \
+    out=$(printf '%s\n' "CREATE TABLE c AS SELECT 'g' AS genome, * FROM read_fastx('data/prodigal/anthus_aco.fas.gz');" \
         "SELECT genome_id, status FROM predict_genes('c', genome_id := 'genome');" |
         REAL_GPL_BOUNDARY="$REAL" MIINT_GPL_BOUNDARY_PATH="$WORK/gpl-boundary" $DUCKDB -no-agent -csv 2>&1)
     if echo "$out" | grep -q "training_failed"; then
@@ -76,7 +76,7 @@ if [ "$(id -u)" = 0 ]; then
 fi
 mkdir "$WORK/read_only"
 chmod 555 "$WORK/read_only"
-out=$(printf '%s\n' "CREATE TABLE c AS SELECT 'g' AS genome, * FROM read_fastx('data/prodigal/anthus_aco.fas');" \
+out=$(printf '%s\n' "CREATE TABLE c AS SELECT 'g' AS genome, * FROM read_fastx('data/prodigal/anthus_aco.fas.gz');" \
     "SELECT genome_id, status FROM predict_genes('c', genome_id := 'genome', training_path := '$WORK/read_only/m.trn');" |
     MIINT_GPL_BOUNDARY_PATH="$REAL" $DUCKDB -no-agent -csv 2>&1)
 chmod 755 "$WORK/read_only"

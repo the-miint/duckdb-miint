@@ -8,7 +8,7 @@ require-env GPL_BOUNDARY_AVAILABLE
 
 statement ok
 CREATE TABLE anthus AS
-SELECT 'anthus' AS genome, sequence_index, read_id, sequence1 FROM read_fastx('data/prodigal/anthus_aco.fas');
+SELECT 'anthus' AS genome, sequence_index, read_id, sequence1 FROM read_fastx('data/prodigal/anthus_aco.fas.gz');
 
 query I
 SELECT count(*) FROM anthus;
@@ -26,14 +26,18 @@ SELECT count(*), count(DISTINCT read_id), count(*) FILTER (WHERE status = 'ok'),
 ----
 129	22	129	0
 
-# The CLI's GFF, field by field, as the CLI prints each value. Read as text: the reference files keep
-# anthus_aco.fas's CR inside their "# Sequence Data" comments, which read_gff refuses.
+# A file's lines, numbered.
+statement ok
+CREATE MACRO file_lines(path) AS TABLE
+SELECT row_number() OVER () AS i, line
+FROM read_csv(path, columns = {'line': 'VARCHAR'}, delim = E'\x1f', quote = '', escape = '', header = false,
+              auto_detect = false);
+
+# The CLI's GFF, field by field, as the CLI prints each value.
 statement ok
 CREATE MACRO ref_genes(path) AS TABLE
 WITH lines AS (
-    SELECT string_split(line, E'\t') AS f
-    FROM (SELECT unnest(string_split(content, E'\n')) AS line FROM read_text(path))
-    WHERE line <> '' AND NOT starts_with(line, '#')
+    SELECT string_split(line, E'\t') AS f FROM file_lines(path) WHERE NOT starts_with(line, '#')
 )
 SELECT f[1] AS read_id, split_part(regexp_extract(f[9], 'ID=([^;]*)', 1), '_', 2)::INTEGER AS gene_index,
        f[4]::BIGINT AS position, f[5]::BIGINT + 1 AS stop_position, f[7] AS strand,
@@ -48,7 +52,7 @@ SELECT f[1] AS read_id, split_part(regexp_extract(f[9], 'ID=([^;]*)', 1), '_', 2
 FROM lines;
 
 statement ok
-CREATE TABLE ref_single AS SELECT * FROM ref_genes('data/prodigal/ref_single.gff');
+CREATE TABLE ref_single AS SELECT * FROM ref_genes('data/prodigal/ref_single.gff.gz');
 
 statement ok
 CREATE MACRO as_cli(rel) AS TABLE
@@ -68,7 +72,7 @@ SELECT count(*) FROM ((SELECT * FROM ref_single EXCEPT ALL SELECT * FROM as_cli(
 
 # Proteins equal the CLI's -a records (unwrapped; the header is <contig>_<gene_index>).
 query I
-SELECT count(*) FROM read_fastx('data/prodigal/ref_single.proteins') p
+SELECT count(*) FROM read_fastx('data/prodigal/ref_single.proteins.gz') p
 FULL JOIN single s ON p.read_id = s.read_id || '_' || s.gene_index AND p.sequence1 = s.protein
 WHERE p.read_id IS NULL OR s.read_id IS NULL;
 ----
@@ -77,11 +81,8 @@ WHERE p.read_id IS NULL OR s.read_id IS NULL;
 # The CLI's per-contig "# Model Data" line: one model for the whole genome.
 statement ok
 CREATE MACRO model_data(path) AS TABLE
-WITH lines AS (
-    SELECT unnest(range(len(s))) AS i, unnest(s) AS line
-    FROM (SELECT string_split(content, E'\n') AS s FROM read_text(path))
-)
-SELECT regexp_extract(sd.line, 'seqhdr="([^"\r]*)', 1) AS read_id,
+WITH lines AS (SELECT * FROM file_lines(path))
+SELECT regexp_extract(sd.line, 'seqhdr="([^"]*)', 1) AS read_id,
        regexp_extract(md.line, 'run_type=([^;]*)', 1) AS run_type,
        regexp_extract(md.line, 'model="([^"]*)"', 1) AS model,
        regexp_extract(md.line, 'gc_cont=([^;]*)', 1) AS gc_cont,
@@ -93,7 +94,7 @@ WHERE sd.line LIKE '# Sequence Data:%' AND md.line LIKE '# Model Data:%';
 
 query I
 SELECT count(*) FROM (
-    (SELECT read_id, gc_cont, transl_table, uses_sd, seqlen FROM model_data('data/prodigal/ref_single.gff')
+    (SELECT read_id, gc_cont, transl_table, uses_sd, seqlen FROM model_data('data/prodigal/ref_single.gff.gz')
      WHERE read_id IN (SELECT read_id FROM single)
      EXCEPT
      SELECT DISTINCT read_id, printf('%.2f', model_gc_content * 100), translation_table, uses_sd, contig_length
@@ -102,7 +103,7 @@ SELECT count(*) FROM (
     (SELECT DISTINCT read_id, printf('%.2f', model_gc_content * 100), translation_table, uses_sd, contig_length
      FROM single
      EXCEPT
-     SELECT read_id, gc_cont, transl_table, uses_sd, seqlen FROM model_data('data/prodigal/ref_single.gff')));
+     SELECT read_id, gc_cont, transl_table, uses_sd, seqlen FROM model_data('data/prodigal/ref_single.gff.gz')));
 ----
 0
 
@@ -118,8 +119,18 @@ SELECT count(meta_bin), count(model_desc) FROM single;
 statement ok
 CREATE TABLE meta AS SELECT * FROM predict_genes('anthus', genome_id := 'genome', meta_mode := true);
 
+# prodigal_gff_lines.test reads this output, and the single-genome one, saved (data/prodigal/README.md); they are
+# still predict_genes' output.
+query II
+SELECT (SELECT count(*) FROM ((SELECT * FROM single EXCEPT ALL FROM read_csv('data/prodigal/anthus_single_genes.csv.gz'))
+                              UNION ALL (FROM read_csv('data/prodigal/anthus_single_genes.csv.gz') EXCEPT ALL FROM single))),
+       (SELECT count(*) FROM ((SELECT * FROM meta EXCEPT ALL FROM read_csv('data/prodigal/anthus_meta_genes.csv.gz'))
+                              UNION ALL (FROM read_csv('data/prodigal/anthus_meta_genes.csv.gz') EXCEPT ALL FROM meta)));
+----
+0	0
+
 statement ok
-CREATE TABLE ref_meta AS SELECT * FROM ref_genes('data/prodigal/ref_meta.gff');
+CREATE TABLE ref_meta AS SELECT * FROM ref_genes('data/prodigal/ref_meta.gff.gz');
 
 query II
 SELECT count(*), (SELECT count(*) FROM ref_meta) FROM meta;
@@ -133,7 +144,7 @@ SELECT count(*) FROM ((SELECT * FROM ref_meta EXCEPT ALL SELECT * FROM as_cli('m
 0
 
 query I
-SELECT count(*) FROM read_fastx('data/prodigal/ref_meta.proteins') p
+SELECT count(*) FROM read_fastx('data/prodigal/ref_meta.proteins.gz') p
 FULL JOIN meta s ON p.read_id = s.read_id || '_' || s.gene_index AND p.sequence1 = s.protein
 WHERE p.read_id IS NULL OR s.read_id IS NULL;
 ----
@@ -142,7 +153,7 @@ WHERE p.read_id IS NULL OR s.read_id IS NULL;
 # Each contig's bin, as the CLI's Model Data names it.
 query I
 SELECT count(*) FROM (
-    (SELECT read_id, model, gc_cont, transl_table, uses_sd FROM model_data('data/prodigal/ref_meta.gff')
+    (SELECT read_id, model, gc_cont, transl_table, uses_sd FROM model_data('data/prodigal/ref_meta.gff.gz')
      EXCEPT
      SELECT DISTINCT read_id, model_desc, printf('%.2f', model_gc_content * 100), translation_table, uses_sd
      FROM meta)
@@ -150,7 +161,7 @@ SELECT count(*) FROM (
     (SELECT DISTINCT read_id, model_desc, printf('%.2f', model_gc_content * 100), translation_table, uses_sd
      FROM meta
      EXCEPT
-     SELECT read_id, model, gc_cont, transl_table, uses_sd FROM model_data('data/prodigal/ref_meta.gff')));
+     SELECT read_id, model, gc_cont, transl_table, uses_sd FROM model_data('data/prodigal/ref_meta.gff.gz')));
 ----
 0
 
@@ -256,12 +267,12 @@ SELECT count(*) FROM ((SELECT * FROM as_cli('single') EXCEPT ALL SELECT * FROM a
 # A view, and read_fastx's own shape with include_filepath as the genome.
 statement ok
 CREATE VIEW anthus_view AS
-SELECT * FROM read_fastx('data/prodigal/anthus_aco.fas', include_filepath := true);
+SELECT * FROM read_fastx('data/prodigal/anthus_aco.fas.gz', include_filepath := true);
 
 query II
 SELECT count(*), any_value(genome_id) FROM predict_genes('anthus_view', genome_id := 'filepath', meta_mode := true);
 ----
-22	data/prodigal/anthus_aco.fas
+22	data/prodigal/anthus_aco.fas.gz
 
 # An empty relation returns no rows.
 statement ok
@@ -419,7 +430,7 @@ statement ok
 CREATE TABLE closed_genes AS SELECT * FROM predict_genes('anthus', genome_id := 'genome', closed_ends := true);
 
 query I
-SELECT n FROM differs_from_cli('closed_genes', 'data/prodigal/ref_single_c.gff');
+SELECT n FROM differs_from_cli('closed_genes', 'data/prodigal/ref_single_c.gff.gz');
 ----
 0
 
@@ -428,7 +439,7 @@ statement ok
 CREATE TABLE table4_genes AS SELECT * FROM predict_genes('anthus', genome_id := 'genome', trans_table := 4);
 
 query I
-SELECT n FROM differs_from_cli('table4_genes', 'data/prodigal/ref_single_g4.gff');
+SELECT n FROM differs_from_cli('table4_genes', 'data/prodigal/ref_single_g4.gff.gz');
 ----
 0
 
@@ -438,7 +449,7 @@ SELECT DISTINCT translation_table, uses_sd FROM table4_genes;
 4	false
 
 query I
-SELECT count(*) FROM read_fastx('data/prodigal/ref_single_g4.proteins') p
+SELECT count(*) FROM read_fastx('data/prodigal/ref_single_g4.proteins.gz') p
 FULL JOIN table4_genes s ON p.read_id = s.read_id || '_' || s.gene_index AND p.sequence1 = s.protein
 WHERE p.read_id IS NULL OR s.read_id IS NULL;
 ----
@@ -448,13 +459,13 @@ WHERE p.read_id IS NULL OR s.read_id IS NULL;
 # default; with it the CLI's -m.
 statement ok
 CREATE TABLE masked AS
-SELECT 'masked' AS genome, sequence_index, read_id, sequence1 FROM read_fastx('data/prodigal/anthus_masked.fas');
+SELECT 'masked' AS genome, sequence_index, read_id, sequence1 FROM read_fastx('data/prodigal/anthus_masked.fas.gz');
 
 statement ok
 CREATE TABLE masked_off AS SELECT * FROM predict_genes('masked', genome_id := 'genome');
 
 query I
-SELECT n FROM differs_from_cli('masked_off', 'data/prodigal/ref_masked.gff');
+SELECT n FROM differs_from_cli('masked_off', 'data/prodigal/ref_masked.gff.gz');
 ----
 0
 
@@ -462,7 +473,7 @@ statement ok
 CREATE TABLE masked_on AS SELECT * FROM predict_genes('masked', genome_id := 'genome', mask_regions := true);
 
 query I
-SELECT n FROM differs_from_cli('masked_on', 'data/prodigal/ref_masked_m.gff');
+SELECT n FROM differs_from_cli('masked_on', 'data/prodigal/ref_masked_m.gff.gz');
 ----
 0
 
@@ -480,7 +491,7 @@ SELECT g.* REPLACE (r.original AS read_id)
 FROM predict_genes('renamed', genome_id := 'genome') g JOIN renamed r ON g.read_id = r.read_id;
 
 query I
-SELECT n FROM differs_from_cli('renamed_genes', 'data/prodigal/ref_single.gff');
+SELECT n FROM differs_from_cli('renamed_genes', 'data/prodigal/ref_single.gff.gz');
 ----
 0
 
@@ -504,7 +515,7 @@ statement ok
 CREATE TABLE pair_second AS SELECT * FROM pair_genes WHERE genome_id = 'anthus2';
 
 query I
-SELECT n FROM differs_from_cli('pair_second', 'data/prodigal/ref_single.gff');
+SELECT n FROM differs_from_cli('pair_second', 'data/prodigal/ref_single.gff.gz');
 ----
 0
 

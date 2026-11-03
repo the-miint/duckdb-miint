@@ -1,0 +1,337 @@
+# name: test/sql/gff3_lines.test
+# description: gff3_lines(relation): GFF3 lines from read_gff's columns, which COPY ... (FORMAT CSV) writes as a file
+# group: [sql]
+
+require miint
+
+# A written file's lines, in order, with tabs shown as ' | '.
+statement ok
+CREATE MACRO file_lines(path) AS TABLE
+SELECT replace(line, E'\t', ' | ') AS line FROM (
+    SELECT unnest(range(len(s))) AS i, unnest(s) AS line
+    FROM (SELECT string_split(rtrim(content, E'\n'), E'\n') AS s FROM read_text(path))
+) ORDER BY i;
+
+# -----------------------------------------------------------------------------
+# What read_gff reads, gff3_lines writes, and read_gff reads back the same
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE features AS SELECT * FROM read_gff('data/gff/test.gff');
+
+statement ok
+COPY (SELECT line FROM gff3_lines('features')) TO '{TEST_DIR}/roundtrip.gff' (FORMAT CSV, HEADER false, QUOTE '', ESCAPE '');
+
+query I
+SELECT count(*) FROM ((SELECT * FROM features EXCEPT ALL SELECT * FROM read_gff('{TEST_DIR}/roundtrip.gff'))
+                      UNION ALL
+                      (SELECT * FROM read_gff('{TEST_DIR}/roundtrip.gff') EXCEPT ALL SELECT * FROM features));
+----
+0
+
+# The file: the version directive, then one line per feature; end is stop_position - 1, NULL is '.'.
+query I
+SELECT line FROM file_lines('{TEST_DIR}/roundtrip.gff');
+----
+##gff-version 3
+chr1 | NCBI | gene | 100 | 500 | . | + | . | ID=gene1;Name=TEST1;biotype=protein_coding
+chr1 | NCBI | mRNA | 100 | 500 | . | + | . | ID=transcript1;Parent=gene1;Name=TEST1-RA
+chr1 | NCBI | exon | 100 | 200 | . | + | . | ID=exon1;Parent=transcript1
+chr1 | NCBI | exon | 300 | 500 | 50.5 | + | . | ID=exon2;Parent=transcript1
+chr1 | NCBI | CDS | 150 | 200 | . | + | 0 | ID=cds1;Parent=transcript1
+chr1 | NCBI | CDS | 300 | 450 | . | + | 2 | ID=cds2;Parent=transcript1
+chr2 | Ensembl | gene | 1000 | 2000 | 100.0 | - | . | ID=gene2;Name=TEST2
+
+# Reserved characters in attribute keys and values are percent-encoded, and read_gff decodes them.
+statement ok
+CREATE TABLE encoded AS SELECT * FROM read_gff('data/gff/encoded.gff');
+
+statement ok
+COPY (SELECT line FROM gff3_lines('encoded')) TO '{TEST_DIR}/encoded.gff' (FORMAT CSV, HEADER false, QUOTE '', ESCAPE '');
+
+query I
+SELECT count(*) FROM ((SELECT * FROM encoded EXCEPT ALL SELECT * FROM read_gff('{TEST_DIR}/encoded.gff'))
+                      UNION ALL
+                      (SELECT * FROM read_gff('{TEST_DIR}/encoded.gff') EXCEPT ALL SELECT * FROM encoded));
+----
+0
+
+statement ok
+CREATE VIEW reserved AS
+SELECT 'c1' AS seqid, 'src' AS source, 'gene' AS type, 1 AS position, 11 AS stop_position, NULL::DOUBLE AS score,
+       NULL::VARCHAR AS strand, NULL::INTEGER AS phase, MAP {'ID': 'a;b=c&d,e%f', 'Note': E'tab\there'} AS attributes;
+
+statement ok
+COPY (SELECT line FROM gff3_lines('reserved')) TO '{TEST_DIR}/reserved.gff' (FORMAT CSV, HEADER false, QUOTE '', ESCAPE '');
+
+query I
+SELECT line FROM file_lines('{TEST_DIR}/reserved.gff');
+----
+##gff-version 3
+c1 | src | gene | 1 | 10 | . | . | . | ID=a%3Bb%3Dc%26d%2Ce%25f;Note=tab%09here
+
+query II
+SELECT attributes['ID'], replace(attributes['Note'], E'\t', '<TAB>') FROM read_gff('{TEST_DIR}/reserved.gff');
+----
+a;b=c&d,e%f	tab<TAB>here
+
+# Characters GFF3 does not reserve, '"' and non-ASCII among them, are written as they are.
+statement ok
+CREATE VIEW plain AS
+SELECT 'c1' AS seqid, 'src' AS source, 'gene' AS type, 1 AS position, 2 AS stop_position, NULL AS score,
+       NULL AS strand, NULL AS phase, MAP {'Note': 'a "b" é'} AS attributes;
+
+query I
+SELECT replace(line, E'\t', ' | ') FROM gff3_lines('plain');
+----
+##gff-version 3
+c1 | src | gene | 1 | 1 | . | . | . | Note=a "b" é
+
+# attributes may be text, written as given.
+statement ok
+CREATE VIEW text_attrs AS
+SELECT 'c1' AS seqid, 'src' AS source, 'gene' AS type, 5 AS position, 6 AS stop_position, 1.5 AS score,
+       '-' AS strand, 1 AS phase, 'ID=g1;Note=raw' AS attributes;
+
+query I
+SELECT replace(line, E'\t', ' | ') FROM gff3_lines('text_attrs');
+----
+##gff-version 3
+c1 | src | gene | 5 | 5 | 1.5 | - | 1 | ID=g1;Note=raw
+
+# NULL or empty attributes are '.'.
+statement ok
+CREATE VIEW no_attrs AS
+SELECT 'c1' AS seqid, 'src' AS source, 'gene' AS type, 5 AS position, 7 AS stop_position, NULL AS score,
+       '+' AS strand, NULL AS phase, NULL::MAP(VARCHAR, VARCHAR) AS attributes
+UNION ALL
+SELECT 'c1', 'src', 'gene', 5, 7, NULL, '+', NULL, MAP {};
+
+query I
+SELECT replace(line, E'\t', ' | ') FROM gff3_lines('no_attrs');
+----
+##gff-version 3
+c1 | src | gene | 5 | 6 | . | + | . | .
+c1 | src | gene | 5 | 6 | . | + | . | .
+
+statement ok
+CREATE VIEW empty_text_attrs AS
+SELECT 'c1' AS seqid, 'src' AS source, 'gene' AS type, 5 AS position, 7 AS stop_position, NULL AS score,
+       '+' AS strand, NULL AS phase, '' AS attributes;
+
+query I
+SELECT replace(line, E'\t', ' | ') FROM gff3_lines('empty_text_attrs');
+----
+##gff-version 3
+c1 | src | gene | 5 | 6 | . | + | . | .
+
+# gzip, by extension, as COPY ... (FORMAT CSV) does.
+statement ok
+COPY (SELECT line FROM gff3_lines('features')) TO '{TEST_DIR}/roundtrip.gff.gz' (FORMAT CSV, HEADER false, QUOTE '', ESCAPE '');
+
+query I
+SELECT count(*) FROM read_gff('{TEST_DIR}/roundtrip.gff.gz');
+----
+7
+
+# An empty relation is the version directive only.
+statement ok
+CREATE VIEW no_features AS SELECT * FROM features WHERE false;
+
+query I
+SELECT line FROM gff3_lines('no_features');
+----
+##gff-version 3
+
+# The lines follow the relation's order, with a parallel source: 300,000 features, shuffled into a table, come out
+# in the table's order.
+statement ok
+SET threads = 8;
+
+statement ok
+CREATE TABLE many AS
+SELECT 'c' || lpad(i::VARCHAR, 6, '0') AS seqid, 's' AS source, 'gene' AS type, 1 AS position, 2 AS stop_position,
+       NULL AS score, NULL AS strand, NULL AS phase, NULL AS attributes
+FROM range(300000) t(i) ORDER BY random();
+
+query I
+SELECT count(*) FROM (
+    SELECT split_part(line, E'\t', 1) AS seqid, row_number() OVER () - 1 AS n FROM gff3_lines('many')
+) l JOIN (SELECT seqid, row_number() OVER () AS n FROM many) t USING (n) WHERE l.seqid <> t.seqid;
+----
+0
+
+# -----------------------------------------------------------------------------
+# What gff3_lines refuses
+# -----------------------------------------------------------------------------
+
+# A missing column, by name.
+statement ok
+CREATE VIEW missing_attributes AS SELECT seqid, source, type, position, stop_position, score, strand, phase FROM features;
+
+statement error
+SELECT * FROM gff3_lines('missing_attributes');
+----
+attributes
+
+# Types.
+statement ok
+CREATE VIEW text_position AS SELECT * REPLACE ('x' AS position) FROM features;
+
+statement error
+SELECT * FROM gff3_lines('text_position');
+----
+position must be an integer
+
+statement ok
+CREATE VIEW number_attributes AS SELECT * REPLACE (42 AS attributes) FROM features;
+
+statement error
+SELECT * FROM gff3_lines('number_attributes');
+----
+attributes must be MAP(VARCHAR, VARCHAR) or VARCHAR
+
+statement ok
+CREATE VIEW text_score AS SELECT * REPLACE ('5' AS score) FROM features;
+
+statement error
+SELECT * FROM gff3_lines('text_score');
+----
+score must be a number
+
+statement ok
+CREATE VIEW double_phase AS SELECT * REPLACE (1.5 AS phase) FROM features;
+
+statement error
+SELECT * FROM gff3_lines('double_phase');
+----
+phase must be an integer
+
+# Values a GFF line cannot hold.
+statement ok
+CREATE TABLE one AS
+SELECT 'c1' AS seqid, 's' AS source, 't' AS type, 1 AS position, 10 AS stop_position, NULL::DOUBLE AS score,
+       NULL::VARCHAR AS strand, NULL::INTEGER AS phase, NULL::MAP(VARCHAR, VARCHAR) AS attributes;
+
+statement ok
+CREATE VIEW bad AS SELECT * REPLACE (1 AS stop_position) FROM one;
+
+statement error
+SELECT * FROM gff3_lines('bad');
+----
+stop_position must be greater than position
+
+statement ok
+CREATE OR REPLACE VIEW bad AS SELECT * REPLACE (0 AS position) FROM one;
+
+statement error
+SELECT * FROM gff3_lines('bad');
+----
+position must be at least 1
+
+statement ok
+CREATE OR REPLACE VIEW bad AS SELECT * REPLACE ('x' AS strand) FROM one;
+
+statement error
+SELECT * FROM gff3_lines('bad');
+----
+strand must be
+
+statement ok
+CREATE OR REPLACE VIEW bad AS SELECT * REPLACE (3 AS phase) FROM one;
+
+statement error
+SELECT * FROM gff3_lines('bad');
+----
+phase must be 0, 1, 2 or NULL
+
+statement ok
+CREATE OR REPLACE VIEW bad AS SELECT * REPLACE (NULL::VARCHAR AS seqid) FROM one;
+
+statement error
+SELECT * FROM gff3_lines('bad');
+----
+NULL seqid
+
+statement ok
+CREATE OR REPLACE VIEW bad AS SELECT * REPLACE (E'c\t1' AS seqid) FROM one;
+
+statement error
+SELECT * FROM gff3_lines('bad');
+----
+control character
+
+statement ok
+CREATE OR REPLACE VIEW bad AS SELECT * REPLACE ('#c1' AS seqid) FROM one;
+
+statement error
+SELECT * FROM gff3_lines('bad');
+----
+starts with '#'
+
+statement ok
+CREATE OR REPLACE VIEW bad AS SELECT * REPLACE ('' AS seqid) FROM one;
+
+statement error
+SELECT * FROM gff3_lines('bad');
+----
+empty seqid
+
+statement ok
+CREATE OR REPLACE VIEW bad AS SELECT * REPLACE ('' AS source) FROM one;
+
+statement error
+SELECT * FROM gff3_lines('bad');
+----
+empty source
+
+statement ok
+CREATE OR REPLACE VIEW bad AS SELECT * REPLACE ('' AS type) FROM one;
+
+statement error
+SELECT * FROM gff3_lines('bad');
+----
+empty type
+
+statement ok
+CREATE OR REPLACE VIEW bad AS SELECT * REPLACE (MAP {'ID': NULL::VARCHAR} AS attributes) FROM one;
+
+statement error
+SELECT * FROM gff3_lines('bad');
+----
+attribute 'ID' (row 1) is NULL
+
+statement ok
+CREATE OR REPLACE VIEW bad AS SELECT * REPLACE (E'ID=a\nb' AS attributes) FROM one;
+
+statement error
+SELECT * FROM gff3_lines('bad');
+----
+attributes text (row 1) has a tab or line break
+
+statement ok
+CREATE OR REPLACE VIEW bad AS SELECT * REPLACE (E'ID=a\tb' AS attributes) FROM one;
+
+statement error
+SELECT * FROM gff3_lines('bad');
+----
+attributes text (row 1) has a tab or line break
+
+statement ok
+CREATE OR REPLACE VIEW bad AS SELECT * REPLACE (E'ID=a\rb' AS attributes) FROM one;
+
+statement error
+SELECT * FROM gff3_lines('bad');
+----
+attributes text (row 1) has a tab or line break
+
+# The row named is the relation's.
+statement ok
+CREATE TABLE two_rows AS SELECT * FROM one;
+
+statement ok
+INSERT INTO two_rows SELECT * REPLACE ('#c2' AS seqid) FROM one;
+
+statement error
+SELECT * FROM gff3_lines('two_rows');
+----
+(row 2)

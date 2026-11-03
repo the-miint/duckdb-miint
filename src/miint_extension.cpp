@@ -12,7 +12,6 @@
 #include <compute_coverage_depth.hpp>
 #include <copy_fasta.hpp>
 #include <copy_fastq.hpp>
-#include <copy_gff.hpp>
 #include <copy_newick.hpp>
 #include <copy_sam.hpp>
 #include <copy_ubam.hpp>
@@ -546,7 +545,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 #endif
 	CopyFastqFunction::Register(loader);
 	CopyFastaFunction::Register(loader);
-	CopyGffFunction::Register(loader);
 	CopyNewickFunction::Register(loader);
 	CopySAMFunction::Register(loader);
 	CopyUBAMFunction::Register(loader);

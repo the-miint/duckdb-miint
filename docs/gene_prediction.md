@@ -1,6 +1,6 @@
 # Gene prediction
 
-`predict_genes` calls protein-coding genes in prokaryotic contigs, one row per gene. It runs [Prodigal](https://github.com/hyattpd/Prodigal) 2.6.5 (the-miint's fork) in the [gpl-boundary](internals/embedded-tools.md#gpl-boundary-process-isolation-host-for-gpl-tools) process, which miint starts for the call. Its genes, proteins and per-contig model data equal the Prodigal CLI's, field by field, for `-p single`, `-p meta`, `-c`, `-g 4` and `-m` on the contigs in `data/prodigal/`. To write them as Prodigal's GFF, see [`COPY ... (FORMAT GFF, DIALECT 'prodigal')`](writing.md#gff).
+`predict_genes` calls protein-coding genes in prokaryotic contigs, one row per gene. It runs Prodigal 2.6.5, built from [the-miint's fork](https://github.com/the-miint/prodigal) of [Prodigal](https://github.com/hyattpd/Prodigal). Prodigal is GPL-licensed, so it runs in a separate process, [gpl-boundary](internals/embedded-tools.md#gpl-boundary-process-isolation-host-for-gpl-tools), which miint starts for the call, rather than inside miint. Its genes, proteins and per-contig model data equal the Prodigal CLI's, field by field, for `-p single`, `-p meta`, `-c`, `-g 4` and `-m` on the contigs in `data/prodigal/`. To write them as Prodigal's GFF, see [`prodigal_gff_lines`](writing.md#gff).
 
 ## predict_genes
 
@@ -10,7 +10,7 @@ predict_genes(relation, genome_id := 'col', [method := 'prodigal'], [order_by :=
               [training_path := 'model.trn'])
 ```
 
-Requires gpl-boundary 0.5.0 or later (`SELECT install_gpl_boundary();`, or `install_gpl_boundary(true)` to replace an older one). Its `prodigal` and `prodigal-train` must report Prodigal 2.6.5 in `gpl-boundary --version`, the version `COPY ... (FORMAT GFF, DIALECT 'prodigal')` names: `predict_genes` refuses another, since its output would be labeled with the wrong version. Not available on Windows or in WASM.
+Requires gpl-boundary 0.5.0 or later (`SELECT install_gpl_boundary();`, or `install_gpl_boundary(true)` to replace an older one). Its `prodigal` and `prodigal-train` must report Prodigal 2.6.5 in `gpl-boundary --version`, the version `prodigal_gff_lines` names: `predict_genes` refuses another, since its output would be labeled with the wrong version. Not available on Windows or in WASM.
 
 **Parameters:**
 
@@ -52,7 +52,7 @@ Requires gpl-boundary 0.5.0 or later (`SELECT install_gpl_boundary();`, or `inst
 | `status` | VARCHAR | `ok` on a gene's row; `no_genes` on a contig's row (`read_id` set) and on a genome's own row (`read_id` NULL); `training_failed` on a genome's own row |
 | `error` | VARCHAR | For `training_failed`, Prodigal's reason; NULL otherwise |
 
-**Genomes that fail:** in single-genome mode, Prodigal refuses to train on a genome that is too short (the CLI wants at least 20,000 bases). That genome gets one row, `status = 'training_failed'`, with `error` giving the reason and every other column but `genome_id` NULL, and the other genomes are called as usual. Each contig without genes gets a row with `status = 'no_genes'` (so [`COPY ... (FORMAT GFF, DIALECT 'prodigal')`](writing.md#gff) can number contigs as the CLI does), and a genome with no genes at all also gets a row of its own, `read_id` NULL. Count genes with `WHERE status = 'ok'`. Anything else that goes wrong (gpl-boundary exiting, say) fails the query. Rerunning failed genomes in metagenomic mode is what CheckM does:
+**Genomes that fail:** in single-genome mode, Prodigal refuses to train on a genome that is too short (the CLI wants at least 20,000 bases). That genome gets one row, `status = 'training_failed'`, with `error` giving the reason and every other column but `genome_id` NULL, and the other genomes are called as usual. Each contig without genes gets a row with `status = 'no_genes'` (so [`prodigal_gff_lines`](writing.md#gff) can number contigs as the CLI does), and a genome with no genes at all also gets a row of its own, `read_id` NULL. Count genes with `WHERE status = 'ok'`. Anything else that goes wrong (gpl-boundary exiting, say) fails the query. Rerunning failed genomes in metagenomic mode is what CheckM does:
 
 ```sql
 CREATE TABLE contigs AS SELECT * FROM read_fastx('bins/*.fna', include_filepath := true);

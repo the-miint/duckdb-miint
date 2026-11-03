@@ -13,9 +13,9 @@ Options follow DuckDB's rules for COPY options in every format here, as they do 
 - An option the format does not have is refused, and the error may suggest options with similar names. The names of DuckDB's own COPY options, such as `OVERWRITE`, are not refused as unknown; DuckDB handles them, and refuses those a format cannot support, such as `FILE_SIZE_BYTES`.
 - Other values are cast to the option's type, so `COMPRESSION_LEVEL '3'` is level 3 and `COMPRESSION_LEVEL 1.6` is level 2. An option with no value or a NULL value is refused.
 
-`COMPRESSION` takes the same values in the text formats, FASTQ, FASTA, GFF, NEWICK and SAM, in any case: `'gzip'` or `'gz'`, and `'none'` or `'uncompressed'`. Without it, a path ending in `.gz` is written as gzip. zstd (`'zstd'`, or a `.zst` path) is refused. BAM's and BIOM's `COMPRESSION` differ; see [SAM / BAM](#sam-and-bam) and [BIOM](#biom).
+`COMPRESSION` takes the same values in the text formats, FASTQ, FASTA, NEWICK and SAM, in any case: `'gzip'` or `'gz'`, and `'none'` or `'uncompressed'`. Without it, a path ending in `.gz` is written as gzip. zstd (`'zstd'`, or a `.zst` path) is refused. BAM's and BIOM's `COMPRESSION` differ; see [SAM / BAM](#sam-and-bam) and [BIOM](#biom).
 
-FASTQ, FASTA, GFF and NEWICK write a path with a URI scheme other than `file://` (`s3://`, `https://`, `az://`, ...) through DuckDB's file systems, which load the extension that serves the scheme. For a scheme no file system serves, DuckDB opens the path as a local file, as it does for its own formats. SAM, BAM, UBAM and BIOM write local files only and refuse a remote target. In every format a `file:` URI is the local file it names, as DuckDB reads it (`file:///p`, `file://localhost/p` and `file:/p` are `/p`; on Windows, `file:///C:/p` is `C:/p`), and gzip output to it takes `COMPRESSION_LEVEL` as any local path does.
+FASTQ, FASTA and NEWICK write a path with a URI scheme other than `file://` (`s3://`, `https://`, `az://`, ...) through DuckDB's file systems, which load the extension that serves the scheme. For a scheme no file system serves, DuckDB opens the path as a local file, as it does for its own formats. SAM, BAM, UBAM and BIOM write local files only and refuse a remote target. In every format a `file:` URI is the local file it names, as DuckDB reads it (`file:///p`, `file://localhost/p` and `file:/p` are `/p`; on Windows, `file:///C:/p` is `C:/p`), and gzip output to it takes `COMPRESSION_LEVEL` as any local path does.
 
 ## Table of Contents
 
@@ -25,7 +25,7 @@ FASTQ, FASTA, GFF and NEWICK write a path with a URI scheme other than `file://`
 - [UBAM](#ubam) - Write unaligned reads BAM (uBAM) files
 - [BIOM](#biom) - Write BIOM observation matrix files
 - [NEWICK](#newick) - Write Newick phylogenetic trees
-- [GFF](#gff) - Write GFF3 annotations, and Prodigal's GFF from `predict_genes`
+- [GFF](#gff) - Write GFF3 annotations, and Prodigal's GFF from `predict_genes`, as lines for `FORMAT CSV`
 
 ### FASTQ 
 
@@ -623,31 +623,37 @@ SELECT * FROM read_newick('copy.nwk');
 
 ## GFF
 
-`COPY ... TO 'x.gff' (FORMAT GFF)` writes one of two dialects, chosen by `DIALECT`:
+GFF is written as lines: `gff3_lines(relation)` and `prodigal_gff_lines(relation, ...)` return a file's lines, one row each, and DuckDB's CSV writer writes them out. `relation` is the name of a table or view; its rows are numbered in the order it returns them, and the lines come out in that order.
 
-- **`DIALECT 'gff3'`** (the default), from **[`read_gff`](reading.md#gff)'s columns**, `seqid`, `source`, `type` (VARCHAR), `position`, `stop_position` (integers), `score` (a number), `strand` (VARCHAR), `phase` (an integer) and `attributes` (`MAP(VARCHAR, VARCHAR)`, or VARCHAR written as given): GFF3, a `##gff-version 3` line, then a line per row. What `read_gff` reads, this writes and `read_gff` reads back the same.
+```sql
+COPY (SELECT line FROM gff3_lines('features')) TO 'out.gff' (FORMAT CSV, HEADER false, QUOTE '', ESCAPE '');
+```
+
+`HEADER false, QUOTE '', ESCAPE ''` write each line as it is (without them, a line holding a `"` or a `,` is quoted). A path ending in `.gz` is written as gzip, as `FORMAT CSV` does.
+
+- **`gff3_lines(relation)`**, from **[`read_gff`](reading.md#gff)'s columns**, `seqid`, `source`, `type`, `position`, `stop_position` (integers), `score` (a number), `strand`, `phase` (an integer) and `attributes` (`MAP(VARCHAR, VARCHAR)`, or VARCHAR written as given): GFF3, a `##gff-version 3` line, then a line per row. What `read_gff` reads, this writes and `read_gff` reads back the same.
   - `stop_position` is half-open, as `read_gff` returns it, so the GFF `end` written is `stop_position - 1`. `position` must be at least 1 and `stop_position` greater than `position`.
   - A NULL `score`, `strand`, `phase` or `attributes` is `.`. `strand` is `+`, `-`, `.` or `?`; `phase` 0, 1 or 2.
   - A MAP's keys and values are percent-encoded where GFF3 reserves the character (`;`, `=`, `&`, `,`, `%`, tab, line breaks and other control characters), and `read_gff` decodes them. A NULL value is refused. Text `attributes` is written as given and may not hold a tab or line break.
   - A value is one value: `read_gff` reads `Parent=a,b` as the text `a,b` (it does not split GFF3's comma-separated lists), so this writes it back as `Parent=a%2Cb`, which a reader that splits lists takes as one parent. To write a list, give `attributes` as text.
   - `seqid`, `source` and `type` are written as given (`read_gff` does not decode them), so a NULL or empty one, a control character, or a `seqid` starting with `#` (which would make the line a comment) is refused.
-- **`DIALECT 'prodigal'`**, from **[`predict_genes`](gene_prediction.md)' columns**: Prodigal's own GFF, as `prodigal -f gff` writes it, with a `# Sequence Data` and a `# Model Data` line before each contig's genes. CheckM reads the translation table from the Model Data line.
-  - The rows must be in contig order, as `predict_genes` returns them (a query that reorders them needs an `ORDER BY`): the header lines are written each time the contig (`genome_id` and `read_id`) changes.
-  - A contig without genes (its `predict_genes` row has a NULL `gene_index`) gets its header lines and no feature, as in the CLI's file, and is counted in `seqnum`, which numbers the contigs of a file from 1. A genome's own row (`training_failed`, or `no_genes` with a NULL `read_id`) is skipped.
+- **`prodigal_gff_lines(relation, [source := 'Prodigal_v2.6.5'], [per_genome := false])`**, from **[`predict_genes`](gene_prediction.md)' columns**: Prodigal's own GFF, as `prodigal -f gff` writes it, with a `# Sequence Data` and a `# Model Data` line before each contig's genes. CheckM reads the translation table from the Model Data line. It returns `genome_id` and `line`.
+  - The rows must be in contig order, as `predict_genes` returns them: the header lines are written each time the contig (`genome_id` and `read_id`) changes.
+  - A contig without genes (its `predict_genes` row has a NULL `gene_index`) gets its header lines and no feature, as in the CLI's file, and is counted in `seqnum`, which numbers the contigs from 1. A genome's own row (`training_failed`, or `no_genes` with a NULL `read_id`) is skipped.
   - `seqhdr` is the `read_id`. A value a line needs that is NULL, a `read_id` with a control character or starting with `#`, and a `strand` other than `+` or `-` are refused.
-  - `genome_id` may be left out (`PARTITION_BY (genome_id)` leaves it out of each file); contigs are then told apart by `read_id` alone.
-  - `SOURCE` (default `Prodigal_v2.6.5`) sets column 2.
-
-**Parameters:** `DIALECT` (`'gff3'` or `'prodigal'`, default `'gff3'`; an input with a `gene_index` column and no `DIALECT` is refused, naming it), `COMPRESSION` and `COMPRESSION_LEVEL` as for FASTA, and `SOURCE` for `DIALECT 'prodigal'` only. The rows are written by one thread, in the query's order. `PER_THREAD_OUTPUT` instead writes a file per thread, which can split a contig's rows across files, so it is not for `predict_genes`' columns; `PARTITION_BY` is.
+  - `source` sets column 2.
+  - `per_genome := true` starts each genome as a file of its own, with its own version line and `seqnum` from 1, for `PARTITION_BY (genome_id)`.
 
 ```sql
 -- Round trip
-COPY (SELECT * FROM read_gff('in.gff')) TO 'out.gff.gz' (FORMAT GFF);
+CREATE TABLE features AS SELECT * FROM read_gff('in.gff');
+COPY (SELECT line FROM gff3_lines('features')) TO 'out.gff.gz' (FORMAT CSV, HEADER false, QUOTE '', ESCAPE '');
 
 -- Prodigal's GFF of every genome's genes in one file, contigs in file order (predict_genes' own order)
-COPY (SELECT * FROM predict_genes('contigs', genome_id := 'filepath')) TO 'genes.gff' (FORMAT GFF, DIALECT 'prodigal');
+CREATE TABLE genes AS SELECT * FROM predict_genes('contigs', genome_id := 'filepath');
+COPY (SELECT line FROM prodigal_gff_lines('genes')) TO 'genes.gff' (FORMAT CSV, HEADER false, QUOTE '', ESCAPE '');
 
 -- A file per genome, each as the Prodigal CLI would write it for that genome alone
-COPY (SELECT * FROM predict_genes('bins', genome_id := 'bin_id'))
-TO 'gff_by_bin' (FORMAT GFF, DIALECT 'prodigal', PARTITION_BY (genome_id));
+COPY (SELECT genome_id, line FROM prodigal_gff_lines('genes', per_genome := true))
+TO 'gff_by_bin' (FORMAT CSV, HEADER false, QUOTE '', ESCAPE '', PARTITION_BY (genome_id), FILE_EXTENSION 'gff');
 ```
