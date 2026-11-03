@@ -32,7 +32,7 @@ INSERT INTO smr_q_uuid VALUES (
 query III
 SELECT typeof(read_id), typeof(reference), typeof(mate_reference)
 FROM align_sortmerna(
-    'smr_q_uuid', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1)
+    'smr_q_uuid', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], num_threads := 1)
 LIMIT 1;
 ----
 UUID	VARCHAR	VARCHAR
@@ -42,7 +42,7 @@ query IIIIIIIIII
 SELECT read_id, flags, reference, position, stop_position, mapq, cigar,
        mate_reference, mate_position, template_length
 FROM align_sortmerna(
-    'smr_q_uuid', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1);
+    'smr_q_uuid', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], num_threads := 1);
 ----
 11111111-1111-1111-1111-111111111111	0	Unc49508	1	1447	255	57S57M2I12M2D4M2I29M1D11M2I3M2D11M1I7M1D13M5D4M3D9M2D3M7D1260M	*	0	0
 
@@ -53,7 +53,7 @@ CREATE TABLE smr_q_hugeint (read_id HUGEINT, sequence1 VARCHAR);
 
 statement error
 SELECT * FROM align_sortmerna(
-    'smr_q_hugeint', ref_paths := ['ext/sortmerna/data/test_ref.fasta']);
+    'smr_q_hugeint', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta']);
 ----
 must be VARCHAR, BIGINT, or UUID
 
@@ -69,7 +69,7 @@ UNION ALL SELECT NULL, sequence1 FROM smr_q_uuid;
 query II
 SELECT COUNT(*), COUNT(DISTINCT read_id)
 FROM align_sortmerna(
-    'smr_q_uuid_with_null', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1);
+    'smr_q_uuid_with_null', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], num_threads := 1);
 ----
 1	1
 
@@ -83,7 +83,7 @@ SELECT read_id, sequence1, sequence1 AS sequence2 FROM smr_q_uuid;
 query IIIII
 SELECT flags, typeof(read_id), read_id, mate_reference, typeof(mate_reference)
 FROM align_sortmerna(
-    'smr_pe_uuid', ref_paths := ['ext/sortmerna/data/test_ref.fasta'],
+    'smr_pe_uuid', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'],
     num_threads := 1, paired := true)
 ORDER BY flags;
 ----
@@ -98,7 +98,7 @@ CREATE TABLE smr_ref_lengths AS SELECT 'Unc49508' AS name, 2000 AS length;
 statement ok
 COPY (
     SELECT * FROM align_sortmerna(
-        'smr_q_uuid', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1)
+        'smr_q_uuid', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], num_threads := 1)
 ) TO '{TEST_DIR}/sortmerna_uuid.sam'
 (FORMAT SAM, REFERENCE_LENGTHS 'smr_ref_lengths');
 

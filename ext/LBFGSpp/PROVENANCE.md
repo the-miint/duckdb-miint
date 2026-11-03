@@ -16,8 +16,8 @@ for how it is built.
 - License: MIT (`LICENSE.md`, vendored verbatim alongside the headers)
 
 Vendored as tracked file copies rather than a submodule, matching
-`ext/kseq++` and `ext/concurrentqueue`: header-only, no build step, and a
-submodule would add a checkout for nine files.
+`ext/kseq++`: header-only, no build step, and a submodule would add a
+checkout for nine files.
 
 ## What was copied, and what was not
 

@@ -18,8 +18,8 @@ unique_ptr<FunctionData> AlignSortMeRNARRNATableFunction::Bind(ClientContext &co
 	}
 	data->query_table = input.inputs[0].ToString();
 	RejectCTERelationName(input, data->query_table);
-	data->ref_paths = ParseSortMeRNARefPaths(input.named_parameters, "align_sortmerna_rrna");
-	ParseSortMeRNAConfigParams(input.named_parameters, data->config);
+	data->refs = BindSortMeRNAReferences(context, input, "align_sortmerna_rrna");
+	ParseSortMeRNAConfigParams(input.named_parameters, data->config, "align_sortmerna_rrna");
 
 	data->query_schema = ValidateSequenceTableSchema(context, data->query_table, /*allow_bigint=*/true);
 	if (data->query_schema.has_sequence2 != data->config.paired) {
@@ -29,9 +29,9 @@ unique_ptr<FunctionData> AlignSortMeRNARRNATableFunction::Bind(ClientContext &co
 		                      data->config.paired ? "true" : "false");
 	}
 
-	// Output schema: read_id mirrors the query column type; the other 12
-	// columns have fixed types (ref_name is free-form FASTA header text).
-	data->types = GetSortMeRNARRNAOutputTypes(data->query_schema.id_type);
+	// Output schema: read_id mirrors the query column type and ref_name follows
+	// the reference source (SortMeRNAReferences::IdType).
+	data->types = GetSortMeRNARRNAOutputTypes(data->query_schema.id_type, data->refs.IdType());
 
 	for (const auto &n : data->names)
 		names.emplace_back(n);
@@ -49,7 +49,7 @@ unique_ptr<GlobalTableFunctionState> AlignSortMeRNARRNATableFunction::InitGlobal
 	if (cfg.num_threads <= 0) {
 		cfg.num_threads = NumericCast<int32_t>(TaskScheduler::GetScheduler(context).NumberOfThreads());
 	}
-	gstate->aligner = std::make_unique<miint::SortMeRNAAligner>(cfg, data.ref_paths);
+	gstate->aligner = MakeSortMeRNAAligner(context, cfg, data.refs);
 	gstate->query_stream = std::make_unique<QuerySequenceStream>(context, data.query_table, data.query_schema);
 	// Execute holds gstate.lock across align() on the assumption that
 	// MaxThreads() is 1. If that invariant ever changes, the shared
@@ -81,7 +81,7 @@ void AlignSortMeRNARRNATableFunction::Execute(ClientContext &, TableFunctionInpu
 		if (available > 0) {
 			idx_t count = std::min(available, static_cast<idx_t>(STANDARD_VECTOR_SIZE));
 			OutputSortMeRNARRNABatch(output, gstate.result_buffer, gstate.buffer_offset, count,
-			                         bind_data.query_schema.id_type);
+			                         bind_data.query_schema.id_type, bind_data.refs.IdType());
 			gstate.buffer_offset += count;
 			return;
 		}

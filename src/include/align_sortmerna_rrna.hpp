@@ -1,6 +1,7 @@
 #pragma once
 
 #include "SortMeRNAAligner.hpp"
+#include "align_sortmerna_common.hpp"
 #include "sequence_table_reader.hpp"
 #include "sortmerna_result_utils.hpp"
 #include "duckdb/function/function.hpp"
@@ -17,17 +18,19 @@ class AlignSortMeRNARRNATableFunction {
 public:
 	struct Data : public TableFunctionData {
 		std::string query_table;
-		std::vector<std::string> ref_paths;
+		SortMeRNAReferences refs;
 		SequenceTableSchema query_schema;
 		miint::SortMeRNAConfig config;
 
 		// Output schema. Names are constant; types are rebuilt by Bind once
-		// the query id type is known. The VARCHAR placeholder here is never
-		// observed by Execute.
+		// the query and reference id types are known. The VARCHAR placeholders
+		// here are never observed by Execute.
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 
-		Data() : names(GetSortMeRNARRNAOutputNames()), types(GetSortMeRNARRNAOutputTypes(LogicalType::VARCHAR)) {
+		Data()
+		    : names(GetSortMeRNARRNAOutputNames()),
+		      types(GetSortMeRNARRNAOutputTypes(LogicalType::VARCHAR, LogicalType::VARCHAR)) {
 		}
 	};
 

@@ -35,7 +35,7 @@ INSERT INTO smr_q_bigint VALUES (
 query II
 SELECT typeof(read_id), typeof(ref_name)
 FROM align_sortmerna_rrna(
-    'smr_q_bigint', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1)
+    'smr_q_bigint', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], num_threads := 1)
 LIMIT 1;
 ----
 BIGINT	VARCHAR
@@ -49,7 +49,7 @@ SELECT read_id, aligned, strand, ref_name, ref_start, ref_end, cigar, score,
        round(identity, 1) AS identity_1dp,
        round(coverage, 1) AS coverage_1dp
 FROM align_sortmerna_rrna(
-    'smr_q_bigint', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1);
+    'smr_q_bigint', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], num_threads := 1);
 ----
 271211	1	1	Unc49508	1	1446	57S57M2I12M2D4M2I29M1D11M2I3M2D11M1I7M1D13M5D4M3D9M2D3M7D1260M	2430	94	93.5	96.2
 
@@ -62,7 +62,7 @@ CREATE TABLE smr_q_integer (read_id INTEGER, sequence1 VARCHAR);
 
 statement error
 SELECT * FROM align_sortmerna_rrna(
-    'smr_q_integer', ref_paths := ['ext/sortmerna/data/test_ref.fasta']);
+    'smr_q_integer', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta']);
 ----
 must be VARCHAR, BIGINT, or UUID
 
@@ -71,7 +71,7 @@ CREATE TABLE smr_q_hugeint (read_id HUGEINT, sequence1 VARCHAR);
 
 statement error
 SELECT * FROM align_sortmerna_rrna(
-    'smr_q_hugeint', ref_paths := ['ext/sortmerna/data/test_ref.fasta']);
+    'smr_q_hugeint', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta']);
 ----
 must be VARCHAR, BIGINT, or UUID
 
@@ -80,7 +80,7 @@ CREATE TABLE smr_q_double (read_id DOUBLE, sequence1 VARCHAR);
 
 statement error
 SELECT * FROM align_sortmerna_rrna(
-    'smr_q_double', ref_paths := ['ext/sortmerna/data/test_ref.fasta']);
+    'smr_q_double', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta']);
 ----
 must be VARCHAR, BIGINT, or UUID
 
@@ -93,7 +93,7 @@ CREATE TABLE smr_q_bigint_empty (read_id BIGINT, sequence1 VARCHAR);
 
 query I
 SELECT COUNT(*) FROM align_sortmerna_rrna(
-    'smr_q_bigint_empty', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1);
+    'smr_q_bigint_empty', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], num_threads := 1);
 ----
 0
 
@@ -112,7 +112,7 @@ UNION ALL SELECT NULL, sequence1 FROM smr_q_bigint;
 query II
 SELECT COUNT(*), COUNT(DISTINCT read_id)
 FROM align_sortmerna_rrna(
-    'smr_q_bigint_with_null', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1);
+    'smr_q_bigint_with_null', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], num_threads := 1);
 ----
 1	1
 
@@ -125,7 +125,7 @@ FROM align_sortmerna_rrna(
 statement ok
 COPY (
     SELECT * FROM align_sortmerna_rrna(
-        'smr_q_bigint', ref_paths := ['ext/sortmerna/data/test_ref.fasta'], num_threads := 1)
+        'smr_q_bigint', ref_paths := ['ext/sortmerna/test_data/test_ref.fasta'], num_threads := 1)
 ) TO '{TEST_DIR}/sortmerna_rrna_bigint.parquet' (FORMAT PARQUET);
 
 query III

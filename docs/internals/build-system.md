@@ -12,7 +12,6 @@ How miint's CMake is laid out, and what to edit when you add a source, a test or
 | `cmake/openmp.cmake` | The `miint_openmp` target (UniFrac needs it; krepp uses it if present). |
 | `cmake/isa_dispatch.cmake` | Per-instruction-set builds of a kernel (`miint_add_isa_variants`). |
 | `cmake/deps/<name>.cmake` | One embedded dependency each: its build, and everything miint compiles or links because of it. The file name is the option's suffix: `MIINT_ENABLE_KREPP` → `krepp.cmake`. `htslib`, `minimap2`, `wfa2` and `rust_glue` are always built. Exceptions: sylph and st3 are cargo features of `rust_glue.cmake`, `skb_arrow.cmake` is included from `gpl_boundary.cmake` (it shares that option and transport), and libdeflate is in `system_deps.cmake`. |
-| `cmake/scripts/` | Build-time scripts run with `cmake -P` (they see only their `-D` arguments), not `include()`d. |
 
 ## The registration lists
 

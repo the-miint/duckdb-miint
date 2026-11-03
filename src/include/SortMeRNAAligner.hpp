@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -9,6 +10,8 @@ struct smr_index;
 
 namespace miint {
 
+struct AlignmentSubject; // Minimap2Aligner.hpp
+
 struct SortMeRNAConfig {
 	int32_t num_threads = 0;
 	int32_t match = 2;
@@ -16,6 +19,8 @@ struct SortMeRNAConfig {
 	int32_t gap_open = 5;
 	int32_t gap_ext = 2;
 	int32_t score_N = -3;
+	// A hit with a larger e-value is reported unaligned; negative keeps every
+	// hit.
 	double evalue = -1.0;
 	uint32_t seed_win_len = 18;
 	uint32_t num_alignments = 1;
@@ -75,7 +80,12 @@ struct SortMeRNAResultBatch {
 
 class SortMeRNAAligner {
 public:
+	// Index one FASTA file. The library refuses more than one: a handle holds a
+	// single index.
 	SortMeRNAAligner(const SortMeRNAConfig &cfg, const std::vector<std::string> &ref_paths);
+	// Index reference sequences held in memory; each read_id is reported as the
+	// ref_name of its hits. The library copies them during the call.
+	SortMeRNAAligner(const SortMeRNAConfig &cfg, const std::vector<AlignmentSubject> &refs);
 	~SortMeRNAAligner();
 
 	SortMeRNAAligner(const SortMeRNAAligner &) = delete;
@@ -89,9 +99,25 @@ public:
 	static std::string version();
 
 private:
-	smr_context *ctx_ = nullptr;
-	smr_index *idx_ = nullptr;
+	// Create ctx_ from cfg; throws if the library returns no context.
+	void create_context(const SortMeRNAConfig &cfg);
+	// Keep the handle an smr_index_load* call returned, or, if it is NULL,
+	// throw with the library's error. `loader` names the call.
+	void adopt_index(smr_index *idx, const char *loader);
+
+	struct ContextDeleter {
+		void operator()(smr_context *ctx) const noexcept;
+	};
+	struct IndexDeleter {
+		void operator()(smr_index *idx) const noexcept;
+	};
+	// Owned from the moment they are set, so a constructor that throws still
+	// frees them. idx_ is declared after ctx_ so it is freed first: the
+	// context must outlive the index (smr_api.h).
+	std::unique_ptr<smr_context, ContextDeleter> ctx_;
+	std::unique_ptr<smr_index, IndexDeleter> idx_;
 	bool paired_ = false;
+	double evalue_ = -1.0;
 };
 
 } // namespace miint
