@@ -2397,7 +2397,9 @@ unique_ptr<miint::progressive::ProgressivePcoaRun> MakeProgressiveRun(ClientCont
 	// only thing standing between a user and an uninterruptible multi-hour query:
 	// Ctrl-C sets the context's interrupt flag and, until now, nothing on this path ever read
 	// it. BlockingInterruptCheck also enforces max_execution_time, which IsInterrupted
-	// ignores. Polled from worker threads too: it reads only an atomic and the clock.
+	// ignores. Polled from worker threads too, which is safe: it reads an atomic, the
+	// clock, and a deadline set before the query runs, and the workers are joined
+	// before the wave returns.
 	const miint::progressive::InterruptCheck interrupt = [&context]() {
 		context.BlockingInterruptCheck();
 	};

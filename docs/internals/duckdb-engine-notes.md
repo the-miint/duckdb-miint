@@ -214,7 +214,9 @@ reads it on every call; both throw "Query exceeded maximum execution time"
 between chunks, which does nothing for an `InitGlobal` or `Execute` that runs for an hour
 before it returns. So a long step checks for itself: `InterruptCheck()` in a hot loop,
 `BlockingInterruptCheck()` between coarse steps (a batch, a wave, one library call). Either
-may be called from a worker thread of the function's own: they read an atomic and the clock.
+may be called from a worker thread of the function's own that is joined before the function
+returns: they read an atomic, the clock, and a deadline that is set before the query runs and
+cleared after it ends.
 The deadline tests in `progressive_pcoa_from_distances.test`, `sc_fit.test` and `sc_shap.test`
 stop a run partway; the one in `sourcetracker.test` stops a run that can only be checked
 between phases.

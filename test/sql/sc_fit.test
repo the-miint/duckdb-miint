@@ -941,8 +941,8 @@ true	true
 # the deadline between chunks, so a query past max_execution_time stops while the
 # cells are still being read. Three million cells over 1000 samples take about a
 # second to read and fit with one tree, twenty times the 50 ms deadline. The fit
-# returns one row, so DuckDB's own check, made on every 256th chunk of output,
-# cannot end the query in the loop's place.
+# returns one row, so DuckDB's own deadline check cannot end the query in the
+# loop's place (docs/testing.md).
 statement ok
 CREATE VIEW big_cells AS
   SELECT 's' || (i % 1000) AS sample_id, 'f' || (i // 1000) AS feature_id, (hash(i) % 7 + 1)::DOUBLE AS value

@@ -18,6 +18,7 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/prepared_statement_data.hpp"
 
+#include <algorithm>
 #include <string>
 
 namespace {
@@ -34,14 +35,12 @@ void Exec(Connection &con, const std::string &sql) {
 //! index path is never opened.
 PreparedStatementData &Prepared(Connection &con, const std::string &name, const std::string &sql) {
 	Exec(con, "PREPARE " + name + " AS " + sql);
-	for (auto &entry : ClientData::Get(*con.context).prepared_statements) {
-		if (entry.first == name) {
-			REQUIRE(entry.second->physical_plan);
-			return *entry.second;
-		}
-	}
-	FAIL("no prepared statement named " << name);
-	throw;
+	auto &statements = ClientData::Get(*con.context).prepared_statements;
+	auto entry = std::find_if(statements.begin(), statements.end(),
+	                          [&](const auto &statement) { return statement.first == name; });
+	REQUIRE(entry != statements.end());
+	REQUIRE(entry->second->physical_plan);
+	return *entry->second;
 }
 
 } // namespace
