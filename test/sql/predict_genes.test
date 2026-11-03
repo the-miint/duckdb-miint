@@ -613,3 +613,121 @@ SELECT count(*) FROM ((SELECT * FROM as_cli('single') EXCEPT ALL SELECT * FROM a
                       UNION ALL (SELECT * FROM as_cli('model_halves') EXCEPT ALL SELECT * FROM as_cli('single')));
 ----
 0
+
+# -----------------------------------------------------------------------------
+# Chunked input: genomes stored in blocks, (read_id or feature_idx, chunk_index, chunk_data), mapped to genomes by
+# mapping_table. A chunked genome's contigs are in key order, so it equals the contig-per-row call in read_id order.
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE anthus_by_id AS SELECT genome, row_number() OVER (ORDER BY read_id) AS ord, read_id, sequence1 FROM anthus;
+
+statement ok
+CREATE TABLE anthus_chunks AS
+SELECT read_id, c.chunk_index, c.chunk_data FROM (SELECT read_id, unnest(sequence_split(sequence1, 100)) AS c FROM anthus)
+ORDER BY random();
+
+statement ok
+CREATE TABLE anthus_mapping AS SELECT read_id, genome AS genome_id FROM anthus;
+
+statement ok
+CREATE TABLE by_id AS SELECT * FROM predict_genes('anthus_by_id', genome_id := 'genome', order_by := 'ord');
+
+query II
+SELECT count(*), count(*) FILTER (WHERE status = 'ok') FROM predict_genes('anthus_chunks', mapping_table := 'anthus_mapping');
+----
+129	129
+
+query I
+SELECT count(*) FROM ((FROM by_id EXCEPT ALL FROM predict_genes('anthus_chunks', mapping_table := 'anthus_mapping'))
+                      UNION ALL
+                      (FROM predict_genes('anthus_chunks', mapping_table := 'anthus_mapping') EXCEPT ALL FROM by_id));
+----
+0
+
+# Metagenomic mode too.
+query I
+SELECT count(*) FROM ((FROM predict_genes('anthus_by_id', genome_id := 'genome', order_by := 'ord', meta_mode := true)
+                       EXCEPT ALL FROM predict_genes('anthus_chunks', mapping_table := 'anthus_mapping', meta_mode := true))
+                      UNION ALL
+                      (FROM predict_genes('anthus_chunks', mapping_table := 'anthus_mapping', meta_mode := true)
+                       EXCEPT ALL FROM predict_genes('anthus_by_id', genome_id := 'genome', order_by := 'ord', meta_mode := true)));
+----
+0
+
+# Keyed by feature_idx (BIGINT), with BLOB chunks; read_id is the feature_idx.
+statement ok
+CREATE TABLE feature_chunks AS
+SELECT dense_rank() OVER (ORDER BY read_id)::BIGINT AS feature_idx, chunk_index, chunk_data::BLOB AS chunk_data
+FROM anthus_chunks;
+
+statement ok
+CREATE TABLE feature_mapping AS SELECT DISTINCT feature_idx, 'anthus' AS genome_id FROM feature_chunks;
+
+query III
+SELECT count(*), count(DISTINCT read_id), any_value(typeof(read_id)) FROM predict_genes('feature_chunks', mapping_table := 'feature_mapping');
+----
+129	22	BIGINT
+
+# Chunks whose key mapping_table does not map, or maps to a NULL genome, are skipped, as rows with a NULL genome_id
+# are.
+statement ok
+CREATE TABLE half_mapping AS
+SELECT read_id, CASE WHEN read_id < 'M' THEN genome_id END AS genome_id FROM anthus_mapping WHERE read_id <> '61430_aco';
+
+query I
+SELECT count(DISTINCT read_id) = (SELECT count(*) FROM half_mapping WHERE genome_id IS NOT NULL)
+FROM predict_genes('anthus_chunks', mapping_table := 'half_mapping', meta_mode := true);
+----
+true
+
+# Malformed chunks are refused, naming the contig.
+statement ok
+CREATE TABLE gap_chunks AS SELECT * FROM anthus_chunks WHERE NOT (read_id = '61430_aco' AND chunk_index = 3);
+
+statement error
+SELECT * FROM predict_genes('gap_chunks', mapping_table := 'anthus_mapping', meta_mode := true);
+----
+the chunk_index values of contig '61430_aco' are not 0, 1, 2, ... with none missing or repeated
+
+statement ok
+CREATE TABLE repeated_chunks AS SELECT * FROM anthus_chunks UNION ALL SELECT * FROM anthus_chunks WHERE read_id = '61430_aco' AND chunk_index = 0;
+
+statement error
+SELECT * FROM predict_genes('repeated_chunks', mapping_table := 'anthus_mapping', meta_mode := true);
+----
+the chunk_index values of contig '61430_aco'
+
+statement ok
+CREATE TABLE null_chunks AS SELECT * REPLACE (CASE WHEN read_id = '61430_aco' AND chunk_index = 2 THEN NULL ELSE chunk_data END AS chunk_data) FROM anthus_chunks;
+
+statement error
+SELECT * FROM predict_genes('null_chunks', mapping_table := 'anthus_mapping', meta_mode := true);
+----
+contig '61430_aco' has a NULL chunk_data
+
+# A key mapped twice is refused: its contig would be in two genomes, or twice in one.
+statement ok
+CREATE TABLE twice_mapping AS SELECT * FROM anthus_mapping UNION ALL SELECT '61430_aco', 'other';
+
+statement error
+SELECT * FROM predict_genes('anthus_chunks', mapping_table := 'twice_mapping', meta_mode := true);
+----
+maps read_id '61430_aco' more than once
+
+# A model is trained on a single chunked genome and written to training_path, as for contigs.
+statement ok
+SELECT * FROM predict_genes('anthus_chunks', mapping_table := 'anthus_mapping', training_path := '{TEST_DIR}/chunked.trn');
+
+query I
+SELECT count(*) FROM predict_genes('anthus_chunks', mapping_table := 'anthus_mapping', training_path := '{TEST_DIR}/chunked.trn')
+WHERE status = 'ok';
+----
+129
+
+statement ok
+CREATE TABLE two_genome_mapping AS SELECT read_id, CASE WHEN read_id < 'M' THEN 'a' ELSE 'b' END AS genome_id FROM anthus;
+
+statement error
+SELECT * FROM predict_genes('anthus_chunks', mapping_table := 'two_genome_mapping', training_path := '{TEST_DIR}/chunked2.trn');
+----
+takes exactly one genome; 'anthus_chunks' has 2

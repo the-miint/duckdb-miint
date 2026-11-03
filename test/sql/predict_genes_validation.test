@@ -167,3 +167,128 @@ error	VARCHAR
 # EXPLAIN binds without running the call.
 statement ok
 EXPLAIN SELECT * FROM predict_genes('contigs', genome_id := 'genome');
+
+# -----------------------------------------------------------------------------
+# Chunked input: a relation with chunk_data, keyed by read_id or feature_idx, its genomes from mapping_table
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE chunks AS SELECT 'c1' AS read_id, 0 AS chunk_index, 'ACGTACGT' AS chunk_data;
+
+statement ok
+CREATE TABLE mapping AS SELECT 'c1' AS read_id, 'g' AS genome_id;
+
+# Its output columns, read_id keeping the key's type and genome_id the mapping's.
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM predict_genes('chunks', mapping_table := 'mapping'))
+WHERE column_name IN ('genome_id', 'read_id');
+----
+genome_id	VARCHAR
+read_id	VARCHAR
+
+statement ok
+CREATE TABLE fchunks AS SELECT 7::BIGINT AS feature_idx, 0 AS chunk_index, 'ACGT'::BLOB AS chunk_data;
+
+statement ok
+CREATE TABLE fmapping AS SELECT 7::BIGINT AS feature_idx, 42::BIGINT AS genome_id;
+
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM predict_genes('fchunks', mapping_table := 'fmapping'))
+WHERE column_name IN ('genome_id', 'read_id');
+----
+genome_id	BIGINT
+read_id	BIGINT
+
+statement error
+SELECT * FROM predict_genes('chunks');
+----
+mapping_table
+
+statement error
+SELECT * FROM predict_genes('chunks', mapping_table := 'mapping', genome_id := 'genome_id');
+----
+genome_id is for a relation of a contig per row
+
+statement error
+SELECT * FROM predict_genes('chunks', mapping_table := 'mapping', order_by := 'chunk_index');
+----
+order_by is for a relation of a contig per row
+
+statement error
+SELECT * FROM predict_genes('contigs', genome_id := 'genome', mapping_table := 'mapping');
+----
+mapping_table is for chunked input
+
+statement error
+SELECT * FROM predict_genes('chunks', mapping_table := 'missing_mapping');
+----
+missing_mapping
+
+statement ok
+CREATE TABLE both_keys AS SELECT 'c1' AS read_id, 1::BIGINT AS feature_idx, 0 AS chunk_index, 'ACGT' AS chunk_data;
+
+statement error
+SELECT * FROM predict_genes('both_keys', mapping_table := 'mapping');
+----
+must have one key column, read_id or feature_idx, naming each chunk's contig (it has both)
+
+statement ok
+CREATE TABLE no_key AS SELECT 0 AS chunk_index, 'ACGT' AS chunk_data;
+
+statement error
+SELECT * FROM predict_genes('no_key', mapping_table := 'mapping');
+----
+(it has neither)
+
+statement ok
+CREATE TABLE chunks_no_index AS SELECT 'c1' AS read_id, 'ACGT' AS chunk_data;
+
+statement error
+SELECT * FROM predict_genes('chunks_no_index', mapping_table := 'mapping');
+----
+chunk_index
+
+statement ok
+CREATE TABLE text_index AS SELECT 'c1' AS read_id, 'a' AS chunk_index, 'ACGT' AS chunk_data;
+
+statement error
+SELECT * FROM predict_genes('text_index', mapping_table := 'mapping');
+----
+chunk_index column of 'text_index' must be an integer type
+
+statement ok
+CREATE TABLE int_data AS SELECT 'c1' AS read_id, 0 AS chunk_index, 5 AS chunk_data;
+
+statement error
+SELECT * FROM predict_genes('int_data', mapping_table := 'mapping');
+----
+chunk_data column of 'int_data' must be VARCHAR or BLOB
+
+statement ok
+CREATE TABLE double_key AS SELECT 1.5 AS read_id, 0 AS chunk_index, 'ACGT' AS chunk_data;
+
+statement error
+SELECT * FROM predict_genes('double_key', mapping_table := 'mapping');
+----
+read_id column of 'double_key' must be
+
+statement ok
+CREATE TABLE mapping_no_genome AS SELECT 'c1' AS read_id, 'g' AS genome;
+
+statement error
+SELECT * FROM predict_genes('chunks', mapping_table := 'mapping_no_genome');
+----
+mapping_table 'mapping_no_genome' must have read_id and genome_id
+
+statement ok
+CREATE TABLE mapping_double_genome AS SELECT 'c1' AS read_id, 1.5 AS genome_id;
+
+statement error
+SELECT * FROM predict_genes('chunks', mapping_table := 'mapping_double_genome');
+----
+genome_id column of mapping_table 'mapping_double_genome' must be
+
+# A mapping_table keyed by the other key column.
+statement error
+SELECT * FROM predict_genes('chunks', mapping_table := 'fmapping');
+----
+mapping_table 'fmapping' must have read_id and genome_id

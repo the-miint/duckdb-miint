@@ -8,21 +8,36 @@
 predict_genes(relation, genome_id := 'col', [method := 'prodigal'], [order_by := 'sequence_index'],
               [meta_mode := false], [trans_table := 11], [closed_ends := false], [mask_regions := false],
               [training_path := 'model.trn'])
+predict_genes(chunks, mapping_table := 'table', ...)
 ```
 
 Requires gpl-boundary 0.5.0 or later (`SELECT install_gpl_boundary();`, or `install_gpl_boundary(true)` to replace an older one). Its `prodigal` and `prodigal-train` must report Prodigal 2.6.5 in `gpl-boundary --version`, the version `prodigal_gff_lines` names: `predict_genes` refuses another, since its output would be labeled with the wrong version. Not available on Windows or in WASM.
 
 **Parameters:**
 
-- `relation` (VARCHAR, positional): a table or view of contigs, one per row: `read_id` (VARCHAR, BIGINT or UUID; the contig's name) and `sequence1` (VARCHAR). `read_fastx`'s output is one.
+- `relation` (VARCHAR, positional): a table or view of contigs, one per row: `read_id` (VARCHAR, BIGINT or UUID; the contig's name) and `sequence1` (VARCHAR). `read_fastx`'s output is one. Or a table or view of chunked contigs: see [Chunked input](#chunked-input).
 - `genome_id` (VARCHAR, **required**): the column that groups contigs into genomes (VARCHAR, BIGINT or UUID). Each distinct non-NULL value is a genome; rows where it is NULL are skipped. `filepath` from `read_fastx(..., include_filepath := true)` makes each FASTA file a genome.
 - `method` (VARCHAR, default `'prodigal'`): the gene caller. Prodigal is the only one.
 - `order_by` (VARCHAR, default `sequence_index`): an integer column that orders a genome's contigs, as they are given to Prodigal (ties by `read_id`). The default is the column `read_fastx` adds, so a genome's contigs are in file order, as the Prodigal CLI reads them; a relation without it names another column. Training on a genome uses its contigs in this order.
 - `meta_mode` (BOOLEAN, default false): false is Prodigal's single-genome mode (`-p single`, the CLI's default): a model is trained on each genome, then its genes are called with it. true is metagenomic mode (`-p meta`): each contig is called with the best of Prodigal's 50 pre-trained models, with no training.
-- `trans_table` (INTEGER, default 11): the NCBI translation table a model is trained with: 4, 5, 9, 11, 13, 15, 21, 25, 26 or 32. Metagenomic mode takes 11 only (its models choose 11 or 4 per contig).
+- `trans_table` (INTEGER, default 11): the NCBI translation table a model is trained with, one of those gpl-boundary's `prodigal-train` lists (`gpl-boundary --describe prodigal-train`; for Prodigal 2.6.5, 4, 5, 9, 11, 13, 15, 21, 25, 26 and 32), checked when the call runs. Metagenomic mode takes 11 only (its models choose 11 or 4 per contig).
 - `closed_ends` (BOOLEAN, default false): genes may not run off a contig's ends (`-c`).
 - `mask_regions` (BOOLEAN, default false): runs of N are treated as gaps, which genes do not cross (`-m`).
 - `training_path` (VARCHAR, single-genome mode only): a Prodigal model file (the CLI's `-t`). If it exists, every genome's genes are called with it, and no genome is trained; `trans_table` is then refused (the model holds it), and `closed_ends` and `mask_regions` should be what it was trained with (the model does not store them). If it does not exist, the relation must hold exactly one genome, and the file's directory must exist and be writable; a model is trained on it, written there, and used. A file Prodigal cannot read as a model fails the call.
+
+### Chunked input
+
+Genomes stored in blocks, a row per block of a contig's sequence, are read as they are. The relation has `chunk_data` (VARCHAR or BLOB), `chunk_index` (an integer, 0, 1, 2, ... within a contig) and one key column naming the contig, `read_id` or `feature_idx` (VARCHAR, BIGINT or UUID). A contig's sequence is its rows' `chunk_data` joined in `chunk_index` order. `mapping_table` (VARCHAR, required) names a table or view of the key column and `genome_id` (VARCHAR, BIGINT or UUID) that puts each contig in its genome. In place of `genome_id` and `order_by`:
+
+- A genome's contigs are given to Prodigal in key order.
+- `read_id` in the output is the key, in its type.
+- Chunks whose key `mapping_table` does not list, or maps to a NULL `genome_id`, are skipped. A key listed twice, a contig whose `chunk_index` values miss or repeat one, and a NULL `chunk_data` fail the call.
+- Every contig is joined from its chunks by one `GROUP BY` over the whole relation before the first genome is called, not a genome at a time.
+
+```sql
+-- chunks(feature_idx BIGINT, chunk_index INTEGER, chunk_data VARCHAR); bins(feature_idx BIGINT, genome_id VARCHAR)
+SELECT * FROM predict_genes('chunks', mapping_table := 'bins');
+```
 
 **Output:** one row per gene; one row for each contig without genes, with its contig columns and NULL gene columns; and one row for each genome that failed training or has no genes at all, with only `genome_id`, `status` and `error`.
 

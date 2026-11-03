@@ -167,6 +167,13 @@ struct PredictGenesBindData : public TableFunctionData {
 	std::string relation;
 	std::string genome_column;
 	std::string order_column = "sequence_index";
+	bool order_set = false;
+	// Chunked input: each contig is the rows of one key (read_id or feature_idx), its sequence their chunk_data in
+	// chunk_index order; mapping_table maps a key to its genome.
+	bool chunked = false;
+	std::string key_column;
+	std::string mapping_table;
+	LogicalType chunk_data_type;
 	bool meta_mode = false;
 	int32_t trans_table = 11;
 	bool trans_table_set = false;
@@ -185,14 +192,15 @@ struct PredictGenesBindData : public TableFunctionData {
 	bool Equals(const FunctionData &other_p) const override {
 		const auto &o = other_p.Cast<PredictGenesBindData>();
 		return relation == o.relation && genome_column == o.genome_column && order_column == o.order_column &&
-		       meta_mode == o.meta_mode && trans_table == o.trans_table && trans_table_set == o.trans_table_set &&
-		       closed_ends == o.closed_ends && mask_regions == o.mask_regions && training_path == o.training_path &&
-		       has_sequence2 == o.has_sequence2 && genome_type == o.genome_type && read_id_type == o.read_id_type;
+		       order_set == o.order_set && chunked == o.chunked && key_column == o.key_column &&
+		       mapping_table == o.mapping_table && chunk_data_type == o.chunk_data_type && meta_mode == o.meta_mode &&
+		       trans_table == o.trans_table && trans_table_set == o.trans_table_set && closed_ends == o.closed_ends &&
+		       mask_regions == o.mask_regions && training_path == o.training_path && has_sequence2 == o.has_sequence2 &&
+		       genome_type == o.genome_type && read_id_type == o.read_id_type;
 	}
 };
 
 void ReadNamedParameters(const named_argument_map_t &params, PredictGenesBindData &data) {
-	bool has_genome_id = false;
 	for (const auto &kv : params) {
 		const auto name = StringUtil::Lower(kv.first.GetIdentifierName());
 		const Value &value = kv.second;
@@ -201,7 +209,8 @@ void ReadNamedParameters(const named_argument_map_t &params, PredictGenesBindDat
 		}
 		if (name == "genome_id") {
 			data.genome_column = StringValue::Get(value);
-			has_genome_id = true;
+		} else if (name == "mapping_table") {
+			data.mapping_table = StringValue::Get(value);
 		} else if (name == "method") {
 			const auto method = StringValue::Get(value);
 			if (!StringUtil::CIEquals(method, kPredictTool)) {
@@ -210,6 +219,7 @@ void ReadNamedParameters(const named_argument_map_t &params, PredictGenesBindDat
 			}
 		} else if (name == "order_by") {
 			data.order_column = StringValue::Get(value);
+			data.order_set = true;
 		} else if (name == "meta_mode") {
 			data.meta_mode = BooleanValue::Get(value);
 		} else if (name == "trans_table") {
@@ -226,10 +236,6 @@ void ReadNamedParameters(const named_argument_map_t &params, PredictGenesBindDat
 			}
 		}
 	}
-	if (!has_genome_id) {
-		throw BinderException("%s: genome_id (the name of the column that groups contigs into genomes) is required",
-		                      kFunction);
-	}
 	if (data.meta_mode && data.trans_table != 11) {
 		throw BinderException("%s: metagenomic mode (meta_mode := true) takes trans_table 11 only: its models choose "
 		                      "table 11 or 4 per contig. Other tables need single-genome mode",
@@ -239,6 +245,121 @@ void ReadNamedParameters(const named_argument_map_t &params, PredictGenesBindDat
 		throw BinderException("%s: training_path is a single-genome model; metagenomic mode (meta_mode := true) "
 		                      "uses Prodigal's own models",
 		                      kFunction);
+	}
+}
+
+// Whether `relation` has a column `name`. A LIMIT 0 probe works for tables and views.
+bool HasColumn(ClientContext &context, const std::string &relation, const std::string &name) {
+	auto conn = MakeReadOnlyHelperConnection(context);
+	auto probe = conn.Query("SELECT * FROM " + SQLIdentifier::ToString(relation) + " LIMIT 0");
+	if (probe->HasError()) {
+		throw BinderException("%s: cannot read '%s': %s", kFunction, relation, probe->GetError());
+	}
+	for (const auto &n : probe->GetNames()) {
+		if (StringUtil::CIEquals(n.GetIdentifierName(), name)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+// Contigs, one per row: read_id and sequence1, grouped into genomes by the genome_id column.
+void BindContigs(ClientContext &context, PredictGenesBindData &data) {
+	if (data.genome_column.empty()) {
+		throw BinderException("%s: genome_id (the name of the column that groups contigs into genomes) is required",
+		                      kFunction);
+	}
+	if (!data.mapping_table.empty()) {
+		throw BinderException("%s: mapping_table is for chunked input (a relation with chunk_data); '%s' has a "
+		                      "contig per row, grouped into genomes by genome_id",
+		                      kFunction, data.relation);
+	}
+	// read_id (VARCHAR, BIGINT or UUID) and sequence1 (VARCHAR).
+	const auto schema = ValidateSequenceTableSchema(context, data.relation, /*allow_bigint=*/true);
+	data.read_id_type = schema.id_type;
+	data.has_sequence2 = schema.has_sequence2;
+
+	auto conn = MakeReadOnlyHelperConnection(context);
+	auto probe = conn.Query("SELECT " + SQLIdentifier::ToString(data.genome_column) + ", " +
+	                        SQLIdentifier::ToString(data.order_column) + " FROM " +
+	                        SQLIdentifier::ToString(data.relation) + " LIMIT 0");
+	if (probe->HasError()) {
+		throw BinderException("%s: cannot read the genome_id column '%s' or the order_by column '%s' of '%s' "
+		                      "(order_by defaults to sequence_index, the column read_fastx adds; name another "
+		                      "integer column for a relation without it): %s",
+		                      kFunction, data.genome_column, data.order_column, data.relation, probe->GetError());
+	}
+	data.genome_type = probe->GetTypes()[0];
+	if (!IsAllowedIdType(data.genome_type)) {
+		throw BinderException("%s: genome_id column '%s' must be %s (got %s)", kFunction, data.genome_column,
+		                      AllowedIdTypeList(), data.genome_type.ToString());
+	}
+	if (!probe->GetTypes()[1].IsIntegral()) {
+		throw BinderException("%s: order_by column '%s' must be an integer type (got %s)", kFunction, data.order_column,
+		                      probe->GetTypes()[1].ToString());
+	}
+}
+
+// Chunked contigs, as genomes are stored in blocks: rows of (read_id or feature_idx, chunk_index, chunk_data), a
+// contig's sequence its rows' chunk_data in chunk_index order. mapping_table maps each key to its genome_id.
+void BindChunked(ClientContext &context, PredictGenesBindData &data) {
+	if (data.mapping_table.empty()) {
+		throw BinderException("%s: '%s' is chunked (it has chunk_data), so mapping_table, a table or view of "
+		                      "(read_id or feature_idx, genome_id) that maps each contig to its genome, is required",
+		                      kFunction, data.relation);
+	}
+	if (!data.genome_column.empty()) {
+		throw BinderException("%s: genome_id is for a relation of a contig per row; '%s' is chunked (it has "
+		                      "chunk_data), so its genomes come from mapping_table",
+		                      kFunction, data.relation);
+	}
+	if (data.order_set) {
+		throw BinderException("%s: order_by is for a relation of a contig per row; a chunked genome's contigs are "
+		                      "in the order of their keys",
+		                      kFunction);
+	}
+	const bool has_read_id = HasColumn(context, data.relation, "read_id");
+	const bool has_feature_idx = HasColumn(context, data.relation, "feature_idx");
+	if (has_read_id == has_feature_idx) {
+		throw BinderException("%s: chunked '%s' must have one key column, read_id or feature_idx, naming each "
+		                      "chunk's contig (it has %s)",
+		                      kFunction, data.relation, has_read_id ? "both" : "neither");
+	}
+	data.key_column = has_read_id ? "read_id" : "feature_idx";
+	const auto key = SQLIdentifier::ToString(data.key_column);
+
+	auto conn = MakeReadOnlyHelperConnection(context);
+	auto chunks = conn.Query("SELECT " + key + ", chunk_index, chunk_data FROM " +
+	                         SQLIdentifier::ToString(data.relation) + " LIMIT 0");
+	if (chunks->HasError()) {
+		throw BinderException("%s: chunked '%s' must have %s, chunk_index and chunk_data: %s", kFunction, data.relation,
+		                      data.key_column, chunks->GetError());
+	}
+	data.read_id_type = chunks->GetTypes()[0];
+	if (!IsAllowedIdType(data.read_id_type)) {
+		throw BinderException("%s: %s column of '%s' must be %s (got %s)", kFunction, data.key_column, data.relation,
+		                      AllowedIdTypeList(), data.read_id_type.ToString());
+	}
+	if (!chunks->GetTypes()[1].IsIntegral()) {
+		throw BinderException("%s: chunk_index column of '%s' must be an integer type (got %s)", kFunction,
+		                      data.relation, chunks->GetTypes()[1].ToString());
+	}
+	data.chunk_data_type = chunks->GetTypes()[2];
+	if (data.chunk_data_type.id() != LogicalTypeId::VARCHAR && data.chunk_data_type.id() != LogicalTypeId::BLOB) {
+		throw BinderException("%s: chunk_data column of '%s' must be VARCHAR or BLOB (got %s)", kFunction,
+		                      data.relation, data.chunk_data_type.ToString());
+	}
+
+	auto mapping =
+	    conn.Query("SELECT " + key + ", genome_id FROM " + SQLIdentifier::ToString(data.mapping_table) + " LIMIT 0");
+	if (mapping->HasError()) {
+		throw BinderException("%s: mapping_table '%s' must have %s and genome_id: %s", kFunction, data.mapping_table,
+		                      data.key_column, mapping->GetError());
+	}
+	data.genome_type = mapping->GetTypes()[1];
+	if (!IsAllowedIdType(data.genome_type)) {
+		throw BinderException("%s: genome_id column of mapping_table '%s' must be %s (got %s)", kFunction,
+		                      data.mapping_table, AllowedIdTypeList(), data.genome_type.ToString());
 	}
 }
 
@@ -252,33 +373,14 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 	RejectCTERelationName(input, data->relation);
 	ReadNamedParameters(input.named_parameters, *data);
 
-	// read_id (VARCHAR, BIGINT or UUID) and sequence1 (VARCHAR).
-	const auto schema = ValidateSequenceTableSchema(context, data->relation, /*allow_bigint=*/true);
-	data->read_id_type = schema.id_type;
-	data->has_sequence2 = schema.has_sequence2;
-
-	// The genome_id and order_by columns. A LIMIT 0 probe works for tables and views.
-	{
-		auto conn = MakeReadOnlyHelperConnection(context);
-		auto probe = conn.Query("SELECT " + SQLIdentifier::ToString(data->genome_column) + ", " +
-		                        SQLIdentifier::ToString(data->order_column) + " FROM " +
-		                        SQLIdentifier::ToString(data->relation) + " LIMIT 0");
-		if (probe->HasError()) {
-			throw BinderException("%s: cannot read the genome_id column '%s' or the order_by column '%s' of '%s' "
-			                      "(order_by defaults to sequence_index, the column read_fastx adds; name another "
-			                      "integer column for a relation without it): %s",
-			                      kFunction, data->genome_column, data->order_column, data->relation,
-			                      probe->GetError());
+	data->chunked = HasColumn(context, data->relation, "chunk_data");
+	if (data->chunked) {
+		if (!data->mapping_table.empty()) {
+			RejectCTERelationName(input, data->mapping_table);
 		}
-		data->genome_type = probe->GetTypes()[0];
-		if (!IsAllowedIdType(data->genome_type)) {
-			throw BinderException("%s: genome_id column '%s' must be %s (got %s)", kFunction, data->genome_column,
-			                      AllowedIdTypeList(), data->genome_type.ToString());
-		}
-		if (!probe->GetTypes()[1].IsIntegral()) {
-			throw BinderException("%s: order_by column '%s' must be an integer type (got %s)", kFunction,
-			                      data->order_column, probe->GetTypes()[1].ToString());
-		}
+		BindChunked(context, *data);
+	} else {
+		BindContigs(context, *data);
 	}
 
 	names = {"genome_id",
@@ -1047,6 +1149,63 @@ bool ProduceMetaBatch(ClientContext &context, PredictGenesGlobalState &g, const 
 	return true;
 }
 
+// The contigs, (genome, read_id, sequence1[, sequence2]), one genome after another, each's contigs in order: order_by
+// order (the file's, for read_fastx) as the CLI reads them, or for chunked input the keys' order, each contig's
+// chunks joined in chunk_index order.
+std::string ContigsQuery(const PredictGenesBindData &data) {
+	const auto relation = SQLIdentifier::ToString(data.relation);
+	if (!data.chunked) {
+		const auto genome = SQLIdentifier::ToString(data.genome_column);
+		std::string sql = "SELECT " + genome + ", read_id, sequence1";
+		if (data.has_sequence2) {
+			sql += ", sequence2";
+		}
+		return sql + " FROM " + relation + " WHERE " + genome + " IS NOT NULL ORDER BY " + genome + ", " +
+		       SQLIdentifier::ToString(data.order_column) + ", read_id";
+	}
+	const auto key = SQLIdentifier::ToString(data.key_column);
+	return StringUtil::Format(
+	    "SELECT m.genome_id, c.%s AS read_id, "
+	    "CASE WHEN count(c.chunk_data) <> count(*) "
+	    "     THEN error(printf('%s: contig ''%%s'' has a NULL chunk_data', c.%s::VARCHAR)) "
+	    "     WHEN min(c.chunk_index) <> 0 OR max(c.chunk_index) + 1 <> count(*) "
+	    "       OR count(DISTINCT c.chunk_index) <> count(*) "
+	    "     THEN error(printf('%s: the chunk_index values of contig ''%%s'' are not 0, 1, 2, ... with none missing "
+	    "or repeated', c.%s::VARCHAR)) "
+	    "     ELSE string_agg(c.chunk_data::VARCHAR, '' ORDER BY c.chunk_index) END AS sequence1 "
+	    "FROM %s c JOIN %s m ON c.%s = m.%s WHERE m.genome_id IS NOT NULL "
+	    "GROUP BY m.genome_id, c.%s ORDER BY m.genome_id, c.%s",
+	    key, kFunction, key, kFunction, key, relation, SQLIdentifier::ToString(data.mapping_table), key, key, key, key);
+}
+
+// The number of genomes ContigsQuery returns.
+std::string GenomeCountQuery(const PredictGenesBindData &data) {
+	const auto relation = SQLIdentifier::ToString(data.relation);
+	if (!data.chunked) {
+		return "SELECT count(DISTINCT " + SQLIdentifier::ToString(data.genome_column) + ") FROM " + relation;
+	}
+	const auto key = SQLIdentifier::ToString(data.key_column);
+	return "SELECT count(DISTINCT genome_id) FROM " + SQLIdentifier::ToString(data.mapping_table) + " WHERE " + key +
+	       " IN (SELECT " + key + " FROM " + relation + ")";
+}
+
+// A key mapped twice would put its contig in two genomes, or twice in one.
+void RequireOneGenomePerKey(Connection &conn, const PredictGenesBindData &data) {
+	const auto key = SQLIdentifier::ToString(data.key_column);
+	auto result = conn.Query("SELECT " + key + "::VARCHAR FROM " + SQLIdentifier::ToString(data.mapping_table) +
+	                         " WHERE " + key + " IS NOT NULL GROUP BY " + key + " HAVING count(*) > 1 LIMIT 1");
+	if (result->HasError()) {
+		throw InvalidInputException("%s: cannot read mapping_table '%s': %s", kFunction, data.mapping_table,
+		                            result->GetError());
+	}
+	auto chunk = result->Fetch();
+	if (chunk && chunk->size() > 0) {
+		throw InvalidInputException("%s: mapping_table '%s' maps %s '%s' more than once; each contig belongs to one "
+		                            "genome",
+		                            kFunction, data.mapping_table, data.key_column, chunk->GetValue(0, 0).ToString());
+	}
+}
+
 unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFunctionInitInput &input) {
 	const auto &data = input.bind_data->Cast<PredictGenesBindData>();
 	auto g = make_uniq<PredictGenesGlobalState>();
@@ -1058,8 +1217,9 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 
 	auto &fs = FileSystem::GetFileSystem(context);
 	auto conn = make_uniq<Connection>(MakeReadOnlyHelperConnection(context));
-	const auto relation = SQLIdentifier::ToString(data.relation);
-	const auto genome = SQLIdentifier::ToString(data.genome_column);
+	if (data.chunked) {
+		RequireOneGenomePerKey(*conn, data);
+	}
 	if (!data.meta_mode) {
 		if (!data.training_path.empty() && fs.FileExists(data.training_path)) {
 			if (data.trans_table_set) {
@@ -1074,7 +1234,7 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 			g->fixed_model.mask_regions = data.mask_regions;
 			g->have_fixed_model = true;
 		} else if (!data.training_path.empty()) {
-			auto count = conn->Query("SELECT count(DISTINCT " + genome + ") FROM " + relation);
+			auto count = conn->Query(GenomeCountQuery(data));
 			if (count->HasError()) {
 				throw InvalidInputException("%s: cannot read '%s': %s", kFunction, data.relation, count->GetError());
 			}
@@ -1130,15 +1290,8 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 		check_tool(kTrainTool, kProdigalTrainSchemaVersion);
 	}
 
-	// One genome after another, each's contigs in order_by order (the file's, for read_fastx), as the CLI reads them.
-	std::string sql = "SELECT " + genome + ", read_id, sequence1";
-	if (data.has_sequence2) {
-		sql += ", sequence2";
-	}
-	sql += " FROM " + relation + " WHERE " + genome + " IS NOT NULL ORDER BY " + genome + ", " +
-	       SQLIdentifier::ToString(data.order_column) + ", read_id";
 	g->conn = std::move(conn);
-	g->stream = SubmitStream(*g->conn, sql);
+	g->stream = SubmitStream(*g->conn, ContigsQuery(data));
 	if (g->stream->HasError()) {
 		throw InvalidInputException("%s: cannot read '%s': %s", kFunction, data.relation, g->stream->GetError());
 	}
@@ -1176,6 +1329,7 @@ void Execute(ClientContext &context, TableFunctionInput &input, DataChunk &outpu
 TableFunction PredictGenesTableFunction::GetFunction() {
 	TableFunction fn("predict_genes", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal);
 	AddNamedParameter(fn, "genome_id", LogicalType::VARCHAR);
+	AddNamedParameter(fn, "mapping_table", LogicalType::VARCHAR);
 	AddNamedParameter(fn, "method", LogicalType::VARCHAR);
 	AddNamedParameter(fn, "order_by", LogicalType::VARCHAR);
 	AddNamedParameter(fn, "meta_mode", LogicalType::BOOLEAN);
