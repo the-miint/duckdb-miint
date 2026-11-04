@@ -63,9 +63,11 @@ Behavior:
     gets a fresh RID, and the label of its first query picks how the search
     goes on: "rtoe_wait" is estimated to take BLAST_RTOE_SECONDS,
     "poll_wait" answers WAITING to its first status poll, and
-    "status_unavailable" answers every status poll with 503. Any other search
-    is READY at once. Its results are one tabular hit, the query against
-    itself.
+    "status_unavailable" answers every status poll with 503. A poll that
+    comes after "rtoe_wait"'s estimate, or after "poll_wait"'s WAITING, gets
+    404: a client that waited the whole time fails with an HTTP error, where
+    one the deadline stopped fails with the deadline's. Any other search is
+    READY at once. Its results are one tabular hit, the query against itself.
 
 Started on a free port by test/scripts/ena_mock_env.sh, for run_tests.sh and
 onboarding-tutorials/run_tutorial_tests.sh, which exports its URL as
@@ -616,9 +618,15 @@ class Handler(BaseHTTPRequestHandler):
             if label == "status_unavailable":
                 self._send_unavailable()
                 return
-            waiting = label == "poll_wait" and rid not in _BLAST_POLLED
-            _BLAST_POLLED.add(rid)
-            self._send_text(200, "Status=WAITING\n" if waiting else "Status=READY\n")
+            if label == "rtoe_wait" or (label == "poll_wait" and rid in _BLAST_POLLED):
+                self.send_response(404)
+                self.end_headers()
+                return
+            if label == "poll_wait":
+                _BLAST_POLLED.add(rid)
+                self._send_text(200, "Status=WAITING\n")
+                return
+            self._send_text(200, "Status=READY\n")
             return
         self._send_text(200, f"{label}\t{label}\t100.0\t20\t0\t0\t1\t20\t1\t20\t1e-10\t40.0\n")
 

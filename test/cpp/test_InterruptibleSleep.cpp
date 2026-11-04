@@ -28,6 +28,16 @@ TEST_CASE("InterruptibleSleep polls its check every slice and lasts the whole wa
 	CHECK(checks == 3);
 }
 
+TEST_CASE("InterruptibleSleep checks after its last slice", "[interruptible_sleep]") {
+	// The caller sends its next request as soon as the wait returns. A cancel during the
+	// last slice must stop that request, which for a Webin submission is a POST that
+	// creates objects, so the last check comes after all the sleeping.
+	const auto start = steady_clock::now();
+	auto last_check = start;
+	miint::InterruptibleSleep(milliseconds(250), [&] { last_check = steady_clock::now(); });
+	CHECK(last_check - start >= milliseconds(250));
+}
+
 TEST_CASE("InterruptibleSleep ends when its check throws", "[interruptible_sleep]") {
 	int checks = 0;
 	const auto start = steady_clock::now();
@@ -39,6 +49,6 @@ TEST_CASE("InterruptibleSleep ends when its check throws", "[interruptible_sleep
 	                                            }),
 	                  Interrupted);
 	CHECK(checks == 3);
-	// Two slices, not the minute; the bound is loose so a loaded machine cannot fail it.
+	// Three slices, not the minute; the bound is loose so a loaded machine cannot fail it.
 	CHECK(steady_clock::now() - start < milliseconds(10000));
 }

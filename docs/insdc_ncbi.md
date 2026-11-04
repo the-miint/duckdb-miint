@@ -65,7 +65,8 @@ sees the status of a GET answered 429 or 503, DuckDB retries the GET itself, as 
 takes about a minute, and Ctrl-C does not end it. miint reads these settings from the database,
 so change them with `SET GLOBAL`.
 
-Two settings send the requests elsewhere, such as to a mirror:
+Two settings send the requests elsewhere, such as to a mirror. A trailing slash is dropped, and
+an empty URL is an error.
 
 - `miint_ncbi_eutils_url`, the base URL of E-utilities (default
   `https://eutils.ncbi.nlm.nih.gov/entrez/eutils`). The Datasets API, which `read_ncbi_fasta` uses

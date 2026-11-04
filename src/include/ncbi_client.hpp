@@ -47,7 +47,7 @@ public:
 	static constexpr int INITIAL_RETRY_DELAY_MS = 1000;
 
 	// `context` is the query's: its miint_ncbi_eutils_url names the E-utilities server, and
-	// its interrupt check ends a retry's backoff.
+	// its interrupt check ends every wait.
 	NCBIClient(duckdb::ClientContext &context, const std::string &api_key = "");
 
 	// Where E-utilities requests go: the miint_ncbi_eutils_url setting.
@@ -121,9 +121,6 @@ private:
 	// Rate limiting (thread-safe)
 	void RespectRateLimit();
 	double GetRateLimit() const;
-
-	// Sleeps `duration`, unless Ctrl-C or max_execution_time ends the query first.
-	void Wait(std::chrono::milliseconds duration);
 };
 
 } // namespace miint

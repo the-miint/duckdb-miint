@@ -106,7 +106,7 @@ public:
 		return body.find(INCOMPLETE_RESULT_MARKER) != std::string::npos;
 	}
 
-	// `context` is the query's, whose interrupt check ends a retry's backoff.
+	// `context` is the query's, whose interrupt check ends every wait.
 	explicit ENAClient(duckdb::ClientContext &context);
 
 	// HTTP methods — build URL via ENAParser, then fetch
@@ -163,8 +163,6 @@ private:
 	std::string PostBody(const std::string &url, const std::string &body, const std::string &content_type,
 	                     const std::string &accept_type, const std::string &user, const std::string &password);
 	void RespectRateLimit();
-	// Sleeps `duration`, unless Ctrl-C or max_execution_time ends the query first.
-	void Wait(std::chrono::milliseconds duration);
 };
 
 } // namespace miint

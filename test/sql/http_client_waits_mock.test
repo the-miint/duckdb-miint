@@ -12,14 +12,15 @@ require-env MIINT_ENA_PORTAL_URL_BASE
 
 # The HTTP clients wait between attempts, backing off 1, 2, 4 s and on: 7 s in all
 # for ENA and read_ncbi_taxdump, 63 s for NCBI and BLAST. BLAST also waits for its
-# own estimate of a search's length, up to an hour, then 15 s between polls. Every
-# wait polls the query's interrupt check, which Ctrl-C and max_execution_time both
-# trip; a test cannot press Ctrl-C, so the deadline stands in for it.
+# own estimate of a search's length, up to an hour, then 15 s between polls, and
+# NCBI and BLAST space their requests a third of a second apart. Every wait polls
+# the query's interrupt check, which Ctrl-C and max_execution_time both trip; a
+# test cannot press Ctrl-C, so the deadline stands in for it.
 #
-# Each query below would wait at least a second against a 300 ms deadline. Waited
-# out, it fails with the HTTP error, or returns a row, instead of the deadline's
-# error. The mock (test/scripts/ena_webin_mock.py) answers 503 to everything under
-# /unavailable/.
+# Each query below waits, in the wait its comment names, from before its deadline
+# until well after it. Waited out, it fails with an HTTP error instead of the
+# deadline's. The mock (test/scripts/ena_webin_mock.py) answers 503 to everything
+# under /unavailable/.
 
 statement ok
 CREATE TABLE submit_unavailable AS SELECT 'submit_unavailable' AS read_id, 'ACGTACGTACGTACGTACGT' AS sequence1;
@@ -110,6 +111,12 @@ Query exceeded maximum execution time
 statement ok
 SET miint_blast_url = '{ENA_WEBIN_MOCK_URL}/blast/Blast.cgi';
 
+# BLAST's first poll follows the submission by its third-of-a-second spacing,
+# and that wait stops at the deadline too. A later deadline lets each search
+# below reach the wait it names first.
+statement ok
+SET max_execution_time = 1000;
+
 # The mock picks how each search goes from its query's label. This one is
 # estimated at 10 s, which the client waits before its first poll.
 statement error
@@ -131,6 +138,9 @@ Query exceeded maximum execution time
 
 statement ok
 RESET max_execution_time;
+
+statement ok
+RESET GLOBAL http_retries;
 
 # The connection still works, and the mock's BLAST answers a search that is
 # ready at once: the deadline, not the mock, stopped the searches above.

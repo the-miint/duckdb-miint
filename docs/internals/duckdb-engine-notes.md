@@ -219,9 +219,10 @@ wave, one library call) and in a wait. Either may be called from a worker thread
 function's own that is joined before the function returns: they read an atomic, the clock, and
 a deadline that is set before the query runs and cleared after it ends.
 
-A sleep is a wait too. The HTTP clients' retry backoff, and BLAST's waits for a search, sleep
-through `InterruptibleSleep` (`src/include/interruptible_sleep.hpp`), which calls
-`BlockingInterruptCheck()` every 100 ms. DuckDB's own HTTP layer does not check.
+A sleep is a wait too. Every sleep in the HTTP clients (a retry's backoff, a rate limit, BLAST's
+waits for a search) goes through `SleepUnlessInterrupted` (`src/include/http_client_common.hpp`),
+which calls `BlockingInterruptCheck()` after every slice of at most 100 ms, the last one
+included, so a cancel during the wait also stops the request the client would send next. DuckDB's own HTTP layer does not check.
 `HTTPUtil::RunRequestWithRetry` (`duckdb/src/main/http/http_util.cpp`) retries a failed
 idempotent request up to `http_retries` times (default 3), and one answered 429 or 503 five
 times more, sleeping up to 20 s between tries (`http_retry_budget.cpp`). With the defaults, a GET

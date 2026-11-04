@@ -35,7 +35,7 @@ public:
 	static constexpr int MAX_UNKNOWN_STATUS_RETRIES = 3;
 
 	// `context` is the query's: its miint_blast_url names the server, and its interrupt
-	// check ends every wait, a retry's backoff or a search's.
+	// check ends every wait.
 	BlastClient(duckdb::ClientContext &context, const std::string &api_key = "");
 	BlastClient(const BlastClient &) = delete;
 	BlastClient &operator=(const BlastClient &) = delete;
@@ -60,8 +60,6 @@ private:
 	void RespectRateLimit();
 	double GetRateLimit() const;
 	static bool IsRetryableStatus(int status);
-	// Sleeps `duration`, unless Ctrl-C or max_execution_time ends the query first.
-	void Wait(std::chrono::milliseconds duration);
 };
 
 } // namespace miint

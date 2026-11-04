@@ -1,7 +1,7 @@
 #include "read_ncbi_taxdump.hpp"
 
 #include "ensure_httpfs.hpp"
-#include "interruptible_sleep.hpp"
+#include "http_client_common.hpp"
 #include "miint_cache.hpp"
 #include "remote_file_helper.hpp"
 #include "taxdump_archive.hpp"
@@ -73,8 +73,7 @@ std::string HttpGetToString(ClientContext &context, const std::string &url) {
 		bool retryable = !response->HasRequestError() &&
 		                 (int(response->status) >= 500 || int(response->status) == 429 || int(response->status) == 408);
 		if (attempt < MAX_RETRIES && retryable) {
-			miint::InterruptibleSleep(std::chrono::milliseconds(retry_delay_ms),
-			                          [&context] { context.BlockingInterruptCheck(); });
+			miint::SleepUnlessInterrupted(context, std::chrono::milliseconds(retry_delay_ms));
 			retry_delay_ms *= 2;
 			continue;
 		}
@@ -205,7 +204,7 @@ miint::TaxdumpFiles LoadTaxdumpFiles(ClientContext &context, const std::string &
 	// path (the default source caches the extracted members), so it is the branch that
 	// matters most for skipping members the caller does not read. A URL never names one,
 	// and httpfs, which DuckDB loads to answer for a URL, throws instead of saying no.
-	if (!miint::RemoteFileHelper::IsRemotePath(source) && fs.DirectoryExists(source)) {
+	if (!IsHttpUrl(source) && fs.DirectoryExists(source)) {
 		auto read_member = [&](const char *name, bool wanted) -> std::string {
 			if (!wanted) {
 				return {};

@@ -1,7 +1,6 @@
 #include "ena_client.hpp"
-#include "interruptible_sleep.hpp"
+#include "http_client_common.hpp"
 #include "duckdb/common/exception/http_exception.hpp"
-#include <thread>
 
 namespace miint {
 
@@ -22,13 +21,10 @@ void ENAClient::RespectRateLimit() {
 		slot = (earliest_next > now) ? earliest_next : now;
 		last_request_time = slot;
 	}
-	if (slot > std::chrono::steady_clock::now()) {
-		std::this_thread::sleep_until(slot);
+	const auto now = std::chrono::steady_clock::now();
+	if (slot > now) {
+		SleepUnlessInterrupted(context, std::chrono::ceil<std::chrono::milliseconds>(slot - now));
 	}
-}
-
-void ENAClient::Wait(std::chrono::milliseconds duration) {
-	InterruptibleSleep(duration, [this] { context.BlockingInterruptCheck(); });
 }
 
 // Shared GET retry loop. Caller supplies a pre-built HTTPHeaders (empty for
@@ -59,7 +55,7 @@ std::string ENAClient::ExecuteGet(const std::string &url, duckdb::HTTPHeaders &h
 
 		const bool retryable = incomplete || (!response->HasRequestError() && IsRetryableStatus(int(response->status)));
 		if (attempt < MAX_RETRIES && retryable) {
-			Wait(std::chrono::milliseconds(retry_delay_ms));
+			SleepUnlessInterrupted(context, std::chrono::milliseconds(retry_delay_ms));
 			retry_delay_ms *= 2;
 			continue;
 		}
@@ -116,7 +112,7 @@ std::string ENAClient::PostBody(const std::string &url, const std::string &body,
 		}
 
 		if (attempt < MAX_RETRIES && !response->HasRequestError() && IsRetryableStatus(int(response->status))) {
-			Wait(std::chrono::milliseconds(retry_delay_ms));
+			SleepUnlessInterrupted(context, std::chrono::milliseconds(retry_delay_ms));
 			retry_delay_ms *= 2;
 			continue;
 		}

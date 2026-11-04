@@ -1,23 +1,10 @@
 #include "ncbi_client.hpp"
-#include "interruptible_sleep.hpp"
+#include "http_client_common.hpp"
 #include "zip_utils.hpp"
 #include "duckdb/common/exception/http_exception.hpp"
 #include <sstream>
-#include <thread>
 
 namespace miint {
-
-// The URL a setting names. The setting is registered at load (src/miint_extension.cpp).
-static std::string UrlSetting(duckdb::ClientContext &context, const char *name) {
-	duckdb::Value value;
-	if (!context.TryGetCurrentSetting(name, value)) {
-		throw duckdb::InternalException("miint extension option '%s' is not registered", name);
-	}
-	if (value.IsNull()) {
-		throw duckdb::InvalidInputException("%s cannot be NULL; RESET it to use NCBI's", name);
-	}
-	return value.ToString();
-}
 
 NCBIClient::NCBIClient(duckdb::ClientContext &context, const std::string &api_key)
     : context(context), db(*context.db), eutils_base(UrlSetting(context, "miint_ncbi_eutils_url")), api_key(api_key),
@@ -39,14 +26,10 @@ void NCBIClient::RespectRateLimit() {
 	auto min_interval = std::chrono::milliseconds(static_cast<int>(1000.0 / rate_limit));
 
 	if (elapsed < min_interval) {
-		std::this_thread::sleep_for(min_interval - elapsed);
+		SleepUnlessInterrupted(context, min_interval - elapsed);
 	}
 
 	last_request_time = std::chrono::steady_clock::now();
-}
-
-void NCBIClient::Wait(std::chrono::milliseconds duration) {
-	InterruptibleSleep(duration, [this] { context.BlockingInterruptCheck(); });
 }
 
 bool NCBIClient::IsRetryableStatus(int status) {
@@ -87,7 +70,7 @@ std::string NCBIClient::MakeRequest(const std::string &url, bool use_api_key_hea
 
 		// Check if we should retry
 		if (attempt < MAX_RETRIES && !response->HasRequestError() && IsRetryableStatus(int(response->status))) {
-			Wait(std::chrono::milliseconds(retry_delay_ms));
+			SleepUnlessInterrupted(context, std::chrono::milliseconds(retry_delay_ms));
 			retry_delay_ms *= 2; // Exponential backoff
 			continue;
 		}
@@ -143,7 +126,7 @@ std::string NCBIClient::MakeRequestPOST(const std::string &url, const std::strin
 		}
 
 		if (attempt < MAX_RETRIES && !response->HasRequestError() && IsRetryableStatus(int(response->status))) {
-			Wait(std::chrono::milliseconds(retry_delay_ms));
+			SleepUnlessInterrupted(context, std::chrono::milliseconds(retry_delay_ms));
 			retry_delay_ms *= 2;
 			continue;
 		}

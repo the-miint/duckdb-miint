@@ -1,23 +1,10 @@
 #include "blast_client.hpp"
-#include "interruptible_sleep.hpp"
+#include "http_client_common.hpp"
 #include "duckdb/common/exception/http_exception.hpp"
 #include "duckdb/common/printer.hpp"
 #include <sstream>
-#include <thread>
 
 namespace miint {
-
-// The URL a setting names. The setting is registered at load (src/miint_extension.cpp).
-static std::string UrlSetting(duckdb::ClientContext &context, const char *name) {
-	duckdb::Value value;
-	if (!context.TryGetCurrentSetting(name, value)) {
-		throw duckdb::InternalException("miint extension option '%s' is not registered", name);
-	}
-	if (value.IsNull()) {
-		throw duckdb::InvalidInputException("%s cannot be NULL; RESET it to use NCBI's", name);
-	}
-	return value.ToString();
-}
 
 BlastClient::BlastClient(duckdb::ClientContext &context, const std::string &api_key)
     : context_(context), db_(*context.db), base_url_(UrlSetting(context, "miint_blast_url")), api_key_(api_key),
@@ -34,13 +21,9 @@ void BlastClient::RespectRateLimit() {
 	auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_request_time_);
 	auto min_interval = std::chrono::milliseconds(static_cast<int>(1000.0 / GetRateLimit()));
 	if (elapsed < min_interval) {
-		std::this_thread::sleep_for(min_interval - elapsed);
+		SleepUnlessInterrupted(context_, min_interval - elapsed);
 	}
 	last_request_time_ = std::chrono::steady_clock::now();
-}
-
-void BlastClient::Wait(std::chrono::milliseconds duration) {
-	InterruptibleSleep(duration, [this] { context_.BlockingInterruptCheck(); });
 }
 
 bool BlastClient::IsRetryableStatus(int status) {
@@ -62,7 +45,7 @@ std::string BlastClient::MakeGetRequest(const std::string &url) {
 			return response->body;
 		}
 		if (attempt < MAX_RETRIES && !response->HasRequestError() && IsRetryableStatus(int(response->status))) {
-			Wait(std::chrono::milliseconds(retry_delay_ms));
+			SleepUnlessInterrupted(context_, std::chrono::milliseconds(retry_delay_ms));
 			retry_delay_ms *= 2;
 			continue;
 		}
@@ -95,7 +78,7 @@ std::string BlastClient::MakePostRequest(const std::string &url, const std::stri
 			return post_request.buffer_out;
 		}
 		if (attempt < MAX_RETRIES && !response->HasRequestError() && IsRetryableStatus(int(response->status))) {
-			Wait(std::chrono::milliseconds(retry_delay_ms));
+			SleepUnlessInterrupted(context_, std::chrono::milliseconds(retry_delay_ms));
 			retry_delay_ms *= 2;
 			continue;
 		}
@@ -138,7 +121,7 @@ void BlastClient::WaitForCompletion(const std::string &rid, int rtoe_hint) {
 	}
 	if (rtoe_hint > 0) {
 		duckdb::Printer::Print("blast: waiting " + std::to_string(rtoe_hint) + "s (NCBI estimate) for RID " + rid);
-		Wait(std::chrono::seconds(rtoe_hint));
+		SleepUnlessInterrupted(context_, std::chrono::seconds(rtoe_hint));
 	}
 
 	int unknown_count = 0;
@@ -170,7 +153,7 @@ void BlastClient::WaitForCompletion(const std::string &rid, int rtoe_hint) {
 		if (status == BlastStatus::WAITING) {
 			duckdb::Printer::Print("blast: RID " + rid + " still running (~" + std::to_string(elapsed) + "s elapsed)");
 		}
-		Wait(std::chrono::seconds(POLL_INTERVAL_SECONDS));
+		SleepUnlessInterrupted(context_, std::chrono::seconds(POLL_INTERVAL_SECONDS));
 	}
 
 	throw duckdb::IOException("blast: timed out after %d poll attempts (~%d minutes) for RID %s. "
