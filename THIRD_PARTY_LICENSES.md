@@ -1574,6 +1574,55 @@ Kuczynski, J.; Liu, Z.; Lozupone, C.; McDonald, D.; Fierer, N.; and Knight, R.
 biologically relevant patterns", Nature Methods, 7(10), 813-819.
 doi: 10.1038/nmeth.1499
 
+### SRA Toolkit (sra-tools / fasterq-dump) and ncbi-vdb
+
+miint reads NCBI SRA archives (`.sra`) with its own reader, written from the
+format. No NCBI code is copied, compiled, vendored or linked. ncbi-vdb's sources
+were read as the reference for the archive format, column encodings and spot-name
+reconstruction, and fasterq-dump's for which reads it writes, in what order and
+under which deflines.
+
+fasterq-dump generated the committed oracles in `data/sra/oracle/`, which the SRA
+parity tests require miint to reproduce byte for byte. It was run once, outside
+this repository, from a throwaway conda environment; nothing here packages or runs
+it. `data/sra/README.md` and each `data/sra/oracle/<RUN>/README.md` record the
+exact commands.
+
+- Repositories: https://github.com/ncbi/sra-tools, https://github.com/ncbi/ncbi-vdb
+- Version that generated the oracles: sra-tools 3.4.1 (bioconda build
+  `h5fa12a8_1`, with ncbi-vdb 3.4.1)
+- Sources referenced: sra-tools commit `434ae787c86e32e7faa5e80417a342c365fa03b0`
+  and ncbi-vdb commit `28118ec6254c1a1acbf47ecbdc775d693f178573` (both 2026-03-25)
+- License: Public domain (U.S. government work per 17 U.S.C. §105), except for
+  third-party files bundled in ncbi-vdb, none of which miint uses. The notice
+  below is reproduced from sra-tools' `LICENSE`.
+
+#### NCBI Public Domain Notice (sra-tools)
+
+With the exception of certain third-party files summarized below, this
+software is a "United States Government Work" under the terms of the
+United States Copyright Act.  It was written as part of the authors'
+official duties as United States Government employees and thus cannot
+be copyrighted.  This software is freely available to the public for
+use. The National Library of Medicine and the U.S. Government have not
+placed any restriction on its use or reproduction.
+
+Although all reasonable efforts have been taken to ensure the accuracy
+and reliability of the software and data, the NLM and the U.S.
+Government do not and cannot warrant the performance or results that
+may be obtained by using this software or data. The NLM and the U.S.
+Government disclaim all warranties, express or implied, including
+warranties of performance, merchantability or fitness for any
+particular purpose.
+
+Please cite the authors in any work or product based on this material.
+
+#### Citation
+
+Leinonen R, Sugawara H, Shumway M; International Nucleotide Sequence Database
+Collaboration. The Sequence Read Archive. Nucleic Acids Res.
+2011;39(Database issue):D19-D21. doi: 10.1093/nar/gkq1019
+
 ### BSD 3-Clause License
 
 Applies to cogent3, NumPy, SciPy, pysyndna, scikit-learn, scikit-bio, mmvec, and
