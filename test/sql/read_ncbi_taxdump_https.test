@@ -1,0 +1,44 @@
+# name: test/sql/read_ncbi_taxdump_https.test
+# description: The taxdump readers read a taxdump.tar.gz from an HTTP URL
+# group: [sql]
+
+# `make test` skips this file because httpfs is not linked into unittest;
+# run_tests.sh runs it in its httpfs pass.
+
+require miint
+
+require httpfs
+
+require-env MIINT_HTTPS_TEST_URL
+
+# The readers first ask whether the source is a directory of extracted .dmp
+# files. A URL never is, and asking httpfs throws, so a URL goes straight to
+# the download. Each reader below returns what it does for the local copy of
+# the archive (read_ncbi_taxdump.test, read_ncbi_taxdump_names_deleted.test).
+
+query I
+SELECT COUNT(*) FROM read_ncbi_taxdump('{MIINT_HTTPS_TEST_URL}/taxonomy/synthetic.tar.gz');
+----
+12
+
+query ITT
+SELECT node_index, name, rank
+FROM read_ncbi_taxdump('{MIINT_HTTPS_TEST_URL}/taxonomy/synthetic.tar.gz')
+WHERE node_index = 90;
+----
+90	Escherichia coli K-12	strain
+
+query II
+SELECT old_taxid, new_taxid FROM read_ncbi_taxdump_merged('{MIINT_HTTPS_TEST_URL}/taxonomy/synthetic.tar.gz');
+----
+999	80
+
+query I
+SELECT COUNT(*) FROM read_ncbi_taxdump_names('{MIINT_HTTPS_TEST_URL}/taxonomy/synthetic.tar.gz');
+----
+14
+
+query I
+SELECT taxid FROM read_ncbi_taxdump_deleted('{MIINT_HTTPS_TEST_URL}/taxonomy/synthetic.tar.gz');
+----
+888

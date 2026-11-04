@@ -90,6 +90,12 @@ SELECT * FROM read_ncbi_annotation('NC_000913.3');
 ----
 Query exceeded maximum execution time
 
+# The taxdump download, a GET with its own retry loop.
+statement error
+SELECT * FROM read_ncbi_taxdump('{ENA_WEBIN_MOCK_URL}/unavailable/taxdump.tar.gz');
+----
+Query exceeded maximum execution time
+
 # --- BLAST -------------------------------------------------------------------
 
 statement ok
