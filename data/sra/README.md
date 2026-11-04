@@ -51,11 +51,11 @@ file. All are public, and none is human: the organism and BioSample are in the t
 | ERR1160027 | 37470 | `47c5df1ac97221102ecc53820d323f46` | 71 | (not recorded) | `NCBI:SRA:Illumina:tbl:phred:v2#1.0.4` | Illumina / single | sponge metagenome | a flat table, names from a physical `SPOT_NAME` |
 | SRR14704581 | 58870 | `e1611efe0cba216262aa5c142fb759a9` | 1 | fastq-load.py 1.3 | `NCBI:SRA:GenericFastq:sequence#2` | capillary / paired | Capra hircus | IUPAC ambiguity codes other than N |
 
-### Accepted pending a decision
+### PacBio and Nanopore runs read as sequence tables
 
 fasterq-dump decodes these through the same path as the runs above, because their databases hold no CONSENSUS,
-ZMW_METRICS or PASSES table. Whether miint accepts them or rejects them by platform is open; their oracles are
-committed either way.
+ZMW_METRICS or PASSES table. miint accepts them for the same reason: a run is classified by the tables present, never
+by platform (decided 2026-11-04).
 
 | Run | Bytes | md5 | Spots | Loader | SEQUENCE table type | Platform | Organism | Exercises |
 |---|---:|---|---:|---|---|---|---|---|
