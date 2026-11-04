@@ -105,10 +105,9 @@ unique_ptr<FunctionData> BlastSearchTableFunction::Bind(ClientContext &context, 
 unique_ptr<GlobalTableFunctionState> BlastSearchTableFunction::InitGlobal(ClientContext &context,
                                                                           TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
-	auto &db = DatabaseInstance::GetDatabase(context);
 	auto gstate = make_uniq<GlobalState>();
 
-	gstate->client = make_uniq<miint::BlastClient>(db, data.api_key);
+	gstate->client = make_uniq<miint::BlastClient>(context, data.api_key);
 	gstate->program = data.program;
 	gstate->database = data.database;
 	gstate->evalue = data.evalue;

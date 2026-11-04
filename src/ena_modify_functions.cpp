@@ -164,7 +164,7 @@ void ExecuteModifyProject(ClientContext &context, TableFunctionInput &data, Data
 	opts.password = creds.password;
 	opts.action = miint::ENAAction::MODIFY;
 
-	miint::ENAClient client(*context.db);
+	miint::ENAClient client(context);
 	miint::ENAPostFn post_fn = [&client](const string &url, const string &body, const string &user,
 	                                     const string &password, const string &content_type) {
 		// Projects use JSON (V2's JSON dispatcher handles projects correctly).
@@ -410,7 +410,7 @@ void ExecuteModifySample(ClientContext &context, TableFunctionInput &data, DataC
 	opts.password = creds.password;
 	opts.action = miint::ENAAction::MODIFY;
 
-	miint::ENAClient client(*context.db);
+	miint::ENAClient client(context);
 	miint::ENAPostFn post_fn = [&client](const string &url, const string &body, const string &user,
 	                                     const string &password, const string &content_type) {
 		if (content_type == "application/xml") {
@@ -691,7 +691,7 @@ void ExecuteModifyExperiment(ClientContext &context, TableFunctionInput &data, D
 	opts.password = creds.password;
 	opts.action = miint::ENAAction::MODIFY;
 
-	miint::ENAClient client(*context.db);
+	miint::ENAClient client(context);
 	miint::ENAPostFn post_fn = [&client](const string &url, const string &body, const string &user,
 	                                     const string &password, const string &content_type) {
 		// Experiments are XML-only — V2's JSON dispatcher NPEs for SRA-side
@@ -916,7 +916,7 @@ void ExecuteModifyRun(ClientContext &context, TableFunctionInput &data, DataChun
 	opts.password = creds.password;
 	opts.action = miint::ENAAction::MODIFY;
 
-	miint::ENAClient client(*context.db);
+	miint::ENAClient client(context);
 	miint::ENAPostFn post_fn = [&client](const string &url, const string &body, const string &user,
 	                                     const string &password, const string &content_type) {
 		// Runs are XML-only — V2's JSON dispatcher NPEs for SRA-side objects.

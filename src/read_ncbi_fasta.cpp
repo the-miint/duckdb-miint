@@ -73,9 +73,9 @@ ReadNCBIFastaTableFunction::Data::Data(std::vector<std::string> accessions, std:
 }
 
 // GlobalState constructor
-ReadNCBIFastaTableFunction::GlobalState::GlobalState(DatabaseInstance &db, const std::string &api_key,
+ReadNCBIFastaTableFunction::GlobalState::GlobalState(ClientContext &context, const std::string &api_key,
                                                      std::vector<WorkUnit> work_units)
-    : work_units(std::move(work_units)), client(make_uniq<miint::NCBIClient>(db, api_key)), work_cursor(0),
+    : work_units(std::move(work_units)), client(make_uniq<miint::NCBIClient>(context, api_key)), work_cursor(0),
       batch_offset(0), sequence_index(0) {
 }
 
@@ -98,7 +98,7 @@ bool ReadNCBIFastaTableFunction::GlobalState::FetchNextBatch(ClientContext &cont
 			// epost+efetch URLs need a fresh WebEnv handle that's already
 			// expired by the time the user reads filepath, so surface the
 			// equivalent `?id=A,B,C` form — same endpoint, reproducible.
-			current_filepath_url = std::string(miint::NCBIClient::EUTILS_BASE) + "/efetch.fcgi?db=nuccore&id=" +
+			current_filepath_url = client->EutilsBase() + "/efetch.fcgi?db=nuccore&id=" +
 			                       miint::NCBIParser::JoinStrings(unit.accessions, ",") + "&rettype=fasta";
 		}
 
@@ -254,8 +254,7 @@ unique_ptr<FunctionData> ReadNCBIFastaTableFunction::Bind(ClientContext &context
 unique_ptr<GlobalTableFunctionState> ReadNCBIFastaTableFunction::InitGlobal(ClientContext &context,
                                                                             TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
-	auto &db = DatabaseInstance::GetDatabase(context);
-	return make_uniq<GlobalState>(db, data.api_key, data.work_units);
+	return make_uniq<GlobalState>(context, data.api_key, data.work_units);
 }
 
 unique_ptr<LocalTableFunctionState> ReadNCBIFastaTableFunction::InitLocal(ExecutionContext &context,

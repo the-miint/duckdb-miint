@@ -1,0 +1,140 @@
+# name: test/sql/http_client_waits_mock.test
+# description: The NCBI, BLAST and ENA clients stop waiting at max_execution_time
+# group: [sql]
+
+require httpfs
+
+require miint
+
+require-env ENA_WEBIN_MOCK_URL
+
+require-env MIINT_ENA_PORTAL_URL_BASE
+
+# The HTTP clients wait between attempts, backing off 1, 2, 4 s and on: 7 s in all
+# for ENA and read_ncbi_taxdump, 63 s for NCBI and BLAST. BLAST also waits for its
+# own estimate of a search's length, up to an hour, then 15 s between polls. Every
+# wait polls the query's interrupt check, which Ctrl-C and max_execution_time both
+# trip; a test cannot press Ctrl-C, so the deadline stands in for it.
+#
+# Each query below would wait at least a second against a 300 ms deadline. Waited
+# out, it fails with the HTTP error, or returns a row, instead of the deadline's
+# error. The mock (test/scripts/ena_webin_mock.py) answers 503 to everything under
+# /unavailable/.
+
+statement ok
+CREATE TABLE submit_unavailable AS SELECT 'submit_unavailable' AS read_id, 'ACGTACGTACGTACGTACGT' AS sequence1;
+
+statement ok
+CREATE TABLE rtoe_wait AS SELECT 'rtoe_wait' AS read_id, 'ACGTACGTACGTACGTACGT' AS sequence1;
+
+statement ok
+CREATE TABLE poll_wait AS SELECT 'poll_wait' AS read_id, 'ACGTACGTACGTACGTACGT' AS sequence1;
+
+statement ok
+CREATE TABLE status_unavailable AS SELECT 'status_unavailable' AS read_id, 'ACGTACGTACGTACGTACGT' AS sequence1;
+
+statement ok
+CREATE TABLE ready_at_once AS SELECT 'ready_at_once' AS read_id, 'ACGTACGTACGTACGTACGT' AS sequence1;
+
+statement ok
+CREATE SECRET webin_unavailable (
+    TYPE ENA,
+    USER 'Webin-99999',
+    PASSWORD 'mock-password',
+    ENDPOINT 'test',
+    ENDPOINT_URL '{ENA_WEBIN_MOCK_URL}/unavailable'
+);
+
+statement ok
+ATTACH '' AS ena (TYPE ENA, SECRET 'webin_unavailable');
+
+# DuckDB's own HTTP layer retries a GET that gets a 503, up to 8 times over about
+# a minute, before a client sees the status, and its waits do not poll the
+# interrupt check. Off, so the waits here are the clients' own. GLOBAL because
+# the clients take their HTTP settings from the database, not the session.
+statement ok
+SET GLOBAL http_retries = 0;
+
+statement ok
+SET max_execution_time = 300;
+
+# --- ENA ---------------------------------------------------------------------
+
+# A Portal search: the mock answers 503 for this accession.
+statement error
+SELECT * FROM read_ena('PORTAL_UNAVAILABLE');
+----
+Query exceeded maximum execution time
+
+# A Webin submission. The alias check before it is a Portal search the mock
+# answers; the POST goes under /unavailable/.
+statement error
+INSERT INTO ena.projects (alias, title, project_type) VALUES ('waits_for_webin', 'never submitted', 'METAGENOMIC');
+----
+Query exceeded maximum execution time
+
+# --- NCBI --------------------------------------------------------------------
+
+statement ok
+SET miint_ncbi_eutils_url = '{ENA_WEBIN_MOCK_URL}/unavailable/eutils';
+
+# epost, a POST.
+statement error
+SELECT * FROM read_ncbi('NC_000913.3');
+----
+Query exceeded maximum execution time
+
+# efetch, a GET.
+statement error
+SELECT * FROM read_ncbi_annotation('NC_000913.3');
+----
+Query exceeded maximum execution time
+
+# --- BLAST -------------------------------------------------------------------
+
+statement ok
+SET miint_blast_url = '{ENA_WEBIN_MOCK_URL}/unavailable/Blast.cgi';
+
+# The submission, a POST.
+statement error
+SELECT * FROM blast('submit_unavailable');
+----
+Query exceeded maximum execution time
+
+statement ok
+SET miint_blast_url = '{ENA_WEBIN_MOCK_URL}/blast/Blast.cgi';
+
+# The mock picks how each search goes from its query's label. This one is
+# estimated at 10 s, which the client waits before its first poll.
+statement error
+SELECT * FROM blast('rtoe_wait');
+----
+Query exceeded maximum execution time
+
+# WAITING at the first poll, then 15 s to the next.
+statement error
+SELECT * FROM blast('poll_wait');
+----
+Query exceeded maximum execution time
+
+# A poll answered with 503, a GET.
+statement error
+SELECT * FROM blast('status_unavailable');
+----
+Query exceeded maximum execution time
+
+statement ok
+RESET max_execution_time;
+
+# The connection still works, and the mock's BLAST answers a search that is
+# ready at once: the deadline, not the mock, stopped the searches above.
+query TT
+SELECT query_id, subject_id FROM blast('ready_at_once');
+----
+ready_at_once	ready_at_once
+
+statement ok
+DETACH ena;
+
+statement ok
+DROP SECRET webin_unavailable;

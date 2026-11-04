@@ -2,6 +2,7 @@
 
 #include "blast_parser.hpp"
 #include "duckdb/common/http_util.hpp"
+#include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
 #include <chrono>
 #include <mutex>
@@ -23,6 +24,7 @@ namespace miint {
 // Independent from NCBIClient — uses DuckDB's HTTPUtil directly.
 class BlastClient {
 public:
+	// The default of the miint_blast_url setting, which the client sends its requests to.
 	static constexpr const char *BLAST_BASE = "https://blast.ncbi.nlm.nih.gov/blast/Blast.cgi";
 	static constexpr int POLL_INTERVAL_SECONDS = 15;
 	static constexpr int MAX_POLL_ATTEMPTS = 240; // 60 min timeout
@@ -32,7 +34,9 @@ public:
 	static constexpr int INITIAL_RETRY_DELAY_MS = 1000;
 	static constexpr int MAX_UNKNOWN_STATUS_RETRIES = 3;
 
-	BlastClient(duckdb::DatabaseInstance &db, const std::string &api_key = "");
+	// `context` is the query's: its miint_blast_url names the server, and its interrupt
+	// check ends every wait, a retry's backoff or a search's.
+	BlastClient(duckdb::ClientContext &context, const std::string &api_key = "");
 	BlastClient(const BlastClient &) = delete;
 	BlastClient &operator=(const BlastClient &) = delete;
 
@@ -44,7 +48,9 @@ public:
 	std::string RetrieveResults(const std::string &rid, int max_targets);
 
 private:
+	duckdb::ClientContext &context_;
 	duckdb::DatabaseInstance &db_;
+	std::string base_url_;
 	std::string api_key_;
 	std::chrono::steady_clock::time_point last_request_time_;
 	mutable std::mutex rate_limit_mutex_;
@@ -54,6 +60,8 @@ private:
 	void RespectRateLimit();
 	double GetRateLimit() const;
 	static bool IsRetryableStatus(int status);
+	// Sleeps `duration`, unless Ctrl-C or max_execution_time ends the query first.
+	void Wait(std::chrono::milliseconds duration);
 };
 
 } // namespace miint

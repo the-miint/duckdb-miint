@@ -519,6 +519,7 @@ list(
   test/cpp/test_id_column_codec.cpp
   test/cpp/test_IndependentContrasts.cpp
   test/cpp/test_InsertFullyResolved.cpp
+  test/cpp/test_InterruptibleSleep.cpp
   test/cpp/test_IntervalCompressor.cpp
   test/cpp/test_KsTwoSample.cpp
   test/cpp/test_KSW2Aligner.cpp

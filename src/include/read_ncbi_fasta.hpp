@@ -62,7 +62,7 @@ public:
 		// of a dangling reference during long-running fetches.
 		std::vector<WorkUnit> work_units;
 
-		GlobalState(DatabaseInstance &db, const std::string &api_key, std::vector<WorkUnit> work_units);
+		GlobalState(ClientContext &context, const std::string &api_key, std::vector<WorkUnit> work_units);
 
 		idx_t MaxThreads() const override {
 			return 1; // Single-threaded for rate limiting

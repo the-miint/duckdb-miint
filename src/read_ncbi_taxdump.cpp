@@ -1,6 +1,7 @@
 #include "read_ncbi_taxdump.hpp"
 
 #include "ensure_httpfs.hpp"
+#include "interruptible_sleep.hpp"
 #include "miint_cache.hpp"
 #include "remote_file_helper.hpp"
 #include "taxdump_archive.hpp"
@@ -17,7 +18,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
-#include <thread>
 #include "miint_named_parameter.hpp"
 
 namespace duckdb {
@@ -52,7 +52,8 @@ bool IsHttpUrl(const std::string &path) {
 // Download `url` into memory via DuckDB's core HTTP client (HTTPUtil), the same
 // mechanism read_ncbi uses. This deliberately avoids the httpfs filesystem
 // extension, which the extension does not auto-load, so read_ncbi_taxdump() works
-// out of the box. Retries transient failures with exponential backoff.
+// out of the box. Retries transient failures with exponential backoff, which Ctrl-C
+// and max_execution_time end.
 std::string HttpGetToString(ClientContext &context, const std::string &url) {
 	miint::EnsureHttpfsLoaded(context);
 	DatabaseInstance &db = *context.db;
@@ -72,7 +73,8 @@ std::string HttpGetToString(ClientContext &context, const std::string &url) {
 		bool retryable = !response->HasRequestError() &&
 		                 (int(response->status) >= 500 || int(response->status) == 429 || int(response->status) == 408);
 		if (attempt < MAX_RETRIES && retryable) {
-			std::this_thread::sleep_for(std::chrono::milliseconds(retry_delay_ms));
+			miint::InterruptibleSleep(std::chrono::milliseconds(retry_delay_ms),
+			                          [&context] { context.BlockingInterruptCheck(); });
 			retry_delay_ms *= 2;
 			continue;
 		}

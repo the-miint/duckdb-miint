@@ -14,8 +14,8 @@ ReadENAAttributesTableFunction::Data::Data(std::vector<std::string> accessions)
 
 // ---- GlobalState ----
 
-ReadENAAttributesTableFunction::GlobalState::GlobalState(DatabaseInstance &db)
-    : client(make_uniq<miint::ENAClient>(db)) {
+ReadENAAttributesTableFunction::GlobalState::GlobalState(ClientContext &context)
+    : client(make_uniq<miint::ENAClient>(context)) {
 }
 
 std::vector<std::string>
@@ -143,8 +143,7 @@ unique_ptr<FunctionData> ReadENAAttributesTableFunction::Bind(ClientContext &con
 
 unique_ptr<GlobalTableFunctionState> ReadENAAttributesTableFunction::InitGlobal(ClientContext &context,
                                                                                 TableFunctionInitInput &input) {
-	auto &db = DatabaseInstance::GetDatabase(context);
-	return make_uniq<GlobalState>(db);
+	return make_uniq<GlobalState>(context);
 }
 
 unique_ptr<LocalTableFunctionState> ReadENAAttributesTableFunction::InitLocal(ExecutionContext &context,

@@ -41,7 +41,7 @@ public:
 
 		std::vector<std::vector<std::string>> batches; // held by value (see read_ncbi)
 
-		GlobalState(DatabaseInstance &db, const std::string &api_key, std::vector<std::vector<std::string>> batches);
+		GlobalState(ClientContext &context, const std::string &api_key, std::vector<std::vector<std::string>> batches);
 
 		idx_t MaxThreads() const override {
 			return 1; // single-threaded for rate limiting

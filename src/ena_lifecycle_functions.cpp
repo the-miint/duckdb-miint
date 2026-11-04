@@ -186,7 +186,7 @@ void ExecuteLifecycle(ClientContext &context, TableFunctionInput &data, DataChun
 		creds.endpoint_url = duckdb::ResolveDefaultENAEndpointURL(creds.endpoint);
 	}
 
-	ENAClient client(*context.db);
+	ENAClient client(context);
 
 	// When the user supplied refname (alias) instead of accession, hit
 	// the Webin Reports API to translate before envelope build. The envelope

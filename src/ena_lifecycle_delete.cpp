@@ -245,7 +245,7 @@ protected:
 		auto &client_context = context.client;
 		auto creds = ResolveENACredentials(client_context, catalog);
 
-		miint::ENAClient client(*client_context.db);
+		miint::ENAClient client(client_context);
 
 		// Alias-targeted DELETE — translate refname → accession via the
 		// Webin Reports API before envelope build. The envelope-builder

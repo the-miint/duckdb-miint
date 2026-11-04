@@ -34,9 +34,9 @@ ReadNCBIAnnotationTableFunction::Data::Data(std::vector<std::string> accessions,
 }
 
 // GlobalState constructor
-ReadNCBIAnnotationTableFunction::GlobalState::GlobalState(DatabaseInstance &db, const std::string &api_key,
+ReadNCBIAnnotationTableFunction::GlobalState::GlobalState(ClientContext &context, const std::string &api_key,
                                                           const std::vector<std::string> &accessions)
-    : client(make_uniq<miint::NCBIClient>(db, api_key)), next_accession_idx(0), batch_offset(0),
+    : client(make_uniq<miint::NCBIClient>(context, api_key)), next_accession_idx(0), batch_offset(0),
       accessions(accessions) {
 }
 
@@ -130,8 +130,7 @@ unique_ptr<FunctionData> ReadNCBIAnnotationTableFunction::Bind(ClientContext &co
 unique_ptr<GlobalTableFunctionState> ReadNCBIAnnotationTableFunction::InitGlobal(ClientContext &context,
                                                                                  TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
-	auto &db = DatabaseInstance::GetDatabase(context);
-	return make_uniq<GlobalState>(db, data.api_key, data.accessions);
+	return make_uniq<GlobalState>(context, data.api_key, data.accessions);
 }
 
 unique_ptr<LocalTableFunctionState> ReadNCBIAnnotationTableFunction::InitLocal(ExecutionContext &context,
@@ -246,7 +245,7 @@ void ReadNCBIAnnotationTableFunction::Execute(ClientContext &context, TableFunct
 	if (bind_data.include_filepath) {
 		// Use NCBI URL as filepath (use stored current_accession to avoid off-by-one)
 		std::ostringstream url;
-		url << miint::NCBIClient::EUTILS_BASE << "/efetch.fcgi?db=nuccore&id=" << global_state.current_accession
+		url << global_state.client->EutilsBase() << "/efetch.fcgi?db=nuccore&id=" << global_state.current_accession
 		    << "&rettype=ft";
 		output.data[9].SetVectorType(VectorType::CONSTANT_VECTOR);
 		auto filepath_data = ConstantVector::GetData<string_t>(output.data[9]);

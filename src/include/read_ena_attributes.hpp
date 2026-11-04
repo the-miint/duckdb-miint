@@ -60,7 +60,7 @@ public:
 		std::atomic<size_t> total_samples_expected {0};
 		std::atomic<size_t> samples_fetched {0};
 
-		GlobalState(DatabaseInstance &db);
+		GlobalState(ClientContext &context);
 
 		// One-time input-accession resolution: studies, runs and experiments
 		// resolve to their sample accessions, which populate `pending_sample_accs`.

@@ -47,9 +47,9 @@ ReadNCBITableFunction::Data::Data(std::vector<std::string> accessions, std::vect
 	         LogicalType::DATE};   // update_date
 }
 
-ReadNCBITableFunction::GlobalState::GlobalState(DatabaseInstance &db, const std::string &api_key,
+ReadNCBITableFunction::GlobalState::GlobalState(ClientContext &context, const std::string &api_key,
                                                 std::vector<std::vector<std::string>> batches)
-    : batches(std::move(batches)), client(make_uniq<miint::NCBIClient>(db, api_key)), batch_cursor(0),
+    : batches(std::move(batches)), client(make_uniq<miint::NCBIClient>(context, api_key)), batch_cursor(0),
       result_offset(0) {
 }
 
@@ -193,8 +193,7 @@ unique_ptr<FunctionData> ReadNCBITableFunction::Bind(ClientContext &context, Tab
 unique_ptr<GlobalTableFunctionState> ReadNCBITableFunction::InitGlobal(ClientContext &context,
                                                                        TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
-	auto &db = DatabaseInstance::GetDatabase(context);
-	return make_uniq<GlobalState>(db, data.api_key, data.batches);
+	return make_uniq<GlobalState>(context, data.api_key, data.batches);
 }
 
 unique_ptr<LocalTableFunctionState> ReadNCBITableFunction::InitLocal(ExecutionContext &context,

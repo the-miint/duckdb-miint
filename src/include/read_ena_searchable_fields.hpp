@@ -44,7 +44,7 @@ public:
 		std::vector<std::array<std::string, 3>> rows;
 		size_t offset = 0;
 
-		explicit GlobalState(DatabaseInstance &db);
+		explicit GlobalState(ClientContext &context);
 
 		idx_t MaxThreads() const override {
 			return 1;

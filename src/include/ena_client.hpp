@@ -2,6 +2,7 @@
 
 #include "ena_parser.hpp"
 #include "duckdb/common/http_util.hpp"
+#include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
 #include <chrono>
 #include <mutex>
@@ -105,7 +106,8 @@ public:
 		return body.find(INCOMPLETE_RESULT_MARKER) != std::string::npos;
 	}
 
-	explicit ENAClient(duckdb::DatabaseInstance &db);
+	// `context` is the query's, whose interrupt check ends a retry's backoff.
+	explicit ENAClient(duckdb::ClientContext &context);
 
 	// HTTP methods — build URL via ENAParser, then fetch
 	std::string Search(const std::string &accession, const std::string &result_type, const std::string &fields);
@@ -146,6 +148,7 @@ public:
 	std::string AuthenticatedGet(const std::string &url, const std::string &user, const std::string &password);
 
 private:
+	duckdb::ClientContext &context;
 	duckdb::DatabaseInstance &db;
 	std::chrono::steady_clock::time_point last_request_time;
 	mutable std::mutex rate_limit_mutex;
@@ -160,6 +163,8 @@ private:
 	std::string PostBody(const std::string &url, const std::string &body, const std::string &content_type,
 	                     const std::string &accept_type, const std::string &user, const std::string &password);
 	void RespectRateLimit();
+	// Sleeps `duration`, unless Ctrl-C or max_execution_time ends the query first.
+	void Wait(std::chrono::milliseconds duration);
 };
 
 } // namespace miint
