@@ -1,0 +1,76 @@
+# name: test/sql/sra_fixtures.test
+# description: The SRA fixtures and fasterq-dump oracles in data/sra are present and unchanged (data/sra/README.md)
+# group: [sql]
+
+require miint
+
+# The oracles were generated once by fasterq-dump and are never regenerated, so a
+# changed or missing file is a failure, not a skip. Every file SHA256SUMS lists is
+# present and matches its recorded sha256.
+query III
+SELECT count(*), count(b.filename), count(*) FILTER (WHERE sha256(b.content) <> m.hash)
+FROM read_csv('data/sra/SHA256SUMS', delim = ' ', header = false,
+              columns = {'hash': 'VARCHAR', 'pad': 'VARCHAR', 'file': 'VARCHAR'}) m
+LEFT JOIN read_blob('data/sra/**') b ON replace(b.filename, '\', '/') = 'data/sra/' || m.file;
+----
+68	68	0
+
+# Nothing in data/sra apart from the READMEs and SHA256SUMS itself escapes the pin.
+query I
+SELECT count(*)
+FROM read_blob('data/sra/**') b
+WHERE parse_filename(b.filename) NOT IN ('README.md', 'SHA256SUMS')
+  AND replace(b.filename, '\', '/') NOT IN (
+      SELECT 'data/sra/' || file
+      FROM read_csv('data/sra/SHA256SUMS', delim = ' ', header = false,
+                    columns = {'hash': 'VARCHAR', 'pad': 'VARCHAR', 'file': 'VARCHAR'}));
+----
+0
+
+# The oracle manifest covers 18 runs in three modes, and every file it names is pinned.
+query III
+SELECT count(*), count(DISTINCT run), count(*) FILTER (WHERE 'oracle/' || run || '/' || file NOT IN (
+           SELECT file FROM read_csv('data/sra/SHA256SUMS', delim = ' ', header = false,
+                                     columns = {'hash': 'VARCHAR', 'pad': 'VARCHAR', 'file': 'VARCHAR'})))
+FROM read_csv('data/sra/oracle/oracle_md5.csv');
+----
+62	18	0
+
+statement ok
+CREATE TABLE manifest AS
+SELECT run, mode, 'data/sra/oracle/' || run || '/' || file AS path, md5, bytes, records
+FROM read_csv('data/sra/oracle/oracle_md5.csv');
+
+# The md5 recorded for each file is that of the FASTQ the .gz decompresses to. A
+# split-3 defline is '@$ac.$si $sn length=$rl', repeated on the '+' line, which
+# read_fastx keeps whole as read_id and comment, so rendering its rows back to
+# text must reproduce the recorded md5 for every split-3 file.
+query III
+WITH rendered AS (
+    SELECT replace(filepath, '\', '/') AS path,
+           md5(string_agg('@' || read_id || ' ' || comment || chr(10) || sequence1 || chr(10) ||
+                          '+' || read_id || ' ' || comment || chr(10) ||
+                          list_aggregate(list_transform(qual1, lambda q: chr(q::INTEGER + 33)), 'string_agg', '') ||
+                          chr(10), '' ORDER BY sequence_index)) AS md5,
+           count(*) AS records
+    FROM read_fastx('data/sra/oracle/*/split_3/*.fastq.gz', include_filepath = true)
+    GROUP BY ALL
+)
+SELECT count(*), count(r.path), count(*) FILTER (WHERE r.md5 <> m.md5 OR r.records <> m.records)
+FROM manifest m LEFT JOIN rendered r USING (path)
+WHERE m.mode = 'split_3';
+----
+26	26	0
+
+# A split-spot defline carries '/$ri' after the spot id, which read_fastx strips,
+# so these files are checked by record count only; the byte-for-byte check is the
+# reader's parity test.
+query II
+SELECT count(*), count(*) FILTER (WHERE r.records IS DISTINCT FROM m.records)
+FROM manifest m
+LEFT JOIN (SELECT replace(filepath, '\', '/') AS path, count(*) AS records
+           FROM read_fastx('data/sra/oracle/*/split_spot/*.fastq.gz', include_filepath = true)
+           GROUP BY ALL) r USING (path)
+WHERE m.mode IN ('split_spot', 'split_spot_tech');
+----
+36	0
