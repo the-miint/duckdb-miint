@@ -5,6 +5,7 @@ MIINT provides integration with NCBI's GenBank and RefSeq.
 ## Table of contents
 
 - [Accessions are literals, not table names](#accessions-are-literals-not-table-names) - Applies to all three readers below; includes the idiom for driving them from accessions held in a table.
+- [Requests: waits and where they go](#requests-waits-and-where-they-go) - Retries, BLAST's waits, what stops them, and the settings that point the requests elsewhere.
 - [Read metadata](#read-metadata) - Fetch record metadata from GenBank and RefSeq by accession.
 - [Read sequences](#read-sequences) - Fetch sequence data from GenBank and RefSeq by accession.
 - [Read annotations](#read-annotations) - Fetch annotation data from GenBank and RefSeq by accession.
@@ -47,6 +48,35 @@ Both bare and qualified names are covered: a bare name is resolved against the s
 and a qualified one (`my_schema.accs`, `my_db.my_schema.accs`) is resolved as written. Versioned
 accessions are unaffected — `'NC_001416.1'` is *looked up* as schema `NC_001416` / relation `1`, finds
 nothing, and is sent upstream unchanged.
+
+### Requests: waits and where they go
+
+The functions here that go online, and `blast`, which searches NCBI BLAST, wait between attempts
+and for NCBI:
+
+- `read_ncbi`, `read_ncbi_fasta`, `read_ncbi_annotation` and `read_ncbi_lineage` retry a transient
+  failure after 1, 2, 4, 8, 16 and 32 s. `read_ncbi_taxdump` retries its download after 1, 2 and 4 s.
+- `blast` backs off between attempts as the readers do. It also waits for NCBI's estimate of how
+  long a search takes, at most an hour, then polls every 15 s.
+
+Ctrl-C and `max_execution_time` end any of these waits within a tenth of a second. Before miint
+sees the status of a GET answered 429 or 503, DuckDB retries the GET itself, as its
+`http_retries`, `http_retry_wait_ms` and `http_retry_backoff` settings say. With the defaults that
+takes about a minute, and Ctrl-C does not end it. miint reads these settings from the database,
+so change them with `SET GLOBAL`.
+
+Two settings send the requests elsewhere, such as to a mirror:
+
+- `miint_ncbi_eutils_url`, the base URL of E-utilities (default
+  `https://eutils.ncbi.nlm.nih.gov/entrez/eutils`). The Datasets API, which `read_ncbi_fasta` uses
+  for assemblies, keeps its own URL.
+- `miint_blast_url`, the URL of BLAST's URL API (default
+  `https://blast.ncbi.nlm.nih.gov/blast/Blast.cgi`).
+
+```sql
+SET miint_ncbi_eutils_url = 'https://eutils.example.org/entrez/eutils';
+RESET miint_ncbi_eutils_url;  -- back to NCBI's
+```
 
 ### Read metadata
 
