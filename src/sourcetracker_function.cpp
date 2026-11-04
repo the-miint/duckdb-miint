@@ -328,9 +328,7 @@ struct St3ResultDeleter {
 }
 
 void CheckInterrupt(ClientContext &context) {
-	if (context.IsInterrupted()) {
-		throw InterruptException();
-	}
+	context.BlockingInterruptCheck();
 }
 
 // ---------------------------------------------------------------------------
@@ -687,8 +685,8 @@ unique_ptr<GlobalTableFunctionState> SourcetrackerInitGlobal(ClientContext &cont
 	St3Config config = data.config;
 	config.seed = data.seed >= 0 ? static_cast<uint64_t>(data.seed) : std::random_device {}();
 	St3Result *result_raw = nullptr;
-	// One blocking call; Ctrl-C is honoured only between phases (st3 has no
-	// cancellation hook).
+	// One blocking call; Ctrl-C and max_execution_time are honoured only between
+	// phases (st3 has no cancellation hook).
 	const St3Status run_status = st3_run(table.get(), &config, &result_raw);
 	if (run_status != ST3_STATUS_OK) {
 		ThrowSt3("st3_run", run_status);

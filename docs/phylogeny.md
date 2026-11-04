@@ -196,6 +196,7 @@ Requires an index built beforehand, either by [`krepp_index_create`](#build-a-kr
 - Reads that krepp cannot support are absent from the output entirely, so `fragment` is a subset of the input `read_id`s.
 - Sequences shorter than the index's *k* are skipped, with one warning per `place_krepp` call — not one per skipped sequence (see [`miint_warnings`](utilities.md)). A sequence containing anything outside the IUPAC nucleotide alphabet raises rather than being silently dropped.
 - RNA input is accepted: `U`/`u` are rewritten to `T`/`t` before krepp sees them, because krepp treats uracil as an ambiguous base and an untouched RNA read would place nothing.
+- Reads are placed on all of DuckDB's threads, and rows come out in no fixed order. Add an `ORDER BY` when the order matters.
 - The index is loaded once **per call** and shared across that call's threads; indexes routinely run to tens of gigabytes. Two `place_krepp` calls in one statement load two copies concurrently, so a query that compares several parameter settings side by side multiplies the memory accordingly.
 
 **Reproducibility:** krepp's output is not bit-reproducible, and neither is this function. krepp accumulates and normalizes placements through hash maps keyed by tree-node *pointer*, so iteration order moves with the heap layout. What that costs you, measured on the toy index:

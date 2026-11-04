@@ -670,4 +670,8 @@ if(BUILD_UNITTESTS)
   if(MIINT_ENABLE_HDF5 AND UNIX)
     target_sources(tests_duckdb PRIVATE test/cpp/test_CopyBiomWriteFailure.cpp)
   endif()
+  if(MIINT_ENABLE_KREPP)
+    target_sources(tests_duckdb
+                   PRIVATE test/cpp/test_PlaceKreppParallelSink.cpp)
+  endif()
 endif()

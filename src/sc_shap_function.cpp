@@ -384,9 +384,7 @@ void ScShapExecute(ClientContext &context, TableFunctionInput &input, DataChunk 
 			if (gstate.cur_sample >= gstate.batch_first + gstate.batch_count) {
 				// One Execute can run many batches; each is a call into sc that
 				// cannot be stopped once begun, so check between them.
-				if (context.IsInterrupted()) {
-					throw InterruptException();
-				}
+				context.BlockingInterruptCheck();
 				LoadBatch(bind, gstate, gstate.cur_sample);
 			}
 			// Output-major within a sample: [o0f0, o0f1, ..., o1f0, ...].

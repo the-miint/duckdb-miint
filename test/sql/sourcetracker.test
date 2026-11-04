@@ -705,3 +705,29 @@ statement error
 SELECT * FROM sourcetracker('tiny', 'tiny_meta', loo := true, assignments := true);
 ----
 not available with loo
+
+# ---------------------------------------------------------------------------
+# max_execution_time
+# ---------------------------------------------------------------------------
+
+# st3 has no cancellation hook, so the deadline is checked between phases: a
+# query past max_execution_time fails at the next one rather than emitting rows.
+# 50 restarts on one thread take about 0.75 s, fifteen times the 50 ms deadline.
+statement ok
+SET max_execution_time = 50;
+
+statement error
+SELECT count(*) FROM sourcetracker('tiny', 'tiny_meta', seed := 42, restarts := 50, threads := 1,
+    source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+----
+Query exceeded maximum execution time
+
+statement ok
+RESET max_execution_time;
+
+# The connection still works.
+query I
+SELECT count(DISTINCT sink_id) FROM sourcetracker('tiny', 'tiny_meta', seed := 42, restarts := 5, threads := 1,
+    source_rarefaction_depth := 0, sink_rarefaction_depth := 0);
+----
+5

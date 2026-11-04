@@ -209,7 +209,7 @@ CREATE VIEW common AS
              HAVING count(DISTINCT sample_id) >= 0.01 * (SELECT count(DISTINCT sample_id) FROM counts)) USING (feature_id);
 ```
 
-- **Cancelling:** `fit_*` and `cross_validate_*` cannot be cancelled once sc is running; `shap` stops between batches.
+- **Cancelling:** Ctrl-C and a `max_execution_time` deadline stop a function while it reads its data relation, and `shap` between batches too; `fit_*` and `cross_validate_*` cannot be stopped once sc is running.
 - **Very large values are refused.** A regression target above about 1e154 in magnitude overflows sc's node statistics, and a feature value beyond the float32 range (about ±3.4e38) cannot be split on, so the fit errors and asks you to rescale. scikit-learn fits the first; it refuses the second too.
 - **`shap`** holds the input table in full, as prediction does, plus one batch of attributions (see `max_attributions` under [Explaining a prediction](#explaining-a-prediction)); fewer features is the way to go further.
 - **DuckDB-Wasm** gives DuckDB and the extension one 4 GiB memory and one thread, so expect a much lower ceiling than native. `threads` has no effect there; results are the same as native. `cross_validate_*` needs the `wasm_eh` build, the one miint publishes, and refuses to run in a build without wasm-native exceptions.

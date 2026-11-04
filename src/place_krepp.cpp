@@ -250,6 +250,10 @@ void PlaceKreppTableFunction::Register(ExtensionLoader &loader) {
 	AddNamedParameter(place, "chisq", LogicalType::DOUBLE);
 	AddNamedParameter(place, "multi", LogicalType::BOOLEAN);
 	AddNamedParameter(place, "filter", LogicalType::BOOLEAN);
+	// Threads claim query chunks as they free up, so rows come out in no fixed
+	// order. Without NO_ORDER, preserve_insertion_order gives this source a
+	// single-threaded result sink, and a SELECT or CTAS runs on one thread.
+	place.order_preservation_type = OrderPreservationType::NO_ORDER;
 	loader.RegisterFunction(place);
 }
 

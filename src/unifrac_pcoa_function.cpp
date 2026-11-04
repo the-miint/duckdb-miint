@@ -2393,14 +2393,13 @@ MakeComputedBlockRun(const ProgressivePcoaData &data, const miint::progressive::
 // because the source issues queries on the context that is running the scan.
 unique_ptr<miint::progressive::ProgressivePcoaRun> MakeProgressiveRun(ClientContext &context,
                                                                       const ProgressivePcoaData &data) {
-	// Cooperative cancellation. The core polls this before every batch, which is the
-	// only thing standing between a user and an uninterruptible multi-hour query:
-	// Ctrl-C sets the context's interrupt flag and, until now, nothing on this path ever read
-	// it. Polled from worker threads too, hence the atomic read.
+	// Cooperative cancellation. The core polls this before every batch, which bounds
+	// the wait for a cancel to one block rather than one wave of a multi-hour run.
+	// BlockingInterruptCheck sees both Ctrl-C and max_execution_time. Polled from
+	// worker threads too, which the core joins before the wave returns
+	// (docs/internals/duckdb-engine-notes.md, "Interrupts and max_execution_time").
 	const miint::progressive::InterruptCheck interrupt = [&context]() {
-		if (context.IsInterrupted()) {
-			throw InterruptException();
-		}
+		context.BlockingInterruptCheck();
 	};
 
 	if (data.source == ProgressivePcoaData::Source::UNIFRAC) {
@@ -2660,9 +2659,7 @@ void StageRotatedRun(ClientContext &context, const ProgressivePcoaData &data, Pr
 	append_chunk.Initialize(Allocator::Get(context), types);
 
 	while (AdvanceProgressiveRun(context, data, gstate)) {
-		if (context.IsInterrupted()) {
-			throw InterruptException();
-		}
+		context.BlockingInterruptCheck();
 		StageWave(data, gstate, append_chunk, axes);
 	}
 	if (append_chunk.size() > 0) {
@@ -2757,9 +2754,7 @@ void ProgressivePcoaExecute(ClientContext &context, TableFunctionInput &input, D
 		// Polled here as well as inside the run: a cancellation arriving while DuckDB
 		// drains the rows already produced is noticed on the next refill rather than
 		// after another wave's worth of work.
-		if (context.IsInterrupted()) {
-			throw InterruptException();
-		}
+		context.BlockingInterruptCheck();
 		// Same contract either way — "false" means there is nothing left to emit. Only
 		// where the rows come from differs: a staged, rotated configuration, or the next
 		// wave of the streaming run.

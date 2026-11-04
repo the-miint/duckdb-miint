@@ -420,9 +420,7 @@ void ScanCooRelation(duckdb::ClientContext &context, duckdb::Connection &conn, c
 	// id only the first time it sees it. Unified rather than flat because a
 	// column may arrive constant- or dictionary-encoded.
 	while (auto chunk = next_chunk()) {
-		if (context.IsInterrupted()) {
-			throw duckdb::InterruptException();
-		}
+		context.BlockingInterruptCheck();
 		const idx_t n = chunk->size();
 		UnifiedVectorFormat sf, ff, vf;
 		chunk->data[0].ToUnifiedFormat(sf);
