@@ -85,8 +85,14 @@ struct VdbBlob {
 // derives its page map from it.
 VdbBlob ParseVdbBlob(std::vector<uint8_t> bytes, uint64_t row_count, uint32_t elem_bits);
 
-// Bit width of a stored element type, e.g. 2 for INSDC:2na:packed. Throws SraUnsupportedError
-// for a type it does not know.
+// A stored element type as the decoders need it: width and signedness.
+struct ElementType {
+	uint32_t bits = 8;
+	bool is_signed = false;
+};
+// Throws SraUnsupportedError for a type it does not know.
+ElementType ElementTypeOf(const std::string &type);
+// Bit width of a stored element type, e.g. 2 for INSDC:2na:packed.
 uint32_t ElementBits(const std::string &type);
 
 // A column directory of a table: its declared type and encoding, its index, and its blobs.

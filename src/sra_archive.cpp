@@ -375,6 +375,9 @@ SraTable::SraTable(std::shared_ptr<const KarArchive> archive) : archive_(std::mo
 			const MetadataNode *start_id = node.Find("start_id");
 			sc.start_id = start_id ? start_id->ValueAsI64() : 1;
 			sc.row_count = row_count->ValueAsU64();
+			if (const MetadataNode *size = node.Find("size")) {
+				sc.size_bits = size->ValueAsU64();
+			}
 			static_columns_.emplace(node.name, std::move(sc));
 		}
 	}

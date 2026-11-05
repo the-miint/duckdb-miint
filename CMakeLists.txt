@@ -385,6 +385,7 @@ list(
   src/simulate_resemblance.cpp
   src/simulate_resemblance_function.cpp
   src/sra_archive.cpp
+  src/sra_codecs.cpp
   src/sra_column.cpp
   src/sra_run.cpp
   src/sra_source.cpp
@@ -493,6 +494,7 @@ list(
   src/SFFReader.cpp
   src/simulate_resemblance.cpp
   src/sra_archive.cpp
+  src/sra_codecs.cpp
   src/sra_column.cpp
   src/sra_run.cpp
   src/sra_source.cpp
@@ -581,8 +583,10 @@ list(
   test/cpp/test_SimulateCluster.cpp
   test/cpp/test_SimulateGradient.cpp
   test/cpp/test_SraArchive.cpp
+  test/cpp/test_SraCodecs.cpp
   test/cpp/test_SraColumn.cpp
   test/cpp/test_SraRun.cpp
+  test/cpp/test_SraSpots.cpp
   test/cpp/test_taxdump_archive.cpp
   test/cpp/test_taxdump_parser.cpp
   test/cpp/test_taxonomy_lineage.cpp
