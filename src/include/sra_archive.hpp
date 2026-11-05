@@ -81,6 +81,9 @@ struct StaticColumn {
 	std::string row;  // the cell's bytes, the same for every row
 	int64_t start_id = 1;
 	uint64_t row_count = 0;
+	// The cell's length in bits, when its bytes do not say it: a 2na cell of 574 bases fills
+	// 144 bytes but holds 1148 bits.
+	std::optional<uint64_t> size_bits;
 };
 
 // The table holding the reads: tbl/SEQUENCE inside a database, or the archive itself when the

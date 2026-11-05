@@ -594,35 +594,39 @@ VdbBlob ParseVdbBlob(std::vector<uint8_t> bytes, uint64_t row_count, uint32_t el
 	return blob;
 }
 
-uint32_t ElementBits(const std::string &type) {
-	static const std::map<std::string, uint32_t> BITS = {{"INSDC:2na:packed", 2},
-	                                                     {"INSDC:4na:packed", 4},
-	                                                     {"INSDC:4na:bin", 8},
-	                                                     {"INSDC:dna:text", 8},
-	                                                     {"INSDC:quality:phred", 8},
-	                                                     {"INSDC:coord:len", 32},
-	                                                     {"INSDC:coord:zero", 32},
-	                                                     {"INSDC:coord:one", 32},
-	                                                     {"INSDC:coord:val", 32},
-	                                                     {"INSDC:SRA:xread_type", 8},
-	                                                     {"INSDC:SRA:read_type", 8},
-	                                                     {"INSDC:SRA:spot_filter", 8},
-	                                                     {"INSDC:SRA:read_filter", 8},
-	                                                     {"INSDC:SRA:platform_id", 8},
-	                                                     {"ascii", 8},
-	                                                     {"U8", 8},
-	                                                     {"U16", 16},
-	                                                     {"U32", 32},
-	                                                     {"U64", 64},
-	                                                     {"I8", 8},
-	                                                     {"I16", 16},
-	                                                     {"I32", 32},
-	                                                     {"I64", 64}};
-	auto it = BITS.find(type);
-	if (it == BITS.end()) {
+ElementType ElementTypeOf(const std::string &type) {
+	static const std::map<std::string, ElementType> TYPES = {{"INSDC:2na:packed", {2, false}},
+	                                                         {"INSDC:4na:packed", {4, false}},
+	                                                         {"INSDC:4na:bin", {8, false}},
+	                                                         {"INSDC:dna:text", {8, false}},
+	                                                         {"INSDC:quality:phred", {8, false}},
+	                                                         {"INSDC:coord:len", {32, false}},
+	                                                         {"INSDC:coord:zero", {32, true}},
+	                                                         {"INSDC:coord:one", {32, true}},
+	                                                         {"INSDC:coord:val", {32, true}},
+	                                                         {"INSDC:SRA:xread_type", {8, false}},
+	                                                         {"INSDC:SRA:read_type", {8, false}},
+	                                                         {"INSDC:SRA:spot_filter", {8, false}},
+	                                                         {"INSDC:SRA:read_filter", {8, false}},
+	                                                         {"INSDC:SRA:platform_id", {8, false}},
+	                                                         {"ascii", {8, false}},
+	                                                         {"U8", {8, false}},
+	                                                         {"U16", {16, false}},
+	                                                         {"U32", {32, false}},
+	                                                         {"U64", {64, false}},
+	                                                         {"I8", {8, true}},
+	                                                         {"I16", {16, true}},
+	                                                         {"I32", {32, true}},
+	                                                         {"I64", {64, true}}};
+	auto it = TYPES.find(type);
+	if (it == TYPES.end()) {
 		throw SraUnsupportedError("stored type '" + type + "'");
 	}
 	return it->second;
+}
+
+uint32_t ElementBits(const std::string &type) {
+	return ElementTypeOf(type).bits;
 }
 
 // ---------------------------------------------------------------------------------------------

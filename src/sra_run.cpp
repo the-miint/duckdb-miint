@@ -1,6 +1,10 @@
 #include "sra_run.hpp"
 
+#include "sra_codecs.hpp"
+#include "sra_column.hpp"
+
 #include <algorithm>
+#include <cstring>
 
 namespace miint {
 namespace sra {
@@ -122,6 +126,304 @@ void ClassifyRun(const RunFacts &f) {
 		if (ColumnsRead().count(kv.first) && !SupportedEncoding(kv.second)) {
 			throw SraUnsupportedError("column '" + kv.first + "' uses encoding '" + kv.second +
 			                          "', which is not supported");
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// Spots
+
+namespace {
+
+// One logical column of the table, from its directory or from a static cell, with the decoded
+// blob of the last row read kept for the next.
+class ColumnSource {
+public:
+	ColumnSource(const SraTable &table, const std::string &name, const std::string &expected_type) : name_(name) {
+		std::string type;
+		if (table.HasPhysical(name)) {
+			physical_ = std::make_unique<PhysicalColumn>(table, name);
+			type = physical_->Type();
+		} else {
+			static_ = table.Static(name);
+			type = static_->type;
+		}
+		if (type != expected_type) {
+			throw SraUnsupportedError("column '" + name + "' stores '" + type + "', not '" + expected_type + "'");
+		}
+		type_ = ElementTypeOf(type);
+		if (static_) {
+			uint64_t bits = static_->size_bits ? *static_->size_bits : uint64_t(static_->row.size()) * 8;
+			if (bits % type_.bits != 0 || bits > uint64_t(static_->row.size()) * 8) {
+				throw SraFormatError("static column '" + name + "' has a cell of " + std::to_string(bits) + " bits");
+			}
+			static_count_ = bits / type_.bits;
+		}
+	}
+
+	static bool Exists(const SraTable &table, const std::string &name) {
+		return table.HasPhysical(name) || table.Static(name) != nullptr;
+	}
+
+	// The row ids the column covers.
+	void Range(int64_t &first, uint64_t &count) const {
+		if (static_) {
+			first = static_->start_id;
+			count = static_->row_count;
+			return;
+		}
+		const auto &blobs = physical_->Index().blobs;
+		if (blobs.empty()) {
+			first = 1;
+			count = 0;
+			return;
+		}
+		first = blobs.front().start_id;
+		count = uint64_t(blobs.back().start_id + int64_t(blobs.back().id_count) - first);
+	}
+
+	// The row's elements: `count` elements of the column's width, starting `offset` elements
+	// into `data` (bit-packed below 8 bits).
+	void Cell(int64_t row, const uint8_t *&data, uint64_t &offset, uint64_t &count) {
+		if (static_) {
+			if (row < static_->start_id || uint64_t(row - static_->start_id) >= static_->row_count) {
+				throw SraFormatError("static column '" + name_ + "' has no row " + std::to_string(row));
+			}
+			data = reinterpret_cast<const uint8_t *>(static_->row.data());
+			offset = 0;
+			count = static_count_;
+			return;
+		}
+		if (current_ == nullptr || row < current_->start_id ||
+		    row >= current_->start_id + int64_t(current_->id_count)) {
+			current_ = &physical_->Index().Locate(row);
+			blob_ = DecodeBlob(physical_->ReadVdbBlob(*current_), physical_->Encoding(), type_);
+		}
+		size_t i = size_t(row - current_->start_id);
+		data = blob_.data.data();
+		offset = blob_.page_map.data_offset[i];
+		count = blob_.page_map.row_length[i];
+	}
+
+	template <typename T>
+	void Values(int64_t row, std::vector<T> &out) {
+		const uint8_t *data;
+		uint64_t offset, count;
+		Cell(row, data, offset, count);
+		out.resize(count);
+		if (count) {
+			std::memcpy(out.data(), data + offset * sizeof(T), count * sizeof(T));
+		}
+	}
+
+private:
+	std::string name_;
+	ElementType type_;
+	const StaticColumn *static_ = nullptr;
+	uint64_t static_count_ = 0;
+	std::unique_ptr<PhysicalColumn> physical_;
+	const BlobLoc *current_ = nullptr;
+	DecodedBlob blob_;
+};
+
+// INSDC 4na: each bit a base (A=1, C=2, G=4, T=8), so an ambiguity code is the OR of its bases.
+const char FOUR_NA_TEXT[17] = ".ACMGRSVTWYHKDBN";
+
+} // namespace
+
+struct SpotReader::Impl {
+	std::shared_ptr<const SraTable> table;
+	std::unique_ptr<ColumnSource> read, altread, quality, read_start, read_len, read_type;
+	int64_t first = 1;
+	uint64_t count = 0;
+	std::vector<uint8_t> bases4na;
+};
+
+SpotReader::SpotReader(std::shared_ptr<const SraTable> table) : impl_(std::make_unique<Impl>()) {
+	Impl &m = *impl_;
+	m.table = std::move(table);
+	const SraTable &t = *m.table;
+	auto need = [&](const char *name, const char *type) {
+		if (!ColumnSource::Exists(t, name)) {
+			throw SraUnsupportedError(std::string("the table has no ") + name + " column");
+		}
+		return std::make_unique<ColumnSource>(t, name, type);
+	};
+	m.read = need("READ", "INSDC:2na:packed");
+	if (ColumnSource::Exists(t, "ALTREAD")) {
+		m.altread = std::make_unique<ColumnSource>(t, "ALTREAD", "INSDC:4na:bin");
+	}
+	// The schemas read original qualities first; older tables have only QUALITY.
+	const char *qual = ColumnSource::Exists(t, "ORIGINAL_QUALITY") ? "ORIGINAL_QUALITY" : "QUALITY";
+	m.quality = need(qual, "INSDC:quality:phred");
+	m.read_start = need("READ_START", "INSDC:coord:zero");
+	m.read_len = need("READ_LEN", "INSDC:coord:len");
+	if (ColumnSource::Exists(t, "READ_TYPE")) {
+		m.read_type = std::make_unique<ColumnSource>(t, "READ_TYPE", "INSDC:SRA:xread_type");
+	}
+	if (const MetadataNode *rna = t.Metadata().Find("RNA_FLAG")) {
+		if (rna->value == "1") {
+			throw SraUnsupportedError("RNA_FLAG is set (bases would print T as U), which no public run surveyed did");
+		}
+	}
+	// fasterq-dump iterates over the rows of READ.
+	m.read->Range(m.first, m.count);
+}
+
+SpotReader::~SpotReader() = default;
+
+int64_t SpotReader::FirstRow() const {
+	return impl_->first;
+}
+
+uint64_t SpotReader::RowCount() const {
+	return impl_->count;
+}
+
+void SpotReader::Read(int64_t row_id, Spot &out) {
+	Impl &m = *impl_;
+	out.row_id = row_id;
+	const std::string where = "spot " + std::to_string(row_id);
+
+	// READ = 2na bases, two bits each, most significant first, widened to 4na and ORed with the
+	// right-aligned ALTREAD (ambiguity codes): bit_or<ALIGN_RIGHT> in the schema.
+	const uint8_t *data;
+	uint64_t offset, n;
+	m.read->Cell(row_id, data, offset, n);
+	m.bases4na.resize(n);
+	for (uint64_t i = 0; i < n; i++) {
+		uint64_t bit = (offset + i) * 2;
+		uint8_t two_na = (data[bit >> 3] >> (6 - (bit & 7))) & 3;
+		m.bases4na[i] = uint8_t(1u << two_na);
+	}
+	if (m.altread) {
+		const uint8_t *alt;
+		uint64_t alt_off, alt_n;
+		m.altread->Cell(row_id, alt, alt_off, alt_n);
+		if (alt_n > n) {
+			throw SraFormatError(where + ": ALTREAD is longer than READ");
+		}
+		for (uint64_t j = 0; j < alt_n; j++) {
+			m.bases4na[n - alt_n + j] |= alt[alt_off + j];
+		}
+	}
+	out.bases.resize(n);
+	for (uint64_t i = 0; i < n; i++) {
+		out.bases[i] = FOUR_NA_TEXT[m.bases4na[i] & 15];
+	}
+
+	m.quality->Values(row_id, out.quality);
+	m.read_start->Values(row_id, out.read_start);
+	m.read_len->Values(row_id, out.read_len);
+	out.has_read_type = m.read_type != nullptr;
+	if (m.read_type) {
+		m.read_type->Values(row_id, out.read_type);
+	} else {
+		out.read_type.clear();
+	}
+
+	// fasterq-dump's per-spot checks (fq_seq_ua_iter.c); each stops the run.
+	if (out.read_start.size() != out.read_len.size()) {
+		throw SraFormatError(where + ": READ_START has " + std::to_string(out.read_start.size()) +
+		                     " reads but READ_LEN has " + std::to_string(out.read_len.size()));
+	}
+	for (size_t i = 0; i < out.read_len.size(); i++) {
+		if (out.read_start[i] < 0 || uint64_t(out.read_start[i]) + out.read_len[i] > n) {
+			throw SraFormatError(where + ": read " + std::to_string(i + 1) + " runs past the spot's " +
+			                     std::to_string(n) + " bases");
+		}
+	}
+	if (out.quality.size() != n) {
+		throw SraFormatError(where + ": " + std::to_string(n) + " bases but " + std::to_string(out.quality.size()) +
+		                     " qualities");
+	}
+}
+
+namespace {
+constexpr uint8_t READ_TYPE_BIOLOGICAL = 1;
+constexpr uint8_t MAX_PRINTED_QUALITY = 93; // fasterq-dump prints every q >= 93 as '~'
+
+void Emit(const Spot &spot, uint32_t read_number, uint32_t destination, size_t start, size_t len,
+          std::vector<SraRead> &out) {
+	SraRead r;
+	r.spot = spot.row_id;
+	r.read_number = read_number;
+	r.destination = destination;
+	r.bases = spot.bases.substr(start, len);
+	r.quality.resize(len);
+	for (size_t i = 0; i < len; i++) {
+		r.quality[i] = std::min(spot.quality[start + i], MAX_PRINTED_QUALITY);
+	}
+	out.push_back(std::move(r));
+}
+
+bool Biological(const Spot &spot, size_t i) {
+	return (spot.read_type[i] & READ_TYPE_BIOLOGICAL) == READ_TYPE_BIOLOGICAL;
+}
+} // namespace
+
+void RouteSpot(const Spot &spot, SplitMode mode, bool include_technical, std::vector<SraRead> &out) {
+	// split-3 always skips technical reads (perform_fastq_split_3_join).
+	bool skip_tech = mode == SplitMode::Split3 || !include_technical;
+	const std::string where = "spot " + std::to_string(spot.row_id);
+	bool use_types = skip_tech && spot.has_read_type;
+	if (use_types && spot.read_type.size() != spot.read_len.size()) {
+		throw SraFormatError(where + ": READ_TYPE has " + std::to_string(spot.read_type.size()) +
+		                     " reads but READ_LEN has " + std::to_string(spot.read_len.size()));
+	}
+	const size_t reads = spot.read_len.size();
+
+	// A one-read spot is written whole, tested on its whole length (filter1).
+	if (reads == 1) {
+		if (spot.bases.empty()) {
+			return;
+		}
+		if (use_types && !spot.read_type.empty() && !Biological(spot, 0)) {
+			return;
+		}
+		Emit(spot, 1, 0, 0, spot.bases.size(), out);
+		return;
+	}
+
+	if (mode == SplitMode::Spot) {
+		// print_fastq_n_reads_split: every non-empty read that passes the filter, in place.
+		for (size_t i = 0; i < reads; i++) {
+			if (spot.read_len[i] == 0 || (use_types && !Biological(spot, i))) {
+				continue;
+			}
+			Emit(spot, uint32_t(i + 1), 0, size_t(spot.read_start[i]), spot.read_len[i], out);
+		}
+		return;
+	}
+
+	// print_fastq_n_reads_split_3: mates are numbered by the reads written, and a spot with
+	// fewer than two non-empty biological reads goes to the unpaired file.
+	if (!spot.has_read_type) {
+		throw SraUnsupportedError("split-3 needs READ_TYPE, which this table lacks");
+	}
+	uint32_t valid_reads = 0, valid_bio_reads = 0;
+	for (size_t i = 0; i < reads; i++) {
+		if (spot.read_len[i] > 0) {
+			valid_reads++;
+			if (Biological(spot, i)) {
+				valid_bio_reads++;
+			}
+		}
+	}
+	if (valid_reads == 0) {
+		return;
+	}
+	uint32_t write_id = 1;
+	for (size_t i = 0; i < reads; i++) {
+		if (spot.read_len[i] == 0 || !Biological(spot, i)) {
+			continue;
+		}
+		if (valid_bio_reads < 2) {
+			write_id = 0;
+		}
+		Emit(spot, uint32_t(i + 1), write_id, size_t(spot.read_start[i]), spot.read_len[i], out);
+		if (write_id > 0) {
+			write_id++;
 		}
 	}
 }
