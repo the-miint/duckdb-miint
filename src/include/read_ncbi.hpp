@@ -41,7 +41,7 @@ public:
 		// teardown order is not contractually fixed).
 		std::vector<std::vector<std::string>> batches;
 
-		GlobalState(DatabaseInstance &db, const std::string &api_key, std::vector<std::vector<std::string>> batches);
+		GlobalState(ClientContext &context, const std::string &api_key, std::vector<std::vector<std::string>> batches);
 
 		idx_t MaxThreads() const override {
 			return 1; // Single-threaded for rate limiting

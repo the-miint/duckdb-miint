@@ -130,6 +130,9 @@ void ENASamplesInsert::ValidateBuiltSpecs(const std::vector<miint::SampleSpec> &
 		const miint::ChecklistDef *cl = nullptr;
 		try {
 			cl = &miint::ChecklistRegistry::Instance().GetOrFetch(spec.checklist, fetcher);
+		} catch (const InterruptException &) {
+			// Ctrl-C or max_execution_time stops the INSERT before it submits anything.
+			throw;
 		} catch (const std::exception &) {
 			continue;
 		}

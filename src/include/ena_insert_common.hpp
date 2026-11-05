@@ -13,11 +13,13 @@
 #include "ena_envelope_builder.hpp"
 
 #include "duckdb/common/error_data.hpp"
+#include "duckdb/common/exception.hpp"
 #include "duckdb/common/index_vector.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/types/value.hpp"
 
 #include <cstdint>
+#include <exception>
 #include <string>
 #include <vector>
 
@@ -95,6 +97,20 @@ struct SubmissionResult {
 	string transport_error;
 	bool success = false;
 	std::vector<std::string> error_messages;
+	// Set when Ctrl-C or max_execution_time ended a wait inside the submission. It is
+	// also a transport failure, so the caller logs the attempt first.
+	std::exception_ptr interrupt;
+
+	// Called once the attempt is logged. If the submit threw, fails the query: as
+	// interrupted, or with `context` and the transport error.
+	void ThrowIfTransportFailure(const string &context) const {
+		if (interrupt) {
+			std::rethrow_exception(interrupt);
+		}
+		if (transport_failure) {
+			throw InvalidInputException("%s: %s", context, transport_error);
+		}
+	}
 };
 
 // Runs `submit`, which returns the submission's outcome or throws on a transport failure
@@ -110,6 +126,9 @@ SubmissionResult SubmitCapturingTransportFailure(OutcomeT &outcome, SubmitFn &&s
 	} catch (const std::exception &e) {
 		result.transport_failure = true;
 		result.transport_error = ErrorData(e).RawMessage();
+		if (dynamic_cast<const InterruptException *>(&e)) {
+			result.interrupt = std::current_exception();
+		}
 	}
 	result.success = !result.transport_failure && outcome.success;
 	result.error_messages = outcome.error_messages;

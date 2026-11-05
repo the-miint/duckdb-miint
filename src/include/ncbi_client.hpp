@@ -2,6 +2,7 @@
 
 #include "ncbi_parser.hpp"
 #include "duckdb/common/http_util.hpp"
+#include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
 #include <chrono>
 #include <mutex>
@@ -23,11 +24,13 @@ namespace miint {
 // - Retries on HTTP 400, 408, 429, 500, 502, 503, 504. NCBI E-utilities occasionally
 //   emits transient 400/408 under load — same URL succeeds on retry — so treat these
 //   as retryable rather than aborting a long scan.
-// - Uses exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s (max 6 retries, ~63s total)
+// - Uses exponential backoff: 1s, 2s, 4s, 8s, 16s, 32s (max 6 retries, ~63s total),
+//   which Ctrl-C and max_execution_time end
 // - Other 4xx (e.g. 404 for an invalid accession) fail immediately
 class NCBIClient {
 public:
-	// Base URLs
+	// Base URLs. E-utilities' is the default of the miint_ncbi_eutils_url setting,
+	// which the client sends its E-utilities requests to.
 	static constexpr const char *EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils";
 	static constexpr const char *DATASETS_BASE = "https://api.ncbi.nlm.nih.gov/datasets/v2";
 
@@ -43,7 +46,14 @@ public:
 	static constexpr int MAX_RETRIES = 6;
 	static constexpr int INITIAL_RETRY_DELAY_MS = 1000;
 
-	NCBIClient(duckdb::DatabaseInstance &db, const std::string &api_key = "");
+	// `context` is the query's: its miint_ncbi_eutils_url names the E-utilities server, and
+	// its interrupt check ends every wait.
+	NCBIClient(duckdb::ClientContext &context, const std::string &api_key = "");
+
+	// Where E-utilities requests go: the miint_ncbi_eutils_url setting.
+	const std::string &EutilsBase() const {
+		return eutils_base;
+	}
 
 	// Accession type detection - delegates to NCBIParser
 	static AccessionType DetectAccessionType(const std::string &accession) {
@@ -89,7 +99,9 @@ public:
 	}
 
 private:
+	duckdb::ClientContext &context;
 	duckdb::DatabaseInstance &db;
+	std::string eutils_base;
 	std::string api_key;
 	std::chrono::steady_clock::time_point last_request_time;
 	mutable std::mutex rate_limit_mutex; // Protects last_request_time

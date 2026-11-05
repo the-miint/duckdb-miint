@@ -219,6 +219,19 @@ wave, one library call) and in a wait. Either may be called from a worker thread
 function's own that is joined before the function returns: they read an atomic, the clock, and
 a deadline that is set before the query runs and cleared after it ends.
 
+A sleep is a wait too. Every sleep in the HTTP clients (a retry's backoff, a rate limit, BLAST's
+waits for a search) goes through `SleepUnlessInterrupted` (`src/include/http_client_common.hpp`),
+which calls `BlockingInterruptCheck()` after every slice of at most 100 ms, the last one
+included, so a cancel during the wait also stops the request the client would send next.
+DuckDB's own HTTP layer does not check. `HTTPUtil::RunRequestWithRetry`
+(`duckdb/src/main/http/http_util.cpp`) retries a failed idempotent request up to `http_retries`
+times (default 3), and one answered 429 or 503 five times more, sleeping up to 20 s between tries
+(`http_retry_budget.cpp`). With the defaults, a GET to a host that keeps answering 503 holds the
+query for 44 to 88 s, by the jittered schedule (68 s measured, #414), before the client sees the
+status, whatever Ctrl-C does. A POST is never retried there. The clients take their HTTP
+parameters from the database (`InitializeParameters(db, url)`), so `SET GLOBAL http_retries`
+changes theirs and a session `SET` does not.
+
 ### Waiting and background work (DuckDB 2.0)
 
 Verified on DuckDB 2.0 (`d54cbbe`). `rype_filter` uses all of it: `src/rype_filter.cpp`, with

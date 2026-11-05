@@ -186,7 +186,7 @@ void ExecuteLifecycle(ClientContext &context, TableFunctionInput &data, DataChun
 		creds.endpoint_url = duckdb::ResolveDefaultENAEndpointURL(creds.endpoint);
 	}
 
-	ENAClient client(*context.db);
+	ENAClient client(context);
 
 	// When the user supplied refname (alias) instead of accession, hit
 	// the Webin Reports API to translate before envelope build. The envelope
@@ -214,6 +214,8 @@ void ExecuteLifecycle(ClientContext &context, TableFunctionInput &data, DataChun
 		};
 		try {
 			resolved_accession = miint::LookupAccessionByAlias(reports_base, kind, bd.refname, fetcher);
+		} catch (const duckdb::InterruptException &) {
+			throw; // Ctrl-C or max_execution_time, not a failed lookup
 		} catch (const std::exception &e) {
 			throw InvalidInputException("%s: Reports API lookup for refname '%s' (kind=%s) failed: %s", bd.fn_name,
 			                            bd.refname, bd.refname_kind, duckdb::ErrorData(e).RawMessage());
@@ -284,9 +286,7 @@ void ExecuteLifecycle(ClientContext &context, TableFunctionInput &data, DataChun
 		duckdb::RecordSubmissionLog(*catalog, log_creds, payload);
 	}
 
-	if (submitted.transport_failure) {
-		throw InvalidInputException("%s: %s", bd.fn_name, submitted.transport_error);
-	}
+	submitted.ThrowIfTransportFailure(bd.fn_name);
 	if (!submitted.success) {
 		string detail;
 		for (const auto &m : submitted.error_messages) {

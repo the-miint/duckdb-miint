@@ -30,7 +30,7 @@ public:
 		size_t batch_offset;
 		std::string current_accession; // Track current accession for filepath
 
-		GlobalState(DatabaseInstance &db, const std::string &api_key, const std::vector<std::string> &accessions);
+		GlobalState(ClientContext &context, const std::string &api_key, const std::vector<std::string> &accessions);
 
 		idx_t MaxThreads() const override {
 			return 1; // Single-threaded for rate limiting

@@ -164,7 +164,7 @@ void ExecuteModifyProject(ClientContext &context, TableFunctionInput &data, Data
 	opts.password = creds.password;
 	opts.action = miint::ENAAction::MODIFY;
 
-	miint::ENAClient client(*context.db);
+	miint::ENAClient client(context);
 	miint::ENAPostFn post_fn = [&client](const string &url, const string &body, const string &user,
 	                                     const string &password, const string &content_type) {
 		// Projects use JSON (V2's JSON dispatcher handles projects correctly).
@@ -214,9 +214,7 @@ void ExecuteModifyProject(ClientContext &context, TableFunctionInput &data, Data
 		duckdb::RecordSubmissionLog(*catalog, creds, payload);
 	}
 
-	if (submitted.transport_failure) {
-		throw InvalidInputException("ena_modify_project: %s", submitted.transport_error);
-	}
+	submitted.ThrowIfTransportFailure("ena_modify_project");
 	if (!submitted.success) {
 		string detail;
 		for (const auto &m : submitted.error_messages) {
@@ -410,7 +408,7 @@ void ExecuteModifySample(ClientContext &context, TableFunctionInput &data, DataC
 	opts.password = creds.password;
 	opts.action = miint::ENAAction::MODIFY;
 
-	miint::ENAClient client(*context.db);
+	miint::ENAClient client(context);
 	miint::ENAPostFn post_fn = [&client](const string &url, const string &body, const string &user,
 	                                     const string &password, const string &content_type) {
 		if (content_type == "application/xml") {
@@ -449,9 +447,7 @@ void ExecuteModifySample(ClientContext &context, TableFunctionInput &data, DataC
 		duckdb::RecordSubmissionLog(*catalog, creds, payload);
 	}
 
-	if (submitted.transport_failure) {
-		throw InvalidInputException("ena_modify_sample: %s", submitted.transport_error);
-	}
+	submitted.ThrowIfTransportFailure("ena_modify_sample");
 	if (!submitted.success) {
 		string detail;
 		for (const auto &m : submitted.error_messages) {
@@ -691,7 +687,7 @@ void ExecuteModifyExperiment(ClientContext &context, TableFunctionInput &data, D
 	opts.password = creds.password;
 	opts.action = miint::ENAAction::MODIFY;
 
-	miint::ENAClient client(*context.db);
+	miint::ENAClient client(context);
 	miint::ENAPostFn post_fn = [&client](const string &url, const string &body, const string &user,
 	                                     const string &password, const string &content_type) {
 		// Experiments are XML-only — V2's JSON dispatcher NPEs for SRA-side
@@ -738,9 +734,7 @@ void ExecuteModifyExperiment(ClientContext &context, TableFunctionInput &data, D
 		duckdb::RecordSubmissionLog(*catalog, creds, payload);
 	}
 
-	if (submitted.transport_failure) {
-		throw InvalidInputException("ena_modify_experiment: %s", submitted.transport_error);
-	}
+	submitted.ThrowIfTransportFailure("ena_modify_experiment");
 	if (!submitted.success) {
 		string detail;
 		for (const auto &m : submitted.error_messages) {
@@ -916,7 +910,7 @@ void ExecuteModifyRun(ClientContext &context, TableFunctionInput &data, DataChun
 	opts.password = creds.password;
 	opts.action = miint::ENAAction::MODIFY;
 
-	miint::ENAClient client(*context.db);
+	miint::ENAClient client(context);
 	miint::ENAPostFn post_fn = [&client](const string &url, const string &body, const string &user,
 	                                     const string &password, const string &content_type) {
 		// Runs are XML-only — V2's JSON dispatcher NPEs for SRA-side objects.
@@ -961,9 +955,7 @@ void ExecuteModifyRun(ClientContext &context, TableFunctionInput &data, DataChun
 		duckdb::RecordSubmissionLog(*catalog, creds, payload);
 	}
 
-	if (submitted.transport_failure) {
-		throw InvalidInputException("ena_modify_run: %s", submitted.transport_error);
-	}
+	submitted.ThrowIfTransportFailure("ena_modify_run");
 	if (!submitted.success) {
 		string detail;
 		for (const auto &m : submitted.error_messages) {

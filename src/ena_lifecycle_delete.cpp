@@ -245,7 +245,7 @@ protected:
 		auto &client_context = context.client;
 		auto creds = ResolveENACredentials(client_context, catalog);
 
-		miint::ENAClient client(*client_context.db);
+		miint::ENAClient client(client_context);
 
 		// Alias-targeted DELETE — translate refname → accession via the
 		// Webin Reports API before envelope build. The envelope-builder
@@ -276,6 +276,8 @@ protected:
 			std::string accession;
 			try {
 				accession = miint::LookupAccessionByAlias(reports_base, kind, resolved_target.refname, fetcher);
+			} catch (const InterruptException &) {
+				throw; // Ctrl-C or max_execution_time, not a failed lookup
 			} catch (const std::exception &e) {
 				throw InvalidInputException("DELETE FROM ena.%s: Reports API lookup for alias '%s' failed: %s",
 				                            object_type, resolved_target.refname, ErrorData(e).RawMessage());
@@ -337,9 +339,7 @@ protected:
 		RecordSubmissionLog(catalog, creds, payload);
 
 		gs.emitted = true;
-		if (submitted.transport_failure) {
-			throw InvalidInputException("DELETE FROM ena.%s: %s", object_type, submitted.transport_error);
-		}
+		submitted.ThrowIfTransportFailure("DELETE FROM ena." + object_type);
 		if (!submitted.success) {
 			string detail;
 			for (const auto &m : submitted.error_messages) {

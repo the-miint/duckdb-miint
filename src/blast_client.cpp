@@ -1,13 +1,14 @@
 #include "blast_client.hpp"
+#include "http_client_common.hpp"
 #include "duckdb/common/exception/http_exception.hpp"
 #include "duckdb/common/printer.hpp"
 #include <sstream>
-#include <thread>
 
 namespace miint {
 
-BlastClient::BlastClient(duckdb::DatabaseInstance &db, const std::string &api_key)
-    : db_(db), api_key_(api_key), last_request_time_(std::chrono::steady_clock::now() - std::chrono::seconds(1)) {
+BlastClient::BlastClient(duckdb::ClientContext &context, const std::string &api_key)
+    : context_(context), db_(*context.db), base_url_(UrlSetting(context, "miint_blast_url")), api_key_(api_key),
+      last_request_time_(std::chrono::steady_clock::now() - std::chrono::seconds(1)) {
 }
 
 double BlastClient::GetRateLimit() const {
@@ -20,7 +21,7 @@ void BlastClient::RespectRateLimit() {
 	auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_request_time_);
 	auto min_interval = std::chrono::milliseconds(static_cast<int>(1000.0 / GetRateLimit()));
 	if (elapsed < min_interval) {
-		std::this_thread::sleep_for(min_interval - elapsed);
+		SleepUnlessInterrupted(context_, min_interval - elapsed);
 	}
 	last_request_time_ = std::chrono::steady_clock::now();
 }
@@ -44,7 +45,7 @@ std::string BlastClient::MakeGetRequest(const std::string &url) {
 			return response->body;
 		}
 		if (attempt < MAX_RETRIES && !response->HasRequestError() && IsRetryableStatus(int(response->status))) {
-			std::this_thread::sleep_for(std::chrono::milliseconds(retry_delay_ms));
+			SleepUnlessInterrupted(context_, std::chrono::milliseconds(retry_delay_ms));
 			retry_delay_ms *= 2;
 			continue;
 		}
@@ -77,7 +78,7 @@ std::string BlastClient::MakePostRequest(const std::string &url, const std::stri
 			return post_request.buffer_out;
 		}
 		if (attempt < MAX_RETRIES && !response->HasRequestError() && IsRetryableStatus(int(response->status))) {
-			std::this_thread::sleep_for(std::chrono::milliseconds(retry_delay_ms));
+			SleepUnlessInterrupted(context_, std::chrono::milliseconds(retry_delay_ms));
 			retry_delay_ms *= 2;
 			continue;
 		}
@@ -95,7 +96,7 @@ BlastSubmitResult BlastClient::Submit(const std::string &program, const std::str
 	if (!api_key_.empty()) {
 		body += "&api_key=" + BlastParser::UrlEncode(api_key_);
 	}
-	std::string response = MakePostRequest(BLAST_BASE, body, "application/x-www-form-urlencoded");
+	std::string response = MakePostRequest(base_url_, body, "application/x-www-form-urlencoded");
 	auto result = BlastParser::ParseSubmitResponse(response);
 	if (!result.error.empty()) {
 		throw duckdb::IOException("blast: NCBI returned error: %s", result.error);
@@ -120,13 +121,13 @@ void BlastClient::WaitForCompletion(const std::string &rid, int rtoe_hint) {
 	}
 	if (rtoe_hint > 0) {
 		duckdb::Printer::Print("blast: waiting " + std::to_string(rtoe_hint) + "s (NCBI estimate) for RID " + rid);
-		std::this_thread::sleep_for(std::chrono::seconds(rtoe_hint));
+		SleepUnlessInterrupted(context_, std::chrono::seconds(rtoe_hint));
 	}
 
 	int unknown_count = 0;
 	for (int attempt = 0; attempt < MAX_POLL_ATTEMPTS; attempt++) {
 		std::ostringstream url;
-		url << BLAST_BASE << "?CMD=Get&FORMAT_OBJECT=SearchInfo&RID=" << encoded_rid;
+		url << base_url_ << "?CMD=Get&FORMAT_OBJECT=SearchInfo&RID=" << encoded_rid;
 		std::string response = MakeGetRequest(url.str());
 		auto status = BlastParser::ParseStatusResponse(response);
 
@@ -152,19 +153,18 @@ void BlastClient::WaitForCompletion(const std::string &rid, int rtoe_hint) {
 		if (status == BlastStatus::WAITING) {
 			duckdb::Printer::Print("blast: RID " + rid + " still running (~" + std::to_string(elapsed) + "s elapsed)");
 		}
-		std::this_thread::sleep_for(std::chrono::seconds(POLL_INTERVAL_SECONDS));
+		SleepUnlessInterrupted(context_, std::chrono::seconds(POLL_INTERVAL_SECONDS));
 	}
 
 	throw duckdb::IOException("blast: timed out after %d poll attempts (~%d minutes) for RID %s. "
 	                          "Check status at: %s?CMD=Get&RID=%s",
-	                          MAX_POLL_ATTEMPTS, (MAX_POLL_ATTEMPTS * POLL_INTERVAL_SECONDS) / 60, rid, BLAST_BASE,
-	                          rid);
+	                          MAX_POLL_ATTEMPTS, (MAX_POLL_ATTEMPTS * POLL_INTERVAL_SECONDS) / 60, rid, base_url_, rid);
 }
 
 std::string BlastClient::RetrieveResults(const std::string &rid, int max_targets) {
 	std::string encoded_rid = BlastParser::UrlEncode(rid);
 	std::ostringstream url;
-	url << BLAST_BASE << "?CMD=Get&FORMAT_TYPE=Text&ALIGNMENT_VIEW=Tabular&HITLIST_SIZE=" << max_targets
+	url << base_url_ << "?CMD=Get&FORMAT_TYPE=Text&ALIGNMENT_VIEW=Tabular&HITLIST_SIZE=" << max_targets
 	    << "&RID=" << encoded_rid;
 	return MakeGetRequest(url.str());
 }

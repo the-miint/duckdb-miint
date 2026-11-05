@@ -194,7 +194,7 @@ unique_ptr<FunctionData> ReadENASequencesTableFunction::Bind(ClientContext &cont
 	std::vector<miint::ENARunInfo> runs;
 	if (!deferred) {
 		// Resolve accessions to run info via ENA Portal API (batched + cached)
-		miint::ENAClient client(db);
+		miint::ENAClient client(context);
 		runs = ResolveRuns(client, accessions, prefer_format);
 
 		if (runs.empty()) {
@@ -212,7 +212,7 @@ unique_ptr<FunctionData> ReadENASequencesTableFunction::Bind(ClientContext &cont
 		// and the ENAClient's rate limiter (~3 req/sec) throttles globally.
 		// Capacity 256 matches the eager-resolve ResolveRuns helper.
 		data->resolver_cache = std::make_unique<miint::ENAResolverCache>(256);
-		data->lateral_client = std::make_unique<miint::ENAClient>(db);
+		data->lateral_client = std::make_unique<miint::ENAClient>(context);
 	}
 
 	// Determine whether to use Aspera (only relevant for FASTX runs; SFF uses HTTP only)
@@ -679,6 +679,9 @@ OperatorResultType ReadENASequencesTableFunction::ExecuteInOut(ExecutionContext 
 			for (const auto &run : it->second) {
 				local.pending_runs.push_back(run);
 			}
+		} catch (const InterruptException &) {
+			// Ctrl-C or max_execution_time: the query stops, this accession did not fail.
+			throw;
 		} catch (const std::exception &e) {
 			record_skip(local.current_accession, "",
 			            std::string("metadata resolution failed: ") + ErrorData(e).RawMessage());

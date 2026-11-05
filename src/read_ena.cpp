@@ -149,10 +149,10 @@ ReadENATableFunction::Data::Data(std::vector<std::string> accessions, const std:
 
 // ---- GlobalState ----
 
-ReadENATableFunction::GlobalState::GlobalState(DatabaseInstance &db, const std::vector<std::string> &accessions,
+ReadENATableFunction::GlobalState::GlobalState(ClientContext &context, const std::vector<std::string> &accessions,
                                                const std::string &result_type, const std::string &fields,
                                                const std::vector<std::string> &schema_names)
-    : client(make_uniq<miint::ENAClient>(db)), next_accession_idx(0), row_offset(0), accessions(accessions),
+    : client(make_uniq<miint::ENAClient>(context)), next_accession_idx(0), row_offset(0), accessions(accessions),
       result_type(result_type), fields(fields), schema_names(schema_names) {
 }
 
@@ -253,8 +253,7 @@ unique_ptr<FunctionData> ReadENATableFunction::Bind(ClientContext &context, Tabl
 unique_ptr<GlobalTableFunctionState> ReadENATableFunction::InitGlobal(ClientContext &context,
                                                                       TableFunctionInitInput &input) {
 	auto &data = input.bind_data->Cast<Data>();
-	auto &db = DatabaseInstance::GetDatabase(context);
-	return make_uniq<GlobalState>(db, data.accessions, data.result_type, data.fields, data.names);
+	return make_uniq<GlobalState>(context, data.accessions, data.result_type, data.fields, data.names);
 }
 
 unique_ptr<LocalTableFunctionState> ReadENATableFunction::InitLocal(ExecutionContext &context,

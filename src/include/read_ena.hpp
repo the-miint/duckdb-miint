@@ -32,7 +32,7 @@ public:
 		size_t next_accession_idx;
 		size_t row_offset;
 
-		GlobalState(DatabaseInstance &db, const std::vector<std::string> &accessions, const std::string &result_type,
+		GlobalState(ClientContext &context, const std::vector<std::string> &accessions, const std::string &result_type,
 		            const std::string &fields, const std::vector<std::string> &schema_names);
 
 		bool FetchNextAccession();

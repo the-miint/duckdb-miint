@@ -1,13 +1,14 @@
 #include "ncbi_client.hpp"
+#include "http_client_common.hpp"
 #include "zip_utils.hpp"
 #include "duckdb/common/exception/http_exception.hpp"
 #include <sstream>
-#include <thread>
 
 namespace miint {
 
-NCBIClient::NCBIClient(duckdb::DatabaseInstance &db, const std::string &api_key)
-    : db(db), api_key(api_key), last_request_time(std::chrono::steady_clock::now() - std::chrono::seconds(1)) {
+NCBIClient::NCBIClient(duckdb::ClientContext &context, const std::string &api_key)
+    : context(context), db(*context.db), eutils_base(UrlSetting(context, "miint_ncbi_eutils_url")), api_key(api_key),
+      last_request_time(std::chrono::steady_clock::now() - std::chrono::seconds(1)) {
 }
 
 double NCBIClient::GetRateLimit() const {
@@ -25,7 +26,7 @@ void NCBIClient::RespectRateLimit() {
 	auto min_interval = std::chrono::milliseconds(static_cast<int>(1000.0 / rate_limit));
 
 	if (elapsed < min_interval) {
-		std::this_thread::sleep_for(min_interval - elapsed);
+		SleepUnlessInterrupted(context, min_interval - elapsed);
 	}
 
 	last_request_time = std::chrono::steady_clock::now();
@@ -69,7 +70,7 @@ std::string NCBIClient::MakeRequest(const std::string &url, bool use_api_key_hea
 
 		// Check if we should retry
 		if (attempt < MAX_RETRIES && !response->HasRequestError() && IsRetryableStatus(int(response->status))) {
-			std::this_thread::sleep_for(std::chrono::milliseconds(retry_delay_ms));
+			SleepUnlessInterrupted(context, std::chrono::milliseconds(retry_delay_ms));
 			retry_delay_ms *= 2; // Exponential backoff
 			continue;
 		}
@@ -88,7 +89,7 @@ std::string NCBIClient::MakeRequest(const std::string &url, bool use_api_key_hea
 
 std::string NCBIClient::FetchFeatureTable(const std::string &accession) {
 	std::ostringstream url;
-	url << EUTILS_BASE << "/efetch.fcgi?db=nuccore&id=" << accession << "&rettype=ft&retmode=text";
+	url << eutils_base << "/efetch.fcgi?db=nuccore&id=" << accession << "&rettype=ft&retmode=text";
 	if (!api_key.empty()) {
 		url << "&api_key=" << api_key;
 	}
@@ -125,7 +126,7 @@ std::string NCBIClient::MakeRequestPOST(const std::string &url, const std::strin
 		}
 
 		if (attempt < MAX_RETRIES && !response->HasRequestError() && IsRetryableStatus(int(response->status))) {
-			std::this_thread::sleep_for(std::chrono::milliseconds(retry_delay_ms));
+			SleepUnlessInterrupted(context, std::chrono::milliseconds(retry_delay_ms));
 			retry_delay_ms *= 2;
 			continue;
 		}
@@ -156,7 +157,7 @@ EPostResult NCBIClient::EPostIds(const std::vector<std::string> &accessions, con
 		body << "&api_key=" << api_key;
 	}
 
-	std::string url = std::string(EUTILS_BASE) + "/epost.fcgi";
+	std::string url = eutils_base + "/epost.fcgi";
 	std::string response = MakeRequestPOST(url, body.str(), "application/x-www-form-urlencoded");
 	auto result = NCBIParser::ParseEPostResponse(response);
 
@@ -181,7 +182,7 @@ std::string NCBIClient::FetchFastaBatch(const std::vector<std::string> &accessio
 	}
 	auto post = EPostIds(accessions);
 	std::ostringstream url;
-	url << EUTILS_BASE << "/efetch.fcgi?db=nuccore&query_key=" << post.query_key << "&WebEnv=" << post.webenv
+	url << eutils_base << "/efetch.fcgi?db=nuccore&query_key=" << post.query_key << "&WebEnv=" << post.webenv
 	    << "&rettype=fasta&retmode=text";
 	if (!api_key.empty()) {
 		url << "&api_key=" << api_key;
@@ -195,7 +196,7 @@ std::string NCBIClient::FetchGenBankXMLBatch(const std::vector<std::string> &acc
 	}
 	auto post = EPostIds(accessions);
 	std::ostringstream url;
-	url << EUTILS_BASE << "/efetch.fcgi?db=nuccore&query_key=" << post.query_key << "&WebEnv=" << post.webenv
+	url << eutils_base << "/efetch.fcgi?db=nuccore&query_key=" << post.query_key << "&WebEnv=" << post.webenv
 	    << "&rettype=gb&retmode=xml";
 	if (!api_key.empty()) {
 		url << "&api_key=" << api_key;
@@ -209,7 +210,7 @@ std::string NCBIClient::FetchTaxonomyXMLBatch(const std::vector<std::string> &ta
 	}
 	auto post = EPostIds(taxids, "taxonomy");
 	std::ostringstream url;
-	url << EUTILS_BASE << "/efetch.fcgi?db=taxonomy&query_key=" << post.query_key << "&WebEnv=" << post.webenv
+	url << eutils_base << "/efetch.fcgi?db=taxonomy&query_key=" << post.query_key << "&WebEnv=" << post.webenv
 	    << "&retmode=xml";
 	if (!api_key.empty()) {
 		url << "&api_key=" << api_key;

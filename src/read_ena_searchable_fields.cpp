@@ -13,8 +13,8 @@ namespace duckdb {
 ReadENASearchableFieldsTableFunction::Data::Data(std::string result_type) : result_type(std::move(result_type)) {
 }
 
-ReadENASearchableFieldsTableFunction::GlobalState::GlobalState(DatabaseInstance &db)
-    : client(make_uniq<miint::ENAClient>(db)) {
+ReadENASearchableFieldsTableFunction::GlobalState::GlobalState(ClientContext &context)
+    : client(make_uniq<miint::ENAClient>(context)) {
 }
 
 // ---- Bind ----
@@ -64,8 +64,7 @@ unique_ptr<FunctionData> ReadENASearchableFieldsTableFunction::Bind(ClientContex
 
 unique_ptr<GlobalTableFunctionState> ReadENASearchableFieldsTableFunction::InitGlobal(ClientContext &context,
                                                                                       TableFunctionInitInput &input) {
-	auto &db = DatabaseInstance::GetDatabase(context);
-	return make_uniq<GlobalState>(db);
+	return make_uniq<GlobalState>(context);
 }
 
 unique_ptr<LocalTableFunctionState>

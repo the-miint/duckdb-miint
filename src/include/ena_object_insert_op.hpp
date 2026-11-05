@@ -183,7 +183,7 @@ public:
 		OptsT opts;
 		FillCommonENAInsertOptions(opts, creds, built.hold_until_date, action);
 
-		miint::ENAClient client(*context.db);
+		miint::ENAClient client(context);
 
 		// Per-table client-side validation. ENASamplesInsert overrides this
 		// to validate user-supplied attributes against the chosen ENA
@@ -261,9 +261,7 @@ public:
 		}
 		RecordSubmissionLog(catalog, creds, log_payload);
 
-		if (submitted.transport_failure) {
-			throw InvalidInputException("%s failed: %s", Derived::ThrowPrefix(), submitted.transport_error);
-		}
+		submitted.ThrowIfTransportFailure(string(Derived::ThrowPrefix()) + " failed");
 		if (!outcome.success) {
 			std::string detail;
 			if (submitted.error_messages.empty()) {

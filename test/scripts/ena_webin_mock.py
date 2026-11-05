@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Tiny HTTP mock of the ENA services miint calls: the Webin V2
 /submit endpoint, the Portal API, the Browser API's checklists, the Reports API
-and the file servers.
+and the file servers. It also stands in for NCBI's BLAST URL API, and answers
+503 where a test needs a client held in its retry backoff.
 
 Used by SQL tests in the duckdb-miint extension that need to exercise the
 INSERT INTO ena.{...} pipeline end-to-end without hitting wwwdev.ebi.ac.uk,
@@ -53,6 +54,21 @@ Behavior:
     {"ranged": n, "full": n, "cuts": n, "errors": n} for that file since the
     reset (cuts counts reset GETs and HEADs, errors the 404s and 412s), so a
     test can show how many requests failed and how.
+  - Every request under /unavailable/ answers 503, and so does a GET whose
+    path holds UNAVAILABLE: a Portal search, checklist or Reports lookup for
+    a name containing it. A test points a client's base URL under
+    /unavailable/ (NCBI's and BLAST's settings, a Webin secret's
+    ENDPOINT_URL, read_ncbi_taxdump's source), or names such an accession,
+    alias or checklist, to hold the client in its retry backoff.
+  - /blast/Blast.cgi stands in for NCBI BLAST. A submission (POST CMD=Put)
+    gets a fresh RID, and the label of its first query picks how the search
+    goes on: "rtoe_wait" is estimated to take BLAST_RTOE_SECONDS,
+    "poll_wait" answers WAITING to its first status poll, and
+    "status_unavailable" answers every status poll with 503. Every status
+    poll of "rtoe_wait", and every one of "poll_wait" after its WAITING, gets
+    404, so a client that waits a whole estimate or poll interval out fails
+    with an HTTP error, where one a deadline stopped fails with the
+    deadline's. Any other search is READY at once. Its results are one tabular hit, the query against itself.
 
 Started on a free port by test/scripts/ena_mock_env.sh, for run_tests.sh and
 onboarding-tutorials/run_tutorial_tests.sh, which exports its URL as
@@ -70,6 +86,7 @@ import socket
 import struct
 import sys
 from functools import cache
+from urllib.parse import parse_qs, urlsplit
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -124,6 +141,16 @@ _fault_cuts: dict[tuple[str, int], int] = {}
 _fault_stats: dict[str, dict[str, int]] = {}
 _NO_FAULTS = {"ranged": 0, "full": 0, "cuts": 0, "errors": 0}
 _RANGE = re.compile(r"bytes=(\d+)-(\d+)")
+
+# A GET whose path holds this answers 503.
+UNAVAILABLE = "UNAVAILABLE"
+# The BLAST stand-in's searches: the label of each one's first query, by RID.
+_BLAST_SEARCHES: dict[str, str] = {}
+# RIDs whose first status poll has been answered.
+_BLAST_POLLED: set[str] = set()
+# A "rtoe_wait" search's estimate: long against a test's deadline, and short enough
+# that a client which cannot be stopped still finishes the test.
+BLAST_RTOE_SECONDS = 10
 
 
 def _fastq_path(name: str) -> Path:
@@ -553,7 +580,61 @@ class Handler(BaseHTTPRequestHandler):
         if not head_only:
             self.wfile.write(payload)
 
+    def _send_text(self, status: int, text: str):
+        payload = text.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _send_unavailable(self):
+        self.send_response(503)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _read_body(self) -> bytes:
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        return self.rfile.read(length) if length else b""
+
+    def _handle_blast(self, submission: bytes | None):
+        """BLAST's URL API: a submission's form body, or None for a status poll or the results."""
+        if submission is not None:
+            fasta = parse_qs(submission.decode("utf-8")).get("QUERY", [""])[0]
+            label = fasta.split("\n", 1)[0].lstrip(">")
+            rid = f"MOCK{len(_BLAST_SEARCHES) + 1:06d}"
+            _BLAST_SEARCHES[rid] = label
+            rtoe = BLAST_RTOE_SECONDS if label == "rtoe_wait" else 0
+            # The QBlastInfo lines BLAST's own answer carries.
+            self._send_text(200, f"    RID = {rid}\n    RTOE = {rtoe}\n")
+            return
+        params = parse_qs(urlsplit(self.path).query)
+        rid = params.get("RID", [""])[0]
+        label = _BLAST_SEARCHES.get(rid)
+        if label is None:
+            self.send_response(404)
+            self.end_headers()
+            return
+        if params.get("FORMAT_OBJECT") == ["SearchInfo"]:
+            if label == "status_unavailable":
+                self._send_unavailable()
+                return
+            if label == "rtoe_wait" or (label == "poll_wait" and rid in _BLAST_POLLED):
+                self.send_response(404)
+                self.end_headers()
+                return
+            if label == "poll_wait":
+                _BLAST_POLLED.add(rid)
+                self._send_text(200, "Status=WAITING\n")
+                return
+            self._send_text(200, "Status=READY\n")
+            return
+        self._send_text(200, f"{label}\t{label}\t100.0\t20\t0\t0\t1\t20\t1\t20\t1e-10\t40.0\n")
+
     def do_HEAD(self):
+        if self.path.startswith("/unavailable/"):
+            self._send_unavailable()
+            return
         if self.path.startswith("/fastq/"):
             self._send_fastq(head_only=True)
             return
@@ -564,6 +645,12 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
+        if self.path.startswith("/unavailable/") or UNAVAILABLE in self.path:
+            self._send_unavailable()
+            return
+        if self.path.startswith("/blast/Blast.cgi"):
+            self._handle_blast(None)
+            return
         if self.path.startswith("/fastq/"):
             self._send_fastq(head_only=False)
             return
@@ -761,6 +848,15 @@ class Handler(BaseHTTPRequestHandler):
         return json.dumps([{"report": report, "links": []}])
 
     def do_POST(self):
+        # Read before answering: a client still sending its body when the
+        # connection closes sees a broken connection, not the 503.
+        if self.path.startswith("/unavailable/"):
+            self._read_body()
+            self._send_unavailable()
+            return
+        if self.path.startswith("/blast/Blast.cgi"):
+            self._handle_blast(self._read_body())
+            return
         if not self._check_auth():
             self.send_response(401)
             self.send_header("WWW-Authenticate", 'Basic realm="webin"')
@@ -771,8 +867,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        length = int(self.headers.get("Content-Length", "0") or "0")
-        body = self.rfile.read(length) if length else b""
+        body = self._read_body()
         ctype = self.headers.get("Content-Type", "")
         action_name = ""
         hold_until = ""
