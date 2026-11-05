@@ -214,10 +214,7 @@ void ExecuteModifyProject(ClientContext &context, TableFunctionInput &data, Data
 		duckdb::RecordSubmissionLog(*catalog, creds, payload);
 	}
 
-	submitted.RethrowInterrupt();
-	if (submitted.transport_failure) {
-		throw InvalidInputException("ena_modify_project: %s", submitted.transport_error);
-	}
+	submitted.ThrowIfTransportFailure("ena_modify_project");
 	if (!submitted.success) {
 		string detail;
 		for (const auto &m : submitted.error_messages) {
@@ -450,10 +447,7 @@ void ExecuteModifySample(ClientContext &context, TableFunctionInput &data, DataC
 		duckdb::RecordSubmissionLog(*catalog, creds, payload);
 	}
 
-	submitted.RethrowInterrupt();
-	if (submitted.transport_failure) {
-		throw InvalidInputException("ena_modify_sample: %s", submitted.transport_error);
-	}
+	submitted.ThrowIfTransportFailure("ena_modify_sample");
 	if (!submitted.success) {
 		string detail;
 		for (const auto &m : submitted.error_messages) {
@@ -740,10 +734,7 @@ void ExecuteModifyExperiment(ClientContext &context, TableFunctionInput &data, D
 		duckdb::RecordSubmissionLog(*catalog, creds, payload);
 	}
 
-	submitted.RethrowInterrupt();
-	if (submitted.transport_failure) {
-		throw InvalidInputException("ena_modify_experiment: %s", submitted.transport_error);
-	}
+	submitted.ThrowIfTransportFailure("ena_modify_experiment");
 	if (!submitted.success) {
 		string detail;
 		for (const auto &m : submitted.error_messages) {
@@ -964,10 +955,7 @@ void ExecuteModifyRun(ClientContext &context, TableFunctionInput &data, DataChun
 		duckdb::RecordSubmissionLog(*catalog, creds, payload);
 	}
 
-	submitted.RethrowInterrupt();
-	if (submitted.transport_failure) {
-		throw InvalidInputException("ena_modify_run: %s", submitted.transport_error);
-	}
+	submitted.ThrowIfTransportFailure("ena_modify_run");
 	if (!submitted.success) {
 		string detail;
 		for (const auto &m : submitted.error_messages) {

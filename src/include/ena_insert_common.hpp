@@ -13,6 +13,7 @@
 #include "ena_envelope_builder.hpp"
 
 #include "duckdb/common/error_data.hpp"
+#include "duckdb/common/exception.hpp"
 #include "duckdb/common/index_vector.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/types/value.hpp"
@@ -97,13 +98,17 @@ struct SubmissionResult {
 	bool success = false;
 	std::vector<std::string> error_messages;
 	// Set when Ctrl-C or max_execution_time ended a wait inside the submission. It is
-	// also a transport failure, so the caller logs the attempt; RethrowInterrupt then
-	// fails the query as interrupted rather than as a failed submission.
+	// also a transport failure, so the caller logs the attempt first.
 	std::exception_ptr interrupt;
 
-	void RethrowInterrupt() const {
+	// Called once the attempt is logged. If the submit threw, fails the query: as
+	// interrupted, or with `context` and the transport error.
+	void ThrowIfTransportFailure(const string &context) const {
 		if (interrupt) {
 			std::rethrow_exception(interrupt);
+		}
+		if (transport_failure) {
+			throw InvalidInputException("%s: %s", context, transport_error);
 		}
 	}
 };

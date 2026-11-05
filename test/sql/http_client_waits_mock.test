@@ -100,6 +100,75 @@ INSERT INTO ena.projects (alias, title, project_type) VALUES ('waits_for_webin',
 ----
 INTERRUPT Error: Query exceeded maximum execution time
 
+query I
+SELECT count(*) FROM ena.submission_log WHERE object_type = 'projects' AND NOT success;
+----
+1
+
+# Every other kind of Webin submission. Each names its target by accession,
+# so no Reports lookup comes before the POST.
+statement error
+SELECT * FROM ena_cancel(secret => 'webin_unavailable', accession => 'ERS-mock-001');
+----
+INTERRUPT Error: Query exceeded maximum execution time
+
+statement error
+DELETE FROM ena.samples WHERE ers_accession = 'ERS-mock-D2';
+----
+INTERRUPT Error: Query exceeded maximum execution time
+
+statement error
+SELECT * FROM ena_modify_project(
+    secret => 'webin_unavailable',
+    accession => 'PRJEB777001',
+    alias => 'waits_for_webin',
+    title => 'never modified',
+    description => 'never modified',
+    project_type => 'METAGENOMIC');
+----
+INTERRUPT Error: Query exceeded maximum execution time
+
+statement error
+SELECT * FROM ena_modify_sample(
+    secret => 'webin_unavailable',
+    accession => 'ERS9000001',
+    alias => 'waits_for_webin',
+    taxon_id => 408170,
+    checklist => 'ERC000015',
+    attributes => MAP {'collection date': '2026-05-07'});
+----
+INTERRUPT Error: Query exceeded maximum execution time
+
+statement error
+SELECT * FROM ena_modify_experiment(
+    secret => 'webin_unavailable',
+    accession => 'ERX9000001',
+    alias => 'waits_for_webin',
+    study_ref => 'PRJEB42',
+    sample_descriptor => 'SAMEA42',
+    library_strategy => 'WGS',
+    library_source => 'METAGENOMIC',
+    library_selection => 'RANDOM',
+    library_layout => 'PAIRED',
+    platform => 'ILLUMINA',
+    instrument_model => 'Illumina NovaSeq 6000',
+    title => 'never modified');
+----
+INTERRUPT Error: Query exceeded maximum execution time
+
+statement error
+SELECT * FROM ena_modify_run(
+    secret => 'webin_unavailable',
+    accession => 'ERR9000001',
+    alias => 'waits_for_webin',
+    experiment_ref => 'ERX42',
+    files => [{'filename': 'r1_1.fastq.gz',
+               'filetype': 'fastq',
+               'md5': '9b8932f85caa54e687eba62fca3edce2'}],
+    title => 'never modified');
+----
+INTERRUPT Error: Query exceeded maximum execution time
+
 # The checklist fetch before a sample submission. A checklist that cannot be
 # fetched is skipped, and Webin validates instead; an interrupt is not that,
 # and must stop the submission. VALIDATE skips the alias check, so after a

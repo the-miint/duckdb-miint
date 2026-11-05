@@ -339,10 +339,7 @@ protected:
 		RecordSubmissionLog(catalog, creds, payload);
 
 		gs.emitted = true;
-		submitted.RethrowInterrupt();
-		if (submitted.transport_failure) {
-			throw InvalidInputException("DELETE FROM ena.%s: %s", object_type, submitted.transport_error);
-		}
+		submitted.ThrowIfTransportFailure("DELETE FROM ena." + object_type);
 		if (!submitted.success) {
 			string detail;
 			for (const auto &m : submitted.error_messages) {

@@ -286,10 +286,7 @@ void ExecuteLifecycle(ClientContext &context, TableFunctionInput &data, DataChun
 		duckdb::RecordSubmissionLog(*catalog, log_creds, payload);
 	}
 
-	submitted.RethrowInterrupt();
-	if (submitted.transport_failure) {
-		throw InvalidInputException("%s: %s", bd.fn_name, submitted.transport_error);
-	}
+	submitted.ThrowIfTransportFailure(bd.fn_name);
 	if (!submitted.success) {
 		string detail;
 		for (const auto &m : submitted.error_messages) {

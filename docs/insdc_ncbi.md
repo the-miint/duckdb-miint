@@ -63,8 +63,9 @@ and for NCBI:
 Ctrl-C and `max_execution_time` end any of these waits within about a tenth of a second. Before
 miint sees the status of a GET answered 429 or 503, DuckDB retries the GET itself, as its
 `http_retries`, `http_retry_wait_ms` and `http_retry_backoff` settings say. With the defaults that
-takes about a minute, and Ctrl-C does not end it (#414). A session `SET` of those three does not
-reach miint's requests; use `SET GLOBAL`.
+takes about a minute, and Ctrl-C does not end it
+([#414](https://github.com/the-miint/duckdb-miint/issues/414)). A session `SET` of those three
+does not reach miint's requests; use `SET GLOBAL`.
 
 Two settings send the requests elsewhere, such as to a mirror, and a session `SET` changes them.
 A trailing slash is dropped, and a query that would use an empty URL fails.

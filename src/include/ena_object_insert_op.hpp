@@ -261,10 +261,7 @@ public:
 		}
 		RecordSubmissionLog(catalog, creds, log_payload);
 
-		submitted.RethrowInterrupt();
-		if (submitted.transport_failure) {
-			throw InvalidInputException("%s failed: %s", Derived::ThrowPrefix(), submitted.transport_error);
-		}
+		submitted.ThrowIfTransportFailure(string(Derived::ThrowPrefix()) + " failed");
 		if (!outcome.success) {
 			std::string detail;
 			if (submitted.error_messages.empty()) {
