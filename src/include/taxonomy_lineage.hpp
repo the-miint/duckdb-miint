@@ -62,6 +62,14 @@ inline constexpr std::array<LineageRank, 8> kLineageRanks = {{{"domain", 'd', &L
 // One value per rank column, in kLineageRanks order; nullopt is a missing rank.
 using LineageRanks = std::array<std::optional<std::string>, kLineageRanks.size()>;
 
+// ASCII whitespace. Lineage fields are trimmed of it, and a rank name may contain it
+// ("Escherichia coli") but may not start or end with it.
+bool IsLineageSpace(char c);
+
+// Whether `name` starts with a rank prefix: a lowercase letter and two underscores, as in
+// "p__Bacillota". A rank name never does; one that does kept a prefix it should have lost.
+bool StartsWithRankPrefix(std::string_view name);
+
 // Parse a prefixed lineage string ("d__A; p__B" or miint's "d__A;p__B") into the rank
 // columns. Each ';'-separated field, trimmed, is <letter>__<name> with the letter
 // matching its position; an empty name is a missing rank and absent trailing fields are

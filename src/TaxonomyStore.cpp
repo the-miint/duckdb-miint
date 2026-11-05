@@ -1,0 +1,266 @@
+#include "TaxonomyStore.hpp"
+
+#include <algorithm>
+#include <map>
+#include <stdexcept>
+#include <utility>
+
+namespace miint {
+
+namespace {
+
+constexpr size_t kRanks = kLineageRanks.size();
+constexpr size_t kMaxListedProblems = 10;
+
+std::string AsciiLower(std::string_view s) {
+	std::string out(s);
+	for (auto &c : out) {
+		if (c >= 'A' && c <= 'Z') {
+			c = static_cast<char>(c - 'A' + 'a');
+		}
+	}
+	return out;
+}
+
+// Why `value` cannot be a rank name, or nullptr if it can.
+const char *ValueProblem(const std::string &value) {
+	if (value.empty()) {
+		return "is empty";
+	}
+	if (IsLineageSpace(value.front()) || IsLineageSpace(value.back())) {
+		return "starts or ends with whitespace";
+	}
+	if (StartsWithRankPrefix(value)) {
+		return "starts with a rank prefix such as 'p__'";
+	}
+	if (value.find(';') != std::string::npos) {
+		return "contains ';'";
+	}
+	return nullptr;
+}
+
+// Counts every problem and keeps the first few, for one error that shows the shape of a
+// broken taxonomy without growing with it.
+class Problems {
+public:
+	void Add(std::string problem) {
+		if (listed_.size() < kMaxListedProblems) {
+			listed_.push_back(std::move(problem));
+		}
+		count_++;
+	}
+
+	void ThrowIfAny() const {
+		if (count_ == 0) {
+			return;
+		}
+		std::string message = "taxonomy: " + std::to_string(count_) + (count_ == 1 ? " problem" : " problems");
+		message += count_ > listed_.size() ? "; the first " + std::to_string(listed_.size()) + ":" : ":";
+		for (const auto &problem : listed_) {
+			message += "\n  " + problem;
+		}
+		throw std::invalid_argument(message);
+	}
+
+private:
+	std::vector<std::string> listed_;
+	size_t count_ = 0;
+};
+
+std::string IdText(const std::string &feature_id) {
+	return "feature_id '" + feature_id + "'";
+}
+
+} // namespace
+
+const std::vector<std::string> &DefaultBadNameTokens() {
+	// t2t/nlevel.py BAD_NAMES, in its order.
+	static const std::vector<std::string> tokens = {
+	    "environmental sample", "uncultured", "UNNAMEABLE", "unclassified",
+	    "unidentified",         "cluster",    "isolate",    "environmental samples"};
+	return tokens;
+}
+
+TaxonomyStore::TaxonomyStore(const std::vector<TaxonomyRow> &rows, const std::vector<std::string> &bad_name_tokens) {
+	std::vector<std::string> lower_tokens;
+	for (const auto &token : bad_name_tokens) {
+		if (token.empty()) {
+			throw std::invalid_argument("taxonomy: a bad-name token is empty, which would match every name");
+		}
+		lower_tokens.push_back(AsciiLower(token));
+	}
+
+	// Row checks: ids, values, gaps. Each row is checked in full before any is cleaned.
+	feature_ids_.reserve(rows.size());
+	for (const auto &row : rows) {
+		feature_ids_.push_back(row.feature_id);
+	}
+	std::unordered_map<std::string_view, size_t> id_count;
+	for (size_t i = 0; i < feature_ids_.size(); i++) {
+		if (!feature_ids_[i].empty()) {
+			row_of_id_.emplace(feature_ids_[i], i);
+			id_count[feature_ids_[i]]++;
+		}
+	}
+
+	Problems problems;
+	for (size_t i = 0; i < rows.size(); i++) {
+		const auto &id = feature_ids_[i];
+		const auto &ranks = rows[i].ranks;
+		if (id.empty()) {
+			problems.Add("row " + std::to_string(i + 1) + " has an empty feature_id");
+		} else if (row_of_id_.at(id) == i && id_count.at(id) > 1) {
+			problems.Add(IdText(id) + " appears " + std::to_string(id_count.at(id)) + " times");
+		}
+		for (size_t r = 0; r < kRanks; r++) {
+			if (!ranks[r]) {
+				continue;
+			}
+			if (const char *why = ValueProblem(*ranks[r])) {
+				problems.Add(IdText(id) + ", column '" + kLineageRanks[r].column + "': value '" + *ranks[r] + "' " +
+				             why);
+			}
+		}
+		for (size_t r = 0; r + 1 < kRanks; r++) {
+			if (ranks[r]) {
+				continue;
+			}
+			for (size_t deeper = r + 1; deeper < kRanks; deeper++) {
+				if (ranks[deeper]) {
+					problems.Add(IdText(id) + ": '" + kLineageRanks[r].column + "' is NULL but deeper rank '" +
+					             kLineageRanks[deeper].column + "' is not");
+					break;
+				}
+			}
+			break;
+		}
+	}
+	problems.ThrowIfAny();
+
+	// Clean, intern and link each lineage to its parent names.
+	names_.assign(rows.size() * kRanks, kMissingName);
+	std::array<std::unordered_map<std::string, NameId>, kRanks> name_ids;
+	// Names seen under more than one parent, in the order the second parent appeared.
+	struct Conflict {
+		size_t rank;
+		NameId name;
+		std::vector<NameId> parents;
+	};
+	std::vector<Conflict> conflicts;
+	std::map<std::pair<size_t, NameId>, size_t> conflict_index;
+
+	for (size_t i = 0; i < rows.size(); i++) {
+		const auto &ranks = rows[i].ranks;
+		// With no gaps, the present ranks are a prefix of the lineage.
+		size_t depth = 0;
+		while (depth < kRanks && ranks[depth]) {
+			depth++;
+		}
+		const size_t given_depth = depth;
+
+		for (size_t r = 0; r < depth; r++) {
+			const std::string lower = AsciiLower(*ranks[r]);
+			for (size_t t = 0; t < lower_tokens.size(); t++) {
+				if (lower.find(lower_tokens[t]) != std::string::npos) {
+					truncations_.push_back({i, r, bad_name_tokens[t]});
+					depth = r;
+					break;
+				}
+			}
+		}
+		if (depth < 2) {
+			if (given_depth > 0) {
+				wiped_rows_.push_back(i);
+			}
+			depth = 0;
+		}
+
+		for (size_t r = 0; r < depth; r++) {
+			const NameId parent = r == 0 ? kMissingName : names_[i * kRanks + r - 1];
+			auto [it, inserted] = name_ids[r].emplace(*ranks[r], static_cast<NameId>(name_text_[r].size()));
+			const NameId name = it->second;
+			if (inserted) {
+				name_text_[r].push_back(*ranks[r]);
+				parent_[r].push_back(parent);
+			} else if (parent_[r][name] != parent) {
+				auto [entry, added] = conflict_index.emplace(std::make_pair(r, name), conflicts.size());
+				if (added) {
+					conflicts.push_back({r, name, {parent_[r][name]}});
+				}
+				auto &seen = conflicts[entry->second].parents;
+				if (std::find(seen.begin(), seen.end(), parent) == seen.end()) {
+					seen.push_back(parent);
+				}
+			}
+			names_[i * kRanks + r] = name;
+		}
+	}
+
+	for (const auto &conflict : conflicts) {
+		std::string problem = "'" + name_text_[conflict.rank][conflict.name] + "' (" +
+		                      kLineageRanks[conflict.rank].column + ") has " + std::to_string(conflict.parents.size()) +
+		                      " parent lineages:";
+		for (size_t p = 0; p < conflict.parents.size(); p++) {
+			// The parent's own lineage, read up the hierarchy from the parent's rank.
+			std::vector<std::string> path;
+			NameId name = conflict.parents[p];
+			for (size_t r = conflict.rank; r-- > 0;) {
+				path.push_back(std::string(1, kLineageRanks[r].letter) + "__" + name_text_[r][name]);
+				name = parent_[r][name];
+			}
+			std::string lineage;
+			for (auto it = path.rbegin(); it != path.rend(); ++it) {
+				lineage += (lineage.empty() ? "" : "; ") + *it;
+			}
+			problem += (p == 0 ? " [" : ", [") + lineage + "]";
+		}
+		problems.Add(std::move(problem));
+	}
+	problems.ThrowIfAny();
+}
+
+size_t TaxonomyStore::RowCount() const {
+	return feature_ids_.size();
+}
+
+const std::string &TaxonomyStore::FeatureId(size_t row) const {
+	return feature_ids_[row];
+}
+
+std::optional<size_t> TaxonomyStore::FindRow(std::string_view feature_id) const {
+	auto it = row_of_id_.find(feature_id);
+	if (it == row_of_id_.end()) {
+		return std::nullopt;
+	}
+	return it->second;
+}
+
+NameId TaxonomyStore::Name(size_t row, size_t rank) const {
+	return names_[row * kRanks + rank];
+}
+
+bool TaxonomyStore::IsInformative(size_t row) const {
+	return Name(row, 0) != kMissingName;
+}
+
+size_t TaxonomyStore::NameCount(size_t rank) const {
+	return name_text_[rank].size();
+}
+
+const std::string &TaxonomyStore::NameText(size_t rank, NameId name) const {
+	return name_text_[rank][name];
+}
+
+NameId TaxonomyStore::Parent(size_t rank, NameId name) const {
+	return parent_[rank][name];
+}
+
+const std::vector<LineageTruncation> &TaxonomyStore::Truncations() const {
+	return truncations_;
+}
+
+const std::vector<size_t> &TaxonomyStore::WipedRows() const {
+	return wiped_rows_;
+}
+
+} // namespace miint
