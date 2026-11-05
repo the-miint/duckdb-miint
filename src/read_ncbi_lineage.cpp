@@ -39,23 +39,6 @@ std::string TaxidToString(const Value &v) {
 	return std::to_string(v.GetValue<int64_t>());
 }
 
-// Execute writes Lineage's rank fields positionally into columns 3-10, while Data names
-// those columns from kLineageRanks. Changing kLineageRanks fails here, not at run time.
-constexpr bool RankWritesMatchColumns() {
-	constexpr std::array<std::string_view, 8> written = {"domain", "phylum", "class",   "order",
-	                                                     "family", "genus",  "species", "strain"};
-	if (miint::kLineageRanks.size() != written.size()) {
-		return false;
-	}
-	for (size_t i = 0; i < written.size(); ++i) {
-		if (written[i] != miint::kLineageRanks[i].column) {
-			return false;
-		}
-	}
-	return true;
-}
-static_assert(RankWritesMatchColumns(), "read_ncbi_lineage's SetRankCell calls no longer match kLineageRanks");
-
 // Emit a VARCHAR cell, or NULL when the collapsed rank is absent.
 void SetRankCell(DataChunk &output, idx_t col, idx_t row, const std::string &value) {
 	if (value.empty()) {
@@ -241,16 +224,12 @@ void ReadNCBILineageTableFunction::Execute(ClientContext &context, TableFunction
 		FlatVector::GetDataMutable<int64_t>(output.data[0])[i] = lin.taxid;
 		FlatVector::GetDataMutable<string_t>(output.data[1])[i] = StringVector::AddString(output.data[1], lin.name);
 		FlatVector::GetDataMutable<string_t>(output.data[2])[i] = StringVector::AddString(output.data[2], lin.rank);
-		SetRankCell(output, 3, i, lin.domain);
-		SetRankCell(output, 4, i, lin.phylum);
-		SetRankCell(output, 5, i, lin.tax_class);
-		SetRankCell(output, 6, i, lin.tax_order);
-		SetRankCell(output, 7, i, lin.family);
-		SetRankCell(output, 8, i, lin.genus);
-		SetRankCell(output, 9, i, lin.species);
-		SetRankCell(output, 10, i, lin.strain);
-		FlatVector::GetDataMutable<string_t>(output.data[11])[i] =
-		    StringVector::AddString(output.data[11], lin.lineage);
+		// The rank columns follow taxid, name and rank, in kLineageRanks order (see Data).
+		for (idx_t r = 0; r < miint::kLineageRanks.size(); r++) {
+			SetRankCell(output, 3 + r, i, lin.*miint::kLineageRanks[r].field);
+		}
+		auto &lineage_column = output.data[3 + miint::kLineageRanks.size()];
+		FlatVector::GetDataMutable<string_t>(lineage_column)[i] = StringVector::AddString(lineage_column, lin.lineage);
 	}
 
 	global_state.result_offset += count;

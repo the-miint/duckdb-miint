@@ -200,6 +200,24 @@ TEST_CASE("kLineageRanks is the shared schema's column order and rank letters", 
 	CHECK(letters == "dpcofgst");
 }
 
+// CollapseLineage, FormatLineage and read_ncbi_lineage all reach a rank's value through
+// kLineageRanks' field pointer, so a rank paired with the wrong Lineage member would file
+// every value under the wrong column.
+TEST_CASE("kLineageRanks pairs each column with its Lineage field", "[lineage]") {
+	Lineage l;
+	l.domain = "domain";
+	l.phylum = "phylum";
+	l.tax_class = "class";
+	l.tax_order = "order";
+	l.family = "family";
+	l.genus = "genus";
+	l.species = "species";
+	l.strain = "strain";
+	for (const auto &rank : kLineageRanks) {
+		CHECK(l.*rank.field == rank.column);
+	}
+}
+
 // tax2tree node labels and GG2 trees join ranks with "; "; miint's own lineage
 // strings (FormatLineage) use ";". The converter has to read both.
 TEST_CASE("ParseLineageString reads both separator styles", "[lineage][parse_lineage]") {

@@ -47,24 +47,22 @@ std::vector<std::string> TopLevelTaxonBlocks(const std::string &xml) {
 	return blocks;
 }
 
+// The rank column an NCBI rank collapses into, or nullptr if it is not collapsed. The
+// legacy "superkingdom" and the newer "domain" both collapse into domain.
+const LineageRank *FindRankColumn(const std::string &ncbi_rank) {
+	const std::string_view column =
+	    ncbi_rank == "superkingdom" ? std::string_view(kLineageRanks[0].column) : std::string_view(ncbi_rank);
+	for (const auto &rank : kLineageRanks) {
+		if (column == rank.column) {
+			return &rank;
+		}
+	}
+	return nullptr;
+}
+
 void AssignRank(Lineage &lin, const std::string &rank, const std::string &name) {
-	std::string col = RankColumn(rank);
-	if (col == "domain") {
-		lin.domain = name;
-	} else if (col == "phylum") {
-		lin.phylum = name;
-	} else if (col == "class") {
-		lin.tax_class = name;
-	} else if (col == "order") {
-		lin.tax_order = name;
-	} else if (col == "family") {
-		lin.family = name;
-	} else if (col == "genus") {
-		lin.genus = name;
-	} else if (col == "species") {
-		lin.species = name;
-	} else if (col == "strain") {
-		lin.strain = name;
+	if (const auto *column = FindRankColumn(rank)) {
+		lin.*column->field = name;
 	}
 }
 
@@ -106,11 +104,22 @@ bool HasRankPrefix(std::string_view field, char letter) {
 	return field.size() >= kRankPrefixWidth && field[0] == letter && field[1] == '_' && field[2] == '_';
 }
 
+// Every rank is written, empty or not, except strain (the last), which is written only
+// when present: d__..;p__..;c__..;o__..;f__..;g__..;s__..[;t__..]
 std::string FormatLineage(const Lineage &l) {
-	std::string s = "d__" + l.domain + ";p__" + l.phylum + ";c__" + l.tax_class + ";o__" + l.tax_order + ";f__" +
-	                l.family + ";g__" + l.genus + ";s__" + l.species;
-	if (!l.strain.empty()) {
-		s += ";t__" + l.strain;
+	std::string s;
+	for (size_t i = 0; i < kLineageRanks.size(); ++i) {
+		const auto &rank = kLineageRanks[i];
+		const std::string &name = l.*rank.field;
+		if (i + 1 == kLineageRanks.size() && name.empty()) {
+			break;
+		}
+		if (i > 0) {
+			s += ';';
+		}
+		s += rank.letter;
+		s += "__";
+		s += name;
 	}
 	return s;
 }
@@ -118,14 +127,8 @@ std::string FormatLineage(const Lineage &l) {
 } // namespace
 
 std::string RankColumn(const std::string &rank) {
-	if (rank == "superkingdom" || rank == "domain") {
-		return "domain";
-	}
-	if (rank == "phylum" || rank == "class" || rank == "order" || rank == "family" || rank == "genus" ||
-	    rank == "species" || rank == "strain") {
-		return rank;
-	}
-	return {};
+	const auto *column = FindRankColumn(rank);
+	return column ? column->column : std::string();
 }
 
 Lineage CollapseLineage(int64_t taxid, const std::string &name, const std::string &rank,
