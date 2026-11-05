@@ -2555,7 +2555,7 @@ const std::string INFER_TRIM = // NOLINT
 // collapses every live node. `source`/`refresh` pass straight through to
 // read_ncbi_taxdump (NULL source => auto-download + cache the canonical NCBI dump).
 //
-// Rank -> column mapping mirrors kLineageRanks (src/include/taxonomy_lineage.hpp),
+// Rank -> column mapping mirrors FindRankColumn (src/include/taxonomy_lineage.hpp),
 // which read_ncbi_lineage uses; test/sql/taxonomy_lineage.test pins both functions'
 // schemas to the same columns. Legacy 'superkingdom' and newer 'domain' both collapse
 // to `domain`; phylum/class/order/family/genus/species/strain map to like-named

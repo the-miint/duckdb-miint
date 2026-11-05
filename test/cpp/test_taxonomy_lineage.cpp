@@ -46,17 +46,34 @@ const char *kTaxonomyXml = R"(<?xml version="1.0"?>
 )";
 } // namespace
 
-TEST_CASE("RankColumn maps NCBI ranks to collapse columns", "[taxdump][lineage]") {
+namespace {
+// The column an NCBI rank collapses into, or "" when it is not collapsed.
+std::string ColumnOf(const std::string &ncbi_rank) {
+	const auto *rank = FindRankColumn(ncbi_rank);
+	return rank ? rank->column : "";
+}
+} // namespace
+
+TEST_CASE("FindRankColumn maps NCBI ranks to collapse columns", "[taxdump][lineage]") {
 	// The superkingdom/domain alias is the whole reason this is centralized: NCBI is
 	// mid-transition and both strings must land in the same column.
-	CHECK(RankColumn("superkingdom") == "domain");
-	CHECK(RankColumn("domain") == "domain");
-	CHECK(RankColumn("phylum") == "phylum");
-	CHECK(RankColumn("species") == "species");
-	CHECK(RankColumn("strain") == "strain");
-	CHECK(RankColumn("clade").empty()); // non-standard ranks are dropped
-	CHECK(RankColumn("subspecies").empty());
-	CHECK(RankColumn("no rank").empty());
+	CHECK(ColumnOf("superkingdom") == "domain");
+	CHECK(ColumnOf("domain") == "domain");
+	CHECK(ColumnOf("phylum") == "phylum");
+	CHECK(ColumnOf("species") == "species");
+	CHECK(ColumnOf("strain") == "strain");
+	CHECK(ColumnOf("clade").empty()); // non-standard ranks are dropped
+	CHECK(ColumnOf("subspecies").empty());
+	CHECK(ColumnOf("no rank").empty());
+}
+
+// An ancestor can collapse into the query taxon's own column (a strain under a strain).
+// The query taxon is the lineage's subject, so its name is the one kept.
+TEST_CASE("CollapseLineage keeps the query taxon's name in its own column", "[taxdump][lineage]") {
+	auto lin = CollapseLineage(3, "Escherichia coli K-12 MG1655", "strain",
+	                           {{1, "Escherichia coli", "species"}, {2, "Escherichia coli K-12", "strain"}});
+	CHECK(lin.strain == "Escherichia coli K-12 MG1655");
+	CHECK(lin.species == "Escherichia coli");
 }
 
 // A queried taxid that NCBI has merged resolves to a taxon whose TaxId is the
@@ -92,7 +109,7 @@ TEST_CASE("ParseTaxonomyXML captures AkaTaxIds for merged taxids", "[taxdump][li
 // -- that is the whole point of the shared schema. This XML reproduces the synthetic
 // taxdump tree's Escherichia coli K-12 lineage (taxid 90), and the expected values below
 // are byte-for-byte the golden asserted for taxid 90 in test/sql/taxonomy_lineage.test.
-// If the C++ rank-collapse (RankColumn/CollapseLineage/FormatLineage) or the SQL macro
+// If the C++ rank-collapse (CollapseLineage/FormatLineage) or the SQL macro
 // drifts, one of the two tests breaks -- keep them in lockstep.
 TEST_CASE("ParseTaxonomyXML matches the taxonomy_lineage macro golden (online==offline)", "[taxdump][lineage]") {
 	const char *xml = R"(<TaxaSet>
@@ -200,9 +217,9 @@ TEST_CASE("kLineageRanks is the shared schema's column order and rank letters", 
 	CHECK(letters == "dpcofgst");
 }
 
-// CollapseLineage, FormatLineage and read_ncbi_lineage all reach a rank's value through
-// kLineageRanks' field pointer, so a rank paired with the wrong Lineage member would file
-// every value under the wrong column.
+// Every reader and writer of a rank's value goes through kLineageRanks' field pointer, so
+// a rank paired with the wrong Lineage member would file every value under the wrong
+// column.
 TEST_CASE("kLineageRanks pairs each column with its Lineage field", "[lineage]") {
 	Lineage l;
 	l.domain = "domain";

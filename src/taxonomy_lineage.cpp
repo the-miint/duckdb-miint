@@ -47,19 +47,6 @@ std::vector<std::string> TopLevelTaxonBlocks(const std::string &xml) {
 	return blocks;
 }
 
-// The rank column an NCBI rank collapses into, or nullptr if it is not collapsed. The
-// legacy "superkingdom" and the newer "domain" both collapse into domain.
-const LineageRank *FindRankColumn(const std::string &ncbi_rank) {
-	const std::string_view column =
-	    ncbi_rank == "superkingdom" ? std::string_view(kLineageRanks[0].column) : std::string_view(ncbi_rank);
-	for (const auto &rank : kLineageRanks) {
-		if (column == rank.column) {
-			return &rank;
-		}
-	}
-	return nullptr;
-}
-
 void AssignRank(Lineage &lin, const std::string &rank, const std::string &name) {
 	if (const auto *column = FindRankColumn(rank)) {
 		lin.*column->field = name;
@@ -104,8 +91,8 @@ bool HasRankPrefix(std::string_view field, char letter) {
 	return field.size() >= kRankPrefixWidth && field[0] == letter && field[1] == '_' && field[2] == '_';
 }
 
-// Every rank is written, empty or not, except strain (the last), which is written only
-// when present: d__..;p__..;c__..;o__..;f__..;g__..;s__..[;t__..]
+// Every rank is written, empty or not, except the last (strain), which is written only
+// when present.
 std::string FormatLineage(const Lineage &l) {
 	std::string s;
 	for (size_t i = 0; i < kLineageRanks.size(); ++i) {
@@ -126,9 +113,16 @@ std::string FormatLineage(const Lineage &l) {
 
 } // namespace
 
-std::string RankColumn(const std::string &rank) {
-	const auto *column = FindRankColumn(rank);
-	return column ? column->column : std::string();
+const LineageRank *FindRankColumn(const std::string &ncbi_rank) {
+	if (ncbi_rank == "superkingdom") {
+		return &kLineageRanks[0]; // domain
+	}
+	for (const auto &rank : kLineageRanks) {
+		if (ncbi_rank == rank.column) {
+			return &rank;
+		}
+	}
+	return nullptr;
 }
 
 Lineage CollapseLineage(int64_t taxid, const std::string &name, const std::string &rank,

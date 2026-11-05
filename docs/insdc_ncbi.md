@@ -542,8 +542,8 @@ the struct into columns.
 - Fields are separated by `;`, and whitespace around a field is ignored, so `'; '` and `';'` both work.
 - Each field is `<letter>__<name>`, and its letter must match its position: `d p c o f g s t` (domain through strain). A skipped rank therefore errors rather than shifting the names below it into the wrong columns.
 - An empty name (`p__`) is NULL, and a lineage with fewer than eight fields leaves the deeper ranks NULL. `d__A;p__;c__;o__;f__;g__;s__` gives domain `A` and seven NULLs.
-- Lineages without rank prefixes are not supported: raw SILVA, and the QIIME releases of SILVA up to 132, whose `D_0__`, `D_1__`, ... prefixes name a depth rather than a rank. The QIIME 2 SILVA 138 release writes `d__`, `p__`, ... and parses.
-- A `lineage` written by `taxonomy_lineage` or `read_ncbi_lineage` parses back into the columns it was written from, provided no name contains `;` or starts or ends with whitespace. A name containing `;` splits into an extra field and errors, so it is never misread. NCBI has a few such names, such as the species `Rhodococcus sp. SJ-2;3`.
+- Lineages without rank prefixes are not supported: raw SILVA, and the QIIME releases of SILVA up to 132, whose `D_0__`, `D_1__`, ... prefixes name a depth rather than a rank.
+- A `lineage` written by `taxonomy_lineage` or `read_ncbi_lineage` parses back into the columns it was written from, provided no name contains `;`, starts or ends with whitespace, or itself starts with a rank prefix such as `p__`. NCBI has a few names containing `;`, such as the species `Rhodococcus sp. SJ-2;3`; each splits into an extra field that fails its prefix check, so `parse_lineage` errors on those lineages.
 - `parse_lineage` does not reject gaps: `d__A; p__; c__C` returns phylum NULL and class `C`. Consumers that need gap-free lineages check that themselves.
 
 **Errors** quote the lineage and name the field:
