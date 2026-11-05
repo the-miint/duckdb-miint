@@ -91,6 +91,44 @@ bool HasRankPrefix(std::string_view field, char letter) {
 	return field.size() >= kRankPrefixWidth && field[0] == letter && field[1] == '_' && field[2] == '_';
 }
 
+// The prefix letter of `rank` in a lineage string: its own, except the domain's, which the
+// caller declares ('d' or 'k').
+char RankLetter(size_t rank, char domain_letter) {
+	return rank == 0 ? domain_letter : kLineageRanks[rank].letter;
+}
+
+// The rank whose prefix `field` starts with, or kLineageRanks.size() if none.
+size_t PrefixRank(std::string_view field, char domain_letter) {
+	size_t rank = 0;
+	while (rank < kLineageRanks.size() && !HasRankPrefix(field, RankLetter(rank, domain_letter))) {
+		++rank;
+	}
+	return rank;
+}
+
+// Why a lineage's first field has the wrong prefix, with a hint when a parameter would
+// read it.
+std::string FirstFieldProblem(std::string_view field, char domain_letter, bool allow_subset) {
+	std::string why;
+	if (allow_subset) {
+		why = "must start with a rank prefix, one of";
+		for (size_t rank = 0; rank < kLineageRanks.size(); ++rank) {
+			why += std::string(" ") + RankLetter(rank, domain_letter) + "__";
+		}
+	} else {
+		why = "must start with '" + std::string(1, domain_letter) + "__'";
+	}
+	const char other = domain_letter == 'd' ? 'k' : 'd';
+	why += " (domain_letter is '" + std::string(1, domain_letter) + "'";
+	if (HasRankPrefix(field, other)) {
+		const std::string o(1, other);
+		why += "; pass domain_letter := '" + o + "' to read " + o + "__ lineages";
+	} else if (!allow_subset && PrefixRank(field, domain_letter) < kLineageRanks.size()) {
+		why += "; pass allow_subset := true to read lineages that start below the domain";
+	}
+	return why + ")";
+}
+
 // Every rank is written, empty or not, except the last (strain), which is written only
 // when present.
 std::string FormatLineage(const Lineage &l) {
@@ -141,17 +179,18 @@ Lineage CollapseLineage(int64_t taxid, const std::string &name, const std::strin
 	return lin;
 }
 
-LineageRanks ParseLineageString(std::string_view lineage, char domain_letter) {
+LineageRanks ParseLineageString(std::string_view lineage, char domain_letter, bool allow_subset) {
 	if (domain_letter != 'd' && domain_letter != 'k') {
 		throw std::invalid_argument("domain_letter must be 'd' or 'k', got '" + std::string(1, domain_letter) + "'");
 	}
-	auto fail = [&](size_t position, std::string_view field, const std::string &why) {
-		return std::invalid_argument("field " + std::to_string(position + 1) + " ('" + std::string(field) + "') " +
-		                             why + " in lineage '" + std::string(lineage) + "'");
+	auto fail = [&](size_t index, std::string_view field, const std::string &why) {
+		return std::invalid_argument("field " + std::to_string(index + 1) + " ('" + std::string(field) + "') " + why +
+		                             " in lineage '" + std::string(lineage) + "'");
 	};
 
 	LineageRanks ranks;
-	size_t position = 0;
+	size_t index = 0; // the field's place in the string
+	size_t rank = 0;  // the rank it must carry
 	size_t start = 0;
 	while (true) {
 		size_t stop = lineage.find(';', start);
@@ -164,38 +203,39 @@ LineageRanks ParseLineageString(std::string_view lineage, char domain_letter) {
 		}
 		const std::string_view field = lineage.substr(start, end - start);
 
-		if (position == ranks.size()) {
-			throw fail(position, field,
-			           "is past strain: a lineage has at most " + std::to_string(ranks.size()) + " fields");
+		if (rank == ranks.size()) {
+			// A subset reaches strain in fewer than eight fields, so its count would mislead.
+			throw fail(index, field,
+			           allow_subset
+			               ? "is past strain, the deepest rank"
+			               : "is past strain: a lineage has at most " + std::to_string(ranks.size()) + " fields");
 		}
 		if (field.empty()) {
-			throw fail(position, field, "is empty");
+			throw fail(index, field, "is empty");
 		}
-		const char letter = position == 0 ? domain_letter : kLineageRanks[position].letter;
-		if (!HasRankPrefix(field, letter)) {
-			std::string why = "must start with '" + std::string(1, letter) + "__'";
-			if (position == 0) {
-				const char other = domain_letter == 'd' ? 'k' : 'd';
-				why += " (domain_letter is '" + std::string(1, domain_letter) + "'";
-				if (HasRankPrefix(field, other)) {
-					const std::string o(1, other);
-					why += "; pass domain_letter := '" + o + "' to read " + o + "__ lineages";
-				}
-				why += ")";
+		if (index == 0) {
+			// With allow_subset the first field's prefix picks the rank the lineage starts at.
+			if (allow_subset) {
+				rank = PrefixRank(field, domain_letter);
 			}
-			throw fail(position, field, why);
+			if (rank == ranks.size() || !HasRankPrefix(field, RankLetter(rank, domain_letter))) {
+				throw fail(index, field, FirstFieldProblem(field, domain_letter, allow_subset));
+			}
+		} else if (!HasRankPrefix(field, RankLetter(rank, domain_letter))) {
+			throw fail(index, field, "must start with '" + std::string(1, RankLetter(rank, domain_letter)) + "__'");
 		}
 		const std::string_view name = field.substr(kRankPrefixWidth);
 		if (!name.empty()) {
 			if (IsLineageSpace(name[0])) {
-				throw fail(position, field, "has whitespace after its rank prefix");
+				throw fail(index, field, "has whitespace after its rank prefix");
 			}
 			if (name[0] >= 'a' && name[0] <= 'z' && HasRankPrefix(name, name[0])) {
-				throw fail(position, field, "has a second rank prefix");
+				throw fail(index, field, "has a second rank prefix");
 			}
-			ranks[position] = std::string(name);
+			ranks[rank] = std::string(name);
 		}
-		++position;
+		++index;
+		++rank;
 		if (stop == std::string_view::npos) {
 			break;
 		}

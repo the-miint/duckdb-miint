@@ -4,8 +4,9 @@
 
 namespace duckdb {
 
-// parse_lineage(lineage VARCHAR, domain_letter := 'd') -> the shared lineage schema's
-// eight rank columns as a STRUCT. The parsing rules are miint::ParseLineageString.
+// parse_lineage(lineage VARCHAR, domain_letter := 'd', allow_subset := false) -> the shared
+// lineage schema's eight rank columns as a STRUCT. The parsing rules are
+// miint::ParseLineageString.
 class ParseLineageFunction {
 public:
 	static void Register(ExtensionLoader &loader);

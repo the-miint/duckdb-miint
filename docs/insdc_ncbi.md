@@ -531,7 +531,8 @@ only NCBI ones.
 
 **Parameters:**
 - `lineage` (VARCHAR): for example `d__Bacteria; p__Bacillota; c__Bacilli` or `d__Bacteria;p__Bacillota;c__Bacilli`
-- `domain_letter` (VARCHAR, named only, default `'d'`): the prefix letter of the first field, `'d'` or `'k'`. Greengenes 13_8 writes `k__Bacteria`; pass `domain_letter := 'k'` to read it. It must be a constant, so one call cannot mix `d__` and `k__` rows.
+- `domain_letter` (VARCHAR, named only, default `'d'`): the prefix letter of the domain, `'d'` or `'k'`. Greengenes 13_8 writes `k__Bacteria`; pass `domain_letter := 'k'` to read it. It must be a constant, so one call cannot mix `d__` and `k__` rows.
+- `allow_subset` (BOOLEAN, named only, default `false`): accept a lineage that starts below the domain, such as `c__Bacilli; o__Lactobacillales` or `p__Bacillota`. The internal node labels of a tree decorated by tax2tree are like this: each starts at the rank where decoration began. The ranks above the first field are NULL, and the result type is the same. It must be a constant.
 
 **Returns:** `STRUCT(domain, phylum, class, "order", family, genus, species, strain)`, all
 VARCHAR: the shared schema's rank columns, in its order. A NULL `lineage` returns NULL.
@@ -541,6 +542,7 @@ the struct into columns.
 **Rules:**
 - Fields are separated by `;`, and whitespace around a field is ignored, so `'; '` and `';'` both work.
 - Each field is `<letter>__<name>`, and its letter must match its position: `d p c o f g s t` (domain through strain). A skipped rank therefore errors rather than shifting the names below it into the wrong columns.
+- With `allow_subset := true`, the first field's letter picks the rank the lineage starts at, and each later field must carry the next rank's letter. `c__A; o__B` gives class `A` and order `B`; `c__A; f__B` (order skipped) and `o__B; c__A` (reversed) are errors.
 - An empty name (`p__`) is NULL, and a lineage with fewer than eight fields leaves the deeper ranks NULL. `d__A;p__;c__;o__;f__;g__;s__` gives domain `A` and seven NULLs.
 - Lineages without rank prefixes are not supported: raw SILVA, and the QIIME releases of SILVA up to 132, whose `D_0__`, `D_1__`, ... prefixes name a depth rather than a rank.
 - A `lineage` written by `taxonomy_lineage` or `read_ncbi_lineage` parses back into the columns it was written from, provided no name contains `;`, starts or ends with whitespace, or itself starts with a rank prefix such as `p__`. NCBI has a few names containing `;`, such as the species `Rhodococcus sp. SJ-2;3`; each splits into an extra field that fails its prefix check, so `parse_lineage` errors on those lineages.
@@ -549,7 +551,8 @@ the struct into columns.
 **Errors** quote the lineage and name the field:
 - an empty lineage, or an empty field (a trailing or doubled `;`)
 - a prefix letter out of position, or `k__` without `domain_letter := 'k'` (and `d__` with it)
-- more than eight fields
+- a lineage that starts below the domain without `allow_subset := true`
+- a field after strain (in a lineage from the domain, a ninth field)
 - a name with whitespace after its prefix (`d__ Bacteria`) or a second prefix (`p__p__Bacillota`, usually a prefix that should have been stripped)
 
 **Examples:**
@@ -563,6 +566,14 @@ WHERE Taxon <> 'Unassigned';
 -- Greengenes 13_8, which writes k__ for the domain
 SELECT feature_id, unnest(parse_lineage(lineage, domain_letter := 'k'))
 FROM gg_13_8_taxonomy;
+
+-- The internal node labels of a tree decorated by tax2tree, such as
+-- 'f__Lachnospiraceae; g__Blautia'. (When tax2tree keeps support values it writes
+-- '95:f__Lachnospiraceae; g__Blautia'; strip the support first.) read_newick gives an
+-- unlabeled node the name ''.
+SELECT node_index, unnest(parse_lineage(name, allow_subset := true))
+FROM read_newick('decorated.nwk')
+WHERE NOT is_tip AND name <> '';
 
 -- An error stops at the first bad row. TRY lists them all.
 SELECT feature_id, lineage

@@ -145,6 +145,68 @@ PREPARE with_letter AS SELECT parse_lineage(lineage, domain_letter := $1) FROM r
 ----
 <REGEX>:.*parse_lineage: domain_letter must be a constant 'd' or 'k'; a column or a prepared-statement parameter is not accepted.*
 
+# --- allow_subset: lineages that start below the domain --------------------
+# A decorated tree's internal node label starts at the rank where decoration began
+# ("f__Lachnospiraceae; g__Blautia"). allow_subset reads it into the same eight columns:
+# the first field's letter picks its rank, the ranks above it are NULL, and each later
+# field must carry the next rank's letter.
+
+query TTTTTTTT
+SELECT unnest(parse_lineage('c__foo; o__bar', allow_subset := true));
+----
+NULL	NULL	foo	bar	NULL	NULL	NULL	NULL
+
+query TTTTTTTT
+SELECT unnest(parse_lineage('p__baz', allow_subset := true));
+----
+NULL	baz	NULL	NULL	NULL	NULL	NULL	NULL
+
+# The flag does not change the result type, so subset and full lineages share a column.
+query I
+SELECT typeof(parse_lineage('g__A', allow_subset := true)) = typeof(parse_lineage('d__A'));
+----
+true
+
+# A lineage from the domain parses the same with or without the flag.
+query I
+SELECT bool_and(parse_lineage(lineage, allow_subset := true) IS NOT DISTINCT FROM parse_lineage(lineage)) FROM raw;
+----
+true
+
+# Both named parameters, in either order; domain_letter names only the domain.
+query TT
+SELECT (p).domain, (p).phylum FROM (SELECT parse_lineage('p__Bacillota', allow_subset := true, domain_letter := 'k') AS p);
+----
+NULL	Bacillota
+
+# Only the start is free: a skipped rank still errors, as o__ must follow c__ ...
+statement error
+SELECT parse_lineage('c__foo; f__bar', allow_subset := true);
+----
+<REGEX>:.*parse_lineage: .*must start with 'o__'.*c__foo; f__bar.*
+
+# ... and so does a reversed one.
+statement error
+SELECT parse_lineage('o__bar; c__foo', allow_subset := true);
+----
+<REGEX>:.*parse_lineage: .*must start with 'f__'.*
+
+# Without the flag a partial lineage errors, and the error names the flag.
+statement error
+SELECT parse_lineage('c__foo; o__bar');
+----
+<REGEX>:.*parse_lineage: .*pass allow_subset := true.*
+
+statement error
+SELECT parse_lineage('c__foo', allow_subset := NULL);
+----
+<REGEX>:.*parse_lineage: allow_subset must be true or false, not NULL.*
+
+statement error
+SELECT parse_lineage(lineage, allow_subset := feature_id = 'G1') FROM raw;
+----
+<REGEX>:.*parse_lineage: allow_subset must be a constant.*
+
 # --- malformed lineages are errors that quote the lineage ------------------
 
 statement error
