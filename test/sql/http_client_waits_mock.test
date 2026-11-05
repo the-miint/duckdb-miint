@@ -105,8 +105,10 @@ SELECT count(*) FROM ena.submission_log WHERE object_type = 'projects' AND NOT s
 ----
 1
 
-# Every other kind of Webin submission. Each names its target by accession,
-# so no Reports lookup comes before the POST.
+# The other six places that submit to Webin; an INSERT into another table goes
+# through the projects INSERT's, and ena_hold and ena_release through
+# ena_cancel's. Each names its target by accession, so no Reports lookup comes
+# before the POST.
 statement error
 SELECT * FROM ena_cancel(secret => 'webin_unavailable', accession => 'ERS-mock-001');
 ----
@@ -168,6 +170,12 @@ SELECT * FROM ena_modify_run(
     title => 'never modified');
 ----
 INTERRUPT Error: Query exceeded maximum execution time
+
+# Each logged its attempt before failing, as the projects INSERT did.
+query I
+SELECT count(*) FROM ena.submission_log WHERE NOT success;
+----
+7
 
 # The checklist fetch before a sample submission. A checklist that cannot be
 # fetched is skipped, and Webin validates instead; an interrupt is not that,
