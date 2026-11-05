@@ -384,6 +384,7 @@ list(
   src/tree_resolve_multifurcations.cpp
   src/tree_resolve_placement.cpp
   src/tree_table_reader.cpp
+  src/TreeIndex.cpp
   src/unifrac_function_common.cpp
   src/WFA2Aligner.cpp
   src/woltka_ogu_function.cpp
@@ -476,6 +477,7 @@ list(
   src/taxdump_archive.cpp
   src/taxdump_parser.cpp
   src/taxonomy_lineage.cpp
+  src/TreeIndex.cpp
   src/WFA2Aligner.cpp
   src/zip_utils.cpp
   test/cpp/test_AbsQuant.cpp
@@ -557,6 +559,7 @@ list(
   test/cpp/test_taxdump_archive.cpp
   test/cpp/test_taxdump_parser.cpp
   test/cpp/test_taxonomy_lineage.cpp
+  test/cpp/test_TreeIndex.cpp
   test/cpp/test_WFA2Aligner.cpp
   third_party/microtar/microtar.c)
 
