@@ -93,5 +93,19 @@ struct SraRead {
 // applies to SplitMode::Spot: split-3 always skips technical reads. Appends to out.
 void RouteSpot(const Spot &spot, SplitMode mode, bool include_technical, std::vector<SraRead> &out);
 
+// A row of read_sra's output: one read, or under split-3 a spot's two mates.
+struct SraRow {
+	int64_t spot = 0;
+	uint32_t read_number = 0; // of the first read
+	SraRead read1;
+	bool paired = false;
+	SraRead read2;
+};
+
+// Turns one spot's reads (RouteSpot's output, in its order) into rows. Under split-3 a spot is one
+// row: mates 1 and 2 together, or its single unpaired read. A spot with a third biological read has
+// no place in that shape and raises SraUnsupportedError. Under split-spot each read is a row.
+void RowsForSpot(std::vector<SraRead> &reads, SplitMode mode, std::vector<SraRow> &out);
+
 } // namespace sra
 } // namespace miint

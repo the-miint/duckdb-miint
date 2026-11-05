@@ -355,6 +355,7 @@ list(
   src/read_paf.cpp
   src/read_sequences_sam.cpp
   src/read_sequences_sff.cpp
+  src/read_sra.cpp
   src/reference_table_reader.cpp
   src/remote_file_helper.cpp
   src/rype_classify.cpp

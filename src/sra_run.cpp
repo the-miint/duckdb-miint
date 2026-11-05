@@ -428,5 +428,48 @@ void RouteSpot(const Spot &spot, SplitMode mode, bool include_technical, std::ve
 	}
 }
 
+void RowsForSpot(std::vector<SraRead> &reads, SplitMode mode, std::vector<SraRow> &out) {
+	if (reads.empty()) {
+		return;
+	}
+	if (mode == SplitMode::Spot) {
+		for (auto &r : reads) {
+			SraRow row;
+			row.spot = r.spot;
+			row.read_number = r.read_number;
+			row.read1 = std::move(r);
+			out.push_back(std::move(row));
+		}
+		return;
+	}
+	// split-3 writes one spot's reads either all to the unpaired file (at most one read: the only
+	// non-empty biological one) or to files 1, 2, ...
+	SraRow row;
+	row.spot = reads[0].spot;
+	row.read_number = reads[0].read_number;
+	for (auto &r : reads) {
+		if (r.destination > 2) {
+			throw SraUnsupportedError("spot " + std::to_string(r.spot) +
+			                          " has a third biological read, which a split_3 row cannot hold; "
+			                          "use split => 'spot'");
+		}
+	}
+	if (reads[0].destination == 0) {
+		if (reads.size() != 1) {
+			throw SraFormatError("spot " + std::to_string(row.spot) + " routes " + std::to_string(reads.size()) +
+			                     " reads to the unpaired file");
+		}
+		row.read1 = std::move(reads[0]);
+	} else {
+		if (reads.size() != 2 || reads[0].destination != 1 || reads[1].destination != 2) {
+			throw SraFormatError("spot " + std::to_string(row.spot) + " does not route to mates 1 and 2");
+		}
+		row.read1 = std::move(reads[0]);
+		row.read2 = std::move(reads[1]);
+		row.paired = true;
+	}
+	out.push_back(std::move(row));
+}
+
 } // namespace sra
 } // namespace miint
