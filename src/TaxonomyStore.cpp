@@ -12,14 +12,14 @@ namespace {
 constexpr size_t kRanks = kLineageRanks.size();
 constexpr size_t kMaxListedProblems = 10;
 
-std::string AsciiLower(std::string_view s) {
-	std::string out(s);
+// Sets `out` to `s` with ASCII letters lowercased, reusing out's buffer.
+void AsciiLower(std::string_view s, std::string &out) {
+	out.assign(s);
 	for (auto &c : out) {
 		if (c >= 'A' && c <= 'Z') {
 			c = static_cast<char>(c - 'A' + 'a');
 		}
 	}
-	return out;
 }
 
 // Why `value` cannot be a rank name, or nullptr if it can.
@@ -67,7 +67,11 @@ private:
 	size_t count_ = 0;
 };
 
-std::string IdText(const std::string &feature_id) {
+// How a problem names its row: by feature_id, or by position when the id is empty.
+std::string RowText(const std::string &feature_id, size_t row) {
+	if (feature_id.empty()) {
+		return "row " + std::to_string(row + 1) + " (empty feature_id)";
+	}
 	return "feature_id '" + feature_id + "'";
 }
 
@@ -87,7 +91,8 @@ TaxonomyStore::TaxonomyStore(const std::vector<TaxonomyRow> &rows, const std::ve
 		if (token.empty()) {
 			throw std::invalid_argument("taxonomy: a bad-name token is empty, which would match every name");
 		}
-		lower_tokens.push_back(AsciiLower(token));
+		lower_tokens.emplace_back();
+		AsciiLower(token, lower_tokens.back());
 	}
 
 	// Row checks: ids, values, gaps. Each row is checked in full before any is cleaned.
@@ -95,11 +100,11 @@ TaxonomyStore::TaxonomyStore(const std::vector<TaxonomyRow> &rows, const std::ve
 	for (const auto &row : rows) {
 		feature_ids_.push_back(row.feature_id);
 	}
-	std::unordered_map<std::string_view, size_t> id_count;
+	// How many times each repeated id occurs; ids that occur once are not listed.
+	std::unordered_map<std::string_view, size_t> repeats;
 	for (size_t i = 0; i < feature_ids_.size(); i++) {
-		if (!feature_ids_[i].empty()) {
-			row_of_id_.emplace(feature_ids_[i], i);
-			id_count[feature_ids_[i]]++;
+		if (!feature_ids_[i].empty() && !row_of_id_.emplace(feature_ids_[i], i).second) {
+			repeats.emplace(feature_ids_[i], 1).first->second++;
 		}
 	}
 
@@ -109,15 +114,15 @@ TaxonomyStore::TaxonomyStore(const std::vector<TaxonomyRow> &rows, const std::ve
 		const auto &ranks = rows[i].ranks;
 		if (id.empty()) {
 			problems.Add("row " + std::to_string(i + 1) + " has an empty feature_id");
-		} else if (row_of_id_.at(id) == i && id_count.at(id) > 1) {
-			problems.Add(IdText(id) + " appears " + std::to_string(id_count.at(id)) + " times");
+		} else if (auto repeat = repeats.find(id); repeat != repeats.end() && row_of_id_.at(id) == i) {
+			problems.Add(RowText(id, i) + " appears " + std::to_string(repeat->second) + " times");
 		}
 		for (size_t r = 0; r < kRanks; r++) {
 			if (!ranks[r]) {
 				continue;
 			}
 			if (const char *why = ValueProblem(*ranks[r])) {
-				problems.Add(IdText(id) + ", column '" + kLineageRanks[r].column + "': value '" + *ranks[r] + "' " +
+				problems.Add(RowText(id, i) + ", column '" + kLineageRanks[r].column + "': value '" + *ranks[r] + "' " +
 				             why);
 			}
 		}
@@ -127,7 +132,7 @@ TaxonomyStore::TaxonomyStore(const std::vector<TaxonomyRow> &rows, const std::ve
 			}
 			for (size_t deeper = r + 1; deeper < kRanks; deeper++) {
 				if (ranks[deeper]) {
-					problems.Add(IdText(id) + ": '" + kLineageRanks[r].column + "' is NULL but deeper rank '" +
+					problems.Add(RowText(id, i) + ": '" + kLineageRanks[r].column + "' is NULL but deeper rank '" +
 					             kLineageRanks[deeper].column + "' is not");
 					break;
 				}
@@ -149,6 +154,7 @@ TaxonomyStore::TaxonomyStore(const std::vector<TaxonomyRow> &rows, const std::ve
 	std::vector<Conflict> conflicts;
 	std::map<std::pair<size_t, NameId>, size_t> conflict_index;
 
+	std::string lower;
 	for (size_t i = 0; i < rows.size(); i++) {
 		const auto &ranks = rows[i].ranks;
 		// With no gaps, the present ranks are a prefix of the lineage.
@@ -158,8 +164,8 @@ TaxonomyStore::TaxonomyStore(const std::vector<TaxonomyRow> &rows, const std::ve
 		}
 		const size_t given_depth = depth;
 
-		for (size_t r = 0; r < depth; r++) {
-			const std::string lower = AsciiLower(*ranks[r]);
+		for (size_t r = 0; r < depth && !lower_tokens.empty(); r++) {
+			AsciiLower(*ranks[r], lower);
 			for (size_t t = 0; t < lower_tokens.size(); t++) {
 				if (lower.find(lower_tokens[t]) != std::string::npos) {
 					truncations_.push_back({i, r, bad_name_tokens[t]});
@@ -180,6 +186,10 @@ TaxonomyStore::TaxonomyStore(const std::vector<TaxonomyRow> &rows, const std::ve
 			auto [it, inserted] = name_ids[r].emplace(*ranks[r], static_cast<NameId>(name_text_[r].size()));
 			const NameId name = it->second;
 			if (inserted) {
+				if (name == kMissingName) {
+					throw std::invalid_argument(std::string("taxonomy: more distinct names at rank '") +
+					                            kLineageRanks[r].column + "' than a NameId can hold");
+				}
 				name_text_[r].push_back(*ranks[r]);
 				parent_[r].push_back(parent);
 			} else if (parent_[r][name] != parent) {

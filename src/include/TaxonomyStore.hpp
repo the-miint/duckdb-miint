@@ -2,6 +2,7 @@
 
 #include "taxonomy_lineage.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -53,6 +54,13 @@ public:
 	explicit TaxonomyStore(const std::vector<TaxonomyRow> &rows,
 	                       const std::vector<std::string> &bad_name_tokens = DefaultBadNameTokens());
 
+	// Not copyable: row_of_id_ views the strings in feature_ids_, and a copy's views would
+	// still point into the original. A move keeps the vector's buffer, so its views stay valid.
+	TaxonomyStore(const TaxonomyStore &) = delete;
+	TaxonomyStore &operator=(const TaxonomyStore &) = delete;
+	TaxonomyStore(TaxonomyStore &&) = default;
+	TaxonomyStore &operator=(TaxonomyStore &&) = default;
+
 	size_t RowCount() const;
 	const std::string &FeatureId(size_t row) const;
 	// The input row with this feature_id, if any.
@@ -69,7 +77,8 @@ public:
 	// The name's parent, one rank shallower; kMissingName at rank 0.
 	NameId Parent(size_t rank, NameId name) const;
 
-	// What cleaning removed, in input order.
+	// Lineages cut at a bad name, in input order. A cut that left no domain and phylum also
+	// puts the row in WipedRows: the cut says why the lineage was emptied.
 	const std::vector<LineageTruncation> &Truncations() const;
 	// Rows whose lineage the domain/phylum rule emptied, in input order. A row that was
 	// all NULL from the start is non-informative but not listed: nothing was removed.

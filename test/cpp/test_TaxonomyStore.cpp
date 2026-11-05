@@ -4,6 +4,8 @@
 #include "TaxonomyStore.hpp"
 
 #include <stdexcept>
+#include <type_traits>
+#include <utility>
 
 using namespace miint;
 using Catch::Matchers::ContainsSubstring;
@@ -69,6 +71,16 @@ TEST_CASE("TaxonomyStore interns names per rank", "[taxonomy_store]") {
 
 // Backfill walks up this map to supply the ranks between a placed name and its nearest
 // named ancestor.
+// FindRow's index views the store's own id strings. A copy would view the original's, so
+// copying is refused; a move keeps the strings where they are, so the index still works.
+static_assert(!std::is_copy_constructible_v<TaxonomyStore> && !std::is_copy_assignable_v<TaxonomyStore>);
+TEST_CASE("TaxonomyStore finds rows by feature_id after a move", "[taxonomy_store]") {
+	TaxonomyStore store({Row("G1", {"A", "B"}), Row("a much longer feature id than any SSO buffer", {"A", "C"})});
+	TaxonomyStore moved(std::move(store));
+	CHECK(moved.FindRow("G1") == std::optional<size_t>(0));
+	CHECK(moved.FindRow("a much longer feature id than any SSO buffer") == std::optional<size_t>(1));
+}
+
 TEST_CASE("TaxonomyStore records each name's parent", "[taxonomy_store]") {
 	TaxonomyStore store({Row("G1", {"A", "B", "C", "D", "E", "F"}), Row("G2", {"A", "B", "C", "D", "E2", "F2"})});
 	auto parent_text = [&](size_t row, size_t rank) {
@@ -117,6 +129,9 @@ TEST_CASE("TaxonomyStore rejects empty and duplicate feature_ids", "[taxonomy_st
 	CHECK_THAT(ErrorOf({Row("G1", {"A", "B"}), Row("G2", {"A", "B"}), Row("G1", {"A", "C"})}),
 	           ContainsSubstring("feature_id 'G1' appears 2 times"));
 	CHECK_THAT(ErrorOf({Row("", {"A", "B"})}), ContainsSubstring("empty feature_id"));
+	// A row with no id is named by its position, so its other problems can be found.
+	CHECK_THAT(ErrorOf({Row("G1", {"A", "B"}), Row("", {"A", "B", " C"})}),
+	           ContainsSubstring("row 2 (empty feature_id), column 'class'"));
 }
 
 // The reference nulls only the bad field, leaving the names below it under a missing
