@@ -223,6 +223,16 @@ TEST_CASE("ParseLineageString reads back what FormatLineage writes", "[lineage][
 	}
 }
 
+// NCBI has species names containing ';' ("Rhodococcus sp. SJ-2;3"). FormatLineage writes
+// them unescaped, so the name splits into an extra field. That must be an error, never a
+// lineage with the name cut short and its tail filed under the next rank.
+TEST_CASE("ParseLineageString rejects a lineage whose name contained ';'", "[lineage][parse_lineage]") {
+	auto lin = CollapseLineage(1, "Rhodococcus sp. SJ-2;3", "species",
+	                           {{2, "Bacteria", "domain"}, {3, "Rhodococcus", "genus"}});
+	REQUIRE(lin.lineage == "d__Bacteria;p__;c__;o__;f__;g__Rhodococcus;s__Rhodococcus sp. SJ-2;3");
+	CHECK_THROWS_WITH(ParseLineageString(lin.lineage), ContainsSubstring("must start with 't__'"));
+}
+
 TEST_CASE("ParseLineageString: empty bodies and short lineages are missing ranks", "[lineage][parse_lineage]") {
 	SECTION("all eight ranks") {
 		CHECK(ParseLineageString("d__A; p__B; c__C; o__D; f__E; g__F; s__F g; t__F g H") ==

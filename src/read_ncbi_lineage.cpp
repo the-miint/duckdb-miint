@@ -39,7 +39,6 @@ std::string TaxidToString(const Value &v) {
 	return std::to_string(v.GetValue<int64_t>());
 }
 
-// Emit a VARCHAR cell, or NULL when the collapsed rank is absent.
 // Execute writes Lineage's rank fields positionally into columns 3-10, while Data names
 // those columns from kLineageRanks. Changing kLineageRanks fails here, not at run time.
 constexpr bool RankWritesMatchColumns() {
@@ -57,6 +56,7 @@ constexpr bool RankWritesMatchColumns() {
 }
 static_assert(RankWritesMatchColumns(), "read_ncbi_lineage's SetRankCell calls no longer match kLineageRanks");
 
+// Emit a VARCHAR cell, or NULL when the collapsed rank is absent.
 void SetRankCell(DataChunk &output, idx_t col, idx_t row, const std::string &value) {
 	if (value.empty()) {
 		FlatVector::ValidityMutable(output.data[col]).SetInvalid(row);

@@ -7,8 +7,7 @@ require miint
 # --- the result is the shared lineage schema -------------------------------
 # `unnest(parse_lineage(x))` must yield exactly the eight rank columns taxonomy_lineage
 # and read_ncbi_lineage emit, in the same order, so the output feeds anything that takes
-# that schema without renaming. (DuckDB 2.0 does not
-# parse `(expr).*`; unnest is how a STRUCT result becomes columns.)
+# that schema without renaming.
 
 query TT
 SELECT column_name, column_type
