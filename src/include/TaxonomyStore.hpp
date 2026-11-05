@@ -16,11 +16,11 @@ namespace miint {
 
 // A rank name, interned per rank: the same NameId at two ranks names two different taxa.
 using NameId = uint32_t;
-// A missing rank (SQL NULL in the input, or emptied by cleaning).
+// A missing rank: NULL in the input row, or emptied by cleaning.
 inline constexpr NameId kMissingName = std::numeric_limits<NameId>::max();
 
-// One input row of the shared lineage schema: a feature id, as text, and its eight rank
-// values in kLineageRanks order, nullopt for NULL.
+// One input row: a feature id, as text, and its values for the shared lineage schema's eight
+// rank columns, in kLineageRanks order, nullopt for NULL.
 struct TaxonomyRow {
 	std::string feature_id;
 	LineageRanks ranks;
@@ -37,18 +37,27 @@ struct LineageTruncation {
 	std::string token;
 };
 
-// A taxonomy in the shared lineage schema, validated, cleaned and interned for decoration.
+// A taxonomy's lineages, validated, cleaned and interned per rank, with each name's parent.
+// Every name has one parent, so walking Parent() from a name gives its one lineage.
 //
-// Construction checks every row and throws std::invalid_argument giving the number of
-// problems and the first 10, in input order, when any of these holds:
-//   - a feature_id is empty, or appears more than once;
-//   - a rank value is empty, starts or ends with whitespace, starts with a rank prefix
-//     ("p__Bacillota"), or contains ';';
-//   - a rank is NULL while a deeper rank is not (a gap);
-//   - after cleaning, a name has more than one parent name (one rank shallower).
-// Cleaning, per row: the first rank whose value contains a bad-name token, and every
-// rank below it, become missing; then a lineage missing its domain or phylum becomes
-// missing entirely (the row is non-informative).
+// Construction throws std::invalid_argument from two passes, each giving the number of
+// problems and the first 10 in input order:
+//   1. Rows, all checked before anything is cleaned: a feature_id is empty or repeated; a
+//      rank value is empty, starts or ends with whitespace, starts with a rank prefix
+//      ("p__Bacillota") or contains ';'; a rank is NULL while a deeper rank is not (a gap).
+//      Any problem stops construction here.
+//   2. Names, over the cleaned lineages: a name appears under more than one parent lineage.
+// It also throws, without a count, for an empty bad-name token, and for more distinct names
+// at one rank than NameId can number.
+//
+// Cleaning, per row: the first rank whose value contains a bad-name token, and every rank
+// below it, become missing; then a lineage missing its domain or its phylum becomes missing
+// entirely (the row is non-informative). tax2tree differs: it empties only the bad rank,
+// which leaves a gap, and its min-informative rule tests the phylum alone, before the
+// bad-name filter runs.
+//
+// Accessors take rows, ranks (kLineageRanks indexes) and NameIds in range; kMissingName is
+// not a NameId.
 class TaxonomyStore {
 public:
 	explicit TaxonomyStore(const std::vector<TaxonomyRow> &rows,
@@ -77,8 +86,8 @@ public:
 	// The name's parent, one rank shallower; kMissingName at rank 0.
 	NameId Parent(size_t rank, NameId name) const;
 
-	// Lineages cut at a bad name, in input order. A cut that left no domain and phylum also
-	// puts the row in WipedRows: the cut says why the lineage was emptied.
+	// Lineages cut at a bad name, in input order. A cut that left no domain or no phylum
+	// also puts the row in WipedRows: the cut says why the lineage was emptied.
 	const std::vector<LineageTruncation> &Truncations() const;
 	// Rows whose lineage the domain/phylum rule emptied, in input order. A row that was
 	// all NULL from the start is non-informative but not listed: nothing was removed.

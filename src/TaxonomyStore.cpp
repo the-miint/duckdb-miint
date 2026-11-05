@@ -11,8 +11,10 @@ namespace {
 
 constexpr size_t kRanks = kLineageRanks.size();
 constexpr size_t kMaxListedProblems = 10;
+constexpr size_t kMaxListedParents = 3;
 
-// Sets `out` to `s` with ASCII letters lowercased, reusing out's buffer.
+// Sets `out` to `s` with ASCII letters lowercased, reusing out's buffer. Spelled out
+// because std::tolower depends on the locale.
 void AsciiLower(std::string_view s, std::string &out) {
 	out.assign(s);
 	for (auto &c : out) {
@@ -39,8 +41,10 @@ const char *ValueProblem(const std::string &value) {
 	return nullptr;
 }
 
-// Counts every problem and keeps the first few, for one error that shows the shape of a
-// broken taxonomy without growing with it.
+// Counts every problem and keeps the first few, one per line in input order, so the error
+// for a broken taxonomy stays a bounded number of lines. FormatIdList (absquant.cpp) and
+// join_names (NewickTree.cpp) list sorted, deduplicated ids; each entry here is a whole
+// problem with its reason, kept in input order so the caller can find the row.
 class Problems {
 public:
 	void Add(std::string problem) {
@@ -78,7 +82,9 @@ std::string RowText(const std::string &feature_id, size_t row) {
 } // namespace
 
 const std::vector<std::string> &DefaultBadNameTokens() {
-	// t2t/nlevel.py BAD_NAMES, in its order.
+	// BAD_NAMES in biocore/tax2tree's t2t/nlevel.py, in its order. The first token that
+	// matches is the one recorded, so "environmental samples" is recorded as
+	// "environmental sample".
 	static const std::vector<std::string> tokens = {
 	    "environmental sample", "uncultured", "UNNAMEABLE", "unclassified",
 	    "unidentified",         "cluster",    "isolate",    "environmental samples"};
@@ -145,11 +151,14 @@ TaxonomyStore::TaxonomyStore(const std::vector<TaxonomyRow> &rows, const std::ve
 	// Clean, intern and link each lineage to its parent names.
 	names_.assign(rows.size() * kRanks, kMissingName);
 	std::array<std::unordered_map<std::string, NameId>, kRanks> name_ids;
-	// Names seen under more than one parent, in the order the second parent appeared.
+	// The row that first interned each name, to show the lineage a parent came from.
+	std::array<std::vector<size_t>, kRanks> first_row;
+	// Names seen under more than one parent, in the order the second parent appeared. Each
+	// distinct parent is kept with the row it first came from.
 	struct Conflict {
 		size_t rank;
 		NameId name;
-		std::vector<NameId> parents;
+		std::vector<std::pair<NameId, size_t>> parents;
 	};
 	std::vector<Conflict> conflicts;
 	std::map<std::pair<size_t, NameId>, size_t> conflict_index;
@@ -187,19 +196,23 @@ TaxonomyStore::TaxonomyStore(const std::vector<TaxonomyRow> &rows, const std::ve
 			const NameId name = it->second;
 			if (inserted) {
 				if (name == kMissingName) {
-					throw std::invalid_argument(std::string("taxonomy: more distinct names at rank '") +
-					                            kLineageRanks[r].column + "' than a NameId can hold");
+					throw std::invalid_argument("taxonomy: more than " + std::to_string(kMissingName) +
+					                            " distinct names at rank '" + kLineageRanks[r].column + "'");
 				}
 				name_text_[r].push_back(*ranks[r]);
 				parent_[r].push_back(parent);
+				first_row[r].push_back(i);
 			} else if (parent_[r][name] != parent) {
 				auto [entry, added] = conflict_index.emplace(std::make_pair(r, name), conflicts.size());
 				if (added) {
-					conflicts.push_back({r, name, {parent_[r][name]}});
+					conflicts.push_back({r, name, {{parent_[r][name], first_row[r][name]}}});
 				}
 				auto &seen = conflicts[entry->second].parents;
-				if (std::find(seen.begin(), seen.end(), parent) == seen.end()) {
-					seen.push_back(parent);
+				auto same_parent = [&](const std::pair<NameId, size_t> &p) {
+					return p.first == parent;
+				};
+				if (std::none_of(seen.begin(), seen.end(), same_parent)) {
+					seen.emplace_back(parent, i);
 				}
 			}
 			names_[i * kRanks + r] = name;
@@ -207,22 +220,23 @@ TaxonomyStore::TaxonomyStore(const std::vector<TaxonomyRow> &rows, const std::ve
 	}
 
 	for (const auto &conflict : conflicts) {
+		const size_t listed = std::min(conflict.parents.size(), kMaxListedParents);
 		std::string problem = "'" + name_text_[conflict.rank][conflict.name] + "' (" +
-		                      kLineageRanks[conflict.rank].column + ") has " + std::to_string(conflict.parents.size()) +
-		                      " parent lineages:";
-		for (size_t p = 0; p < conflict.parents.size(); p++) {
-			// The parent's own lineage, read up the hierarchy from the parent's rank.
-			std::vector<std::string> path;
-			NameId name = conflict.parents[p];
-			for (size_t r = conflict.rank; r-- > 0;) {
-				path.push_back(std::string(1, kLineageRanks[r].letter) + "__" + name_text_[r][name]);
-				name = parent_[r][name];
-			}
+		                      kLineageRanks[conflict.rank].column + ") appears under " +
+		                      std::to_string(conflict.parents.size()) + " parent lineages:";
+		for (size_t p = 0; p < listed; p++) {
+			// The lineage above the name in the row the parent came from, joined with "; " as
+			// tax2tree writes labels, for reading. (FormatLineage writes lineages for parsing.)
+			const size_t row = conflict.parents[p].second;
 			std::string lineage;
-			for (auto it = path.rbegin(); it != path.rend(); ++it) {
-				lineage += (lineage.empty() ? "" : "; ") + *it;
+			for (size_t r = 0; r < conflict.rank; r++) {
+				lineage += (r == 0 ? "" : "; ") + std::string(1, kLineageRanks[r].letter) + "__" +
+				           name_text_[r][names_[row * kRanks + r]];
 			}
 			problem += (p == 0 ? " [" : ", [") + lineage + "]";
+		}
+		if (conflict.parents.size() > listed) {
+			problem += ", and " + std::to_string(conflict.parents.size() - listed) + " more";
 		}
 		problems.Add(std::move(problem));
 	}
