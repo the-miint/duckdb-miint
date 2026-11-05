@@ -7,7 +7,7 @@ require miint
 # --- the result is the shared lineage schema -------------------------------
 # `unnest(parse_lineage(x))` must yield exactly the eight rank columns taxonomy_lineage
 # and read_ncbi_lineage emit, in the same order, so the output feeds anything that takes
-# that schema (tax2tree's taxonomy and pins) without renaming. (DuckDB 2.0 does not
+# that schema without renaming. (DuckDB 2.0 does not
 # parse `(expr).*`; unnest is how a STRUCT result becomes columns.)
 
 query TT
@@ -57,6 +57,19 @@ G3	false
 G4	false
 G5	true
 
+# A literal NULL reaches the function as a constant vector, not a table row.
+query III
+SELECT parse_lineage(NULL) IS NULL, (parse_lineage(NULL)).domain IS NULL, (parse_lineage(NULL::VARCHAR))."order" IS NULL;
+----
+true	true	true
+
+# DuckDB 2.0 does not parse `(expr).*`, which is why the docs give unnest. If a DuckDB
+# upgrade makes this pass, the docs' sentence about it is stale.
+statement error
+SELECT (parse_lineage('d__A')).*;
+----
+<REGEX>:Parser Error: syntax error at or near.*
+
 # "order" is a reserved word: the expanded column is reachable only when quoted.
 query T
 SELECT "order" FROM (SELECT unnest(parse_lineage(lineage)) FROM raw WHERE feature_id = 'G1');
@@ -79,7 +92,7 @@ SELECT count(*) > 0 FROM taxonomy_lineage(source := 'data/taxonomy/synthetic');
 ----
 true
 
-# --- gaps are decorate's to reject, not the converter's --------------------
+# --- gaps are not rejected here --------------------------------------------
 
 query TTT
 SELECT (p).domain, (p).phylum, (p)."class" FROM (SELECT parse_lineage('d__A; p__; c__C') AS p);
@@ -103,7 +116,7 @@ SELECT parse_lineage('k__Bacteria; p__Bacillota');
 statement error
 SELECT parse_lineage('d__Bacteria; p__Bacillota', domain_letter := 'k');
 ----
-<REGEX>:.*parse_lineage: .*k__.*
+<REGEX>:.*parse_lineage: .*must start with 'k__'.*pass domain_letter := 'd'.*
 
 statement error
 SELECT parse_lineage('d__Bacteria', domain_letter := 'x');
@@ -143,7 +156,7 @@ SELECT parse_lineage('d__A; c__B');
 statement error
 SELECT parse_lineage('d__A; p__B; c__C; o__D; f__E; g__F; s__G; t__H; t__I');
 ----
-<REGEX>:.*parse_lineage: .*8.*
+<REGEX>:.*parse_lineage: .*at most 8 fields.*
 
 statement error
 SELECT parse_lineage('');
@@ -160,8 +173,7 @@ SELECT parse_lineage('Bacteria; Bacillota');
 ----
 <REGEX>:.*parse_lineage: .*d__.*
 
-# Values decorate would reject are rejected here, so a converted table always passes
-# decorate's value checks.
+# A name may not start with whitespace or carry a second rank prefix.
 
 statement error
 SELECT parse_lineage('d__ Bacteria');

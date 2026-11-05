@@ -92,9 +92,18 @@ std::vector<int64_t> ExtractAllTaxIds(const std::string &xml) {
 }
 
 // ASCII whitespace, trimmed from both ends of a lineage field. Names may contain it
-// ("Escherichia coli") but may not start with it.
+// ("Escherichia coli") but may not start with it. Spelled out because std::isspace
+// depends on the locale, and this file is DuckDB-free, so StringUtil::CharacterIsSpace
+// is not available.
 bool IsLineageSpace(char c) {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+
+// A rank prefix is a letter and two underscores: "d__", "p__", ...
+constexpr size_t kRankPrefixWidth = 3;
+
+bool HasRankPrefix(std::string_view field, char letter) {
+	return field.size() >= kRankPrefixWidth && field[0] == letter && field[1] == '_' && field[2] == '_';
 }
 
 std::string FormatLineage(const Lineage &l) {
@@ -166,24 +175,25 @@ LineageRanks ParseLineageString(std::string_view lineage, char domain_letter) {
 			throw fail(position, field, "is empty");
 		}
 		const char letter = position == 0 ? domain_letter : kLineageRanks[position].letter;
-		if (field.size() < 3 || field[0] != letter || field[1] != '_' || field[2] != '_') {
+		if (!HasRankPrefix(field, letter)) {
 			std::string why = "must start with '" + std::string(1, letter) + "__'";
 			if (position == 0) {
-				const std::string other = domain_letter == 'd' ? "k" : "d";
+				const char other = domain_letter == 'd' ? 'k' : 'd';
 				why += " (domain_letter is '" + std::string(1, domain_letter) + "'";
-				if (field.substr(0, 3) == other + "__") {
-					why += "; pass domain_letter := '" + other + "' to read " + other + "__ lineages";
+				if (HasRankPrefix(field, other)) {
+					const std::string o(1, other);
+					why += "; pass domain_letter := '" + o + "' to read " + o + "__ lineages";
 				}
 				why += ")";
 			}
 			throw fail(position, field, why);
 		}
-		const std::string_view name = field.substr(3);
+		const std::string_view name = field.substr(kRankPrefixWidth);
 		if (!name.empty()) {
 			if (IsLineageSpace(name[0])) {
 				throw fail(position, field, "has whitespace after its rank prefix");
 			}
-			if (name.size() >= 3 && name[0] >= 'a' && name[0] <= 'z' && name[1] == '_' && name[2] == '_') {
+			if (name[0] >= 'a' && name[0] <= 'z' && HasRankPrefix(name, name[0])) {
 				throw fail(position, field, "has a second rank prefix");
 			}
 			ranks[position] = std::string(name);

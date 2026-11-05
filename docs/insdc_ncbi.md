@@ -8,7 +8,7 @@ MIINT provides integration with NCBI's GenBank and RefSeq.
 - [Read metadata](#read-metadata) - Fetch record metadata from GenBank and RefSeq by accession.
 - [Read sequences](#read-sequences) - Fetch sequence data from GenBank and RefSeq by accession.
 - [Read annotations](#read-annotations) - Fetch annotation data from GenBank and RefSeq by accession.
-- [Taxonomy](#taxonomy) - Obtain and use the NCBI taxonomy: the full tree (bulk/offline), online lineage lookups, and offline lineage collapse.
+- [Taxonomy](#taxonomy) - Obtain and use the NCBI taxonomy: the full tree (bulk/offline), online lineage lookups, offline lineage collapse, and parsing prefixed lineage strings.
   - [Read the taxonomy tree (`read_ncbi_taxdump`)](#read-the-taxonomy-tree-read_ncbi_taxdump) - Bulk/offline: download + cache the taxonomy tree.
   - [Remap retired taxids (`read_ncbi_taxdump_merged`)](#remap-retired-taxids-read_ncbi_taxdump_merged) - The retired→current taxid map.
   - [Read every name class (`read_ncbi_taxdump_names`)](#read-every-name-class-read_ncbi_taxdump_names) - All of `names.dmp`, including `genbank common name`.
@@ -524,9 +524,10 @@ JOIN taxonomy_lineage(source := '/data/taxonomy/') l ON l.taxid = m.taxonomy_id;
 ### Parse lineage strings (`parse_lineage`)
 
 Turns a prefixed lineage string, as written by GTDB, Greengenes2, tax2tree and
-`taxonomy_lineage` itself, into the eight rank columns of the shared lineage schema. Use it
-to bring a `(feature_id, lineage)` taxonomy into the shared schema. It works on any
-prefixed lineage, not only NCBI ones.
+`taxonomy_lineage` itself, into the eight rank columns of the
+[shared lineage schema](#look-up-lineages-online-read_ncbi_lineage). Use it to turn a
+`(feature_id, lineage)` taxonomy into those columns. It works on any prefixed lineage, not
+only NCBI ones.
 
 **Parameters:**
 - `lineage` (VARCHAR): for example `d__Bacteria; p__Bacillota; c__Bacilli` or `d__Bacteria;p__Bacillota;c__Bacilli`
@@ -541,7 +542,8 @@ the struct into columns.
 - Fields are separated by `;`, and whitespace around a field is ignored, so `'; '` and `';'` both work.
 - Each field is `<letter>__<name>`, and its letter must match its position: `d p c o f g s t` (domain through strain). A skipped rank therefore errors rather than shifting the names below it into the wrong columns.
 - An empty name (`p__`) is NULL, and a lineage with fewer than eight fields leaves the deeper ranks NULL. `d__A;p__;c__;o__;f__;g__;s__` gives domain `A` and seven NULLs.
-- Lineages without prefixes (raw SILVA) are not supported, since a field's rank would be unknown.
+- Lineages without rank prefixes are not supported: raw SILVA, and QIIME-formatted SILVA, whose `D_0__`, `D_1__`, ... prefixes name a depth rather than a rank.
+- A `lineage` written by `taxonomy_lineage` or `read_ncbi_lineage` parses back into the columns it was written from, unless a name contains `;`. Such a name splits into an extra field and errors; it is never misread. NCBI has a few such names, such as the species `Rhodococcus sp. SJ-2;3`.
 - `parse_lineage` does not reject gaps: `d__A; p__; c__C` returns phylum NULL and class `C`. Consumers that need gap-free lineages check that themselves.
 
 **Errors** quote the lineage and name the field:
@@ -552,10 +554,9 @@ the struct into columns.
 
 **Examples:**
 ```sql
--- (feature_id, lineage) -> the shared lineage schema
-SELECT feature_id, unnest(parse_lineage(lineage))
-FROM read_csv('taxonomy.tsv', delim = '\t', header = false,
-              columns = {'feature_id': 'VARCHAR', 'lineage': 'VARCHAR'});
+-- A QIIME 2 taxonomy.tsv (header: Feature ID, Taxon, Confidence)
+SELECT "Feature ID" AS feature_id, unnest(parse_lineage(Taxon))
+FROM read_csv('taxonomy.tsv', delim = '\t', header = true);
 
 -- Greengenes 13_8, which writes k__ for the domain
 SELECT feature_id, unnest(parse_lineage(lineage, domain_letter := 'k'))
