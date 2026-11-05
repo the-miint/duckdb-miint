@@ -274,6 +274,7 @@ list(
   src/ensure_httpfs.cpp
   src/extract_linked_amplicon.cpp
   src/fastq_encoder.cpp
+  src/file_suffix_scan.cpp
   src/formula_function.cpp
   src/formula_parser.cpp
   src/gfa_parser.cpp
