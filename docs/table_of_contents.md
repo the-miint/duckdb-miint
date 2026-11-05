@@ -78,6 +78,10 @@ Two constraints come with it:
 - [Multiple sequence alignment](alignment_multiple.md) - Multiple sequence alignment methods.
 - [Alignment analysis](alignment_analysis.md) - Operations for the analysis of alignment data.
 
+## Genomes
+
+- [Gene prediction](gene_prediction.md) - Call prokaryotic genes and their proteins (Prodigal, single-genome or metagenomic), and write them as Prodigal's GFF.
+
 ## Amplicon & community analysis
 
 - [Quality control](qc.md) - Adapter / polyG / polyX / quality trimming and per-read filtering.

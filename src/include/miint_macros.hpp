@@ -5,6 +5,7 @@
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/statement/create_statement.hpp"
 #include "duckdb/parser/parsed_data/create_macro_info.hpp"
+#include "predict_genes.hpp"
 
 namespace duckdb {
 
@@ -129,6 +130,204 @@ const std::string READ_GFF = // NOLINT
     "  ) "
     ") "
     "WHERE keep; ";
+
+// _miint_gff3_lines(relation) / _miint_prodigal_gff_lines(relation, ...)
+//
+// COPY ... (FORMAT GFF)'s internals (src/copy_gff.cpp): GFF files as lines, one row each, which the CSV writer
+// (HEADER false, QUOTE '', ESCAPE '') writes. The rows
+// are numbered in the relation's order (row_number() OVER ()), and the lines come out in that order.
+
+// A GFF3 column 9 key or value, with the characters GFF3 reserves there (and '%' and control characters)
+// percent-encoded. read_gff decodes them.
+const std::string MIINT_GFF_ENCODE = // NOLINT
+    "CREATE OR REPLACE MACRO _miint_gff_encode(s) AS ( "
+    "  array_to_string(list_transform(string_split(s, ''), lambda c: "
+    "    CASE WHEN c <> '' AND (ord(c) < 32 OR ord(c) = 127 OR c IN ('%', ';', '=', '&', ',')) "
+    "         THEN printf('%%%02X', ord(c)) ELSE c END), '') "
+    "); ";
+
+// A value written into a line as it is: NULL, empty, a control character (which would break the line) and, for the
+// first column, a leading '#' (which would make the line a comment) are refused, naming the column and row.
+const std::string MIINT_GFF_TEXT = // NOLINT
+    "CREATE OR REPLACE MACRO _miint_gff_text(fn, v, col, n, first) AS ( "
+    "  CASE WHEN v IS NULL THEN error(printf('%s: NULL %s (row %d)', fn, col, n)) "
+    "       WHEN v::VARCHAR = '' THEN error(printf('%s: empty %s (row %d)', fn, col, n)) "
+    "       WHEN regexp_matches(v::VARCHAR, '[[:cntrl:]]') "
+    "       THEN error(printf('%s: %s ''%s'' (row %d) has a control character, which a GFF line cannot hold', "
+    "                         fn, col, v::VARCHAR, n)) "
+    "       WHEN first AND starts_with(v::VARCHAR, '#') "
+    "       THEN error(printf('%s: %s ''%s'' (row %d) starts with ''#'', which makes the line a comment', "
+    "                         fn, col, v::VARCHAR, n)) "
+    "       ELSE v::VARCHAR END "
+    "); ";
+
+// A value a line needs: NULL is refused, rather than written as 'NULL' or read as 0.
+const std::string MIINT_GFF_REQUIRED = // NOLINT
+    "CREATE OR REPLACE MACRO _miint_gff_required(fn, v, col, n) AS ( "
+    "  CASE WHEN v IS NULL THEN error(printf('%s: NULL %s (row %d)', fn, col, n)) ELSE v END "
+    "); ";
+
+const std::string MIINT_GFF_INTEGRAL = // NOLINT
+    "CREATE OR REPLACE MACRO _miint_gff_integral(v) AS ( "
+    "  typeof(v) IN ('TINYINT', 'SMALLINT', 'INTEGER', 'BIGINT', 'HUGEINT', 'UTINYINT', 'USMALLINT', 'UINTEGER', "
+    "                'UBIGINT', 'UHUGEINT', '\"NULL\"') "
+    "); ";
+
+// GFF3 from read_gff's columns (seqid, source, type, position, stop_position, score, strand, phase, attributes): what
+// read_gff reads, this writes and read_gff reads back the same. stop_position is half-open, as read_gff returns it,
+// so the end written is stop_position - 1. attributes is a MAP, encoded, or text, written as given; to tell them
+// apart in one expression, it goes through JSON (an OBJECT or a string).
+const std::string GFF3_LINES = // NOLINT
+    "CREATE OR REPLACE MACRO _miint_gff3_lines(relation) AS TABLE "
+    "SELECT CASE WHEN raw_line IS NULL "
+    "            THEN error(printf('COPY FORMAT GFF: row %d has a NULL where its line needs a value', n)) "
+    "            ELSE raw_line END AS line "
+    "FROM ( "
+    "  SELECT 0 AS n, '##gff-version 3' AS raw_line "
+    "  UNION ALL "
+    "  SELECT n, "
+    "    _miint_gff_text('COPY FORMAT GFF', seqid, 'seqid', n, true) || chr(9) || "
+    "    _miint_gff_text('COPY FORMAT GFF', source, 'source', n, false) || chr(9) || "
+    "    _miint_gff_text('COPY FORMAT GFF', type, 'type', n, false) || chr(9) || "
+    "    CASE WHEN NOT _miint_gff_integral(position) "
+    "         THEN error(printf('COPY FORMAT GFF: position must be an integer (got %s)', typeof(position))) "
+    "         WHEN position IS NULL OR TRY_CAST(position AS HUGEINT) < 1 "
+    "         THEN error(printf('COPY FORMAT GFF: position must be at least 1 (row %d has %s)', n, position::VARCHAR)) "
+    "         ELSE position::VARCHAR END || chr(9) || "
+    "    CASE WHEN NOT _miint_gff_integral(stop_position) "
+    "         THEN error(printf('COPY FORMAT GFF: stop_position must be an integer (got %s)', typeof(stop_position))) "
+    "         WHEN stop_position IS NULL OR TRY_CAST(stop_position AS HUGEINT) <= TRY_CAST(position AS HUGEINT) "
+    "         THEN error(printf('COPY FORMAT GFF: stop_position must be greater than position (row %d has %s and %s)', "
+    "                           n, position::VARCHAR, stop_position::VARCHAR)) "
+    "         ELSE (TRY_CAST(stop_position AS HUGEINT) - 1)::VARCHAR END || chr(9) || "
+    "    CASE WHEN score IS NULL THEN '.' "
+    "         WHEN typeof(score) = 'VARCHAR' OR TRY_CAST(score::VARCHAR AS DOUBLE) IS NULL "
+    "         THEN error(printf('COPY FORMAT GFF: score must be a number (got %s)', typeof(score))) "
+    "         ELSE score::DOUBLE::VARCHAR END || chr(9) || "
+    "    CASE WHEN strand IS NULL THEN '.' "
+    "         WHEN strand::VARCHAR IN ('+', '-', '.', '?') THEN strand::VARCHAR "
+    "         ELSE error(printf('COPY FORMAT GFF: strand must be ''+'', ''-'', ''.'', ''?'' or NULL (row %d has "
+    "''%s'')', "
+    "                           n, strand::VARCHAR)) END || chr(9) || "
+    "    CASE WHEN NOT _miint_gff_integral(phase) "
+    "         THEN error(printf('COPY FORMAT GFF: phase must be an integer (got %s)', typeof(phase))) "
+    "         WHEN phase IS NULL THEN '.' "
+    "         WHEN TRY_CAST(phase AS HUGEINT) BETWEEN 0 AND 2 THEN phase::VARCHAR "
+    "         ELSE error(printf('COPY FORMAT GFF: phase must be 0, 1, 2 or NULL (row %d has %s)', n, phase::VARCHAR)) "
+    "    END || chr(9) || "
+    "    CASE WHEN attributes_json IS NULL THEN '.' "
+    "         WHEN json_type(attributes_json) = 'VARCHAR' THEN "
+    "           CASE WHEN regexp_matches(attributes_json->>'$', '[[:cntrl:]]') "
+    "                THEN error(printf('COPY FORMAT GFF: attributes text (row %d) has a control character (a tab or "
+    "line break, say); give attributes as a MAP to have them encoded', n)) "
+    "                WHEN attributes_json->>'$' = '' THEN '.' "
+    "                ELSE attributes_json->>'$' END "
+    "         WHEN NOT starts_with(typeof(attributes), 'MAP(') "
+    "         THEN error(printf('COPY FORMAT GFF: attributes must be MAP(VARCHAR, VARCHAR) or VARCHAR (got %s)', "
+    "                           typeof(attributes))) "
+    "         WHEN len(attributes_entries) = 0 "
+    // read_gff never reads {'': NULL} alone (';' alone is not a line it reads), and it would write an empty column.
+    "           OR (len(attributes_entries) = 1 AND attributes_entries[1].key = '' "
+    "               AND attributes_entries[1].value IS NULL) THEN '.' "
+    // A NULL value is a token without '=', as read_gff reads one (an attributes column ending in ';' has an
+    // empty one, and '.' is one): written as the key alone, so it reads back the same.
+    "         ELSE array_to_string(list_transform(attributes_entries, "
+    "                lambda e: _miint_gff_encode(e.key) || "
+    "                          CASE WHEN e.value IS NULL THEN '' ELSE '=' || _miint_gff_encode(e.value) END), ';') "
+    "    END AS raw_line "
+    "  FROM ( "
+    "    SELECT *, "
+    "      CASE WHEN json_type(attributes_json) = 'OBJECT' "
+    "           THEN map_entries(json_transform(attributes_json, '\"MAP(VARCHAR, VARCHAR)\"')) END "
+    "        AS attributes_entries "
+    "    FROM (SELECT row_number() OVER () AS n, *, to_json(attributes) AS attributes_json "
+    "          FROM query_table(relation)) "
+    "  ) "
+    ") ORDER BY n; ";
+
+// Prodigal's GFF, as `prodigal -f gff` writes it, from predict_genes' columns, in the relation's order (predict_genes
+// returns contig order): '##gff-version  3' (with two spaces, as Prodigal writes it), then each contig's
+// '# Sequence Data' and '# Model Data' lines and its genes. A contig is the rows of one (genome_id, read_id) in a
+// row; seqnum numbers them from 1. A genome's own row (no read_id or gene) is skipped; a contig's row without a gene
+// writes its header lines only, as the CLI does. With per_genome, each genome starts its own file: its own version
+// line, and seqnum from 1, for COPY's PARTITION_BY (genome_id).
+const std::string PRODIGAL_GFF_LINES = // NOLINT
+    "CREATE OR REPLACE MACRO _miint_prodigal_gff_lines(relation, source := 'Prodigal_v" PRODIGAL_VERSION_LITERAL
+    "', per_genome := false) AS TABLE "
+    "WITH numbered AS ( "
+    "  SELECT row_number() OVER () AS n, * FROM query_table(relation) "
+    "), contig_rows AS ( "
+    "  SELECT *, "
+    "    row_number() OVER (ORDER BY n) = 1 "
+    "      OR lag(genome_id) OVER (ORDER BY n) IS DISTINCT FROM genome_id "
+    "      OR lag(read_id) OVER (ORDER BY n) IS DISTINCT FROM read_id AS new_contig, "
+    "    row_number() OVER (ORDER BY n) = 1 "
+    "      OR lag(genome_id) OVER (ORDER BY n) IS DISTINCT FROM genome_id AS new_genome "
+    "  FROM numbered WHERE read_id IS NOT NULL OR gene_index IS NOT NULL "
+    "), seqnums AS ( "
+    "  SELECT *, sum(new_contig::INTEGER) OVER (PARTITION BY CASE WHEN per_genome THEN genome_id END ORDER BY n) "
+    "    AS seqnum "
+    "  FROM contig_rows "
+    "), lined AS ( "
+    "  SELECT genome_id, n, "
+    "    CASE WHEN per_genome AND new_genome THEN ['##gff-version  3'] ELSE [] END || "
+    "    CASE WHEN new_contig THEN [ "
+    "      printf('# Sequence Data: seqnum=%d;seqlen=%d;seqhdr=\"%s\"', seqnum, "
+    "             _miint_gff_required('COPY FORMAT GFF', contig_length, 'contig_length', n), "
+    "             _miint_gff_text('COPY FORMAT GFF', read_id, 'read_id', n, true)), "
+    "      printf('# Model Data: version=Prodigal.v" PRODIGAL_VERSION_LITERAL
+    ";run_type=%s;model=\"%s\";gc_cont=%.2f;transl_table=%d;uses_sd=%d', "
+    "             CASE WHEN model_desc IS NULL THEN 'Single' ELSE 'Metagenomic' END, "
+    "             CASE WHEN model_desc IS NULL THEN 'Ab initio' "
+    "                  ELSE _miint_gff_text('COPY FORMAT GFF', model_desc, 'model_desc', n, false) END, "
+    "             _miint_gff_required('COPY FORMAT GFF', model_gc_content, 'model_gc_content', n) * 100.0, "
+    "             _miint_gff_required('COPY FORMAT GFF', translation_table, 'translation_table', n), "
+    "             _miint_gff_required('COPY FORMAT GFF', uses_sd, 'uses_sd', n)::INTEGER) "
+    "    ] ELSE [] END || "
+    "    CASE WHEN gene_index IS NULL THEN [] ELSE [ "
+    "      _miint_gff_text('COPY FORMAT GFF', read_id, 'read_id', n, true) || chr(9) || "
+    "      CASE WHEN source = '' OR regexp_matches(source, '[[:cntrl:]]') "
+    "           THEN error(printf('COPY FORMAT GFF: source ''%s'' is empty or has a control character, which a "
+    "GFF line cannot hold', source)) "
+    "           ELSE source END || chr(9) || 'CDS' || chr(9) || "
+    "      printf('%d\t%d\t%.1f\t%s\t0\tID=%d_%d;partial=%d%d;start_type=%s;rbs_motif=%s;rbs_spacer=%s;gc_cont=%.3f;"
+    "conf=%.2f;score=%.2f;cscore=%.2f;sscore=%.2f;rscore=%.2f;uscore=%.2f;tscore=%.2f;', "
+    "             _miint_gff_required('COPY FORMAT GFF', position, 'position', n), "
+    "             _miint_gff_required('COPY FORMAT GFF', stop_position, 'stop_position', n) - 1, "
+    "             _miint_gff_required('COPY FORMAT GFF', score, 'score', n), "
+    "             CASE WHEN _miint_gff_required('COPY FORMAT GFF', strand, 'strand', n) IN ('+', '-') THEN strand "
+    "                  ELSE error(printf('COPY FORMAT GFF: strand must be ''+'' or ''-'' (row %d has ''%s'')', "
+    "                                    n, strand::VARCHAR)) END, "
+    "             seqnum, gene_index, "
+    "             _miint_gff_required('COPY FORMAT GFF', partial_left, 'partial_left', n)::INTEGER, "
+    "             _miint_gff_required('COPY FORMAT GFF', partial_right, 'partial_right', n)::INTEGER, "
+    "             _miint_gff_text('COPY FORMAT GFF', start_type, 'start_type', n, false), "
+    "             CASE WHEN rbs_motif IS NULL THEN 'None' "
+    "                  ELSE _miint_gff_text('COPY FORMAT GFF', rbs_motif, 'rbs_motif', n, false) END, "
+    "             CASE WHEN rbs_spacer IS NULL THEN 'None' "
+    "                  ELSE _miint_gff_text('COPY FORMAT GFF', rbs_spacer, 'rbs_spacer', n, false) END, "
+    "             _miint_gff_required('COPY FORMAT GFF', gene_gc_content, 'gene_gc_content', n), "
+    "             _miint_gff_required('COPY FORMAT GFF', confidence, 'confidence', n), "
+    "             score, "
+    "             _miint_gff_required('COPY FORMAT GFF', cscore, 'cscore', n), "
+    "             _miint_gff_required('COPY FORMAT GFF', sscore, 'sscore', n), "
+    "             _miint_gff_required('COPY FORMAT GFF', rscore, 'rscore', n), "
+    "             _miint_gff_required('COPY FORMAT GFF', uscore, 'uscore', n), "
+    "             _miint_gff_required('COPY FORMAT GFF', tscore, 'tscore', n)) "
+    "    ] END AS lines "
+    "  FROM seqnums "
+    ") "
+    // A column whose type is NULL (a literal NULL in a view) makes the line NULL as it is bound, before the checks
+    // above run; refused here instead of written as an empty line.
+    "SELECT genome_id, "
+    "  CASE WHEN line IS NULL "
+    "       THEN error(printf('COPY FORMAT GFF: row %d has a NULL where its line needs a value', n)) "
+    "       ELSE line END AS line "
+    "FROM ( "
+    "  SELECT NULL AS genome_id, 0 AS n, 0 AS k, '##gff-version  3' AS line WHERE NOT per_genome "
+    "  UNION ALL "
+    "  SELECT genome_id, n, unnest(range(len(lines))) AS k, unnest(lines) AS line FROM lined "
+    ") ORDER BY n, k; ";
 
 // read_gfa_segments(path) / read_gfa_links(path)
 //
@@ -2787,6 +2986,13 @@ public:
 
 		register_macro(PARSE_GFF_ATTRIBUTES, "parse_gff_attributes");
 		register_macro(READ_GFF, "read_gff");
+		// The _miint_gff_ helpers before the macros that use them.
+		register_macro(MIINT_GFF_ENCODE, "_miint_gff_encode");
+		register_macro(MIINT_GFF_TEXT, "_miint_gff_text");
+		register_macro(MIINT_GFF_REQUIRED, "_miint_gff_required");
+		register_macro(MIINT_GFF_INTEGRAL, "_miint_gff_integral");
+		register_macro(GFF3_LINES, "_miint_gff3_lines");
+		register_macro(PRODIGAL_GFF_LINES, "_miint_prodigal_gff_lines");
 		// The _miint_gfa_ helpers before the views that use them.
 		register_macro(MIINT_GFA_INTEGER_TAG, "_miint_gfa_integer_tag");
 		register_macro(MIINT_GFA_SEGMENT_LABEL, "_miint_gfa_segment_label");

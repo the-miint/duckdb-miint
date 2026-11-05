@@ -25,6 +25,7 @@ FASTQ, FASTA and NEWICK write a path with a URI scheme other than `file://` (`s3
 - [UBAM](#ubam) - Write unaligned reads BAM (uBAM) files
 - [BIOM](#biom) - Write BIOM observation matrix files
 - [NEWICK](#newick) - Write Newick phylogenetic trees
+- [GFF](#gff) - Write GFF3 annotations, and Prodigal's GFF from `predict_genes`, as lines for `FORMAT CSV`
 
 ### FASTQ 
 
@@ -619,3 +620,37 @@ SELECT * FROM read_newick('copy.nwk');
 - Branch lengths are included after colon (`:0.123`)
 - Edge IDs are included in braces when EDGE_IDS=true (`{0}`)
 - Tree is terminated with semicolon (`;`)
+
+## GFF
+
+`COPY ... TO 'out.gff' (FORMAT GFF)` writes GFF, a line per row. A path ending in `.gff` is FORMAT GFF without saying so. The rows are made into lines in SQL and DuckDB's CSV writer writes them (as DuckDB's own `FORMAT JSON` does), so `COMPRESSION` (and gzip for a path ending in `.gz`), `PARTITION_BY`, `FILE_EXTENSION`, `OVERWRITE`, `OVERWRITE_OR_IGNORE`, `FILENAME_PATTERN`, `USE_TMP_FILE` and `RETURN_FILES` are the CSV writer's. Options that would break the file (`APPEND`, `PER_THREAD_OUTPUT`, `FILE_SIZE_BYTES`, `WRITE_PARTITION_COLUMNS`, `PRESERVE_ORDER`, and CSV's own) are refused, and so is `PARTITION_PATH`. The lines come out in the query's order, and the count COPY returns is the lines written, the version and header lines included.
+
+**Parameters:**
+- `DIALECT` (VARCHAR, default `'gff3'`): `'gff3'` or `'prodigal'`.
+- `SOURCE` (VARCHAR, default `'Prodigal_v2.6.5'`, `'prodigal'` only): column 2.
+- `PARTITION_BY (genome_id)` (`'prodigal'` only): a file per genome.
+
+- **DIALECT `'gff3'`**, from **[`read_gff`](reading.md#gff)'s columns**, `seqid`, `source`, `type` (VARCHAR), `position`, `stop_position` (integers), `score` (a number), `strand` (VARCHAR), `phase` (an integer) and `attributes` (`MAP(VARCHAR, VARCHAR)`, or VARCHAR written as given): GFF3, a `##gff-version 3` line, then a line per row. What `read_gff` reads, this writes and `read_gff` reads back the same. A missing column or a column of another type is refused as the query is bound, even when every value is NULL.
+  - `stop_position` is half-open, as `read_gff` returns it, so the GFF `end` written is `stop_position - 1`. `position` must be at least 1 and `stop_position` greater than `position`.
+  - A NULL `score`, `strand`, `phase` or `attributes` is `.`. `strand` is `+`, `-`, `.` or `?`; `phase` 0, 1 or 2.
+  - A MAP's keys and values are percent-encoded where GFF3 reserves the character (`;`, `=`, `&`, `,`, `%`, tab, line breaks and other control characters), and `read_gff` decodes them. A key with a NULL value is written alone, without `=`, as `read_gff` reads such a token (an attributes column ending in `;`, or `.`, reads back the same). Text `attributes` is written as given and may not hold a control character (a tab or line break, say).
+  - A value is one value: `read_gff` reads `Parent=a,b` as the text `a,b` (it does not split GFF3's comma-separated lists), so this writes it back as `Parent=a%2Cb`, which a reader that splits lists takes as one parent. To write a list, give `attributes` as text.
+  - `seqid`, `source` and `type` are written as given (`read_gff` does not decode them), so a NULL or empty one, a control character, or a `seqid` starting with `#` (which would make the line a comment) is refused.
+- **DIALECT `'prodigal'`**, from **[`predict_genes`](gene_prediction.md)' columns**: Prodigal's own GFF, as `prodigal -f gff` writes it, with a `# Sequence Data` and a `# Model Data` line before each contig's genes. CheckM reads the translation table from the Model Data line. Its columns' types are checked as the query is bound (`read_id` may be any type). Without DIALECT, predict_genes' columns (with `gene_index` and without read_gff's) are refused with a pointer to it.
+  - The rows must be in contig order, as `predict_genes` returns them: the header lines are written each time the contig (`genome_id` and `read_id`) changes. Without a `genome_id` column, the rows are one genome's.
+  - A contig without genes (its `predict_genes` row has a NULL `gene_index`) gets its header lines and no feature, as in the CLI's file, and is counted in `seqnum`, which numbers the contigs from 1. A genome's own row (`training_failed`, or `no_genes` with a NULL `read_id`) is skipped.
+  - `seqhdr` is the `read_id`. A value a line needs that is NULL, a `read_id` with a control character or starting with `#`, and a `strand` other than `+` or `-` are refused.
+  - With `PARTITION_BY (genome_id)`, each genome is a file of its own, with its own version line and `seqnum` from 1.
+
+```sql
+-- Round trip
+CREATE TABLE features AS SELECT * FROM read_gff('in.gff');
+COPY features TO 'out.gff.gz' (FORMAT GFF);
+
+-- Prodigal's GFF of every genome's genes in one file, contigs in file order (predict_genes' own order)
+CREATE TABLE genes AS SELECT * FROM predict_genes('contigs', genome_id := 'filepath');
+COPY genes TO 'genes.gff' (FORMAT GFF, DIALECT 'prodigal');
+
+-- A file per genome, each as the Prodigal CLI would write it for that genome alone
+COPY genes TO 'gff_by_bin' (FORMAT GFF, DIALECT 'prodigal', PARTITION_BY (genome_id));
+```

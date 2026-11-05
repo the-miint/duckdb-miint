@@ -233,6 +233,7 @@ list(
   src/copy_fasta.cpp
   src/copy_fastq.cpp
   src/copy_format_common.cpp
+  src/copy_gff.cpp
   src/copy_newick.cpp
   src/copy_sam.cpp
   src/copy_ubam.cpp

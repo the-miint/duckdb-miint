@@ -1151,6 +1151,7 @@ Read GFF3 (General Feature Format) annotation files. GFF is a standard format fo
 - Reads tab-delimited GFF3 format files
 - Skips comment and directive lines (those starting with '#'); a '#' later in a line is kept as data
 - Every line, comment lines included, must be UTF-8 and have at most nine tab-separated fields; a line that breaks either fails the scan. GFF3 has no quoting, so '"' is an ordinary character
+- A carriage return is read as a line ending, so CRLF files read; one inside a line fails the scan ([#396](https://github.com/the-miint/duckdb-miint/issues/396)). The Prodigal CLI writes one into each `# Sequence Data` comment when its FASTA has CRLF line endings; strip them first (`tr -d '\r'`)
 - Converts '.' to NULL for score, strand, and phase fields
 - Parses the attributes column (semicolon-separated key=value pairs) into a SQL MAP
 - Percent-decodes (`%XX`) attribute keys and values per the GFF3 spec (e.g. `%3D` → `=`, `%2C` → `,`, `%3B` → `;`, `%26` → `&`); the value is everything after the first `=`, so a raw `=` inside a value is preserved rather than truncated

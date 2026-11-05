@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -62,6 +63,22 @@ inline bool ParseGplBoundaryVersion(const std::string &cli_output, int &major, i
 	patch = c;
 	return true;
 }
+
+/// Thrown by `Session::Submit` when the daemon answers a batch with
+/// `"success": false`: it refused the request (input or config a tool
+/// rejects), as opposed to dying or breaking the protocol, which throw a
+/// plain `std::runtime_error`. `reason()` is the daemon's own message.
+class BatchRefused : public std::runtime_error {
+public:
+	BatchRefused(const std::string &what, std::string reason) : std::runtime_error(what), reason_(std::move(reason)) {
+	}
+	const std::string &reason() const {
+		return reason_;
+	}
+
+private:
+	std::string reason_;
+};
 
 /// One entry in the daemon's tool registry, as advertised on the init reply.
 /// Populated by `Session::Initialize()` from the protocol-v3 `tools` field

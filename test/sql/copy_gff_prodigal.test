@@ -1,0 +1,647 @@
+# name: test/sql/copy_gff_prodigal.test
+# description: COPY ... (FORMAT GFF, DIALECT 'prodigal'): Prodigal's GFF from predict_genes' columns, "# Model Data" included, checked against the CLI's file on anthus_aco.fas. The input is predict_genes' saved output (data/prodigal/README.md), so this runs without gpl-boundary; predict_genes.test checks that output is still predict_genes'.
+# group: [sql]
+
+require miint
+
+# A GFF file's lines, numbered, with tabs shown as ' | '. The CLI's reference files name the Prodigal that made them
+# (2.6.3); that is normalized here and nowhere else.
+statement ok
+CREATE MACRO lines_of(path) AS TABLE
+SELECT row_number() OVER () AS i, replace(replace(line, 'v2.6.3', 'v2.6.5'), E'\t', ' | ') AS line
+FROM read_csv(path, columns = {'line': 'VARCHAR'}, delim = E'\x1f', quote = '', escape = '', header = false,
+              auto_detect = false);
+
+# A written file's lines as they are, numbered.
+statement ok
+CREATE MACRO gff_file(path) AS TABLE
+SELECT row_number() OVER () AS i, line
+FROM read_csv(path, columns = {'line': 'VARCHAR'}, delim = E'\x1f', quote = '', escape = '', header = false,
+              auto_detect = false);
+
+# predict_genes' output on anthus_aco.fas, in the CLI's contig order, single-genome and metagenomic.
+statement ok
+CREATE TABLE single AS SELECT * FROM read_csv('data/prodigal/anthus_single_genes.csv.gz');
+
+statement ok
+CREATE TABLE meta AS SELECT * FROM read_csv('data/prodigal/anthus_meta_genes.csv.gz');
+
+statement ok
+COPY single TO '{TEST_DIR}/single.gff' (FORMAT GFF, DIALECT 'prodigal');
+
+query I
+SELECT count(*) FROM ((SELECT * FROM lines_of('data/prodigal/ref_single.gff.gz')
+                       EXCEPT SELECT * FROM lines_of('{TEST_DIR}/single.gff'))
+                      UNION ALL
+                      (SELECT * FROM lines_of('{TEST_DIR}/single.gff')
+                       EXCEPT SELECT * FROM lines_of('data/prodigal/ref_single.gff.gz')));
+----
+0
+
+statement ok
+COPY meta TO '{TEST_DIR}/meta.gff' (FORMAT GFF, DIALECT 'prodigal');
+
+query I
+SELECT count(*) FROM ((SELECT * FROM lines_of('data/prodigal/ref_meta.gff.gz')
+                       EXCEPT SELECT * FROM lines_of('{TEST_DIR}/meta.gff'))
+                      UNION ALL
+                      (SELECT * FROM lines_of('{TEST_DIR}/meta.gff')
+                       EXCEPT SELECT * FROM lines_of('data/prodigal/ref_meta.gff.gz')));
+----
+0
+
+# read_gff reads it, and CheckM's reading of the translation table (checkm/prodigal.py) finds 11.
+query I
+SELECT count(*) FROM read_gff('{TEST_DIR}/single.gff');
+----
+129
+
+query I
+SELECT DISTINCT regexp_extract(line, 'transl_table=([0-9]+)', 1) FROM lines_of('{TEST_DIR}/single.gff')
+WHERE line LIKE '# Model Data:%';
+----
+11
+
+# A genome's own rows (training failed, or no genes at all) have no contig, and are skipped.
+statement ok
+CREATE TABLE with_status AS SELECT * FROM single;
+
+statement ok
+INSERT INTO with_status BY NAME
+SELECT 'failed' AS genome_id, 'training_failed' AS status, 'too short' AS error
+UNION ALL SELECT 'empty', 'no_genes', NULL;
+
+statement ok
+COPY single TO '{TEST_DIR}/single.gff' (FORMAT GFF, DIALECT 'prodigal');
+
+statement ok
+COPY with_status TO '{TEST_DIR}/with_status.gff' (FORMAT GFF, DIALECT 'prodigal');
+
+query I
+SELECT count(*) FROM ((SELECT * FROM gff_file('{TEST_DIR}/single.gff') EXCEPT ALL SELECT * FROM gff_file('{TEST_DIR}/with_status.gff'))
+                      UNION ALL
+                      (SELECT * FROM gff_file('{TEST_DIR}/with_status.gff') EXCEPT ALL SELECT * FROM gff_file('{TEST_DIR}/single.gff')));
+----
+0
+
+# source names the program in column 2.
+statement ok
+COPY meta TO '{TEST_DIR}/source.gff' (FORMAT GFF, DIALECT 'prodigal', SOURCE 'Prodigal_v2.6.5_miint');
+
+query I
+SELECT DISTINCT source FROM read_gff('{TEST_DIR}/source.gff');
+----
+Prodigal_v2.6.5_miint
+
+# A contig without genes gets its header lines and its seqnum, as in the CLI's file (gene.c's print_genes writes
+# them whatever the gene count): here 'tiny', after the 10th of 22 contigs.
+statement ok
+CREATE TABLE first_ten AS SELECT read_id FROM read_fastx('data/prodigal/anthus_aco.fas.gz') WHERE sequence_index <= 10;
+
+statement ok
+CREATE TABLE mixed AS SELECT * FROM meta WHERE read_id IN (SELECT read_id FROM first_ten);
+
+statement ok
+INSERT INTO mixed
+SELECT * REPLACE ('tiny' AS read_id, NULL::INTEGER AS gene_index, 48::BIGINT AS contig_length, 'no_genes' AS status)
+FROM meta LIMIT 1;
+
+statement ok
+INSERT INTO mixed SELECT * FROM meta WHERE read_id NOT IN (SELECT read_id FROM first_ten);
+
+statement ok
+COPY mixed TO '{TEST_DIR}/mixed.gff' (FORMAT GFF, DIALECT 'prodigal');
+
+query I
+SELECT count(*) FROM gff_file('{TEST_DIR}/mixed.gff') WHERE line LIKE '# Sequence Data:%';
+----
+23
+
+statement ok
+COPY mixed TO '{TEST_DIR}/mixed.gff' (FORMAT GFF, DIALECT 'prodigal');
+
+# Its two header lines, then straight to the next contig's.
+statement ok
+CREATE TABLE mixed_lines AS SELECT row_number() OVER () AS i, line FROM gff_file('{TEST_DIR}/mixed.gff');
+
+query I
+SELECT CASE WHEN line LIKE '# Model Data:%' THEN '# Model Data' ELSE line END FROM mixed_lines
+WHERE i BETWEEN (SELECT i FROM mixed_lines WHERE line LIKE '%seqhdr="tiny"%')
+            AND (SELECT i FROM mixed_lines WHERE line LIKE '%seqhdr="tiny"%') + 2
+ORDER BY i;
+----
+# Sequence Data: seqnum=11;seqlen=48;seqhdr="tiny"
+# Model Data
+# Sequence Data: seqnum=12;seqlen=960;seqhdr="AMNH13589_aco"
+
+# The contigs after it are numbered after it.
+query I
+SELECT DISTINCT split_part(line, E'\t', 1) FROM mixed_lines WHERE line LIKE '%ID=13\_%' ESCAPE '\';
+----
+KU25127_aco
+
+# PARTITION_BY (genome_id): each genome is a file of its own, with its own version line and
+# seqnum from 1, as the CLI writes a file per genome. Each file is the one-genome file.
+statement ok
+CREATE TABLE pair AS SELECT * FROM meta;
+
+statement ok
+INSERT INTO pair SELECT * REPLACE ('anthus2' AS genome_id) FROM meta;
+
+statement ok
+COPY pair TO '{TEST_DIR}/by_genome' (FORMAT GFF, DIALECT 'prodigal', PARTITION_BY (genome_id));
+
+query II
+SELECT regexp_extract(filename, 'genome_id=([^/]*)', 1) AS genome,
+       count(*) = (SELECT count(*) FROM lines_of('{TEST_DIR}/meta.gff'))
+FROM read_csv('{TEST_DIR}/by_genome/*/*.gff', columns = {'line': 'VARCHAR'}, delim = E'\x1f', quote = '',
+              escape = '', header = false, auto_detect = false, filename = true)
+GROUP BY genome ORDER BY genome;
+----
+anthus	true
+anthus2	true
+
+query I
+SELECT count(*) FROM ((SELECT * FROM lines_of('{TEST_DIR}/meta.gff')
+                       EXCEPT ALL SELECT * FROM lines_of('{TEST_DIR}/by_genome/genome_id=anthus2/data_0.gff'))
+                      UNION ALL
+                      (SELECT * FROM lines_of('{TEST_DIR}/by_genome/genome_id=anthus2/data_0.gff')
+                       EXCEPT ALL SELECT * FROM lines_of('{TEST_DIR}/meta.gff')));
+----
+0
+
+statement ok
+COPY pair TO '{TEST_DIR}/pair.gff' (FORMAT GFF, DIALECT 'prodigal');
+
+# Without PARTITION_BY, the two genomes are one file, numbered on: the same read_id in the next genome is another
+# contig.
+query I
+SELECT count(*) FROM gff_file('{TEST_DIR}/pair.gff') WHERE line LIKE '# Sequence Data:%';
+----
+44
+
+statement ok
+COPY pair TO '{TEST_DIR}/pair.gff' (FORMAT GFF, DIALECT 'prodigal');
+
+query I
+SELECT count(*) FROM gff_file('{TEST_DIR}/pair.gff') WHERE line LIKE '##gff-version%';
+----
+1
+
+# The same read_id on both sides of the genome boundary: two contigs.
+statement ok
+CREATE TABLE same_id_pair AS SELECT * FROM meta WHERE read_id = (SELECT max(read_id) FROM meta) ORDER BY gene_index;
+
+statement ok
+INSERT INTO same_id_pair SELECT * REPLACE ('anthus2' AS genome_id) FROM meta WHERE read_id = (SELECT max(read_id) FROM meta) ORDER BY gene_index;
+
+statement ok
+COPY same_id_pair TO '{TEST_DIR}/same_id_pair.gff' (FORMAT GFF, DIALECT 'prodigal');
+
+query I
+SELECT count(*) FROM gff_file('{TEST_DIR}/same_id_pair.gff') WHERE line LIKE '# Sequence Data:%';
+----
+2
+
+# -----------------------------------------------------------------------------
+# Rows built by hand
+# -----------------------------------------------------------------------------
+statement ok
+CREATE TABLE hand AS
+SELECT 'g' AS genome_id, 'c1' AS read_id, 1 AS gene_index, 1::BIGINT AS position, 301::BIGINT AS stop_position,
+       '+' AS strand, false AS partial_left, true AS partial_right, 'ATG' AS start_type, 'AGGAG' AS rbs_motif,
+       '5-10bp' AS rbs_spacer, 10.5 AS score, 9.0 AS cscore, 1.5 AS sscore, 0.0 AS rscore, 0.5 AS uscore,
+       1.0 AS tscore, 99.9 AS confidence, 0.4 AS gene_gc_content, 1000::BIGINT AS contig_length, 11 AS translation_table,
+       true AS uses_sd, NULL::VARCHAR AS model_desc, 0.42 AS model_gc_content, 'ok' AS status;
+
+statement ok
+COPY hand TO '{TEST_DIR}/hand.gff' (FORMAT GFF, DIALECT 'prodigal');
+
+query I
+SELECT replace(line, E'\t', ' | ') FROM gff_file('{TEST_DIR}/hand.gff');
+----
+##gff-version  3
+# Sequence Data: seqnum=1;seqlen=1000;seqhdr="c1"
+# Model Data: version=Prodigal.v2.6.5;run_type=Single;model="Ab initio";gc_cont=42.00;transl_table=11;uses_sd=1
+c1 | Prodigal_v2.6.5 | CDS | 1 | 300 | 10.5 | + | 0 | ID=1_1;partial=01;start_type=ATG;rbs_motif=AGGAG;rbs_spacer=5-10bp;gc_cont=0.400;conf=99.90;score=10.50;cscore=9.00;sscore=1.50;rscore=0.00;uscore=0.50;tscore=1.00;
+
+# A metagenomic contig names its model; a missing RBS is None.
+statement ok
+CREATE VIEW hand_meta AS
+SELECT * REPLACE ('M1 Acinetobacter_baumannii_AB307-0294_uid59271_00' AS model_desc, NULL::VARCHAR AS rbs_motif,
+                  NULL::VARCHAR AS rbs_spacer) FROM hand;
+
+statement ok
+COPY hand_meta TO '{TEST_DIR}/hand_meta.gff' (FORMAT GFF, DIALECT 'prodigal');
+
+query I
+SELECT replace(line, E'\t', ' | ') FROM gff_file('{TEST_DIR}/hand_meta.gff') WHERE line NOT LIKE '#%';
+----
+c1 | Prodigal_v2.6.5 | CDS | 1 | 300 | 10.5 | + | 0 | ID=1_1;partial=01;start_type=ATG;rbs_motif=None;rbs_spacer=None;gc_cont=0.400;conf=99.90;score=10.50;cscore=9.00;sscore=1.50;rscore=0.00;uscore=0.50;tscore=1.00;
+
+statement ok
+COPY hand_meta TO '{TEST_DIR}/hand_meta.gff' (FORMAT GFF, DIALECT 'prodigal');
+
+query I
+SELECT line FROM gff_file('{TEST_DIR}/hand_meta.gff') WHERE line LIKE '# Model Data:%';
+----
+# Model Data: version=Prodigal.v2.6.5;run_type=Metagenomic;model="M1 Acinetobacter_baumannii_AB307-0294_uid59271_00";gc_cont=42.00;transl_table=11;uses_sd=1
+
+# A genome's own row is skipped; a contig's row without a gene writes its header lines only; the same read_id in
+# another genome is another contig.
+statement ok
+CREATE TABLE hand_rows AS SELECT * FROM hand;
+
+statement ok
+INSERT INTO hand_rows SELECT * REPLACE ('c2' AS read_id, NULL::INTEGER AS gene_index, 'no_genes' AS status) FROM hand;
+
+statement ok
+INSERT INTO hand_rows SELECT * REPLACE (NULL::VARCHAR AS read_id, NULL::INTEGER AS gene_index, 'no_genes' AS status) FROM hand;
+
+statement ok
+INSERT INTO hand_rows SELECT * REPLACE ('h' AS genome_id) FROM hand;
+
+statement ok
+COPY hand_rows TO '{TEST_DIR}/hand_rows.gff' (FORMAT GFF, DIALECT 'prodigal');
+
+query I
+SELECT regexp_extract(line, '^(# Sequence Data: [^;]*|[^\t]*\t[^\t]*\tCDS)') FROM gff_file('{TEST_DIR}/hand_rows.gff')
+WHERE line NOT LIKE '# Model Data%' AND line NOT LIKE '##%';
+----
+# Sequence Data: seqnum=1
+c1	Prodigal_v2.6.5	CDS
+# Sequence Data: seqnum=2
+# Sequence Data: seqnum=3
+c1	Prodigal_v2.6.5	CDS
+
+statement ok
+COPY hand_rows TO '{TEST_DIR}/hand_rows.gff' (FORMAT GFF, DIALECT 'prodigal');
+
+query I
+SELECT regexp_extract(line, 'ID=([0-9_]+)', 1) FROM gff_file('{TEST_DIR}/hand_rows.gff') WHERE line LIKE '%ID=%';
+----
+1_1
+3_1
+
+# An empty relation is the version line only; with PARTITION_BY (genome_id), no file (no genome).
+statement ok
+CREATE VIEW nothing AS SELECT * FROM hand WHERE false;
+
+statement ok
+COPY nothing TO '{TEST_DIR}/nothing.gff' (FORMAT GFF, DIALECT 'prodigal');
+
+query I
+SELECT line FROM gff_file('{TEST_DIR}/nothing.gff');
+----
+##gff-version  3
+
+statement ok
+COPY nothing TO '{TEST_DIR}/nothing_by_genome' (FORMAT GFF, DIALECT 'prodigal', PARTITION_BY (genome_id));
+
+query I
+SELECT count(*) FROM glob('{TEST_DIR}/nothing_by_genome/**');
+----
+0
+
+# The lines follow the relation's order, with a parallel source: one header per contig (300,000 rows of 42,858
+# contigs, shuffled, then ordered into a table).
+statement ok
+SET threads = 8;
+
+statement ok
+CREATE TABLE many AS
+SELECT * EXCLUDE (i) FROM (
+    SELECT * REPLACE ('c' || lpad((i // 7)::VARCHAR, 6, '0') AS read_id, (i % 7 + 1)::INTEGER AS gene_index)
+    FROM hand, range(300000) t(i) ORDER BY random()
+) ORDER BY read_id, gene_index;
+
+statement ok
+COPY many TO '{TEST_DIR}/many.gff' (FORMAT GFF, DIALECT 'prodigal');
+
+query II
+SELECT count(*) FILTER (WHERE line LIKE '# Sequence Data:%'), count(*) FILTER (WHERE line LIKE 'c%')
+FROM gff_file('{TEST_DIR}/many.gff');
+----
+42858	300000
+
+statement ok
+COPY many TO '{TEST_DIR}/many.gff' (FORMAT GFF, DIALECT 'prodigal');
+
+query I
+SELECT max(regexp_extract(line, 'seqnum=([0-9]+)', 1)::INTEGER) FROM gff_file('{TEST_DIR}/many.gff')
+WHERE line LIKE '# Sequence Data:%';
+----
+42858
+
+# -----------------------------------------------------------------------------
+# What COPY refuses
+# -----------------------------------------------------------------------------
+
+# Values the line needs are refused when NULL, rather than written as 'NULL' or read as 0.
+statement ok
+CREATE OR REPLACE TABLE bad_null AS FROM hand;
+
+statement ok
+UPDATE bad_null SET position = NULL;
+
+statement error
+COPY bad_null TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+COPY FORMAT GFF: NULL position (row 1)
+
+statement ok
+CREATE OR REPLACE TABLE bad_null AS FROM hand;
+
+statement ok
+UPDATE bad_null SET stop_position = NULL;
+
+statement error
+COPY bad_null TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+COPY FORMAT GFF: NULL stop_position (row 1)
+
+statement ok
+CREATE OR REPLACE TABLE bad_null AS FROM hand;
+
+statement ok
+UPDATE bad_null SET score = NULL;
+
+statement error
+COPY bad_null TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+COPY FORMAT GFF: NULL score (row 1)
+
+statement ok
+CREATE OR REPLACE TABLE bad_null AS FROM hand;
+
+statement ok
+UPDATE bad_null SET cscore = NULL;
+
+statement error
+COPY bad_null TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+COPY FORMAT GFF: NULL cscore (row 1)
+
+statement ok
+CREATE OR REPLACE TABLE bad_null AS FROM hand;
+
+statement ok
+UPDATE bad_null SET sscore = NULL;
+
+statement error
+COPY bad_null TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+COPY FORMAT GFF: NULL sscore (row 1)
+
+statement ok
+CREATE OR REPLACE TABLE bad_null AS FROM hand;
+
+statement ok
+UPDATE bad_null SET rscore = NULL;
+
+statement error
+COPY bad_null TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+COPY FORMAT GFF: NULL rscore (row 1)
+
+statement ok
+CREATE OR REPLACE TABLE bad_null AS FROM hand;
+
+statement ok
+UPDATE bad_null SET uscore = NULL;
+
+statement error
+COPY bad_null TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+COPY FORMAT GFF: NULL uscore (row 1)
+
+statement ok
+CREATE OR REPLACE TABLE bad_null AS FROM hand;
+
+statement ok
+UPDATE bad_null SET tscore = NULL;
+
+statement error
+COPY bad_null TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+COPY FORMAT GFF: NULL tscore (row 1)
+
+statement ok
+CREATE OR REPLACE TABLE bad_null AS FROM hand;
+
+statement ok
+UPDATE bad_null SET confidence = NULL;
+
+statement error
+COPY bad_null TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+COPY FORMAT GFF: NULL confidence (row 1)
+
+statement ok
+CREATE OR REPLACE TABLE bad_null AS FROM hand;
+
+statement ok
+UPDATE bad_null SET gene_gc_content = NULL;
+
+statement error
+COPY bad_null TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+COPY FORMAT GFF: NULL gene_gc_content (row 1)
+
+statement ok
+CREATE OR REPLACE TABLE bad_null AS FROM hand;
+
+statement ok
+UPDATE bad_null SET contig_length = NULL;
+
+statement error
+COPY bad_null TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+COPY FORMAT GFF: NULL contig_length (row 1)
+
+statement ok
+CREATE OR REPLACE TABLE bad_null AS FROM hand;
+
+statement ok
+UPDATE bad_null SET model_gc_content = NULL;
+
+statement error
+COPY bad_null TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+COPY FORMAT GFF: NULL model_gc_content (row 1)
+
+statement ok
+CREATE OR REPLACE TABLE bad_null AS FROM hand;
+
+statement ok
+UPDATE bad_null SET translation_table = NULL;
+
+statement error
+COPY bad_null TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+COPY FORMAT GFF: NULL translation_table (row 1)
+
+statement ok
+CREATE OR REPLACE TABLE bad_null AS FROM hand;
+
+statement ok
+UPDATE bad_null SET uses_sd = NULL;
+
+statement error
+COPY bad_null TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+COPY FORMAT GFF: NULL uses_sd (row 1)
+
+statement ok
+CREATE OR REPLACE TABLE bad_null AS FROM hand;
+
+statement ok
+UPDATE bad_null SET partial_left = NULL;
+
+statement error
+COPY bad_null TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+COPY FORMAT GFF: NULL partial_left (row 1)
+
+statement ok
+CREATE OR REPLACE TABLE bad_null AS FROM hand;
+
+statement ok
+UPDATE bad_null SET partial_right = NULL;
+
+statement error
+COPY bad_null TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+COPY FORMAT GFF: NULL partial_right (row 1)
+
+statement ok
+CREATE OR REPLACE TABLE bad_null AS FROM hand;
+
+statement ok
+UPDATE bad_null SET start_type = NULL;
+
+statement error
+COPY bad_null TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+COPY FORMAT GFF: NULL start_type (row 1)
+
+# A column whose type is NULL (a literal NULL in a view) is refused too, if without its name.
+statement ok
+CREATE OR REPLACE VIEW bad AS SELECT * REPLACE (NULL AS position) FROM hand;
+
+statement error
+COPY bad TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+COPY FORMAT GFF: row 1 has a NULL where its line needs a value
+
+statement ok
+CREATE OR REPLACE VIEW bad AS SELECT * REPLACE (E'c\t1' AS read_id) FROM hand;
+
+statement error
+COPY bad TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+control character
+
+statement ok
+CREATE OR REPLACE VIEW bad AS SELECT * REPLACE ('#c1' AS read_id) FROM hand;
+
+statement error
+COPY bad TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+starts with '#'
+
+statement ok
+CREATE OR REPLACE VIEW bad AS SELECT * REPLACE ('7' AS strand) FROM hand;
+
+statement error
+COPY bad TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+strand must be '+' or '-'
+
+statement ok
+CREATE OR REPLACE VIEW bad AS SELECT * REPLACE ('.' AS strand) FROM hand;
+
+statement error
+COPY bad TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+strand must be '+' or '-'
+
+statement ok
+CREATE OR REPLACE VIEW bad AS SELECT * REPLACE (E'AG\nGAG' AS rbs_motif) FROM hand;
+
+statement error
+COPY bad TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+rbs_motif
+
+statement ok
+CREATE OR REPLACE VIEW bad AS SELECT * REPLACE ('g' AS genome_id, NULL::VARCHAR AS read_id) FROM hand;
+
+statement error
+COPY bad TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+NULL read_id
+
+statement error
+COPY hand TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal', SOURCE E'a\tb');
+----
+SOURCE 'a	b' has a control character
+
+statement error
+COPY hand TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal', SOURCE '');
+----
+SOURCE is empty
+
+# read_gff's columns are not predict_genes'.
+statement ok
+CREATE TABLE features AS SELECT * FROM read_gff('data/gff/test.gff');
+
+statement error
+COPY features TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+the query has no read_id column; it needs predict_genes' columns
+
+# predict_genes' column types are checked as the query is bound, naming the column.
+statement error
+COPY (SELECT * REPLACE ('x' AS position) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+COPY FORMAT GFF: position must be an integer (got VARCHAR)
+
+statement error
+COPY (SELECT * REPLACE ('x' AS score) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+COPY FORMAT GFF: score must be a number (got VARCHAR)
+
+statement error
+COPY (SELECT * REPLACE (1 AS uses_sd) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+COPY FORMAT GFF: uses_sd must be BOOLEAN (got INTEGER)
+
+statement error
+COPY (SELECT * REPLACE (1 AS strand) FROM hand) TO '{TEST_DIR}/bad.gff' (FORMAT GFF, DIALECT 'prodigal');
+----
+COPY FORMAT GFF: strand must be VARCHAR (got INTEGER)
+
+# PARTITION_BY is (genome_id), and needs the column.
+statement error
+COPY hand TO '{TEST_DIR}/bad_dir' (FORMAT GFF, DIALECT 'prodigal', PARTITION_BY (read_id));
+----
+PARTITION_BY is (genome_id) with DIALECT 'prodigal'
+
+statement error
+COPY (SELECT * EXCLUDE (genome_id) FROM hand) TO '{TEST_DIR}/bad_dir' (FORMAT GFF, DIALECT 'prodigal', PARTITION_BY (genome_id));
+----
+PARTITION_BY (genome_id), but the query has no genome_id column
+
+# -----------------------------------------------------------------------------
+# Rows without genome_id are one genome's
+# -----------------------------------------------------------------------------
+statement ok
+COPY (SELECT * EXCLUDE (genome_id) FROM single) TO '{TEST_DIR}/single_no_genome.gff' (FORMAT GFF, DIALECT 'prodigal');
+
+query I
+SELECT count(*) FROM ((SELECT * FROM gff_file('{TEST_DIR}/single.gff') EXCEPT ALL SELECT * FROM gff_file('{TEST_DIR}/single_no_genome.gff'))
+                      UNION ALL
+                      (SELECT * FROM gff_file('{TEST_DIR}/single_no_genome.gff') EXCEPT ALL SELECT * FROM gff_file('{TEST_DIR}/single.gff')));
+----
+0

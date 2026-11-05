@@ -18,6 +18,7 @@
 #include "gpl_boundary/arrow_ipc.hpp"
 #include "gpl_boundary/process.hpp"
 #include "gpl_boundary/session.hpp"
+#include "gpl_boundary_version.hpp"
 
 #include "nanoarrow/nanoarrow.h"
 
@@ -618,19 +619,7 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	// 3. Spawn the gpl-boundary daemon. Fail loud (with a hint) when the
 	//    binary isn't found in any of FindGplBoundary's lookup locations
 	//    (MIINT_GPL_BOUNDARY_PATH, miint's install cache, PATH).
-	const std::string gpl_path = gb::FindGplBoundary();
-	if (gpl_path.empty()) {
-		throw IOException("phylogeny_fasttree: gpl-boundary binary not found. To install:\n"
-		                  "  Easiest:  SELECT install_gpl_boundary();   "
-		                  "-- downloads a prebuilt binary into miint's cache dir\n"
-		                  "  Manual:   curl -fsSL "
-		                  "https://github.com/the-miint/GPL-boundary/releases/latest/download/install.sh | sh\n"
-		                  "  Source:   https://github.com/the-miint/GPL-boundary#building-from-source\n"
-		                  "Currently supported prebuilt platforms: Linux x86_64, macOS arm64. macOS Intel users "
-		                  "must build from source.\n"
-		                  "If gpl-boundary is installed at a non-standard location, set "
-		                  "MIINT_GPL_BOUNDARY_PATH=<absolute path>.");
-	}
+	const std::string gpl_path = FindGplBoundaryOrThrow("phylogeny_fasttree");
 	std::vector<std::string> argv = {gpl_path}; // no args → daemon mode
 	gb::ChildProcess child(argv);
 	state->session = std::make_unique<gb::Session>(std::move(child));

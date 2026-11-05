@@ -25,6 +25,7 @@
 #include "gpl_boundary/arrow_ipc.hpp"
 #include "gpl_boundary/process.hpp"
 #include "gpl_boundary/session.hpp"
+#include "gpl_boundary_version.hpp"
 
 #include <chrono>
 #include <cstdlib>
@@ -639,15 +640,7 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 // =============================================================================
 
 std::unique_ptr<gb::Session> SpawnAndCheckSession() {
-	const std::string gpl_path = gb::FindGplBoundary();
-	if (gpl_path.empty()) {
-		throw IOException("align_bowtie2_sharded: gpl-boundary binary not found. To install:\n"
-		                  "  Easiest:  SELECT install_gpl_boundary();\n"
-		                  "  Manual:   curl -fsSL "
-		                  "https://github.com/the-miint/GPL-boundary/releases/latest/download/install.sh | sh\n"
-		                  "If gpl-boundary is installed at a non-standard location, set "
-		                  "MIINT_GPL_BOUNDARY_PATH=<absolute path>.");
-	}
+	const std::string gpl_path = FindGplBoundaryOrThrow("align_bowtie2_sharded");
 	// Fail loud if the resolved daemon predates bowtie2 `memory_mapped` support
 	// (>= 0.4.2): the sharded mm-off default depends on it, and older daemons
 	// silently ignore the field — reintroducing the cold-FS regression.

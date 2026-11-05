@@ -20,6 +20,7 @@
 #include "gpl_boundary/arrow_ipc.hpp"
 #include "gpl_boundary/process.hpp"
 #include "gpl_boundary/session.hpp"
+#include "gpl_boundary_version.hpp"
 
 #include <cstdio>
 #include <cstdlib>
@@ -288,16 +289,7 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 // rather than producing garbled output if the daemon doesn't have bowtie2
 // or has drifted to a different schema_version.
 std::unique_ptr<gb::Session> SpawnAndCheckSession() {
-	const std::string gpl_path = gb::FindGplBoundary();
-	if (gpl_path.empty()) {
-		throw IOException("align_bowtie2: gpl-boundary binary not found. To install:\n"
-		                  "  Easiest:  SELECT install_gpl_boundary();   "
-		                  "-- downloads a prebuilt binary into miint's cache dir\n"
-		                  "  Manual:   curl -fsSL "
-		                  "https://github.com/the-miint/GPL-boundary/releases/latest/download/install.sh | sh\n"
-		                  "If gpl-boundary is installed at a non-standard location, set "
-		                  "MIINT_GPL_BOUNDARY_PATH=<absolute path>.");
-	}
+	const std::string gpl_path = FindGplBoundaryOrThrow("align_bowtie2");
 	// Fail loud if the resolved daemon predates bowtie2 `memory_mapped` support
 	// (>= 0.4.2), since older daemons silently ignore the field.
 	bt2_daemon::RequireGplBoundaryVersion(gpl_path, "align_bowtie2");
