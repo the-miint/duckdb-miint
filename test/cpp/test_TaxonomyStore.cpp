@@ -69,9 +69,9 @@ TEST_CASE("TaxonomyStore interns names per rank", "[taxonomy_store]") {
 	CHECK(store.IsInformative(2));
 }
 
-static_assert(!std::is_copy_constructible_v<TaxonomyStore> && !std::is_copy_assignable_v<TaxonomyStore>);
 // FindRow's index views the store's own id strings, so the store refuses copies. A move
 // must keep those strings where they are, even once the moved-from store is gone.
+static_assert(!std::is_copy_constructible_v<TaxonomyStore> && !std::is_copy_assignable_v<TaxonomyStore>);
 TEST_CASE("TaxonomyStore finds rows by feature_id after a move", "[taxonomy_store]") {
 	const std::string long_id = "a feature id longer than any small-string buffer";
 	std::optional<TaxonomyStore> source(std::in_place,
@@ -143,7 +143,7 @@ TEST_CASE("TaxonomyStore rejects empty and duplicate feature_ids", "[taxonomy_st
 	           ContainsSubstring("row 2 (empty feature_id), column 'class'"));
 }
 
-// tax2tree's own list, so a taxonomy cleans the same way it does there.
+// tax2tree's own token list. How cleaning applies the tokens differs; see TaxonomyStore.hpp.
 TEST_CASE("DefaultBadNameTokens is tax2tree's BAD_NAMES", "[taxonomy_store]") {
 	CHECK(DefaultBadNameTokens() == std::vector<std::string> {"environmental sample", "uncultured", "UNNAMEABLE",
 	                                                          "unclassified", "unidentified", "cluster", "isolate",
@@ -224,16 +224,16 @@ TEST_CASE("TaxonomyStore wipes a lineage missing its domain or phylum", "[taxono
 	}
 }
 
-// Every name must have one parent lineage, so walking Parent() from it is unambiguous.
+// Every name must have one parent, so walking Parent() from it is unambiguous.
 TEST_CASE("TaxonomyStore rejects a name with more than one parent", "[taxonomy_store]") {
-	SECTION("the error names the name, its rank and every parent lineage") {
+	SECTION("the error names the name, its rank and its parents, each in a row's lineage") {
 		auto message =
 		    ErrorOf({Row("G1", {"A", "B", "C", "D", "E1", "Foo"}), Row("G2", {"A", "B", "C", "D", "E2", "Foo"})});
-		CHECK_THAT(message, ContainsSubstring("'Foo' (genus) appears under 2 parent lineages"));
+		CHECK_THAT(message, ContainsSubstring("'Foo' (genus) is under 2 different family names"));
 		CHECK_THAT(message, ContainsSubstring("[d__A; p__B; c__C; o__D; f__E1]"));
 		CHECK_THAT(message, ContainsSubstring("[d__A; p__B; c__C; o__D; f__E2]"));
 	}
-	SECTION("each parent lineage is one a row actually has") {
+	SECTION("each lineage shown is one a row actually has") {
 		// C is under B and B2, so walking up from E2 would give p__B; G2 says p__B2.
 		auto message =
 		    ErrorOf({Row("G1", {"A", "B", "C", "D", "E", "F"}), Row("G2", {"A", "B2", "C", "D", "E2", "F"})});
@@ -244,7 +244,7 @@ TEST_CASE("TaxonomyStore rejects a name with more than one parent", "[taxonomy_s
 		auto message =
 		    ErrorOf({Row("G1", {"A", "B", "C", "D", "E1", "Foo"}), Row("G2", {"A", "B", "C", "D", "E2", "Foo"}),
 		             Row("G3", {"A", "B", "C", "D", "E2", "Foo"}), Row("G4", {"A", "B", "C", "D", "E1", "Foo"})});
-		CHECK_THAT(message, ContainsSubstring("appears under 2 parent lineages"));
+		CHECK_THAT(message, ContainsSubstring("is under 2 different family names"));
 	}
 	SECTION("a name under many parents lists the first 3") {
 		std::vector<TaxonomyRow> rows;
@@ -252,7 +252,7 @@ TEST_CASE("TaxonomyStore rejects a name with more than one parent", "[taxonomy_s
 			rows.push_back(Row("G" + std::to_string(i), {"A", "B", "C", "D" + std::to_string(i), "Incertae Sedis"}));
 		}
 		auto message = ErrorOf(rows);
-		CHECK_THAT(message, ContainsSubstring("'Incertae Sedis' (family) appears under 5 parent lineages"));
+		CHECK_THAT(message, ContainsSubstring("'Incertae Sedis' (family) is under 5 different order names"));
 		CHECK_THAT(message, ContainsSubstring("o__D3], and 2 more"));
 		CHECK_THAT(message, !ContainsSubstring("o__D4"));
 	}
@@ -264,7 +264,11 @@ TEST_CASE("TaxonomyStore rejects a name with more than one parent", "[taxonomy_s
 		REQUIRE(ErrorOf(rows).empty());
 		TaxonomyStore store(rows);
 		CHECK(store.NameCount(kFamily) == 1);
-		CHECK(store.NameText(kFamily, store.Parent(kGenus, store.Name(0, kGenus))) == "E1");
+		const NameId foo = store.Name(0, kGenus);
+		REQUIRE(foo != kMissingName);
+		const NameId parent = store.Parent(kGenus, foo);
+		REQUIRE(parent != kMissingName);
+		CHECK(store.NameText(kFamily, parent) == "E1");
 		CHECK(Text(store, 1, kGenus) == "<missing>");
 	}
 	SECTION("names are not checked while any row has a problem") {
@@ -273,7 +277,7 @@ TEST_CASE("TaxonomyStore rejects a name with more than one parent", "[taxonomy_s
 		auto message =
 		    ErrorOf({Row("G1", {"A", "B", "C", "D", "E1", "Foo"}), Row("G2", {"A", "B", "C", "D", " E1", "Foo"})});
 		CHECK_THAT(message, ContainsSubstring("taxonomy: 1 problem:"));
-		CHECK_THAT(message, !ContainsSubstring("parent lineages"));
+		CHECK_THAT(message, !ContainsSubstring("different family names"));
 	}
 }
 

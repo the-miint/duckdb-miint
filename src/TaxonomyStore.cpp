@@ -222,8 +222,9 @@ TaxonomyStore::TaxonomyStore(const std::vector<TaxonomyRow> &rows, const std::ve
 	for (const auto &conflict : conflicts) {
 		const size_t listed = std::min(conflict.parents.size(), kMaxListedParents);
 		std::string problem = "'" + name_text_[conflict.rank][conflict.name] + "' (" +
-		                      kLineageRanks[conflict.rank].column + ") appears under " +
-		                      std::to_string(conflict.parents.size()) + " parent lineages:";
+		                      kLineageRanks[conflict.rank].column + ") is under " +
+		                      std::to_string(conflict.parents.size()) + " different " +
+		                      kLineageRanks[conflict.rank - 1].column + " names:";
 		for (size_t p = 0; p < listed; p++) {
 			// The lineage above the name in the row the parent came from, joined with "; " as
 			// tax2tree writes labels, for reading. (FormatLineage writes lineages for parsing.)

@@ -46,15 +46,16 @@ struct LineageTruncation {
 //      rank value is empty, starts or ends with whitespace, starts with a rank prefix
 //      ("p__Bacillota") or contains ';'; a rank is NULL while a deeper rank is not (a gap).
 //      Any problem stops construction here.
-//   2. Names, over the cleaned lineages: a name appears under more than one parent lineage.
+//   2. Names, over the cleaned lineages: a name is under more than one name at the rank
+//      above it (its parent).
 // It also throws, without a count, for an empty bad-name token, and for more distinct names
 // at one rank than NameId can number.
 //
 // Cleaning, per row: the first rank whose value contains a bad-name token, and every rank
 // below it, become missing; then a lineage missing its domain or its phylum becomes missing
-// entirely (the row is non-informative). tax2tree differs: it empties only the bad rank,
-// which leaves a gap, and its min-informative rule tests the phylum alone, before the
-// bad-name filter runs.
+// entirely (the row is non-informative). Cleaning runs first so that a lineage cut back to
+// its domain is emptied too. tax2tree differs: it empties only the bad rank, which leaves a
+// gap, and its min-informative rule tests the phylum alone, before the bad-name filter.
 //
 // Accessors take rows, ranks (kLineageRanks indexes) and NameIds in range; kMissingName is
 // not a NameId.
