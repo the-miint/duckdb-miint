@@ -34,6 +34,8 @@ Subset ("shear" / prune) a tree down to a specified set of tips. This is the ope
 **Output schema:** Same as [`read_newick`](reading.md#newick) (without filepath), reindexed 0-based:
 - `node_index` (BIGINT), `name` (VARCHAR), `branch_length` (DOUBLE, nullable), `edge_id` (BIGINT, nullable), `parent_index` (BIGINT, nullable, NULL for root), `is_tip` (BOOLEAN).
 
+The kept nodes keep their relative `node_index` order, so a tree in `read_newick`'s postorder numbering (see [Newick](reading.md#newick), "Node numbering") is sheared into a tree in postorder numbering.
+
 The schema is `UNION ALL`-compatible with `read_newick` and can be written straight back out with `COPY ... (FORMAT NEWICK)`.
 
 **Behavior / semantics:**
@@ -100,7 +102,7 @@ Resolve every multifurcation (a node with more than two children — a "polytomy
 **Parameters:**
 - `tree_table` (VARCHAR): Name of a table or view containing tree data in [`read_newick`](reading.md#newick) schema (requires `node_index` and `parent_index`; `name`, `branch_length`, `edge_id` optional).
 
-**Output schema:** Same as [`read_newick`](reading.md#newick) (without filepath), reindexed 0-based: `node_index`, `name`, `branch_length`, `edge_id`, `parent_index`, `is_tip`. The schema is `UNION ALL`-compatible with `read_newick`, can be written back out with `COPY ... (FORMAT NEWICK)`, and feeds directly into `phylo_independent_contrasts`.
+**Output schema:** Same as [`read_newick`](reading.md#newick) (without filepath), reindexed 0-based: `node_index`, `name`, `branch_length`, `edge_id`, `parent_index`, `is_tip`. The schema is `UNION ALL`-compatible with `read_newick`, can be written back out with `COPY ... (FORMAT NEWICK)`, and feeds directly into `phylo_independent_contrasts`. Original nodes keep their relative order and the new connector nodes are numbered after all of them, so when anything was resolved the output is **not** in `read_newick`'s postorder numbering.
 
 **Behavior / semantics:**
 - A node with `m ≥ 3` children `c0, c1, …, c(m-1)` (in `node_index` order) is resolved into a **deterministic left-comb**: the node keeps `c0` and a new internal node `N1`; `N1` keeps `c1` and `N2`; … ; `N(m-2)` keeps `c(m-2)` and `c(m-1)`. This inserts `m-2` new internal nodes.
@@ -341,7 +343,7 @@ Resolve phylogenetic placements into a reference tree, returning a fully resolve
 - `placements_table` (VARCHAR): Name of a table or view containing placement data: `fragment_id` (VARCHAR, BIGINT or UUID, as a `read_id`, so `place_krepp`'s `fragment` of any id type can be used; the placed tip is named with its text), `edge_id` (BIGINT, INTEGER, UBIGINT or UINTEGER), and `like_weight_ratio`, `distal_length` and `pendant_length` (each DOUBLE or FLOAT)
 
 **Output schema:** Same as [`read_newick`](reading.md#newick) (without filepath):
-- `node_index` (BIGINT): 0-based index of node in resolved tree
+- `node_index` (BIGINT): 0-based index of node in resolved tree. Original nodes keep their relative order and the nodes created for placements are numbered after all of them, so the output is **not** in `read_newick`'s postorder numbering.
 - `name` (VARCHAR): Node label (placed fragments use their fragment_id as name)
 - `branch_length` (DOUBLE, nullable): Branch length
 - `edge_id` (BIGINT, nullable): Edge identifier (NULL for newly created nodes)
