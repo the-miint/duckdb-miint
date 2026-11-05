@@ -34,10 +34,7 @@ Read paths target ENA's [Portal API](https://www.ebi.ac.uk/ena/portal/api/), [Br
 
 Every metadata request miint sends to ENA's Portal, Browser XML and Reports APIs, whether from a read or from the checks an `INSERT` makes first, is retried with backoff on HTTP 429, 500, 502, 503 and 504. The Portal API sometimes answers HTTP 200 with `ERROR occurred. Not all results may have been written.` in place of the results; that response is retried the same way. If the last retry gets it too, the query fails instead of returning a partial result, with two exceptions: a `LATERAL` call to `read_ena_sequences` skips that accession with a warning in `miint_warnings()`, and `INSERT INTO ena.samples` skips its client-side checklist check, leaving validation to Webin.
 
-The waits between those retries, 1, 2 and 4 s, and between a Webin submission's, end at Ctrl-C or
-`max_execution_time`. DuckDB retries a GET answered 429 or 503 itself before miint sees it, for
-about a minute with its default settings, and Ctrl-C does not end that wait;
-[Working with NCBI](insdc_ncbi.md#requests-waits-and-where-they-go) says how to change it.
+The waits between those retries, 1, 2 and 4 s, and between a Webin submission's, end at Ctrl-C or `max_execution_time`. DuckDB retries a GET answered 429 or 503 itself before miint sees it, for about a minute with its default settings, and Ctrl-C does not end that wait; [Working with NCBI](insdc_ncbi.md#requests-waits-and-where-they-go) says how to change it.
 
 A an example read pattern joins a study's metadata with its sequence data:
 

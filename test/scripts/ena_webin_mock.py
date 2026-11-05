@@ -54,20 +54,21 @@ Behavior:
     {"ranged": n, "full": n, "cuts": n, "errors": n} for that file since the
     reset (cuts counts reset GETs and HEADs, errors the 404s and 412s), so a
     test can show how many requests failed and how.
-  - Every request under /unavailable/ answers 503, and so does a Portal
-    search for the accession PORTAL_UNAVAILABLE. A test points a client's
-    base URL there (NCBI's and BLAST's settings, a Webin secret's
-    ENDPOINT_URL, read_ncbi_taxdump's source) to hold it in its retry
-    backoff.
+  - Every request under /unavailable/ answers 503, and so does a GET whose
+    path holds UNAVAILABLE: a Portal search, checklist or Reports lookup for
+    a name containing it. A test points a client's base URL under
+    /unavailable/ (NCBI's and BLAST's settings, a Webin secret's
+    ENDPOINT_URL, read_ncbi_taxdump's source), or names such an accession,
+    alias or checklist, to hold the client in its retry backoff.
   - /blast/Blast.cgi stands in for NCBI BLAST. A submission (POST CMD=Put)
     gets a fresh RID, and the label of its first query picks how the search
     goes on: "rtoe_wait" is estimated to take BLAST_RTOE_SECONDS,
     "poll_wait" answers WAITING to its first status poll, and
-    "status_unavailable" answers every status poll with 503. A poll that
-    comes after "rtoe_wait"'s estimate, or after "poll_wait"'s WAITING, gets
-    404: a client that waited the whole time fails with an HTTP error, where
-    one the deadline stopped fails with the deadline's. Any other search is
-    READY at once. Its results are one tabular hit, the query against itself.
+    "status_unavailable" answers every status poll with 503. Every status
+    poll of "rtoe_wait", and every one of "poll_wait" after its WAITING, gets
+    404, so a client that waits a whole estimate or poll interval out fails
+    with an HTTP error, where one a deadline stopped fails with the
+    deadline's. Any other search is READY at once. Its results are one tabular hit, the query against itself.
 
 Started on a free port by test/scripts/ena_mock_env.sh, for run_tests.sh and
 onboarding-tutorials/run_tutorial_tests.sh, which exports its URL as
@@ -141,8 +142,8 @@ _fault_stats: dict[str, dict[str, int]] = {}
 _NO_FAULTS = {"ranged": 0, "full": 0, "cuts": 0, "errors": 0}
 _RANGE = re.compile(r"bytes=(\d+)-(\d+)")
 
-# The Portal search accession that answers 503.
-PORTAL_UNAVAILABLE = "PORTAL_UNAVAILABLE"
+# A GET whose path holds this answers 503.
+UNAVAILABLE = "UNAVAILABLE"
 # The BLAST stand-in's searches: the label of each one's first query, by RID.
 _BLAST_SEARCHES: dict[str, str] = {}
 # RIDs whose first status poll has been answered.
@@ -644,7 +645,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        if self.path.startswith("/unavailable/"):
+        if self.path.startswith("/unavailable/") or UNAVAILABLE in self.path:
             self._send_unavailable()
             return
         if self.path.startswith("/blast/Blast.cgi"):
@@ -672,9 +673,6 @@ class Handler(BaseHTTPRequestHandler):
         # auth → HTTP 500), and ena-upload-cli's check_remote.py likewise
         # queries it without credentials.
         if self.path.startswith("/portal/api/search"):
-            if PORTAL_UNAVAILABLE in self.path:
-                self._send_unavailable()
-                return
             tsv = self._handle_portal_search(self.path)
             if tsv is None:
                 self.send_response(400)
@@ -869,8 +867,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
-        length = int(self.headers.get("Content-Length", "0") or "0")
-        body = self.rfile.read(length) if length else b""
+        body = self._read_body()
         ctype = self.headers.get("Content-Type", "")
         action_name = ""
         hold_until = ""

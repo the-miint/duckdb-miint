@@ -261,6 +261,7 @@ public:
 		}
 		RecordSubmissionLog(catalog, creds, log_payload);
 
+		submitted.RethrowInterrupt();
 		if (submitted.transport_failure) {
 			throw InvalidInputException("%s failed: %s", Derived::ThrowPrefix(), submitted.transport_error);
 		}

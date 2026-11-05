@@ -16,6 +16,12 @@ CREATE TEMP TABLE test_seqs (read_id VARCHAR, sequence1 VARCHAR);
 statement ok
 INSERT INTO test_seqs VALUES ('seq1', 'ACGTACGTACGTACGTACGT');
 
+# Requests go to NCBI unless miint_blast_url says otherwise.
+query T
+SELECT current_setting('miint_blast_url');
+----
+https://blast.ncbi.nlm.nih.gov/blast/Blast.cgi
+
 # Test error: NULL table name
 statement error
 SELECT * FROM blast(NULL);

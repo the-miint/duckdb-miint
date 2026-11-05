@@ -276,6 +276,8 @@ protected:
 			std::string accession;
 			try {
 				accession = miint::LookupAccessionByAlias(reports_base, kind, resolved_target.refname, fetcher);
+			} catch (const InterruptException &) {
+				throw; // Ctrl-C or max_execution_time, not a failed lookup
 			} catch (const std::exception &e) {
 				throw InvalidInputException("DELETE FROM ena.%s: Reports API lookup for alias '%s' failed: %s",
 				                            object_type, resolved_target.refname, ErrorData(e).RawMessage());
@@ -337,6 +339,7 @@ protected:
 		RecordSubmissionLog(catalog, creds, payload);
 
 		gs.emitted = true;
+		submitted.RethrowInterrupt();
 		if (submitted.transport_failure) {
 			throw InvalidInputException("DELETE FROM ena.%s: %s", object_type, submitted.transport_error);
 		}

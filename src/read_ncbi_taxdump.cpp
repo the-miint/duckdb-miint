@@ -202,8 +202,8 @@ miint::TaxdumpFiles LoadTaxdumpFiles(ClientContext &context, const std::string &
 
 	// A directory of already-extracted .dmp files. This is also the cached-download
 	// path (the default source caches the extracted members), so it is the branch that
-	// matters most for skipping members the caller does not read. A URL never names one,
-	// and httpfs, which DuckDB loads to answer for a URL, throws instead of saying no.
+	// matters most for skipping members the caller does not read. An http(s) URL never
+	// names one, and httpfs, which answers for it, throws instead of saying no.
 	if (!IsHttpUrl(source) && fs.DirectoryExists(source)) {
 		auto read_member = [&](const char *name, bool wanted) -> std::string {
 			if (!wanted) {

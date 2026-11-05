@@ -57,16 +57,17 @@ and for NCBI:
 - `read_ncbi`, `read_ncbi_fasta`, `read_ncbi_annotation` and `read_ncbi_lineage` retry a transient
   failure after 1, 2, 4, 8, 16 and 32 s. `read_ncbi_taxdump` retries its download after 1, 2 and 4 s.
 - `blast` backs off between attempts as the readers do. It also waits for NCBI's estimate of how
-  long a search takes, at most an hour, then polls every 15 s.
+  long a search takes, at most an hour, then polls every 15 s for up to another hour, after which
+  it fails.
 
-Ctrl-C and `max_execution_time` end any of these waits within a tenth of a second. Before miint
-sees the status of a GET answered 429 or 503, DuckDB retries the GET itself, as its
+Ctrl-C and `max_execution_time` end any of these waits within about a tenth of a second. Before
+miint sees the status of a GET answered 429 or 503, DuckDB retries the GET itself, as its
 `http_retries`, `http_retry_wait_ms` and `http_retry_backoff` settings say. With the defaults that
-takes about a minute, and Ctrl-C does not end it. miint reads these settings from the database,
-so change them with `SET GLOBAL`.
+takes about a minute, and Ctrl-C does not end it (#414). A session `SET` of those three does not
+reach miint's requests; use `SET GLOBAL`.
 
-Two settings send the requests elsewhere, such as to a mirror. A trailing slash is dropped, and
-an empty URL is an error.
+Two settings send the requests elsewhere, such as to a mirror, and a session `SET` changes them.
+A trailing slash is dropped, and a query that would use an empty URL fails.
 
 - `miint_ncbi_eutils_url`, the base URL of E-utilities (default
   `https://eutils.ncbi.nlm.nih.gov/entrez/eutils`). The Datasets API, which `read_ncbi_fasta` uses
@@ -158,7 +159,7 @@ Fetch FASTA sequences from NCBI by accession number. Returns data in the same sc
 - `sequence2` (VARCHAR): Always NULL (single sequences only)
 - `qual1` (UINT8[]): Always NULL (FASTA has no quality scores)
 - `qual2` (UINT8[]): Always NULL
-- `filepath` (VARCHAR, optional): NCBI E-utilities URL when include_filepath=true
+- `filepath` (VARCHAR, optional): the URL the records were fetched from, when include_filepath=true
 
 **Behavior:**
 - Fetches FASTA via the batched `epost` + `efetch` handshake (sequence accessions); assemblies route through the Datasets API one at a time
@@ -225,7 +226,7 @@ Fetch feature annotations from NCBI by accession number. Returns data in the sam
 - `strand` (VARCHAR): Strand ('+' or '-')
 - `phase` (INTEGER, nullable): CDS phase (0, 1, 2) derived from codon_start qualifier
 - `attributes` (MAP(VARCHAR, VARCHAR)): Key-value attributes (gene, product, locus_tag, etc.)
-- `filepath` (VARCHAR, optional): NCBI E-utilities URL when include_filepath=true
+- `filepath` (VARCHAR, optional): the URL the records were fetched from, when include_filepath=true
 
 **Behavior:**
 - Fetches INSDC feature table format from E-utilities

@@ -1,5 +1,5 @@
 # name: test/sql/http_client_waits_mock.test
-# description: The NCBI, BLAST and ENA clients stop waiting at max_execution_time
+# description: The NCBI, BLAST and ENA clients stop waiting at max_execution_time, and the interrupt reaches the query
 # group: [sql]
 
 require httpfs
@@ -10,6 +10,10 @@ require-env ENA_WEBIN_MOCK_URL
 
 require-env MIINT_ENA_PORTAL_URL_BASE
 
+require-env MIINT_ENA_CHECKLIST_URL_BASE
+
+require-env MIINT_ENA_REPORTS_URL_BASE
+
 # The HTTP clients wait between attempts, backing off 1, 2, 4 s and on: 7 s in all
 # for ENA and read_ncbi_taxdump, 63 s for NCBI and BLAST. BLAST also waits for its
 # own estimate of a search's length, up to an hour, then 15 s between polls, and
@@ -18,9 +22,10 @@ require-env MIINT_ENA_PORTAL_URL_BASE
 # test cannot press Ctrl-C, so the deadline stands in for it.
 #
 # Each query below waits, in the wait its comment names, from before its deadline
-# until well after it. Waited out, it fails with an HTTP error instead of the
-# deadline's. The mock (test/scripts/ena_webin_mock.py) answers 503 to everything
-# under /unavailable/.
+# until well after it. Waited out, it fails with an HTTP error, or succeeds,
+# instead of failing as interrupted. The mock (test/scripts/ena_webin_mock.py)
+# answers 503 to everything under /unavailable/, and to a GET whose path holds
+# UNAVAILABLE.
 
 statement ok
 CREATE TABLE submit_unavailable AS SELECT 'submit_unavailable' AS read_id, 'ACGTACGTACGTACGTACGT' AS sequence1;
@@ -37,6 +42,7 @@ CREATE TABLE status_unavailable AS SELECT 'status_unavailable' AS read_id, 'ACGT
 statement ok
 CREATE TABLE ready_at_once AS SELECT 'ready_at_once' AS read_id, 'ACGTACGTACGTACGTACGT' AS sequence1;
 
+# Webin submissions through this secret get 503.
 statement ok
 CREATE SECRET webin_unavailable (
     TYPE ENA,
@@ -49,10 +55,21 @@ CREATE SECRET webin_unavailable (
 statement ok
 ATTACH '' AS ena (TYPE ENA, SECRET 'webin_unavailable');
 
-# DuckDB's own HTTP layer retries a GET that gets a 503, up to 8 times over about
-# a minute, before a client sees the status, and its waits do not poll the
-# interrupt check. Off, so the waits here are the clients' own. GLOBAL because
-# the clients take their HTTP settings from the database, not the session.
+# Through this one they succeed.
+statement ok
+CREATE SECRET webin_ok (
+    TYPE ENA,
+    USER 'Webin-99999',
+    PASSWORD 'mock-password',
+    ENDPOINT 'test',
+    ENDPOINT_URL '{ENA_WEBIN_MOCK_URL}'
+);
+
+statement ok
+ATTACH '' AS ena_ok (TYPE ENA, SECRET 'webin_ok');
+
+# DuckDB's own retries of a GET answered 503 would otherwise run first
+# (docs/internals/duckdb-engine-notes.md, "Interrupts and max_execution_time").
 statement ok
 SET GLOBAL http_retries = 0;
 
@@ -61,18 +78,61 @@ SET max_execution_time = 300;
 
 # --- ENA ---------------------------------------------------------------------
 
-# A Portal search: the mock answers 503 for this accession.
+# A Portal search.
 statement error
-SELECT * FROM read_ena('PORTAL_UNAVAILABLE');
+SELECT * FROM read_ena('ERR_UNAVAILABLE');
 ----
-Query exceeded maximum execution time
+INTERRUPT Error: Query exceeded maximum execution time
+
+# The same search from a LATERAL call, which skips an accession it cannot
+# resolve. An interrupt is not such a failure: skipped, it would leave the
+# query to succeed with no rows.
+statement error
+SELECT * FROM (VALUES ('ERR_UNAVAILABLE')) t(accession), LATERAL read_ena_sequences(accession);
+----
+INTERRUPT Error: Query exceeded maximum execution time
 
 # A Webin submission. The alias check before it is a Portal search the mock
-# answers; the POST goes under /unavailable/.
+# answers; the POST goes under /unavailable/. The attempt is logged, and the
+# query fails as interrupted, not as a failed submission.
 statement error
 INSERT INTO ena.projects (alias, title, project_type) VALUES ('waits_for_webin', 'never submitted', 'METAGENOMIC');
 ----
-Query exceeded maximum execution time
+INTERRUPT Error: Query exceeded maximum execution time
+
+# The checklist fetch before a sample submission. A checklist that cannot be
+# fetched is skipped, and Webin validates instead; an interrupt is not that,
+# and must stop the submission. VALIDATE skips the alias check, so after a
+# skipped interrupt nothing else would wait before the POST.
+statement ok
+SET miint_ena_validate_only = true;
+
+statement error
+INSERT INTO ena_ok.samples (alias, taxon_id, checklist, attributes)
+VALUES ('waits_for_checklist', 408170, 'UNAVAILABLE', MAP {'project name': 'never validated'});
+----
+INTERRUPT Error: Query exceeded maximum execution time
+
+statement ok
+RESET miint_ena_validate_only;
+
+# Nothing was submitted.
+query I
+SELECT count(*) FROM ena_ok.submission_log WHERE object_type = 'samples';
+----
+0
+
+# The Reports lookup that turns an alias into an accession, for a lifecycle
+# function and for a DELETE.
+statement error
+SELECT * FROM ena_cancel(secret => 'webin_ok', refname => 'UNAVAILABLE_alias', kind => 'samples');
+----
+INTERRUPT Error: Query exceeded maximum execution time
+
+statement error
+DELETE FROM ena_ok.samples WHERE alias = 'UNAVAILABLE_alias';
+----
+INTERRUPT Error: Query exceeded maximum execution time
 
 # --- NCBI --------------------------------------------------------------------
 
@@ -83,19 +143,19 @@ SET miint_ncbi_eutils_url = '{ENA_WEBIN_MOCK_URL}/unavailable/eutils';
 statement error
 SELECT * FROM read_ncbi('NC_000913.3');
 ----
-Query exceeded maximum execution time
+INTERRUPT Error: Query exceeded maximum execution time
 
 # efetch, a GET.
 statement error
 SELECT * FROM read_ncbi_annotation('NC_000913.3');
 ----
-Query exceeded maximum execution time
+INTERRUPT Error: Query exceeded maximum execution time
 
 # The taxdump download, a GET with its own retry loop.
 statement error
 SELECT * FROM read_ncbi_taxdump('{ENA_WEBIN_MOCK_URL}/unavailable/taxdump.tar.gz');
 ----
-Query exceeded maximum execution time
+INTERRUPT Error: Query exceeded maximum execution time
 
 # --- BLAST -------------------------------------------------------------------
 
@@ -106,7 +166,7 @@ SET miint_blast_url = '{ENA_WEBIN_MOCK_URL}/unavailable/Blast.cgi';
 statement error
 SELECT * FROM blast('submit_unavailable');
 ----
-Query exceeded maximum execution time
+INTERRUPT Error: Query exceeded maximum execution time
 
 statement ok
 SET miint_blast_url = '{ENA_WEBIN_MOCK_URL}/blast/Blast.cgi';
@@ -122,19 +182,19 @@ SET max_execution_time = 1000;
 statement error
 SELECT * FROM blast('rtoe_wait');
 ----
-Query exceeded maximum execution time
+INTERRUPT Error: Query exceeded maximum execution time
 
 # WAITING at the first poll, then 15 s to the next.
 statement error
 SELECT * FROM blast('poll_wait');
 ----
-Query exceeded maximum execution time
+INTERRUPT Error: Query exceeded maximum execution time
 
 # A poll answered with 503, a GET.
 statement error
 SELECT * FROM blast('status_unavailable');
 ----
-Query exceeded maximum execution time
+INTERRUPT Error: Query exceeded maximum execution time
 
 statement ok
 RESET max_execution_time;
@@ -153,4 +213,10 @@ statement ok
 DETACH ena;
 
 statement ok
+DETACH ena_ok;
+
+statement ok
 DROP SECRET webin_unavailable;
+
+statement ok
+DROP SECRET webin_ok;

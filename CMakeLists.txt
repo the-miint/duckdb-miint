@@ -664,7 +664,7 @@ if(BUILD_UNITTESTS)
   add_executable(
     tests_duckdb
     test/cpp/test_RypeInputStream.cpp test/cpp/test_RypeFilterParallel.cpp
-    test/cpp/test_RypeFilterSchedule.cpp test/cpp/test_HttpClientSettings.cpp)
+    test/cpp/test_RypeFilterSchedule.cpp test/cpp/test_HttpClientCommon.cpp)
   target_link_libraries(tests_duckdb Catch2::Catch2WithMain duckdb_static)
   link_extension_libraries(tests_duckdb "")
   # Sets RLIMIT_FSIZE, so POSIX only

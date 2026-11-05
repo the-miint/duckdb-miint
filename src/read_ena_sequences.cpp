@@ -679,6 +679,9 @@ OperatorResultType ReadENASequencesTableFunction::ExecuteInOut(ExecutionContext 
 			for (const auto &run : it->second) {
 				local.pending_runs.push_back(run);
 			}
+		} catch (const InterruptException &) {
+			// Ctrl-C or max_execution_time: the query stops, this accession did not fail.
+			throw;
 		} catch (const std::exception &e) {
 			record_skip(local.current_accession, "",
 			            std::string("metadata resolution failed: ") + ErrorData(e).RawMessage());

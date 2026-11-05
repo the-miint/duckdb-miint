@@ -11,11 +11,9 @@ namespace miint {
 constexpr std::chrono::milliseconds INTERRUPT_POLL_INTERVAL {100};
 
 // Sleeps for `duration` in slices of at most INTERRUPT_POLL_INTERVAL, calling `check`
-// after each one. A check that throws ends the wait with its exception. The HTTP
-// clients pass ClientContext::BlockingInterruptCheck, so Ctrl-C and max_execution_time
-// stop a retry backoff or a BLAST wait within one slice instead of when it ends. The
-// last check follows the last slice, so a cancel during the wait also stops the request
-// the caller would send next.
+// after each one, the last included. A check that throws ends the wait with its
+// exception, at most one slice after it would first have thrown, and before the caller
+// does whatever follows the wait.
 inline void InterruptibleSleep(std::chrono::milliseconds duration, const std::function<void()> &check) {
 	while (duration > std::chrono::milliseconds::zero()) {
 		const auto slice = std::min(duration, INTERRUPT_POLL_INTERVAL);

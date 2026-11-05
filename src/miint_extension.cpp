@@ -342,10 +342,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                                 "sizes groups from the memory budget.",
 	                                 LogicalType::BIGINT, Value::BIGINT(0));
 
-	// Where the NCBI clients send their requests: a mirror, or the test mock
-	// (test/scripts/ena_webin_mock.py). Settings rather than environment variables,
-	// as the ENA base URLs are, because the mock tests share a process with the live
-	// NCBI tests.
+	// Where the NCBI clients send their requests, so a mirror or a test server can stand
+	// in for NCBI.
 	ena_db_config.AddExtensionOption("miint_ncbi_eutils_url",
 	                                 "Base URL of NCBI E-utilities, which read_ncbi, read_ncbi_fasta, "
 	                                 "read_ncbi_annotation and read_ncbi_lineage call. The Datasets API, which "

@@ -18,6 +18,7 @@
 #include "duckdb/common/types/value.hpp"
 
 #include <cstdint>
+#include <exception>
 #include <string>
 #include <vector>
 
@@ -95,6 +96,16 @@ struct SubmissionResult {
 	string transport_error;
 	bool success = false;
 	std::vector<std::string> error_messages;
+	// Set when Ctrl-C or max_execution_time ended a wait inside the submission. It is
+	// also a transport failure, so the caller logs the attempt; RethrowInterrupt then
+	// fails the query as interrupted rather than as a failed submission.
+	std::exception_ptr interrupt;
+
+	void RethrowInterrupt() const {
+		if (interrupt) {
+			std::rethrow_exception(interrupt);
+		}
+	}
 };
 
 // Runs `submit`, which returns the submission's outcome or throws on a transport failure
@@ -110,6 +121,9 @@ SubmissionResult SubmitCapturingTransportFailure(OutcomeT &outcome, SubmitFn &&s
 	} catch (const std::exception &e) {
 		result.transport_failure = true;
 		result.transport_error = ErrorData(e).RawMessage();
+		if (dynamic_cast<const InterruptException *>(&e)) {
+			result.interrupt = std::current_exception();
+		}
 	}
 	result.success = !result.transport_failure && outcome.success;
 	result.error_messages = outcome.error_messages;
