@@ -1,0 +1,182 @@
+# name: test/sql/parse_lineage.test
+# description: parse_lineage turns a prefixed lineage string into the shared lineage schema
+# group: [sql]
+
+require miint
+
+# --- the result is the shared lineage schema -------------------------------
+# `unnest(parse_lineage(x))` must yield exactly the eight rank columns taxonomy_lineage
+# and read_ncbi_lineage emit, in the same order, so the output feeds anything that takes
+# that schema (tax2tree's taxonomy and pins) without renaming. (DuckDB 2.0 does not
+# parse `(expr).*`; unnest is how a STRUCT result becomes columns.)
+
+query TT
+SELECT column_name, column_type
+FROM (DESCRIBE SELECT unnest(parse_lineage('d__A')));
+----
+domain	VARCHAR
+phylum	VARCHAR
+class	VARCHAR
+order	VARCHAR
+family	VARCHAR
+genus	VARCHAR
+species	VARCHAR
+strain	VARCHAR
+
+# --- the intended use: (feature_id, lineage) -> shared schema --------------
+# Both separators parse: tax2tree/GG2 labels join with '; ', miint's own lineage strings
+# with ';'. Empty bodies and absent trailing fields are NULL, never ''.
+
+statement ok
+CREATE TABLE raw(feature_id VARCHAR, lineage VARCHAR);
+
+statement ok
+INSERT INTO raw VALUES
+  ('G1', 'd__Bacteria; p__Bacillota; c__Bacilli; o__Lactobacillales; f__Streptococcaceae; g__Streptococcus; s__Streptococcus mutans'),
+  ('G2', 'd__Bacteria;p__Pseudomonadota;c__Gammaproteobacteria;o__;f__;g__;s__'),
+  ('G3', 'd__Archaea; p__Methanobacteriota'),
+  ('G4', 'd__Bacteria; p__Pseudomonadota; c__Gammaproteobacteria; o__Enterobacterales; f__Enterobacteriaceae; g__Escherichia; s__Escherichia coli; t__Escherichia coli K-12'),
+  ('G5', NULL);
+
+query TTTTTTTTT
+SELECT feature_id, unnest(parse_lineage(lineage)) FROM raw ORDER BY feature_id;
+----
+G1	Bacteria	Bacillota	Bacilli	Lactobacillales	Streptococcaceae	Streptococcus	Streptococcus mutans	NULL
+G2	Bacteria	Pseudomonadota	Gammaproteobacteria	NULL	NULL	NULL	NULL	NULL
+G3	Archaea	Methanobacteriota	NULL	NULL	NULL	NULL	NULL	NULL
+G4	Bacteria	Pseudomonadota	Gammaproteobacteria	Enterobacterales	Enterobacteriaceae	Escherichia	Escherichia coli	Escherichia coli K-12
+G5	NULL	NULL	NULL	NULL	NULL	NULL	NULL	NULL
+
+# unnest keeps G5's row; the struct itself is NULL, not a struct of NULLs.
+query TI
+SELECT feature_id, parse_lineage(lineage) IS NULL FROM raw ORDER BY feature_id;
+----
+G1	false
+G2	false
+G3	false
+G4	false
+G5	true
+
+# "order" is a reserved word: the expanded column is reachable only when quoted.
+query T
+SELECT "order" FROM (SELECT unnest(parse_lineage(lineage)) FROM raw WHERE feature_id = 'G1');
+----
+Lactobacillales
+
+# --- inverse of miint's lineage strings ------------------------------------
+# Every lineage taxonomy_lineage writes parses back into the columns it was written from.
+
+query I
+SELECT count(*) FROM taxonomy_lineage(source := 'data/taxonomy/synthetic')
+WHERE parse_lineage(lineage) IS DISTINCT FROM
+      {'domain': domain, 'phylum': phylum, 'class': "class", 'order': "order",
+       'family': family, 'genus': genus, 'species': species, 'strain': strain};
+----
+0
+
+query I
+SELECT count(*) > 0 FROM taxonomy_lineage(source := 'data/taxonomy/synthetic');
+----
+true
+
+# --- gaps are decorate's to reject, not the converter's --------------------
+
+query TTT
+SELECT (p).domain, (p).phylum, (p)."class" FROM (SELECT parse_lineage('d__A; p__; c__C') AS p);
+----
+A	NULL	C
+
+# --- domain_letter: k__ only when declared ---------------------------------
+# Greengenes 13_8 writes k__ for the domain. One constant letter per call means one call
+# cannot mix d__ and k__ rows.
+
+query TT
+SELECT (p).domain, (p).phylum FROM (SELECT parse_lineage('k__Bacteria; p__Bacillota', domain_letter := 'k') AS p);
+----
+Bacteria	Bacillota
+
+statement error
+SELECT parse_lineage('k__Bacteria; p__Bacillota');
+----
+<REGEX>:.*parse_lineage: .*domain_letter.*
+
+statement error
+SELECT parse_lineage('d__Bacteria; p__Bacillota', domain_letter := 'k');
+----
+<REGEX>:.*parse_lineage: .*k__.*
+
+statement error
+SELECT parse_lineage('d__Bacteria', domain_letter := 'x');
+----
+<REGEX>:.*parse_lineage: domain_letter must be 'd' or 'k'.*
+
+statement error
+SELECT parse_lineage('d__Bacteria', domain_letter := NULL);
+----
+<REGEX>:.*parse_lineage: domain_letter must be 'd' or 'k', not NULL.*
+
+statement error
+SELECT parse_lineage(lineage, domain_letter := feature_id) FROM raw;
+----
+<REGEX>:.*parse_lineage: domain_letter must be a constant.*
+
+# domain_letter is keyword-only: a bare 'k' in second position would not say what it is.
+statement error
+SELECT parse_lineage('k__Bacteria', 'k');
+----
+<REGEX>:.*parse_lineage.*
+
+# --- malformed lineages are errors that quote the lineage ------------------
+
+statement error
+SELECT parse_lineage('d__A; c__B');
+----
+<REGEX>:.*parse_lineage: .*p__.*d__A; c__B.*
+
+statement error
+SELECT parse_lineage('d__A; p__B; c__C; o__D; f__E; g__F; s__G; t__H; t__I');
+----
+<REGEX>:.*parse_lineage: .*8.*
+
+statement error
+SELECT parse_lineage('');
+----
+<REGEX>:.*parse_lineage: .*empty.*
+
+statement error
+SELECT parse_lineage('d__A; p__B;');
+----
+<REGEX>:.*parse_lineage: .*empty.*
+
+statement error
+SELECT parse_lineage('Bacteria; Bacillota');
+----
+<REGEX>:.*parse_lineage: .*d__.*
+
+# Values decorate would reject are rejected here, so a converted table always passes
+# decorate's value checks.
+
+statement error
+SELECT parse_lineage('d__ Bacteria');
+----
+<REGEX>:.*parse_lineage: .*whitespace.*
+
+statement error
+SELECT parse_lineage('d__Bacteria; p__p__Bacillota');
+----
+<REGEX>:.*parse_lineage: .*prefix.*
+
+# --- finding every malformed row ---------------------------------------------
+# A scalar error stops at the first bad row. TRY turns each failure into NULL, so a
+# caller can list all the bad rows at once.
+
+statement ok
+INSERT INTO raw VALUES ('B1', 'd__A; c__B'), ('B2', 'k__A');
+
+query T
+SELECT feature_id FROM raw
+WHERE lineage IS NOT NULL AND TRY(parse_lineage(lineage)) IS NULL
+ORDER BY feature_id;
+----
+B1
+B2

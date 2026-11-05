@@ -53,11 +53,13 @@ void SetRankCell(DataChunk &output, idx_t col, idx_t row, const std::string &val
 ReadNCBILineageTableFunction::Data::Data(std::vector<std::string> taxids, std::vector<std::vector<std::string>> batches,
                                          const std::string &api_key, int64_t batch_size)
     : taxids(std::move(taxids)), batches(std::move(batches)), api_key(api_key), batch_size(batch_size) {
-	names = {"taxid", "name",   "rank",  "domain",  "phylum", "class",
-	         "order", "family", "genus", "species", "strain", "lineage"};
-	types = {LogicalType::BIGINT,  LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
-	         LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
-	         LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR};
+	names = {"taxid", "name", "rank"};
+	for (const auto &rank : miint::kLineageRanks) {
+		names.emplace_back(rank.column);
+	}
+	names.emplace_back("lineage");
+	types.assign(names.size(), LogicalType::VARCHAR);
+	types[0] = LogicalType::BIGINT;
 }
 
 ReadNCBILineageTableFunction::GlobalState::GlobalState(DatabaseInstance &db, const std::string &api_key,

@@ -3,6 +3,7 @@
 #include "ncbi_parser.hpp"
 
 #include <cstdlib>
+#include <stdexcept>
 
 namespace miint {
 
@@ -90,6 +91,11 @@ std::vector<int64_t> ExtractAllTaxIds(const std::string &xml) {
 	return ids;
 }
 
+// Whitespace that separates lineage fields but is never part of a name.
+bool IsLineageSpace(char c) {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+
 std::string FormatLineage(const Lineage &l) {
 	std::string s = "d__" + l.domain + ";p__" + l.phylum + ";c__" + l.tax_class + ";o__" + l.tax_order + ";f__" +
 	                l.family + ";g__" + l.genus + ";s__" + l.species;
@@ -126,6 +132,68 @@ Lineage CollapseLineage(int64_t taxid, const std::string &name, const std::strin
 	AssignRank(lin, rank, name);
 	lin.lineage = FormatLineage(lin);
 	return lin;
+}
+
+LineageRanks ParseLineageString(const std::string &lineage, char domain_letter) {
+	if (domain_letter != 'd' && domain_letter != 'k') {
+		throw std::invalid_argument("domain_letter must be 'd' or 'k', got '" + std::string(1, domain_letter) + "'");
+	}
+	auto fail = [&](size_t position, const std::string &field, const std::string &why) {
+		return std::invalid_argument("field " + std::to_string(position + 1) + " ('" + field + "') " + why +
+		                             " in lineage '" + lineage + "'");
+	};
+
+	LineageRanks ranks;
+	size_t position = 0;
+	size_t start = 0;
+	while (true) {
+		size_t stop = lineage.find(';', start);
+		size_t end = stop == std::string::npos ? lineage.size() : stop;
+		while (start < end && IsLineageSpace(lineage[start])) {
+			++start;
+		}
+		while (end > start && IsLineageSpace(lineage[end - 1])) {
+			--end;
+		}
+		const std::string field = lineage.substr(start, end - start);
+
+		if (position == ranks.size()) {
+			throw fail(position, field,
+			           "is past strain: a lineage has at most " + std::to_string(ranks.size()) + " fields");
+		}
+		if (field.empty()) {
+			throw fail(position, field, "is empty");
+		}
+		const char letter = position == 0 ? domain_letter : kLineageRanks[position].letter;
+		if (field.size() < 3 || field[0] != letter || field[1] != '_' || field[2] != '_') {
+			std::string why = "must start with '" + std::string(1, letter) + "__'";
+			if (position == 0) {
+				const std::string other = domain_letter == 'd' ? "k" : "d";
+				why += " (domain_letter is '" + std::string(1, domain_letter) + "'";
+				if (field.rfind(other + "__", 0) == 0) {
+					why += "; pass domain_letter := '" + other + "' to read " + other + "__ lineages";
+				}
+				why += ")";
+			}
+			throw fail(position, field, why);
+		}
+		std::string name = field.substr(3);
+		if (!name.empty()) {
+			if (IsLineageSpace(name[0])) {
+				throw fail(position, field, "has whitespace after its rank prefix");
+			}
+			if (name.size() >= 3 && name[0] >= 'a' && name[0] <= 'z' && name[1] == '_' && name[2] == '_') {
+				throw fail(position, field, "has a second rank prefix");
+			}
+			ranks[position] = std::move(name);
+		}
+		++position;
+		if (stop == std::string::npos) {
+			break;
+		}
+		start = stop + 1;
+	}
+	return ranks;
 }
 
 std::vector<Lineage> ParseTaxonomyXML(const std::string &xml) {

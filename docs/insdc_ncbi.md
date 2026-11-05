@@ -15,6 +15,7 @@ MIINT provides integration with NCBI's GenBank and RefSeq.
   - [List deleted taxids (`read_ncbi_taxdump_deleted`)](#list-deleted-taxids-read_ncbi_taxdump_deleted) - The taxids NCBI deleted outright.
   - [Look up lineages online (`read_ncbi_lineage`)](#look-up-lineages-online-read_ncbi_lineage) - Online/rate-limited: resolve a handful of taxids via E-utilities.
   - [Collapse the tree to lineages (`taxonomy_lineage`)](#collapse-the-tree-to-lineages-taxonomy_lineage) - Offline: rank-collapse a taxdump tree, identical schema to `read_ncbi_lineage`.
+  - [Parse lineage strings (`parse_lineage`)](#parse-lineage-strings-parse_lineage) - Turn a `d__…; p__…` lineage string (GTDB, Greengenes2, tax2tree) into the shared schema's rank columns.
 
 ### Accessions are literals, not table names
 
@@ -519,3 +520,49 @@ JOIN taxonomy_lineage(source := '/data/taxonomy/') l ON l.taxid = m.taxonomy_id;
 
 **Notes:**
 - **Memory:** calling `taxonomy_lineage()` with `taxids := NULL` over the full NCBI tree materializes a lineage for every one of ~2.9M nodes and is memory-heavy (tens of GB peak). For typical use, always pass `taxids := [...]` — resolving thousands of taxids is fast and light. The unfiltered form is intended for whole-taxonomy exports on machines with ample RAM.
+
+### Parse lineage strings (`parse_lineage`)
+
+Turns a prefixed lineage string, as written by GTDB, Greengenes2, tax2tree and
+`taxonomy_lineage` itself, into the eight rank columns of the shared lineage schema. Use it
+to bring a `(feature_id, lineage)` taxonomy into the shared schema. It works on any
+prefixed lineage, not only NCBI ones.
+
+**Parameters:**
+- `lineage` (VARCHAR): for example `d__Bacteria; p__Bacillota; c__Bacilli` or `d__Bacteria;p__Bacillota;c__Bacilli`
+- `domain_letter` (VARCHAR, named only, default `'d'`): the prefix letter of the first field, `'d'` or `'k'`. Greengenes 13_8 writes `k__Bacteria`; pass `domain_letter := 'k'` to read it. It must be a constant, so one call cannot mix `d__` and `k__` rows.
+
+**Returns:** `STRUCT(domain, phylum, class, "order", family, genus, species, strain)`, all
+VARCHAR: the shared schema's rank columns, in its order. A NULL `lineage` returns NULL.
+DuckDB 2.0 does not accept `(expr).*`, so use `unnest(parse_lineage(lineage))` to turn
+the struct into columns.
+
+**Rules:**
+- Fields are separated by `;`, and whitespace around a field is ignored, so `'; '` and `';'` both work.
+- Each field is `<letter>__<name>`, and its letter must match its position: `d p c o f g s t` (domain through strain). A skipped rank therefore errors rather than shifting the names below it into the wrong columns.
+- An empty name (`p__`) is NULL, and a lineage with fewer than eight fields leaves the deeper ranks NULL. `d__A;p__;c__;o__;f__;g__;s__` gives domain `A` and seven NULLs.
+- Lineages without prefixes (raw SILVA) are not supported, since a field's rank would be unknown.
+- `parse_lineage` does not reject gaps: `d__A; p__; c__C` returns phylum NULL and class `C`. Consumers that need gap-free lineages check that themselves.
+
+**Errors** quote the lineage and name the field:
+- an empty lineage, or an empty field (a trailing or doubled `;`)
+- a prefix letter out of position, or `k__` without `domain_letter := 'k'` (and `d__` with it)
+- more than eight fields
+- a name with whitespace after its prefix (`d__ Bacteria`) or a second prefix (`p__p__Bacillota`, usually a prefix that should have been stripped)
+
+**Examples:**
+```sql
+-- (feature_id, lineage) -> the shared lineage schema
+SELECT feature_id, unnest(parse_lineage(lineage))
+FROM read_csv('taxonomy.tsv', delim = '\t', header = false,
+              columns = {'feature_id': 'VARCHAR', 'lineage': 'VARCHAR'});
+
+-- Greengenes 13_8, which writes k__ for the domain
+SELECT feature_id, unnest(parse_lineage(lineage, domain_letter := 'k'))
+FROM gg_13_8_taxonomy;
+
+-- An error stops at the first bad row. TRY lists them all.
+SELECT feature_id, lineage
+FROM raw_taxonomy
+WHERE lineage IS NOT NULL AND TRY(parse_lineage(lineage)) IS NULL;
+```

@@ -1,10 +1,38 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
 namespace miint {
+
+// The eight rank columns of the shared lineage schema, shallowest first, with the
+// letter each carries in a prefixed lineage string ("d__", "p__", ...).
+struct LineageRank {
+	const char *column;
+	char letter;
+};
+inline constexpr std::array<LineageRank, 8> kLineageRanks = {{{"domain", 'd'},
+                                                              {"phylum", 'p'},
+                                                              {"class", 'c'},
+                                                              {"order", 'o'},
+                                                              {"family", 'f'},
+                                                              {"genus", 'g'},
+                                                              {"species", 's'},
+                                                              {"strain", 't'}}};
+
+// One value per rank column, in kLineageRanks order; nullopt is a missing rank.
+using LineageRanks = std::array<std::optional<std::string>, kLineageRanks.size()>;
+
+// Parse a prefixed lineage string ("d__A; p__B" or miint's "d__A;p__B") into the rank
+// columns. Each ';'-separated field, trimmed, is <letter>__<name> with the letter
+// matching its position; an empty name is a missing rank and absent trailing fields are
+// missing. `domain_letter` ('d' or 'k') is the only letter accepted at position 0.
+// Throws std::invalid_argument on anything else, including a name with leading
+// whitespace or one that itself looks prefixed. Gaps are not checked here.
+LineageRanks ParseLineageString(const std::string &lineage, char domain_letter = 'd');
 
 // One node in a taxon's lineage (an ancestor, or the query taxon itself).
 struct TaxonNode {
