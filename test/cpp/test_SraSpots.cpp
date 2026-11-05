@@ -222,6 +222,41 @@ TEST_CASE("A spot whose READ_TYPE disagrees with READ_LEN stops the run", "[sra]
 	CHECK(ThrowsTypeMentioning<SraFormatError>([&] { Route(s, SplitMode::Split3); }, "READ_TYPE"));
 }
 
+TEST_CASE("split-3 rows pair a spot's mates and keep an unpaired read alone", "[sra]") {
+	std::vector<SraRow> rows;
+	auto reads = Route(MakeSpot("AAAACCCC", {0, 4}, {4, 4}, {BIO, BIO}), SplitMode::Split3);
+	RowsForSpot(reads, SplitMode::Split3, rows);
+	REQUIRE(rows.size() == 1);
+	CHECK(rows[0].paired);
+	CHECK(rows[0].read1.bases == "AAAA");
+	CHECK(rows[0].read2.bases == "CCCC");
+
+	rows.clear();
+	reads = Route(MakeSpot("AAAA", {0, 4}, {4, 0}, {BIO, BIO}), SplitMode::Split3);
+	RowsForSpot(reads, SplitMode::Split3, rows);
+	REQUIRE(rows.size() == 1);
+	CHECK_FALSE(rows[0].paired);
+	CHECK(rows[0].read1.bases == "AAAA");
+}
+
+TEST_CASE("split-3 rows cannot hold a third biological read", "[sra]") {
+	// fasterq-dump writes it to a file _3; a read_fastx row has two mates, so the reader refuses
+	// rather than drop it, and names the mode that keeps it.
+	std::vector<SraRow> rows;
+	auto reads = Route(MakeSpot("AACCGG", {0, 2, 4}, {2, 2, 2}, {BIO, BIO, BIO}), SplitMode::Split3);
+	CHECK(ThrowsTypeMentioning<SraUnsupportedError>([&] { RowsForSpot(reads, SplitMode::Split3, rows); },
+	                                                "split => 'spot'"));
+}
+
+TEST_CASE("split-spot rows are one per read", "[sra]") {
+	std::vector<SraRow> rows;
+	auto reads = Route(MakeSpot("AACCGG", {0, 2, 4}, {2, 2, 2}, {BIO, BIO, BIO}), SplitMode::Spot);
+	RowsForSpot(reads, SplitMode::Spot, rows);
+	REQUIRE(rows.size() == 3);
+	CHECK(rows[2].read_number == 3);
+	CHECK_FALSE(rows[2].paired);
+}
+
 TEST_CASE("Spots of every fixture match fasterq-dump's split-3 output", "[sra]") {
 	for (const auto &run : AcceptedRuns()) {
 		INFO(run);
