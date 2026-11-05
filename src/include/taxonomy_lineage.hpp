@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace miint {
@@ -32,7 +33,7 @@ using LineageRanks = std::array<std::optional<std::string>, kLineageRanks.size()
 // missing. `domain_letter` ('d' or 'k') is the only letter accepted at position 0.
 // Throws std::invalid_argument on anything else, including a name with leading
 // whitespace or one that itself looks prefixed. Gaps are not checked here.
-LineageRanks ParseLineageString(const std::string &lineage, char domain_letter = 'd');
+LineageRanks ParseLineageString(std::string_view lineage, char domain_letter = 'd');
 
 // One node in a taxon's lineage (an ancestor, or the query taxon itself).
 struct TaxonNode {

@@ -13,6 +13,7 @@
 
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 namespace duckdb {
 
@@ -43,7 +44,8 @@ struct ParseLineageBindData : public FunctionData {
 static unique_ptr<FunctionData> ParseLineageBind(BindScalarFunctionInput &input) {
 	auto &args = input.GetArguments();
 	if (!args[1]->IsFoldable()) {
-		throw InvalidInputException("parse_lineage: domain_letter must be a constant, not a column reference");
+		throw InvalidInputException("parse_lineage: domain_letter must be a constant 'd' or 'k'; a column or a "
+		                            "prepared-statement parameter is not accepted");
 	}
 	Value letter = ExpressionExecutor::EvaluateScalar(input.GetClientContext(), *args[1]);
 	if (letter.IsNull()) {
@@ -73,7 +75,8 @@ static void ParseLineageExecute(DataChunk &args, ExpressionState &state, Vector 
 		}
 		miint::LineageRanks ranks;
 		try {
-			ranks = miint::ParseLineageString(lineages[idx].GetString(), domain_letter);
+			const auto &lineage = lineages[idx];
+			ranks = miint::ParseLineageString(std::string_view(lineage.GetData(), lineage.GetSize()), domain_letter);
 		} catch (const std::invalid_argument &e) {
 			throw InvalidInputException("parse_lineage: %s", e.what());
 		}

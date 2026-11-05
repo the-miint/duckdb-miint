@@ -91,7 +91,8 @@ std::vector<int64_t> ExtractAllTaxIds(const std::string &xml) {
 	return ids;
 }
 
-// Whitespace that separates lineage fields but is never part of a name.
+// ASCII whitespace, trimmed from both ends of a lineage field. Names may contain it
+// ("Escherichia coli") but may not start with it.
 bool IsLineageSpace(char c) {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
 }
@@ -134,13 +135,13 @@ Lineage CollapseLineage(int64_t taxid, const std::string &name, const std::strin
 	return lin;
 }
 
-LineageRanks ParseLineageString(const std::string &lineage, char domain_letter) {
+LineageRanks ParseLineageString(std::string_view lineage, char domain_letter) {
 	if (domain_letter != 'd' && domain_letter != 'k') {
 		throw std::invalid_argument("domain_letter must be 'd' or 'k', got '" + std::string(1, domain_letter) + "'");
 	}
-	auto fail = [&](size_t position, const std::string &field, const std::string &why) {
-		return std::invalid_argument("field " + std::to_string(position + 1) + " ('" + field + "') " + why +
-		                             " in lineage '" + lineage + "'");
+	auto fail = [&](size_t position, std::string_view field, const std::string &why) {
+		return std::invalid_argument("field " + std::to_string(position + 1) + " ('" + std::string(field) + "') " +
+		                             why + " in lineage '" + std::string(lineage) + "'");
 	};
 
 	LineageRanks ranks;
@@ -148,14 +149,14 @@ LineageRanks ParseLineageString(const std::string &lineage, char domain_letter) 
 	size_t start = 0;
 	while (true) {
 		size_t stop = lineage.find(';', start);
-		size_t end = stop == std::string::npos ? lineage.size() : stop;
+		size_t end = stop == std::string_view::npos ? lineage.size() : stop;
 		while (start < end && IsLineageSpace(lineage[start])) {
 			++start;
 		}
 		while (end > start && IsLineageSpace(lineage[end - 1])) {
 			--end;
 		}
-		const std::string field = lineage.substr(start, end - start);
+		const std::string_view field = lineage.substr(start, end - start);
 
 		if (position == ranks.size()) {
 			throw fail(position, field,
@@ -170,14 +171,14 @@ LineageRanks ParseLineageString(const std::string &lineage, char domain_letter) 
 			if (position == 0) {
 				const std::string other = domain_letter == 'd' ? "k" : "d";
 				why += " (domain_letter is '" + std::string(1, domain_letter) + "'";
-				if (field.rfind(other + "__", 0) == 0) {
+				if (field.substr(0, 3) == other + "__") {
 					why += "; pass domain_letter := '" + other + "' to read " + other + "__ lineages";
 				}
 				why += ")";
 			}
 			throw fail(position, field, why);
 		}
-		std::string name = field.substr(3);
+		const std::string_view name = field.substr(3);
 		if (!name.empty()) {
 			if (IsLineageSpace(name[0])) {
 				throw fail(position, field, "has whitespace after its rank prefix");
@@ -185,10 +186,10 @@ LineageRanks ParseLineageString(const std::string &lineage, char domain_letter) 
 			if (name.size() >= 3 && name[0] >= 'a' && name[0] <= 'z' && name[1] == '_' && name[2] == '_') {
 				throw fail(position, field, "has a second rank prefix");
 			}
-			ranks[position] = std::move(name);
+			ranks[position] = std::string(name);
 		}
 		++position;
-		if (stop == std::string::npos) {
+		if (stop == std::string_view::npos) {
 			break;
 		}
 		start = stop + 1;

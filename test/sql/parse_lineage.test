@@ -121,10 +121,17 @@ SELECT parse_lineage(lineage, domain_letter := feature_id) FROM raw;
 <REGEX>:.*parse_lineage: domain_letter must be a constant.*
 
 # domain_letter is keyword-only: a bare 'k' in second position would not say what it is.
+# The binder rejects the call outright; it never reaches the parser.
 statement error
 SELECT parse_lineage('k__Bacteria', 'k');
 ----
-<REGEX>:.*parse_lineage.*
+<REGEX>:Binder Error: No function matches.*parse_lineage\(lineage VARCHAR, \*, domain_letter VARCHAR.*
+
+# A prepared-statement parameter is not a constant at bind time, so PREPARE itself fails.
+statement error
+PREPARE with_letter AS SELECT parse_lineage(lineage, domain_letter := $1) FROM raw;
+----
+<REGEX>:.*parse_lineage: domain_letter must be a constant 'd' or 'k'; a column or a prepared-statement parameter is not accepted.*
 
 # --- malformed lineages are errors that quote the lineage ------------------
 
