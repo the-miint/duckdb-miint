@@ -595,6 +595,16 @@ WITH c AS (SELECT 1 AS x) SELECT * FROM shear_tree('nope', 'c');
 shear_tree: 'c' is a common table expression
 
 statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM tree_lca('c', 'nope');
+----
+tree_lca: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM tree_lca('nope', 'c');
+----
+tree_lca: 'c' is a common table expression
+
+statement error
 WITH c AS (SELECT 1 AS x) SELECT * FROM tree_nearest_tip('c', 'nope', 'nope');
 ----
 tree_nearest_tip: 'c' is a common table expression
@@ -608,6 +618,11 @@ statement error
 WITH c AS (SELECT 1 AS x) SELECT * FROM tree_nearest_tip('nope', 'nope', 'c');
 ----
 tree_nearest_tip: 'c' is a common table expression
+
+statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM tree_node_depths('c');
+----
+tree_node_depths: 'c' is a common table expression
 
 statement error
 WITH c AS (SELECT 1 AS x) SELECT * FROM tree_resolve_multifurcations('c');

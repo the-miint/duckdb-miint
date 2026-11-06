@@ -152,7 +152,8 @@ TreeWithNodeIds BuildTreeAndNodeIds(ClientContext &context, const std::string &t
 TreeTableArrays ReadTreeArrays(ClientContext &context, const std::string &table_name,
                                const std::unordered_set<std::string_view> &keep_names, const LogicalType &name_type) {
 	auto info = GetTableOrViewColumns(context, table_name, "Tree table");
-	const bool has_names = HasColumn(info, "name");
+	// Names are read only when some are kept.
+	const bool has_names = HasColumn(info, "name") && !keep_names.empty();
 	// The names are matched as text. VARCHAR names, the usual case, are read as they are, so
 	// the type of the read shows whether they still are VARCHAR; it is checked before any
 	// row is read as text. Names bound with another type are cast to text, and the column as

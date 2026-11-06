@@ -25,7 +25,9 @@
 #include <phylo_ancestral_parsimony.hpp>
 #include <phylo_ancestral_ml.hpp>
 #include <shear_tree.hpp>
+#include <tree_lca.hpp>
 #include <tree_nearest_tip.hpp>
+#include <tree_node_depths.hpp>
 #include <tree_resolve_multifurcations.hpp>
 #include <tree_resolve_placement.hpp>
 #include <kseq++/seqio.hpp>
@@ -377,6 +379,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	TreeResolvePlacementTableFunction::Register(loader);
 	ShearTreeTableFunction::Register(loader);
 	TreeNearestTipTableFunction::Register(loader);
+	TreeLcaTableFunction::Register(loader);
+	TreeNodeDepthsTableFunction::Register(loader);
 	TreeResolveMultifurcationsTableFunction::Register(loader);
 	PhyloIndependentContrastsTableFunction::Register(loader);
 	PhyloAncestralStatesTableFunction::Register(loader);
