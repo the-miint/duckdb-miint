@@ -5,23 +5,20 @@
 #include "catalog_utils.hpp"
 #include "id_column_utils.hpp"
 #include "miint_named_parameter.hpp"
+#include "tree_function_utils.hpp"
 #include "tree_table_reader.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/value_map.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
-#include "duckdb/main/connection.hpp"
-#include "duckdb/main/query_result.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
-#include "duckdb/parser/keyword_helper.hpp"
 
 #include <algorithm>
 #include <atomic>
 #include <numeric>
 #include <set>
 #include <stdexcept>
-#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -69,68 +66,29 @@ struct GlobalState : public GlobalTableFunctionState {
 	}
 };
 
-// The type of `column` among a relation's columns, matched case-insensitively as DuckDB
-// matches column names.
-bool FindColumnType(const TableOrViewColumns &columns, const std::string &column, LogicalType &type) {
-	for (idx_t i = 0; i < columns.names.size(); ++i) {
-		if (StringUtil::CIEquals(columns.names[i], column)) {
-			type = columns.types[i];
-			return true;
-		}
-	}
-	return false;
-}
-
-// Bind fixed the output types. A relation can change type without a catalog change (a
-// view over a file that is rewritten, under a prepared statement), so a column read with
-// another type is refused rather than emitted under the old one. The check uses the types
-// of the read itself (docs/internals/reading-tables-views.md says why not the catalog's).
-void RequireBoundType(const std::string &relation, const std::string &column, const LogicalType &now,
-                      const LogicalType &bound) {
-	if (now != bound) {
-		throw InvalidInputException(
-		    "%s: column '%s' of '%s' is %s now but was %s when the statement was bound; run or prepare it again", kFn,
-		    column, relation, now.ToString(), bound.ToString());
-	}
-}
-
 struct NamedRow {
 	std::string name;
 	Value grp;
 };
 
-// Read `name`, and `grp` with groups, from a targets or queries relation: once, at
-// execution, over a helper connection (docs/internals/reading-tables-views.md). Rows
-// with a NULL name are dropped.
+// Read `name`, and `grp` with groups, from a targets or queries relation, once. Rows with
+// a NULL name are dropped.
 std::vector<NamedRow> ReadNames(ClientContext &context, const std::string &relation, const BindData &bind) {
-	auto conn = MakeReadOnlyHelperConnection(context);
-	const std::string sql =
-	    std::string("SELECT name") + (bind.has_groups ? ", grp" : "") + " FROM " + SQLIdentifier::ToString(relation);
-	auto result = conn.Query(sql);
-	if (result->HasError()) {
-		throw InvalidInputException("%s: failed to read '%s': %s", kFn, relation, result->GetError());
-	}
-	auto &types = result->GetTypes();
-	RequireBoundType(relation, "name", types[0], bind.name_type);
+	std::vector<std::pair<std::string, LogicalType>> columns {{"name", bind.name_type}};
 	if (bind.has_groups) {
-		RequireBoundType(relation, "grp", types[1], bind.grp_type);
+		columns.emplace_back("grp", bind.grp_type);
 	}
-
 	std::vector<NamedRow> rows;
 	std::vector<std::string> names;
 	std::vector<bool> nulls;
-	while (auto chunk = result->Fetch()) {
-		if (chunk->size() == 0) {
-			break;
-		}
-		context.InterruptCheck();
-		ExtractIdColumnAsStrings(*chunk, 0, bind.name_type, names, nulls);
-		for (idx_t i = 0; i < chunk->size(); ++i) {
+	ReadRelation(context, kFn, relation, columns, [&](DataChunk &chunk) {
+		ExtractIdColumnAsStrings(chunk, 0, bind.name_type, names, nulls);
+		for (idx_t i = 0; i < chunk.size(); ++i) {
 			if (!nulls[i]) {
-				rows.push_back({std::move(names[i]), bind.has_groups ? chunk->GetValue(1, i) : Value()});
+				rows.push_back({std::move(names[i]), bind.has_groups ? chunk.GetValue(1, i) : Value()});
 			}
 		}
-	}
+	});
 	return rows;
 }
 
@@ -158,19 +116,6 @@ void SortInTypeOrder(std::vector<std::string> &ids, const LogicalType &type) {
 	default:
 		throw InternalException("%s: unsupported tip name type %s", kFn, type.ToString());
 	}
-}
-
-// "'a', 'b', ... (n more)": the first ten names, quoted.
-std::string QuoteSome(const std::vector<std::string> &names) {
-	constexpr size_t cap = 10;
-	std::string out;
-	for (size_t i = 0; i < names.size() && i < cap; ++i) {
-		out += (i ? ", '" : "'") + names[i] + "'";
-	}
-	if (names.size() > cap) {
-		out += ", ... (" + std::to_string(names.size() - cap) + " more)";
-	}
-	return out;
 }
 
 unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &return_types,
@@ -286,55 +231,20 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	    queries_are_targets ? std::vector<NamedRow>() : ReadNames(context, bind.queries_table, bind);
 	const auto &queries = queries_are_targets ? targets : queries_read;
 
-	// The tips that queries and targets name: which node, and how many tips carry the name.
-	struct TipMatch {
-		uint32_t node = 0;
-		uint32_t count = 0;
-	};
-	std::unordered_map<std::string, TipMatch> tips;
+	// The tips that queries and targets name. Only those names are kept from the tree.
+	TipMatches tips;
 	for (const auto *rows : {&targets, &queries}) {
 		for (const auto &row : *rows) {
 			tips.emplace(row.name, TipMatch {});
 		}
 	}
-
 	{
-		// Only the names that queries and targets use are kept from the tree.
-		std::unordered_set<std::string_view> keep_names;
-		keep_names.reserve(tips.size());
-		for (const auto &tip : tips) {
-			keep_names.insert(tip.first);
-		}
-		TreeTableArrays tree;
-		try {
-			tree = ReadTreeArrays(context, bind.tree_table, keep_names, bind.name_type);
-			state->index = miint::TreeIndex::Build(tree.tree.parent, tree.tree.branch_length, &tree.tree.node_ids);
-		} catch (const std::invalid_argument &e) {
-			throw InvalidInputException("%s: the tree '%s' cannot be searched: %s", kFn, bind.tree_table, e.what());
-		}
-		for (const auto &named : tree.named) {
-			if (state->index.is_tip(named.first)) {
-				auto &match = tips.at(named.second);
-				match.node = named.first;
-				++match.count;
-			}
-		}
-		state->node_ids = std::move(tree.tree.node_ids);
-		// The arrays are released here: the index and the names in use are all the search needs.
+		auto tree = ReadIndexedTree(context, kFn, bind.tree_table, tips, bind.name_type,
+		                            miint::LengthPolicy::Searchable, "searched");
+		state->index = std::move(tree.index);
+		state->node_ids = std::move(tree.node_ids);
 	}
-
-	std::vector<std::string> ambiguous;
-	for (const auto &tip : tips) {
-		if (tip.second.count > 1) {
-			ambiguous.push_back(tip.first);
-		}
-	}
-	if (!ambiguous.empty()) {
-		std::sort(ambiguous.begin(), ambiguous.end());
-		throw InvalidInputException(
-		    "%s: tip name '%s' names %d tips in the tree '%s'; a query or target must name exactly one tip", kFn,
-		    ambiguous.front(), static_cast<int64_t>(tips[ambiguous.front()].count), bind.tree_table);
-	}
+	RequireUnambiguousTips(kFn, bind.tree_table, tips, "a query or target");
 	if (!bind.ignore_missing) {
 		for (const auto &role : {std::make_pair("query", &queries), std::make_pair("target", &targets)}) {
 			std::set<std::string> missing;

@@ -9,7 +9,9 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -206,6 +208,202 @@ TEST_CASE("TreeIndex: rejects root distances that overflow", "[TreeIndex]") {
 	REQUIRE_THROWS_WITH(TreeIndex::Build({NP, 0, 1}, {kNaN, big, big}), ContainsSubstring("node 2") &&
 	                                                                        ContainsSubstring("root distance") &&
 	                                                                        ContainsSubstring("not finite"));
+}
+
+// ---------------------------------------------------------------------------
+// Unknown branch lengths. A tree read from a table may have a NULL length on some edge.
+// Depth and LCA do not depend on lengths, and a distance whose path avoids that edge is
+// still well defined, so an index built with LengthPolicy::UnknownAllowed answers those
+// and reports the distances that cross it as unknown (nullopt), never as a number.
+// Negative lengths are allowed there: a sum of them is still a well-defined distance,
+// and only a search that prunes by distance needs them non-negative.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+using miint::LengthPolicy;
+
+// The lengths of the edges from v up to its ancestor-or-self a, summed; nullopt when one
+// of them is unknown (NaN). Throws when a is not above v.
+std::optional<double> naive_path_to_ancestor(const TreeArrays &t, uint32_t v, uint32_t a) {
+	double sum = 0.0;
+	bool known = true;
+	for (uint32_t cur = v; cur != a; cur = t.parent[cur]) {
+		if (cur == kNoParent || t.parent[cur] == kNoParent) {
+			throw std::logic_error("naive_path_to_ancestor: a is not an ancestor of v");
+		}
+		if (std::isnan(t.length[cur])) {
+			known = false;
+		}
+		sum += t.length[cur];
+	}
+	return known ? std::optional<double>(sum) : std::nullopt;
+}
+
+// A random tree in which about a sixth of the edges have an unknown length and about a
+// fifth of the rest are negative.
+TreeArrays random_tree_with_unknowns(std::mt19937 &rng, uint32_t n, bool dyadic) {
+	auto t = random_tree(rng, n, dyadic);
+	std::uniform_real_distribution<double> unit(0.0, 1.0);
+	for (uint32_t v = 0; v < n; ++v) {
+		if (t.parent[v] == kNoParent) {
+			continue;
+		}
+		const double u = unit(rng);
+		if (u < 0.15) {
+			t.length[v] = kNaN;
+		} else if (u < 0.35) {
+			t.length[v] = -t.length[v];
+		}
+	}
+	return t;
+}
+
+} // namespace
+
+TEST_CASE("TreeIndex: unknown lengths, a hand-written tree", "[TreeIndex]") {
+	// R over C (1) and D (-0.25); C over A (unknown) and B (0.5). Dense ids R=0 C=1 D=2 A=3 B=4.
+	const uint32_t R = 0, C = 1, D = 2, A = 3, B = 4;
+	auto idx = TreeIndex::Build({NP, R, R, C, C}, {kNaN, 1.0, -0.25, kNaN, 0.5}, nullptr, LengthPolicy::UnknownAllowed);
+
+	// Depth and LCA ignore lengths.
+	REQUIRE(idx.depth(A) == 2);
+	REQUIRE(idx.lca(A, B) == C);
+	REQUIRE(idx.lca(A, D) == R);
+
+	// The edge above A is unknown: any distance across it is unknown.
+	REQUIRE_FALSE(idx.distance_to_ancestor(A, C).has_value());
+	REQUIRE_FALSE(idx.distance_to_ancestor(A, R).has_value());
+	REQUIRE_FALSE(idx.path_length(A, B, C).has_value());
+	REQUIRE_FALSE(idx.path_length(D, A, R).has_value());
+	// A node's distance to itself crosses no edge.
+	REQUIRE(idx.distance_to_ancestor(A, A) == 0.0);
+	REQUIRE(idx.path_length(A, A, A) == 0.0);
+
+	// Elsewhere every distance is known, negative edges summed through.
+	REQUIRE(idx.distance_to_ancestor(B, R) == 1.5);
+	REQUIRE(idx.distance_to_ancestor(D, R) == -0.25);
+	REQUIRE(idx.path_length(B, D, R) == 1.25);
+	REQUIRE(idx.path_length(D, C, R) == 0.75);
+	REQUIRE(idx.path_length(B, C, C) == 0.5);
+}
+
+TEST_CASE("TreeIndex: a distance is unknown exactly when its path crosses an unknown length", "[TreeIndex]") {
+	std::mt19937 rng(20261107);
+	for (int trial = 0; trial < 60; ++trial) {
+		const uint32_t n = std::uniform_int_distribution<uint32_t>(1, 100)(rng);
+		// Dyadic lengths sum exactly in any order, so the naive sum (taken from v upward)
+		// must equal the index's to the bit.
+		const bool dyadic = trial % 2 == 0;
+		auto t = random_tree_with_unknowns(rng, n, dyadic);
+		CAPTURE(trial, n, dyadic);
+		auto idx = TreeIndex::Build(t.parent, t.length, nullptr, LengthPolicy::UnknownAllowed);
+
+		// The tree itself is indexed as if every length were known.
+		require_matches_naive(idx, [&] {
+			auto known = t;
+			std::replace_if(
+			    known.length.begin(), known.length.end(), [](double x) { return std::isnan(x); }, 0.0);
+			return known;
+		}());
+
+		auto close = [&](double got, double want) {
+			return dyadic ? got == want : std::fabs(got - want) <= 1e-9 * (1.0 + std::fabs(want));
+		};
+		for (uint32_t a = 0; a < n; ++a) {
+			for (uint32_t v = 0; v < n; ++v) {
+				CAPTURE(a, v);
+				if (naive_is_ancestor_or_self(t, a, v)) {
+					auto want = naive_path_to_ancestor(t, v, a);
+					auto got = idx.distance_to_ancestor(v, a);
+					REQUIRE(got.has_value() == want.has_value());
+					if (want) {
+						REQUIRE(close(*got, *want));
+					}
+				} else {
+					REQUIRE_THROWS_WITH(idx.distance_to_ancestor(v, a), ContainsSubstring("not an ancestor"));
+				}
+
+				const uint32_t l = naive_lca(t, a, v);
+				auto up = naive_path_to_ancestor(t, a, l);
+				auto down = naive_path_to_ancestor(t, v, l);
+				auto got = idx.path_length(a, v, l);
+				REQUIRE(got.has_value() == (up.has_value() && down.has_value()));
+				if (got) {
+					REQUIRE(close(*got, *up + *down));
+					// Either direction, the same double: the two halves are added, and addition
+					// commutes exactly.
+					REQUIRE(*got == *idx.path_length(v, a, l));
+				}
+			}
+		}
+	}
+}
+
+TEST_CASE("TreeIndex: a path length is the difference of root distances, as the nearest-tip search takes it",
+          "[TreeIndex]") {
+	// The nearest-tip search scores a target as (D[q] - D[lca]) + (D[t] - D[lca]). A path
+	// length must be that same double, or the same pair could get two different distances
+	// from two functions.
+	std::mt19937 rng(20261108);
+	for (int trial = 0; trial < 30; ++trial) {
+		const uint32_t n = std::uniform_int_distribution<uint32_t>(2, 100)(rng);
+		auto t = random_tree(rng, n, false);
+		CAPTURE(trial, n);
+		for (auto policy : {LengthPolicy::Searchable, LengthPolicy::UnknownAllowed}) {
+			auto idx = TreeIndex::Build(t.parent, t.length, nullptr, policy);
+			for (uint32_t a = 0; a < n; ++a) {
+				for (uint32_t b = 0; b < n; ++b) {
+					const uint32_t l = idx.lca(a, b);
+					const double expected =
+					    (idx.root_distance(a) - idx.root_distance(l)) + (idx.root_distance(b) - idx.root_distance(l));
+					REQUIRE(idx.path_length(a, b, l) == expected);
+				}
+			}
+		}
+	}
+}
+
+TEST_CASE("TreeIndex: a fully specified tree gets the same root distances under either policy", "[TreeIndex]") {
+	std::mt19937 rng(20261109);
+	for (int trial = 0; trial < 30; ++trial) {
+		const uint32_t n = std::uniform_int_distribution<uint32_t>(1, 120)(rng);
+		auto t = random_tree(rng, n, trial % 2 == 0);
+		CAPTURE(trial, n);
+		auto strict = TreeIndex::Build(t.parent, t.length);
+		auto lenient = TreeIndex::Build(t.parent, t.length, nullptr, LengthPolicy::UnknownAllowed);
+		for (uint32_t v = 0; v < n; ++v) {
+			REQUIRE(strict.root_distance(v) == lenient.root_distance(v));
+			REQUIRE(lenient.distance_to_ancestor(v, lenient.root()) == strict.root_distance(v));
+		}
+	}
+}
+
+TEST_CASE("TreeIndex: unknown and negative lengths are still refused for a search", "[TreeIndex]") {
+	// The default policy is unchanged: lengths a pruning search cannot use are errors.
+	REQUIRE_THROWS_WITH(TreeIndex::Build({NP, 0}, {kNaN, kNaN}, nullptr, LengthPolicy::Searchable),
+	                    ContainsSubstring("NULL or NaN"));
+	REQUIRE_THROWS_WITH(TreeIndex::Build({NP, 0}, {kNaN, -1.0}, nullptr, LengthPolicy::Searchable),
+	                    ContainsSubstring("negative"));
+}
+
+TEST_CASE("TreeIndex: infinite lengths and overflowing distances are errors under either policy", "[TreeIndex]") {
+	// An unknown length has no value; an infinite one has a value no distance can use, and
+	// a sum past the largest double has none either.
+	const double inf = std::numeric_limits<double>::infinity();
+	const double big = std::numeric_limits<double>::max() / 2 * 1.5;
+	for (auto policy : {LengthPolicy::Searchable, LengthPolicy::UnknownAllowed}) {
+		CAPTURE(policy == LengthPolicy::Searchable);
+		REQUIRE_THROWS_WITH(TreeIndex::Build({NP, 0}, {kNaN, inf}, nullptr, policy),
+		                    ContainsSubstring("node 1") && ContainsSubstring("not finite"));
+		REQUIRE_THROWS_WITH(TreeIndex::Build({NP, 0, 1}, {kNaN, big, big}, nullptr, policy),
+		                    ContainsSubstring("node 2") && ContainsSubstring("root distance"));
+	}
+	// Negative infinity and a negative overflow, where negative lengths are allowed.
+	REQUIRE_THROWS_WITH(TreeIndex::Build({NP, 0}, {kNaN, -inf}, nullptr, LengthPolicy::UnknownAllowed),
+	                    ContainsSubstring("node 1") && ContainsSubstring("not finite"));
+	REQUIRE_THROWS_WITH(TreeIndex::Build({NP, 0, 1}, {kNaN, -big, -big}, nullptr, LengthPolicy::UnknownAllowed),
+	                    ContainsSubstring("node 2") && ContainsSubstring("root distance"));
 }
 
 // ---------------------------------------------------------------------------

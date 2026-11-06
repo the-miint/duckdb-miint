@@ -30,7 +30,7 @@ std::vector<T> Permuted(const std::vector<T> &values, const std::vector<uint32_t
 } // namespace
 
 TreeIndex TreeIndex::Build(const std::vector<uint32_t> &parent, const std::vector<double> &branch_length,
-                           const std::vector<int64_t> *node_ids) {
+                           const std::vector<int64_t> *node_ids, LengthPolicy policy) {
 	const size_t n_size = parent.size();
 	if (n_size == 0) {
 		throw std::invalid_argument("the tree is empty");
@@ -116,22 +116,31 @@ TreeIndex TreeIndex::Build(const std::vector<uint32_t> &parent, const std::vecto
 		}
 	}
 
-	// Branch lengths below the root: present, finite and non-negative.
+	// Branch lengths below the root: never infinite; known and non-negative for a search.
+	const bool searchable = policy == LengthPolicy::Searchable;
+	bool any_unknown = false;
 	for (uint32_t v = 0; v < n; ++v) {
 		if (v == root) {
 			continue;
 		}
 		const double bl = branch_length[v];
 		if (std::isnan(bl)) {
-			throw std::invalid_argument("the branch length of " + NodeLabel(v, node_ids) + " is NULL or NaN");
+			if (searchable) {
+				throw std::invalid_argument("the branch length of " + NodeLabel(v, node_ids) + " is NULL or NaN");
+			}
+			any_unknown = true;
+			continue;
 		}
 		if (!std::isfinite(bl)) {
 			throw std::invalid_argument("the branch length of " + NodeLabel(v, node_ids) + " is not finite");
 		}
-		if (bl < 0) {
+		if (searchable && bl < 0) {
 			throw std::invalid_argument("the branch length of " + NodeLabel(v, node_ids) + " is negative (" +
 			                            std::to_string(bl) + ")");
 		}
+	}
+	if (any_unknown) {
+		idx.unknown_above_.assign(n, 0);
 	}
 
 	// Parents before children: depth, root distance and the skew-binary jump pointer.
@@ -145,7 +154,16 @@ TreeIndex TreeIndex::Build(const std::vector<uint32_t> &parent, const std::vecto
 		}
 		const uint32_t p = parent[v];
 		idx.depth_[v] = idx.depth_[p] + 1;
-		idx.dist_[v] = idx.dist_[p] + branch_length[v];
+		const double bl = branch_length[v];
+		if (std::isnan(bl)) {
+			idx.dist_[v] = idx.dist_[p];
+			idx.unknown_above_[v] = idx.unknown_above_[p] + 1;
+		} else {
+			idx.dist_[v] = idx.dist_[p] + bl;
+			if (any_unknown) {
+				idx.unknown_above_[v] = idx.unknown_above_[p];
+			}
+		}
 		if (!std::isfinite(idx.dist_[v])) {
 			throw std::invalid_argument("the root distance of " + NodeLabel(v, node_ids) +
 			                            " is not finite (the branch lengths above it sum past the largest double)");
@@ -227,6 +245,29 @@ uint32_t DenseTree::find(int64_t node_id) const {
 	}
 	auto it = std::lower_bound(node_ids.begin(), node_ids.end(), node_id);
 	return (it != node_ids.end() && *it == node_id) ? static_cast<uint32_t>(it - node_ids.begin()) : NOT_FOUND;
+}
+
+std::optional<double> TreeIndex::distance_to_ancestor(uint32_t v, uint32_t a) const {
+	if (v >= parent_.size() || a >= parent_.size()) {
+		throw std::out_of_range("TreeIndex::distance_to_ancestor: node out of range");
+	}
+	if (!is_ancestor_or_self(a, v)) {
+		throw std::invalid_argument("TreeIndex::distance_to_ancestor: node " + std::to_string(a) +
+		                            " is not an ancestor of node " + std::to_string(v));
+	}
+	if (!unknown_above_.empty() && unknown_above_[v] != unknown_above_[a]) {
+		return std::nullopt;
+	}
+	return dist_[v] - dist_[a];
+}
+
+std::optional<double> TreeIndex::path_length(uint32_t a, uint32_t b, uint32_t lca) const {
+	const auto up = distance_to_ancestor(a, lca);
+	const auto down = distance_to_ancestor(b, lca);
+	if (!up || !down) {
+		return std::nullopt;
+	}
+	return *up + *down;
 }
 
 uint32_t TreeIndex::lowest_ancestor_containing(uint32_t from, uint32_t x) const {
