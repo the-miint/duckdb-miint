@@ -76,14 +76,6 @@ std::vector<int64_t> ExtractAllTaxIds(const std::string &xml) {
 	return ids;
 }
 
-// ASCII whitespace, trimmed from both ends of a lineage field. Names may contain it
-// ("Escherichia coli") but may not start with it. Spelled out because std::isspace
-// depends on the locale, and this file is DuckDB-free, so StringUtil::CharacterIsSpace
-// is not available.
-bool IsLineageSpace(char c) {
-	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
-}
-
 // A rank prefix is a letter and two underscores: "d__", "p__", ...
 constexpr size_t kRankPrefixWidth = 3;
 
@@ -150,6 +142,16 @@ std::string FormatLineage(const Lineage &l) {
 }
 
 } // namespace
+
+// Spelled out because std::isspace depends on the locale, and this file is DuckDB-free,
+// so StringUtil::CharacterIsSpace is not available.
+bool IsLineageSpace(char c) {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+
+bool StartsWithRankPrefix(std::string_view name) {
+	return !name.empty() && name[0] >= 'a' && name[0] <= 'z' && HasRankPrefix(name, name[0]);
+}
 
 const LineageRank *FindRankColumn(const std::string &ncbi_rank) {
 	if (ncbi_rank == "superkingdom") {
@@ -229,7 +231,7 @@ LineageRanks ParseLineageString(std::string_view lineage, char domain_letter, bo
 			if (IsLineageSpace(name[0])) {
 				throw fail(index, field, "has whitespace after its rank prefix");
 			}
-			if (name[0] >= 'a' && name[0] <= 'z' && HasRankPrefix(name, name[0])) {
+			if (StartsWithRankPrefix(name)) {
 				throw fail(index, field, "has a second rank prefix");
 			}
 			ranks[rank] = std::string(name);
