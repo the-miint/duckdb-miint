@@ -342,7 +342,7 @@ SELECT a, b, distance FROM tree_lca('tree', 'all_pairs');
 - The tree cannot be read: as for [`tree_node_depths`](#node-depths).
 - A pair's path length is outside `DOUBLE`'s range (the message names the pair).
 
-**Performance note:** of the tree's names, only those the pairs use are kept, so memory grows with the number of nodes and the number of distinct names in the pairs. On the full Greengenes2 2024.09 tree (24.5M nodes, 23.4M tips), read from Parquet at 8 threads, 1,000,000 pairs took 8.5 s at a peak of 3.7 GB (the process's peak resident memory), most of it on one thread: at 8 threads, the call's CPU time (11.3 s) was 1.3 times its wall time. On a 2M-node tree, 1,000,000 pairs took 1.8 s. Measured on a 16-core AMD Ryzen 9 9950X3D with no other load.
+**Performance note:** of the tree's names, only those the pairs use are kept, so memory grows with the number of nodes and the number of distinct names in the pairs. On the full Greengenes2 2024.09 tree (24.5M nodes, 23.4M tips), read from Parquet at 8 threads, 1,000,000 pairs took about 10 s at a peak of 3.6 GB (the process's peak resident memory), most of it on one thread: at 8 threads, the call's CPU time (11.6 to 11.9 s) was 1.2 times its wall time. Measured on a 16-core AMD Ryzen 9 9950X3D with no other load.
 
 ### Ancestors
 
