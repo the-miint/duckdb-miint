@@ -14,6 +14,10 @@ namespace miint {
 NearestTipTargets::NearestTipTargets(const TreeIndex &index, const std::vector<uint32_t> &nodes,
                                      const std::vector<uint32_t> &name_ranks)
     : index_(&index) {
+	// The search prunes by distance, which needs LengthPolicy::Searchable.
+	if (index.length_policy() != LengthPolicy::Searchable) {
+		throw std::invalid_argument("NearestTipTargets: the index must be built with LengthPolicy::Searchable");
+	}
 	if (nodes.size() != name_ranks.size()) {
 		throw std::invalid_argument("NearestTipTargets: the node and name rank arrays differ in size");
 	}
