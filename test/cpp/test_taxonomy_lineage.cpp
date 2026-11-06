@@ -315,6 +315,54 @@ TEST_CASE("ParseLineageString accepts k__ only when declared", "[lineage][parse_
 	CHECK_THROWS_WITH(ParseLineageString("d__Bacteria", 'x'), ContainsSubstring("domain_letter"));
 }
 
+// A decorated tree's internal node label starts at the rank where decoration began
+// ("f__Lachnospiraceae; g__Blautia"). allow_subset reads it into the same eight columns:
+// the first field's letter picks the rank it starts at, the ranks above it are missing,
+// and the names still land in their own columns.
+TEST_CASE("ParseLineageString with allow_subset reads a lineage that starts below the domain",
+          "[lineage][parse_lineage]") {
+	const std::optional<std::string> none;
+	CHECK(ParseLineageString("c__foo; o__bar", 'd', true) == Ranks({none, none, "foo", "bar"}));
+	CHECK(ParseLineageString("p__baz", 'd', true) == Ranks({none, "baz"}));
+	CHECK(ParseLineageString("s__F g; t__F g H", 'd', true) ==
+	      Ranks({none, none, none, none, none, none, "F g", "F g H"}));
+	// A lineage from the domain parses as it does without the flag.
+	CHECK(ParseLineageString("d__A; p__B", 'd', true) == Ranks({"A", "B"}));
+	// domain_letter still names the domain, and only the domain.
+	CHECK(ParseLineageString("k__A; p__B", 'k', true) == Ranks({"A", "B"}));
+	CHECK(ParseLineageString("p__B", 'k', true) == Ranks({none, "B"}));
+	// An empty body is still a missing rank.
+	CHECK(ParseLineageString("c__; o__bar", 'd', true) == Ranks({none, none, none, "bar"}));
+}
+
+// allow_subset frees only where the lineage starts. A skipped or reversed rank would still
+// shift names into the wrong columns, so after the first field the letters must follow on.
+TEST_CASE("ParseLineageString with allow_subset still rejects skipped and reversed ranks", "[lineage][parse_lineage]") {
+	CHECK_THROWS_WITH(ParseLineageString("c__foo; f__bar", 'd', true), ContainsSubstring("must start with 'o__'"));
+	CHECK_THROWS_WITH(ParseLineageString("o__bar; c__foo", 'd', true), ContainsSubstring("must start with 'f__'"));
+	CHECK_THROWS_WITH(ParseLineageString("s__a; t__b; g__c", 'd', true),
+	                  ContainsSubstring("is past strain, the deepest rank"));
+	// The first field still needs a prefix that names a rank.
+	CHECK_THROWS_WITH(ParseLineageString("x__foo", 'd', true), ContainsSubstring("rank prefix"));
+	CHECK_THROWS_AS(ParseLineageString("Bacteria", 'd', true), std::invalid_argument);
+	CHECK_THROWS_AS(ParseLineageString("", 'd', true), std::invalid_argument);
+	// k__ is still the domain only when declared.
+	CHECK_THROWS_WITH(ParseLineageString("k__A; p__B", 'd', true), ContainsSubstring("pass domain_letter := 'k'"));
+	CHECK_THROWS_WITH(ParseLineageString("d__A", 'k', true), ContainsSubstring("pass domain_letter := 'd'"));
+	// The rules for a name are unchanged.
+	CHECK_THROWS_WITH(ParseLineageString("c__ foo", 'd', true), ContainsSubstring("whitespace"));
+	CHECK_THROWS_WITH(ParseLineageString("c__c__foo", 'd', true), ContainsSubstring("second rank prefix"));
+}
+
+// Without the flag a lineage that starts below the domain is an error, and the error names
+// the flag. A first field whose prefix names no rank gets no such hint.
+TEST_CASE("ParseLineageString without allow_subset rejects a partial lineage and names the flag",
+          "[lineage][parse_lineage]") {
+	CHECK_THROWS_WITH(ParseLineageString("c__foo; o__bar"), ContainsSubstring("pass allow_subset := true"));
+	CHECK_THROWS_WITH(ParseLineageString("x__foo"), !ContainsSubstring("allow_subset"));
+	CHECK_THROWS_WITH(ParseLineageString("k__A"), !ContainsSubstring("allow_subset"));
+}
+
 TEST_CASE("ParseLineageString rejects malformed fields", "[lineage][parse_lineage]") {
 	CHECK_THROWS_AS(ParseLineageString(""), std::invalid_argument);
 	CHECK_THROWS_AS(ParseLineageString("   "), std::invalid_argument);

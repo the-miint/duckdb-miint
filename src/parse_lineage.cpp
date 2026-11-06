@@ -26,21 +26,25 @@ static LogicalType ParseLineageResultType() {
 }
 
 struct ParseLineageBindData : public FunctionData {
-	explicit ParseLineageBindData(char domain_letter) : domain_letter(domain_letter) {
+	ParseLineageBindData(char domain_letter, bool allow_subset)
+	    : domain_letter(domain_letter), allow_subset(allow_subset) {
 	}
 
 	unique_ptr<FunctionData> Copy() const override {
-		return make_uniq<ParseLineageBindData>(domain_letter);
+		return make_uniq<ParseLineageBindData>(domain_letter, allow_subset);
 	}
 	bool Equals(const FunctionData &other) const override {
-		return domain_letter == other.Cast<ParseLineageBindData>().domain_letter;
+		auto &o = other.Cast<ParseLineageBindData>();
+		return domain_letter == o.domain_letter && allow_subset == o.allow_subset;
 	}
 
 	char domain_letter;
+	bool allow_subset;
 };
 
 // domain_letter must be one constant for the whole call: a per-row letter would let
-// one taxonomy mix d__ and k__ rows, which the letter exists to prevent.
+// one taxonomy mix d__ and k__ rows, which the letter exists to prevent. allow_subset
+// says what kind of strings the column holds, so it is one constant too.
 static unique_ptr<FunctionData> ParseLineageBind(BindScalarFunctionInput &input) {
 	auto &args = input.GetArguments();
 	if (!args[1]->IsFoldable()) {
@@ -55,12 +59,20 @@ static unique_ptr<FunctionData> ParseLineageBind(BindScalarFunctionInput &input)
 	if (text != "d" && text != "k") {
 		throw InvalidInputException("parse_lineage: domain_letter must be 'd' or 'k', got '%s'", text);
 	}
-	return make_uniq<ParseLineageBindData>(text[0]);
+	if (!args[2]->IsFoldable()) {
+		throw InvalidInputException("parse_lineage: allow_subset must be a constant true or false; a column or a "
+		                            "prepared-statement parameter is not accepted");
+	}
+	Value subset = ExpressionExecutor::EvaluateScalar(input.GetClientContext(), *args[2]);
+	if (subset.IsNull()) {
+		throw InvalidInputException("parse_lineage: allow_subset must be true or false, not NULL");
+	}
+	return make_uniq<ParseLineageBindData>(text[0], subset.GetValue<bool>());
 }
 
 static void ParseLineageExecute(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &func_expr = state.expr.Cast<BoundFunctionExpression>();
-	const char domain_letter = func_expr.BindInfo()->Cast<ParseLineageBindData>().domain_letter;
+	const auto &bind_data = func_expr.BindInfo()->Cast<ParseLineageBindData>();
 
 	UnifiedVectorFormat lineage_data;
 	args.data[0].ToUnifiedFormat(lineage_data);
@@ -76,7 +88,8 @@ static void ParseLineageExecute(DataChunk &args, ExpressionState &state, Vector 
 		miint::LineageRanks ranks;
 		try {
 			const auto &lineage = lineages[idx];
-			ranks = miint::ParseLineageString(std::string_view(lineage.GetData(), lineage.GetSize()), domain_letter);
+			ranks = miint::ParseLineageString(std::string_view(lineage.GetData(), lineage.GetSize()),
+			                                  bind_data.domain_letter, bind_data.allow_subset);
 		} catch (const std::invalid_argument &e) {
 			throw InvalidInputException("parse_lineage: %s", e.what());
 		}
@@ -95,6 +108,8 @@ void ParseLineageFunction::Register(ExtensionLoader &loader) {
 	ScalarFunction fn("parse_lineage",
 	                  {FunctionParameter(Identifier("lineage"), LogicalType::VARCHAR),
 	                   FunctionParameter(Identifier("domain_letter"), LogicalType::VARCHAR, Value("d"),
+	                                     FunctionParameterKind::KEYWORD_ONLY),
+	                   FunctionParameter(Identifier("allow_subset"), LogicalType::BOOLEAN, Value::BOOLEAN(false),
 	                                     FunctionParameterKind::KEYWORD_ONLY)},
 	                  ParseLineageResultType(), ParseLineageExecute, ParseLineageBind);
 	fn.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);

@@ -73,10 +73,13 @@ bool StartsWithRankPrefix(std::string_view name);
 // Parse a prefixed lineage string ("d__A; p__B" or miint's "d__A;p__B") into the rank
 // columns. Each ';'-separated field, trimmed, is <letter>__<name> with the letter
 // matching its position; an empty name is a missing rank and absent trailing fields are
-// missing. `domain_letter` ('d' or 'k') is the only letter accepted at position 0.
+// missing. `domain_letter` ('d' or 'k') is the only letter accepted for the domain. With
+// `allow_subset` the lineage may start at any rank ("c__A; o__B", as in a decorated tree's
+// internal node label): the first field's letter picks its rank, the ranks above it are
+// missing, and each later field carries the next rank's letter.
 // Throws std::invalid_argument on anything else, including a name with leading
 // whitespace or one that itself looks prefixed. Gaps are not checked here.
-LineageRanks ParseLineageString(std::string_view lineage, char domain_letter = 'd');
+LineageRanks ParseLineageString(std::string_view lineage, char domain_letter = 'd', bool allow_subset = false);
 
 // The rank column an NCBI rank collapses into. Both the legacy "superkingdom" and the
 // newer "domain" collapse into domain; the other seven standard ranks into their
