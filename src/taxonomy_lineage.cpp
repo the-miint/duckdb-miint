@@ -3,6 +3,7 @@
 #include "ncbi_parser.hpp"
 
 #include <cstdlib>
+#include <stdexcept>
 
 namespace miint {
 
@@ -47,23 +48,8 @@ std::vector<std::string> TopLevelTaxonBlocks(const std::string &xml) {
 }
 
 void AssignRank(Lineage &lin, const std::string &rank, const std::string &name) {
-	std::string col = RankColumn(rank);
-	if (col == "domain") {
-		lin.domain = name;
-	} else if (col == "phylum") {
-		lin.phylum = name;
-	} else if (col == "class") {
-		lin.tax_class = name;
-	} else if (col == "order") {
-		lin.tax_order = name;
-	} else if (col == "family") {
-		lin.family = name;
-	} else if (col == "genus") {
-		lin.genus = name;
-	} else if (col == "species") {
-		lin.species = name;
-	} else if (col == "strain") {
-		lin.strain = name;
+	if (const auto *column = FindRankColumn(rank)) {
+		lin.*column->field = name;
 	}
 }
 
@@ -90,26 +76,91 @@ std::vector<int64_t> ExtractAllTaxIds(const std::string &xml) {
 	return ids;
 }
 
+// ASCII whitespace, trimmed from both ends of a lineage field. Names may contain it
+// ("Escherichia coli") but may not start with it. Spelled out because std::isspace
+// depends on the locale, and this file is DuckDB-free, so StringUtil::CharacterIsSpace
+// is not available.
+bool IsLineageSpace(char c) {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+
+// A rank prefix is a letter and two underscores: "d__", "p__", ...
+constexpr size_t kRankPrefixWidth = 3;
+
+bool HasRankPrefix(std::string_view field, char letter) {
+	return field.size() >= kRankPrefixWidth && field[0] == letter && field[1] == '_' && field[2] == '_';
+}
+
+// The prefix letter of `rank` in a lineage string: its own, except the domain's, which the
+// caller declares ('d' or 'k').
+char RankLetter(size_t rank, char domain_letter) {
+	return rank == 0 ? domain_letter : kLineageRanks[rank].letter;
+}
+
+// The rank whose prefix `field` starts with, or kLineageRanks.size() if none.
+size_t PrefixRank(std::string_view field, char domain_letter) {
+	size_t rank = 0;
+	while (rank < kLineageRanks.size() && !HasRankPrefix(field, RankLetter(rank, domain_letter))) {
+		++rank;
+	}
+	return rank;
+}
+
+// Why a lineage's first field has the wrong prefix, with a hint when a parameter would
+// read it.
+std::string FirstFieldProblem(std::string_view field, char domain_letter, bool allow_subset) {
+	std::string why;
+	if (allow_subset) {
+		why = "must start with a rank prefix, one of";
+		for (size_t rank = 0; rank < kLineageRanks.size(); ++rank) {
+			why += std::string(" ") + RankLetter(rank, domain_letter) + "__";
+		}
+	} else {
+		why = "must start with '" + std::string(1, domain_letter) + "__'";
+	}
+	const char other = domain_letter == 'd' ? 'k' : 'd';
+	why += " (domain_letter is '" + std::string(1, domain_letter) + "'";
+	if (HasRankPrefix(field, other)) {
+		const std::string o(1, other);
+		why += "; pass domain_letter := '" + o + "' to read " + o + "__ lineages";
+	} else if (!allow_subset && PrefixRank(field, domain_letter) < kLineageRanks.size()) {
+		why += "; pass allow_subset := true to read lineages that start below the domain";
+	}
+	return why + ")";
+}
+
+// Every rank is written, empty or not, except the last (strain), which is written only
+// when present.
 std::string FormatLineage(const Lineage &l) {
-	std::string s = "d__" + l.domain + ";p__" + l.phylum + ";c__" + l.tax_class + ";o__" + l.tax_order + ";f__" +
-	                l.family + ";g__" + l.genus + ";s__" + l.species;
-	if (!l.strain.empty()) {
-		s += ";t__" + l.strain;
+	std::string s;
+	for (size_t i = 0; i < kLineageRanks.size(); ++i) {
+		const auto &rank = kLineageRanks[i];
+		const std::string &name = l.*rank.field;
+		if (i + 1 == kLineageRanks.size() && name.empty()) {
+			break;
+		}
+		if (i > 0) {
+			s += ';';
+		}
+		s += rank.letter;
+		s += "__";
+		s += name;
 	}
 	return s;
 }
 
 } // namespace
 
-std::string RankColumn(const std::string &rank) {
-	if (rank == "superkingdom" || rank == "domain") {
-		return "domain";
+const LineageRank *FindRankColumn(const std::string &ncbi_rank) {
+	if (ncbi_rank == "superkingdom") {
+		return &kLineageRanks[0]; // domain
 	}
-	if (rank == "phylum" || rank == "class" || rank == "order" || rank == "family" || rank == "genus" ||
-	    rank == "species" || rank == "strain") {
-		return rank;
+	for (const auto &rank : kLineageRanks) {
+		if (ncbi_rank == rank.column) {
+			return &rank;
+		}
 	}
-	return {};
+	return nullptr;
 }
 
 Lineage CollapseLineage(int64_t taxid, const std::string &name, const std::string &rank,
@@ -126,6 +177,71 @@ Lineage CollapseLineage(int64_t taxid, const std::string &name, const std::strin
 	AssignRank(lin, rank, name);
 	lin.lineage = FormatLineage(lin);
 	return lin;
+}
+
+LineageRanks ParseLineageString(std::string_view lineage, char domain_letter, bool allow_subset) {
+	if (domain_letter != 'd' && domain_letter != 'k') {
+		throw std::invalid_argument("domain_letter must be 'd' or 'k', got '" + std::string(1, domain_letter) + "'");
+	}
+	auto fail = [&](size_t index, std::string_view field, const std::string &why) {
+		return std::invalid_argument("field " + std::to_string(index + 1) + " ('" + std::string(field) + "') " + why +
+		                             " in lineage '" + std::string(lineage) + "'");
+	};
+
+	LineageRanks ranks;
+	size_t index = 0; // the field's place in the string
+	size_t rank = 0;  // the rank it must carry
+	size_t start = 0;
+	while (true) {
+		size_t stop = lineage.find(';', start);
+		size_t end = stop == std::string_view::npos ? lineage.size() : stop;
+		while (start < end && IsLineageSpace(lineage[start])) {
+			++start;
+		}
+		while (end > start && IsLineageSpace(lineage[end - 1])) {
+			--end;
+		}
+		const std::string_view field = lineage.substr(start, end - start);
+
+		if (rank == ranks.size()) {
+			// A subset reaches strain in fewer than eight fields, so its count would mislead.
+			throw fail(index, field,
+			           allow_subset
+			               ? "is past strain, the deepest rank"
+			               : "is past strain: a lineage has at most " + std::to_string(ranks.size()) + " fields");
+		}
+		if (field.empty()) {
+			throw fail(index, field, "is empty");
+		}
+		if (index == 0) {
+			// With allow_subset the first field's prefix picks the rank the lineage starts at.
+			if (allow_subset) {
+				rank = PrefixRank(field, domain_letter);
+			}
+			if (rank == ranks.size() || !HasRankPrefix(field, RankLetter(rank, domain_letter))) {
+				throw fail(index, field, FirstFieldProblem(field, domain_letter, allow_subset));
+			}
+		} else if (!HasRankPrefix(field, RankLetter(rank, domain_letter))) {
+			throw fail(index, field, "must start with '" + std::string(1, RankLetter(rank, domain_letter)) + "__'");
+		}
+		const std::string_view name = field.substr(kRankPrefixWidth);
+		if (!name.empty()) {
+			if (IsLineageSpace(name[0])) {
+				throw fail(index, field, "has whitespace after its rank prefix");
+			}
+			if (name[0] >= 'a' && name[0] <= 'z' && HasRankPrefix(name, name[0])) {
+				throw fail(index, field, "has a second rank prefix");
+			}
+			ranks[rank] = std::string(name);
+		}
+		++index;
+		++rank;
+		if (stop == std::string_view::npos) {
+			break;
+		}
+		start = stop + 1;
+	}
+	return ranks;
 }
 
 std::vector<Lineage> ParseTaxonomyXML(const std::string &xml) {

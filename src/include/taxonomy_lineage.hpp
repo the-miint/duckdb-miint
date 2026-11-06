@@ -1,7 +1,10 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace miint {
@@ -38,11 +41,43 @@ struct Lineage {
 	std::vector<int64_t> aka_taxids;
 };
 
-// Map an NCBI rank string to its collapse column. Both the legacy "superkingdom"
-// and the newer "domain" map to "domain"; the other seven standard ranks map to
-// their like-named column; everything else (clade, subspecies, no rank, ...)
-// returns "" and is not collapsed.
-std::string RankColumn(const std::string &rank);
+// The eight rank columns of the shared lineage schema, shallowest first: each column's
+// name, the letter it carries in a prefixed lineage string ("d__", "p__", ...), and the
+// Lineage field that holds it. Everything in C++ that names, writes or formats the rank
+// columns goes through this table; the taxonomy_lineage SQL macro mirrors it by hand.
+struct LineageRank {
+	const char *column;
+	char letter;
+	std::string Lineage::*field;
+};
+inline constexpr std::array<LineageRank, 8> kLineageRanks = {{{"domain", 'd', &Lineage::domain},
+                                                              {"phylum", 'p', &Lineage::phylum},
+                                                              {"class", 'c', &Lineage::tax_class},
+                                                              {"order", 'o', &Lineage::tax_order},
+                                                              {"family", 'f', &Lineage::family},
+                                                              {"genus", 'g', &Lineage::genus},
+                                                              {"species", 's', &Lineage::species},
+                                                              {"strain", 't', &Lineage::strain}}};
+
+// One value per rank column, in kLineageRanks order; nullopt is a missing rank.
+using LineageRanks = std::array<std::optional<std::string>, kLineageRanks.size()>;
+
+// Parse a prefixed lineage string ("d__A; p__B" or miint's "d__A;p__B") into the rank
+// columns. Each ';'-separated field, trimmed, is <letter>__<name> with the letter
+// matching its position; an empty name is a missing rank and absent trailing fields are
+// missing. `domain_letter` ('d' or 'k') is the only letter accepted for the domain. With
+// `allow_subset` the lineage may start at any rank ("c__A; o__B", as in a decorated tree's
+// internal node label): the first field's letter picks its rank, the ranks above it are
+// missing, and each later field carries the next rank's letter.
+// Throws std::invalid_argument on anything else, including a name with leading
+// whitespace or one that itself looks prefixed. Gaps are not checked here.
+LineageRanks ParseLineageString(std::string_view lineage, char domain_letter = 'd', bool allow_subset = false);
+
+// The rank column an NCBI rank collapses into. Both the legacy "superkingdom" and the
+// newer "domain" collapse into domain; the other seven standard ranks into their
+// like-named column. Everything else (clade, subspecies, no rank, ...) returns nullptr
+// and is not collapsed.
+const LineageRank *FindRankColumn(const std::string &ncbi_rank);
 
 // Collapse a set of ancestors plus the query taxon into the standard ranks and the
 // formatted lineage string.

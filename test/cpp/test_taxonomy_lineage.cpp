@@ -1,7 +1,11 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include "taxonomy_lineage.hpp"
 
+#include <stdexcept>
+
 using namespace miint;
+using Catch::Matchers::ContainsSubstring;
 
 namespace {
 // A two-taxon taxonomy efetch response. 9606 uses the legacy "superkingdom" rank
@@ -42,17 +46,34 @@ const char *kTaxonomyXml = R"(<?xml version="1.0"?>
 )";
 } // namespace
 
-TEST_CASE("RankColumn maps NCBI ranks to collapse columns", "[taxdump][lineage]") {
+namespace {
+// The column an NCBI rank collapses into, or "" when it is not collapsed.
+std::string ColumnOf(const std::string &ncbi_rank) {
+	const auto *rank = FindRankColumn(ncbi_rank);
+	return rank ? rank->column : "";
+}
+} // namespace
+
+TEST_CASE("FindRankColumn maps NCBI ranks to collapse columns", "[taxdump][lineage]") {
 	// The superkingdom/domain alias is the whole reason this is centralized: NCBI is
 	// mid-transition and both strings must land in the same column.
-	CHECK(RankColumn("superkingdom") == "domain");
-	CHECK(RankColumn("domain") == "domain");
-	CHECK(RankColumn("phylum") == "phylum");
-	CHECK(RankColumn("species") == "species");
-	CHECK(RankColumn("strain") == "strain");
-	CHECK(RankColumn("clade").empty()); // non-standard ranks are dropped
-	CHECK(RankColumn("subspecies").empty());
-	CHECK(RankColumn("no rank").empty());
+	CHECK(ColumnOf("superkingdom") == "domain");
+	CHECK(ColumnOf("domain") == "domain");
+	CHECK(ColumnOf("phylum") == "phylum");
+	CHECK(ColumnOf("species") == "species");
+	CHECK(ColumnOf("strain") == "strain");
+	CHECK(ColumnOf("clade").empty()); // non-standard ranks are dropped
+	CHECK(ColumnOf("subspecies").empty());
+	CHECK(ColumnOf("no rank").empty());
+}
+
+// An ancestor can collapse into the query taxon's own column (a strain under a strain).
+// The query taxon is the lineage's subject, so its name is the one kept.
+TEST_CASE("CollapseLineage keeps the query taxon's name in its own column", "[taxdump][lineage]") {
+	auto lin = CollapseLineage(3, "Escherichia coli K-12 MG1655", "strain",
+	                           {{1, "Escherichia coli", "species"}, {2, "Escherichia coli K-12", "strain"}});
+	CHECK(lin.strain == "Escherichia coli K-12 MG1655");
+	CHECK(lin.species == "Escherichia coli");
 }
 
 // A queried taxid that NCBI has merged resolves to a taxon whose TaxId is the
@@ -88,7 +109,7 @@ TEST_CASE("ParseTaxonomyXML captures AkaTaxIds for merged taxids", "[taxdump][li
 // -- that is the whole point of the shared schema. This XML reproduces the synthetic
 // taxdump tree's Escherichia coli K-12 lineage (taxid 90), and the expected values below
 // are byte-for-byte the golden asserted for taxid 90 in test/sql/taxonomy_lineage.test.
-// If the C++ rank-collapse (RankColumn/CollapseLineage/FormatLineage) or the SQL macro
+// If the C++ rank-collapse (CollapseLineage/FormatLineage) or the SQL macro
 // drifts, one of the two tests breaks -- keep them in lockstep.
 TEST_CASE("ParseTaxonomyXML matches the taxonomy_lineage macro golden (online==offline)", "[taxdump][lineage]") {
 	const char *xml = R"(<TaxaSet>
@@ -163,4 +184,205 @@ TEST_CASE("ParseTaxonomyXML collapses lineages and splits top-level taxa", "[tax
 		CHECK(e.lineage ==
 		      "d__Bacteria;p__Pseudomonadota;c__;o__;f__;g__Escherichia;s__Escherichia coli;t__Escherichia coli K-12");
 	}
+}
+
+namespace {
+// The eight shared-schema columns, shallowest first; missing ranks pad with nullopt.
+LineageRanks Ranks(std::initializer_list<std::optional<std::string>> values) {
+	LineageRanks out;
+	size_t i = 0;
+	for (const auto &v : values) {
+		out[i++] = v;
+	}
+	return out;
+}
+
+// What a shared-schema column holds for one of Lineage's string fields: NULL when empty.
+std::optional<std::string> Column(const std::string &value) {
+	return value.empty() ? std::nullopt : std::optional<std::string>(value);
+}
+} // namespace
+
+// read_ncbi_lineage's output columns and ParseLineageString's field positions both
+// come from kLineageRanks, and prefixed lineages use the letters dpcofgst. Reordering
+// it changes the shared lineage schema.
+TEST_CASE("kLineageRanks is the shared schema's column order and rank letters", "[lineage][parse_lineage]") {
+	std::string columns;
+	std::string letters;
+	for (const auto &rank : kLineageRanks) {
+		columns += std::string(columns.empty() ? "" : ",") + rank.column;
+		letters += rank.letter;
+	}
+	CHECK(columns == "domain,phylum,class,order,family,genus,species,strain");
+	CHECK(letters == "dpcofgst");
+}
+
+// Every reader and writer of a rank's value goes through kLineageRanks' field pointer, so
+// a rank paired with the wrong Lineage member would file every value under the wrong
+// column.
+TEST_CASE("kLineageRanks pairs each column with its Lineage field", "[lineage]") {
+	Lineage l;
+	l.domain = "domain";
+	l.phylum = "phylum";
+	l.tax_class = "class";
+	l.tax_order = "order";
+	l.family = "family";
+	l.genus = "genus";
+	l.species = "species";
+	l.strain = "strain";
+	for (const auto &rank : kLineageRanks) {
+		CHECK(l.*rank.field == rank.column);
+	}
+}
+
+// tax2tree node labels and GG2 trees join ranks with "; "; miint's own lineage
+// strings (FormatLineage) use ";". The converter has to read both.
+TEST_CASE("ParseLineageString reads both separator styles", "[lineage][parse_lineage]") {
+	auto expected = Ranks({"Bacteria", "Bacillota", "Bacilli"});
+	CHECK(ParseLineageString("d__Bacteria; p__Bacillota; c__Bacilli") == expected);
+	CHECK(ParseLineageString("d__Bacteria;p__Bacillota;c__Bacilli") == expected);
+	// Whitespace around a field is not part of the name, including a CRLF file's '\r'.
+	CHECK(ParseLineageString("  d__Bacteria ;\tp__Bacillota;c__Bacilli\r") == expected);
+}
+
+// A lineage string written by taxonomy_lineage / read_ncbi_lineage parses back into the
+// columns it was written from. (A name containing ';' cannot; it errors instead.)
+TEST_CASE("ParseLineageString reads back what FormatLineage writes", "[lineage][parse_lineage]") {
+	auto lineages = ParseTaxonomyXML(kTaxonomyXml);
+	REQUIRE(lineages.size() == 2);
+	for (const auto &l : lineages) {
+		INFO(l.lineage);
+		auto expected = Ranks({Column(l.domain), Column(l.phylum), Column(l.tax_class), Column(l.tax_order),
+		                       Column(l.family), Column(l.genus), Column(l.species), Column(l.strain)});
+		CHECK(ParseLineageString(l.lineage) == expected);
+	}
+}
+
+// NCBI has species names containing ';' ("Rhodococcus sp. SJ-2;3"). FormatLineage writes
+// them unescaped, so the name splits into an extra field. That must be an error, never a
+// lineage with the name cut short and its tail filed under the next rank.
+TEST_CASE("ParseLineageString rejects a lineage whose name contained ';'", "[lineage][parse_lineage]") {
+	auto lin = CollapseLineage(1, "Rhodococcus sp. SJ-2;3", "species",
+	                           {{2, "Bacteria", "domain"}, {3, "Rhodococcus", "genus"}});
+	REQUIRE(lin.lineage == "d__Bacteria;p__;c__;o__;f__;g__Rhodococcus;s__Rhodococcus sp. SJ-2;3");
+	CHECK_THROWS_WITH(ParseLineageString(lin.lineage), ContainsSubstring("must start with 't__'"));
+}
+
+TEST_CASE("ParseLineageString: empty bodies and short lineages are missing ranks", "[lineage][parse_lineage]") {
+	SECTION("all eight ranks") {
+		CHECK(ParseLineageString("d__A; p__B; c__C; o__D; f__E; g__F; s__F g; t__F g H") ==
+		      Ranks({"A", "B", "C", "D", "E", "F", "F g", "F g H"}));
+	}
+	SECTION("fewer than eight fields leaves the deeper ranks missing") {
+		CHECK(ParseLineageString("d__A; p__B") == Ranks({"A", "B"}));
+	}
+	SECTION("an empty body is a missing rank, Greengenes style") {
+		CHECK(ParseLineageString("d__A; p__B; c__; o__; f__; g__; s__") == Ranks({"A", "B"}));
+	}
+	SECTION("a lineage with nothing assigned is all-missing, not an error") {
+		CHECK(ParseLineageString("d__; p__") == LineageRanks {});
+	}
+	SECTION("an internal empty body parses: gaps are not rejected here") {
+		CHECK(ParseLineageString("d__A; p__; c__C") == Ranks({"A", std::nullopt, "C"}));
+	}
+	SECTION("a body may contain '__' after its prefix") {
+		CHECK(ParseLineageString("d__A; p__B__x") == Ranks({"A", "B__x"}));
+	}
+}
+
+// A field's rank comes from its position, and its letter must agree. Anything else
+// means the string does not follow d/p/c/o/f/g/s/t, and guessing would misfile names.
+TEST_CASE("ParseLineageString rejects a rank letter out of position", "[lineage][parse_lineage]") {
+	CHECK_THROWS_AS(ParseLineageString("p__A; d__B"), std::invalid_argument);
+	// A skipped rank shifts every later field.
+	CHECK_THROWS_WITH(ParseLineageString("d__A; c__B"), ContainsSubstring("p__"));
+	CHECK_THROWS_WITH(ParseLineageString("d__A; c__B"), ContainsSubstring("d__A; c__B"));
+	CHECK_THROWS_AS(ParseLineageString("d__A; p__B; c__C; o__D; f__E; g__F; s__G; s__H"), std::invalid_argument);
+	// A ninth field has no rank to go to.
+	CHECK_THROWS_WITH(ParseLineageString("d__A; p__B; c__C; o__D; f__E; g__F; s__G; t__H; t__I"),
+	                  ContainsSubstring("at most 8 fields"));
+}
+
+// Greengenes 13_8 writes k__ for the domain. Accepting it only when the caller says
+// so means one call cannot mix d__ and k__ rows.
+TEST_CASE("ParseLineageString accepts k__ only when declared", "[lineage][parse_lineage]") {
+	CHECK_THROWS_WITH(ParseLineageString("k__Bacteria; p__Bacillota"), ContainsSubstring("pass domain_letter := 'k'"));
+	CHECK(ParseLineageString("k__Bacteria; p__Bacillota", 'k') == Ranks({"Bacteria", "Bacillota"}));
+	CHECK_THROWS_WITH(ParseLineageString("d__Bacteria; p__Bacillota", 'k'),
+	                  ContainsSubstring("pass domain_letter := 'd'"));
+	// k is a domain synonym only; it is never accepted below position 0.
+	CHECK_THROWS_AS(ParseLineageString("k__Bacteria; k__Bacillota", 'k'), std::invalid_argument);
+	CHECK_THROWS_WITH(ParseLineageString("d__Bacteria", 'x'), ContainsSubstring("domain_letter"));
+}
+
+// A decorated tree's internal node label starts at the rank where decoration began
+// ("f__Lachnospiraceae; g__Blautia"). allow_subset reads it into the same eight columns:
+// the first field's letter picks the rank it starts at, the ranks above it are missing,
+// and the names still land in their own columns.
+TEST_CASE("ParseLineageString with allow_subset reads a lineage that starts below the domain",
+          "[lineage][parse_lineage]") {
+	const std::optional<std::string> none;
+	CHECK(ParseLineageString("c__foo; o__bar", 'd', true) == Ranks({none, none, "foo", "bar"}));
+	CHECK(ParseLineageString("p__baz", 'd', true) == Ranks({none, "baz"}));
+	CHECK(ParseLineageString("s__F g; t__F g H", 'd', true) ==
+	      Ranks({none, none, none, none, none, none, "F g", "F g H"}));
+	// A lineage from the domain parses as it does without the flag.
+	CHECK(ParseLineageString("d__A; p__B", 'd', true) == Ranks({"A", "B"}));
+	// domain_letter still names the domain, and only the domain.
+	CHECK(ParseLineageString("k__A; p__B", 'k', true) == Ranks({"A", "B"}));
+	CHECK(ParseLineageString("p__B", 'k', true) == Ranks({none, "B"}));
+	// An empty body is still a missing rank.
+	CHECK(ParseLineageString("c__; o__bar", 'd', true) == Ranks({none, none, none, "bar"}));
+}
+
+// allow_subset frees only where the lineage starts. A skipped or reversed rank would still
+// shift names into the wrong columns, so after the first field the letters must follow on.
+TEST_CASE("ParseLineageString with allow_subset still rejects skipped and reversed ranks", "[lineage][parse_lineage]") {
+	CHECK_THROWS_WITH(ParseLineageString("c__foo; f__bar", 'd', true), ContainsSubstring("must start with 'o__'"));
+	CHECK_THROWS_WITH(ParseLineageString("o__bar; c__foo", 'd', true), ContainsSubstring("must start with 'f__'"));
+	CHECK_THROWS_WITH(ParseLineageString("s__a; t__b; g__c", 'd', true),
+	                  ContainsSubstring("is past strain, the deepest rank"));
+	// The first field still needs a prefix that names a rank.
+	CHECK_THROWS_WITH(ParseLineageString("x__foo", 'd', true), ContainsSubstring("rank prefix"));
+	CHECK_THROWS_AS(ParseLineageString("Bacteria", 'd', true), std::invalid_argument);
+	CHECK_THROWS_AS(ParseLineageString("", 'd', true), std::invalid_argument);
+	// k__ is still the domain only when declared.
+	CHECK_THROWS_WITH(ParseLineageString("k__A; p__B", 'd', true), ContainsSubstring("pass domain_letter := 'k'"));
+	CHECK_THROWS_WITH(ParseLineageString("d__A", 'k', true), ContainsSubstring("pass domain_letter := 'd'"));
+	// The rules for a name are unchanged.
+	CHECK_THROWS_WITH(ParseLineageString("c__ foo", 'd', true), ContainsSubstring("whitespace"));
+	CHECK_THROWS_WITH(ParseLineageString("c__c__foo", 'd', true), ContainsSubstring("second rank prefix"));
+}
+
+// Without the flag a lineage that starts below the domain is an error, and the error names
+// the flag. A first field whose prefix names no rank gets no such hint.
+TEST_CASE("ParseLineageString without allow_subset rejects a partial lineage and names the flag",
+          "[lineage][parse_lineage]") {
+	CHECK_THROWS_WITH(ParseLineageString("c__foo; o__bar"), ContainsSubstring("pass allow_subset := true"));
+	CHECK_THROWS_WITH(ParseLineageString("x__foo"), !ContainsSubstring("allow_subset"));
+	CHECK_THROWS_WITH(ParseLineageString("k__A"), !ContainsSubstring("allow_subset"));
+}
+
+TEST_CASE("ParseLineageString rejects malformed fields", "[lineage][parse_lineage]") {
+	CHECK_THROWS_AS(ParseLineageString(""), std::invalid_argument);
+	CHECK_THROWS_AS(ParseLineageString("   "), std::invalid_argument);
+	// A trailing or doubled ';' is an empty field, which carries no rank letter.
+	CHECK_THROWS_AS(ParseLineageString("d__A; p__B;"), std::invalid_argument);
+	CHECK_THROWS_AS(ParseLineageString("d__A;; p__B"), std::invalid_argument);
+	// Unprefixed strings (raw SILVA) are unsupported: a field's rank would be unknown.
+	CHECK_THROWS_AS(ParseLineageString("Bacteria; Bacillota"), std::invalid_argument);
+	// So are QIIME-formatted SILVA's level prefixes, which name a depth, not a rank.
+	CHECK_THROWS_AS(ParseLineageString("D_0__Bacteria; D_1__Bacillota"), std::invalid_argument);
+	CHECK_THROWS_AS(ParseLineageString("d_Bacteria"), std::invalid_argument);
+	CHECK_THROWS_AS(ParseLineageString("D__Bacteria"), std::invalid_argument);
+}
+
+// A name that starts with whitespace, or with a second rank prefix (usually one the caller
+// forgot to strip), would differ from the same name spelled correctly elsewhere.
+TEST_CASE("ParseLineageString rejects a name starting with whitespace or a second prefix", "[lineage][parse_lineage]") {
+	// Field trimming cannot reach whitespace between the prefix and the name.
+	CHECK_THROWS_WITH(ParseLineageString("d__ Bacteria"), ContainsSubstring("whitespace"));
+	CHECK_THROWS_WITH(ParseLineageString("d__Bacteria; p__p__Bacillota"), ContainsSubstring("second rank prefix"));
+	// Any lowercase letter counts, not only the field's own.
+	CHECK_THROWS_WITH(ParseLineageString("d__Bacteria; p__d__Bacillota"), ContainsSubstring("second rank prefix"));
 }

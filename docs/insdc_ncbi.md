@@ -9,13 +9,14 @@ MIINT provides integration with NCBI's GenBank and RefSeq.
 - [Read metadata](#read-metadata) - Fetch record metadata from GenBank and RefSeq by accession.
 - [Read sequences](#read-sequences) - Fetch sequence data from GenBank and RefSeq by accession.
 - [Read annotations](#read-annotations) - Fetch annotation data from GenBank and RefSeq by accession.
-- [Taxonomy](#taxonomy) - Obtain and use the NCBI taxonomy: the full tree (bulk/offline), online lineage lookups, and offline lineage collapse.
+- [Taxonomy](#taxonomy) - Obtain and use the NCBI taxonomy: the full tree (bulk/offline), online lineage lookups, offline lineage collapse, and parsing prefixed lineage strings.
   - [Read the taxonomy tree (`read_ncbi_taxdump`)](#read-the-taxonomy-tree-read_ncbi_taxdump) - Bulk/offline: download + cache the taxonomy tree.
   - [Remap retired taxids (`read_ncbi_taxdump_merged`)](#remap-retired-taxids-read_ncbi_taxdump_merged) - The retired→current taxid map.
   - [Read every name class (`read_ncbi_taxdump_names`)](#read-every-name-class-read_ncbi_taxdump_names) - All of `names.dmp`, including `genbank common name`.
   - [List deleted taxids (`read_ncbi_taxdump_deleted`)](#list-deleted-taxids-read_ncbi_taxdump_deleted) - The taxids NCBI deleted outright.
   - [Look up lineages online (`read_ncbi_lineage`)](#look-up-lineages-online-read_ncbi_lineage) - Online/rate-limited: resolve a handful of taxids via E-utilities.
   - [Collapse the tree to lineages (`taxonomy_lineage`)](#collapse-the-tree-to-lineages-taxonomy_lineage) - Offline: rank-collapse a taxdump tree, identical schema to `read_ncbi_lineage`.
+  - [Parse lineage strings (`parse_lineage`)](#parse-lineage-strings-parse_lineage) - Turn a `d__…; p__…` lineage string (GTDB, Greengenes2, tax2tree) into the shared schema's rank columns.
 
 ### Accessions are literals, not table names
 
@@ -552,3 +553,63 @@ JOIN taxonomy_lineage(source := '/data/taxonomy/') l ON l.taxid = m.taxonomy_id;
 
 **Notes:**
 - **Memory:** calling `taxonomy_lineage()` with `taxids := NULL` over the full NCBI tree materializes a lineage for every one of ~2.9M nodes and is memory-heavy (tens of GB peak). For typical use, always pass `taxids := [...]` — resolving thousands of taxids is fast and light. The unfiltered form is intended for whole-taxonomy exports on machines with ample RAM.
+
+### Parse lineage strings (`parse_lineage`)
+
+Turns a prefixed lineage string, as written by GTDB, Greengenes2, tax2tree and
+`taxonomy_lineage` itself, into the eight rank columns of the
+[shared lineage schema](#look-up-lineages-online-read_ncbi_lineage). Use it to turn a
+`(feature_id, lineage)` taxonomy into those columns. It works on any prefixed lineage, not
+only NCBI ones.
+
+**Parameters:**
+- `lineage` (VARCHAR): for example `d__Bacteria; p__Bacillota; c__Bacilli` or `d__Bacteria;p__Bacillota;c__Bacilli`
+- `domain_letter` (VARCHAR, named only, default `'d'`): the prefix letter of the domain, `'d'` or `'k'`. Greengenes 13_8 writes `k__Bacteria`; pass `domain_letter := 'k'` to read it. It must be a constant, so one call cannot mix `d__` and `k__` rows.
+- `allow_subset` (BOOLEAN, named only, default `false`): accept a lineage that starts below the domain, such as `c__Bacilli; o__Lactobacillales` or `p__Bacillota`. The internal node labels of a tree decorated by tax2tree are like this: each starts at the rank where decoration began. The ranks above the first field are NULL, and the result type is the same. It must be a constant.
+
+**Returns:** `STRUCT(domain, phylum, class, "order", family, genus, species, strain)`, all
+VARCHAR: the shared schema's rank columns, in its order. A NULL `lineage` returns NULL.
+DuckDB 2.0 does not accept `(expr).*`, so use `unnest(parse_lineage(lineage))` to turn
+the struct into columns.
+
+**Rules:**
+- Fields are separated by `;`, and whitespace around a field is ignored, so `'; '` and `';'` both work.
+- Each field is `<letter>__<name>`, and its letter must match its position: `d p c o f g s t` (domain through strain). A skipped rank therefore errors rather than shifting the names below it into the wrong columns.
+- With `allow_subset := true`, the first field's letter picks the rank the lineage starts at, and each later field must carry the next rank's letter. `c__A; o__B` gives class `A` and order `B`; `c__A; f__B` (order skipped) and `o__B; c__A` (reversed) are errors.
+- An empty name (`p__`) is NULL, and a lineage with fewer than eight fields leaves the deeper ranks NULL. `d__A;p__;c__;o__;f__;g__;s__` gives domain `A` and seven NULLs.
+- Lineages without rank prefixes are not supported: raw SILVA, and the QIIME releases of SILVA up to 132, whose `D_0__`, `D_1__`, ... prefixes name a depth rather than a rank.
+- A `lineage` written by `taxonomy_lineage` or `read_ncbi_lineage` parses back into the columns it was written from, provided no name contains `;`, starts or ends with whitespace, or itself starts with a rank prefix such as `p__`. NCBI has a few names containing `;`, such as the species `Rhodococcus sp. SJ-2;3`; each splits into an extra field that fails its prefix check, so `parse_lineage` errors on those lineages.
+- `parse_lineage` does not reject gaps: `d__A; p__; c__C` returns phylum NULL and class `C`. Consumers that need gap-free lineages check that themselves.
+
+**Errors** quote the lineage and name the field:
+- an empty lineage, or an empty field (a trailing or doubled `;`)
+- a prefix letter out of position, or `k__` without `domain_letter := 'k'` (and `d__` with it)
+- a lineage that starts below the domain without `allow_subset := true`
+- a field after strain (in a lineage from the domain, a ninth field)
+- a name with whitespace after its prefix (`d__ Bacteria`) or a second prefix (`p__p__Bacillota`, usually a prefix that should have been stripped)
+
+**Examples:**
+```sql
+-- A QIIME 2 taxonomy.tsv (header: Feature ID, Taxon, Confidence). The classifier writes
+-- 'Unassigned', which has no prefix, for features it could not classify.
+SELECT "Feature ID" AS feature_id, unnest(parse_lineage(Taxon))
+FROM read_csv('taxonomy.tsv', delim = '\t', header = true)
+WHERE Taxon <> 'Unassigned';
+
+-- Greengenes 13_8, which writes k__ for the domain
+SELECT feature_id, unnest(parse_lineage(lineage, domain_letter := 'k'))
+FROM gg_13_8_taxonomy;
+
+-- The internal node labels of a tree decorated by tax2tree, such as
+-- 'f__Lachnospiraceae; g__Blautia'. (When tax2tree keeps support values it writes
+-- '95:f__Lachnospiraceae; g__Blautia'; strip the support first.) read_newick gives an
+-- unlabeled node the name ''.
+SELECT node_index, unnest(parse_lineage(name, allow_subset := true))
+FROM read_newick('decorated.nwk')
+WHERE NOT is_tip AND name <> '';
+
+-- An error stops at the first bad row. TRY lists them all.
+SELECT feature_id, lineage
+FROM raw_taxonomy
+WHERE lineage IS NOT NULL AND TRY(parse_lineage(lineage)) IS NULL;
+```

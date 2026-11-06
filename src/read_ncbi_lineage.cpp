@@ -53,11 +53,13 @@ void SetRankCell(DataChunk &output, idx_t col, idx_t row, const std::string &val
 ReadNCBILineageTableFunction::Data::Data(std::vector<std::string> taxids, std::vector<std::vector<std::string>> batches,
                                          const std::string &api_key, int64_t batch_size)
     : taxids(std::move(taxids)), batches(std::move(batches)), api_key(api_key), batch_size(batch_size) {
-	names = {"taxid", "name",   "rank",  "domain",  "phylum", "class",
-	         "order", "family", "genus", "species", "strain", "lineage"};
-	types = {LogicalType::BIGINT,  LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
-	         LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
-	         LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR};
+	names = {"taxid", "name", "rank"};
+	for (const auto &rank : miint::kLineageRanks) {
+		names.emplace_back(rank.column);
+	}
+	names.emplace_back("lineage");
+	types.assign(names.size(), LogicalType::VARCHAR);
+	types[0] = LogicalType::BIGINT;
 }
 
 ReadNCBILineageTableFunction::GlobalState::GlobalState(ClientContext &context, const std::string &api_key,
@@ -221,16 +223,12 @@ void ReadNCBILineageTableFunction::Execute(ClientContext &context, TableFunction
 		FlatVector::GetDataMutable<int64_t>(output.data[0])[i] = lin.taxid;
 		FlatVector::GetDataMutable<string_t>(output.data[1])[i] = StringVector::AddString(output.data[1], lin.name);
 		FlatVector::GetDataMutable<string_t>(output.data[2])[i] = StringVector::AddString(output.data[2], lin.rank);
-		SetRankCell(output, 3, i, lin.domain);
-		SetRankCell(output, 4, i, lin.phylum);
-		SetRankCell(output, 5, i, lin.tax_class);
-		SetRankCell(output, 6, i, lin.tax_order);
-		SetRankCell(output, 7, i, lin.family);
-		SetRankCell(output, 8, i, lin.genus);
-		SetRankCell(output, 9, i, lin.species);
-		SetRankCell(output, 10, i, lin.strain);
-		FlatVector::GetDataMutable<string_t>(output.data[11])[i] =
-		    StringVector::AddString(output.data[11], lin.lineage);
+		// The rank columns follow taxid, name and rank, in kLineageRanks order (see Data).
+		for (idx_t r = 0; r < miint::kLineageRanks.size(); r++) {
+			SetRankCell(output, 3 + r, i, lin.*miint::kLineageRanks[r].field);
+		}
+		auto &lineage_column = output.data[3 + miint::kLineageRanks.size()];
+		FlatVector::GetDataMutable<string_t>(lineage_column)[i] = StringVector::AddString(lineage_column, lin.lineage);
 	}
 
 	global_state.result_offset += count;

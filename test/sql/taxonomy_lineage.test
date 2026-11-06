@@ -23,6 +23,26 @@ species	VARCHAR
 strain	VARCHAR
 lineage	VARCHAR
 
+# The online side of the same contract. read_ncbi_lineage's bind fetches nothing, so
+# its schema is checkable here without NCBI; test/sql/read_ncbi_lineage.test needs
+# the network and skips offline.
+query TT
+SELECT column_name, column_type
+FROM (DESCRIBE SELECT * FROM read_ncbi_lineage([9606]));
+----
+taxid	BIGINT
+name	VARCHAR
+rank	VARCHAR
+domain	VARCHAR
+phylum	VARCHAR
+class	VARCHAR
+order	VARCHAR
+family	VARCHAR
+genus	VARCHAR
+species	VARCHAR
+strain	VARCHAR
+lineage	VARCHAR
+
 # --- full 8-rank lineage (strain); legacy 'superkingdom' collapses to domain -
 # PARITY PIN: this taxid-90 row is byte-for-byte the golden asserted for the online
 # path in test/cpp/test_taxonomy_lineage.cpp ("online==offline"). Keep them in lockstep.

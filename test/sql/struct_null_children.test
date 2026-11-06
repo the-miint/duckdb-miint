@@ -25,8 +25,8 @@
 #
 # The bare-STRUCT returners in src/ are: qc_functions.cpp (3 return types, 4 sites),
 # merge_pairs_function.cpp, extract_linked_amplicon.cpp, ks_2samp.cpp,
-# pairwise_align_shared.hpp (2 templates serving 8 SQL functions), and
-# compute_msa_consensus.cpp -- all covered here or, for merge_pairs_vsearch, in
+# pairwise_align_shared.hpp (2 templates serving 8 SQL functions),
+# compute_msa_consensus.cpp and parse_lineage.cpp -- all covered here or, for merge_pairs_vsearch, in
 # test/sql/merge_pairs.test. install_gpl_boundary.cpp, miint_extension.cpp,
 # ena_modify_functions.cpp and ena_storage.cpp also return bare STRUCTs but never mark a
 # result row NULL at all, so there is nothing to pin.
@@ -197,6 +197,31 @@ FROM msa GROUP BY bin_id ORDER BY bin_id;
 ----
 1	false	false	false
 2	true	true	true
+
+# ---------------------------------------------------------------------------
+# parse_lineage -- 8 struct fields, one per rank column
+#
+# The control row fills every field, so a NULL row after it that leaked would read
+# that row's names back.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE TABLE lineages(id INTEGER, lineage VARCHAR);
+
+statement ok
+INSERT INTO lineages VALUES
+  (1, 'd__A; p__B; c__C; o__D; f__E; g__F; s__F g; t__F g h'),
+  (2, NULL);
+
+query IIIII
+SELECT id,
+       parse_lineage(lineage) IS NULL            AS struct_null,
+       (parse_lineage(lineage)).domain IS NULL   AS f_domain,
+       (parse_lineage(lineage))."order" IS NULL  AS f_order,
+       (parse_lineage(lineage)).strain IS NULL   AS f_strain
+FROM lineages ORDER BY id;
+----
+1	false	false	false	false
+2	true	true	true	true
 
 # merge_pairs_vsearch has the same contract, but it needs vsearch, so its case lives in
 # test/sql/merge_pairs.test which already carries the require-env guard. A mid-file
