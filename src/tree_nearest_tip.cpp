@@ -281,9 +281,14 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 
 	// Each relation is read exactly once. Targets and queries are read in their own types,
 	// which ReadNames checks against the bound output types. Tree names are only matched,
-	// as text, and never emitted, so the tree's reader (ReadTreeTable) reads them as text.
+	// as text, and never emitted, so the tree's reader (ReadTreeArrays) reads them as text.
+	// One relation as both targets and queries (identifiers are case-insensitive) is read
+	// once for both, so both roles see the same rows.
 	const auto targets = ReadNames(context, bind.targets_table, bind);
-	const auto queries = ReadNames(context, bind.queries_table, bind);
+	const bool queries_are_targets = StringUtil::CIEquals(bind.targets_table, bind.queries_table);
+	const auto queries_read =
+	    queries_are_targets ? std::vector<NamedRow>() : ReadNames(context, bind.queries_table, bind);
+	const auto &queries = queries_are_targets ? targets : queries_read;
 
 	// The tips that queries and targets name: which node, and how many tips carry the name.
 	struct TipMatch {

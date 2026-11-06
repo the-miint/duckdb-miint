@@ -167,13 +167,13 @@ The `name` columns of all three tables must have the same type: `VARCHAR`, `BIGI
 | `lca_index` | BIGINT | The `node_index` (in `tree_table`'s numbering) of the query–target lowest common ancestor, or `NULL` |
 
 **Behavior / semantics:**
-- **Distance.** The path length is `(D(q) - D(lca)) + (D(t) - D(lca))`, where `D` is the sum of branch lengths from the root down to a node. It depends only on the two tips: not on child order, and not on the other targets in the group.
-- **Ties.** A tie means exactly equal `DOUBLE` distances. The tie goes to the target that `ORDER BY target` puts first (byte order for `VARCHAR`, numeric order for `BIGINT`, so `9` before `10`), and `n_tied` counts every tied target. Zero-length branches tie exactly, but two paths of mathematically equal length can round to different doubles and then do not tie.
+- **Distance.** The path length is `(D(q) - D(lca)) + (D(t) - D(lca))`, where `D` is the sum of branch lengths from the root down to a node. It depends only on the two tips: not on child order, and not on the other targets in the group. Because it is a difference of root distances, its rounding error is about `1e-16` times the root distances involved: where root distances are far larger than the branches near the tips, two nearby distances can round to the same double (a tie) or swap.
+- **Ties.** A tie means exactly equal `DOUBLE` distances. The tie goes to the smallest target name: by bytes for `VARCHAR`, whatever its collation; by value for `BIGINT` (so `9` before `10`); in DuckDB's own order for `UUID`. `n_tied` counts every tied target. Zero-length branches tie exactly, but two paths of mathematically equal length can round to different doubles and then do not tie.
 - **Groups.** A query competes only with targets that have the same `grp` value. A query in two groups gives two rows. A `NULL` `grp` matches nothing: a target with `NULL` `grp` is in no group, and a query with `NULL` `grp` gets a row with no target.
 - **Names.** Only tips are matched; an internal node's label is a missing name. A name that labels two or more tips is an error, but only when a query or target uses it. Repeated rows and `NULL` names in `targets_table` and `queries_table` are ignored.
 - **Branch lengths.** A `NULL` or negative branch length below the root is an error naming the node, since a path through it has no length. The root's own length is ignored. A tree with a few tiny negative lengths (rounding left by a placement tool, for example) can be read through a view that reads them as 0; see the examples.
 - **Row order** is not promised; use `ORDER BY`. Queries are answered in parallel.
-- Each of the three relations is read once, at execution.
+- Each of the three relations is read once, at execution; one relation passed as both `targets_table` and `queries_table` is read once for both.
 
 **Examples:**
 ```sql

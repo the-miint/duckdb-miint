@@ -667,6 +667,30 @@ SELECT currval('tree_seq'), currval('targets_seq'), currval('queries_seq');
 ----
 10	2	3
 
+# One relation as both targets and queries (every tip against the others, the call that
+# exclude_self is for) is read once too, so both roles see the same rows. Identifiers are
+# case-insensitive, so it is the same relation however its name is spelled.
+statement ok
+CREATE SEQUENCE both_seq START 1;
+
+statement ok
+CREATE VIEW both_volatile AS SELECT concat(name, repeat('x', 0 * nextval('both_seq'))) AS name FROM ex1 WHERE is_tip;
+
+query TTR
+SELECT query, target, round(distance, 12) FROM tree_nearest_tip('ex1', 'both_volatile', 'BOTH_VOLATILE') ORDER BY query;
+----
+A	B	0.3
+B	A	0.3
+D	A	1.3
+F	G	1.3
+G	F	1.3
+
+# 5 tips, evaluated once.
+query I
+SELECT currval('both_seq');
+----
+5
+
 # Planning reads no rows: a view whose rows cannot be read still plans.
 statement ok
 CREATE VIEW boom AS SELECT CAST(error('read at planning') AS VARCHAR) AS name FROM ex1_targets;
