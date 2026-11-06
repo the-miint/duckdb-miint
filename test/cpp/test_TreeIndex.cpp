@@ -3,29 +3,24 @@
 
 #include "NewickTree.hpp"
 #include "TreeIndex.hpp"
+#include "tree_test_util.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <limits>
-#include <numeric>
 #include <random>
 #include <string>
 #include <vector>
 
 using Catch::Matchers::ContainsSubstring;
 using miint::TreeIndex;
+using namespace miint::test;
 
 namespace {
 
 constexpr uint32_t NP = TreeIndex::NO_PARENT;
 const double kNaN = std::numeric_limits<double>::quiet_NaN();
-
-// A tree as plain arrays, the input TreeIndex::Build takes.
-struct Arrays {
-	std::vector<uint32_t> parent;
-	std::vector<double> length;
-};
 
 uint32_t node_named(const miint::NewickTree &tree, const std::string &name) {
 	auto found = tree.find_node_by_name(name);
@@ -33,109 +28,7 @@ uint32_t node_named(const miint::NewickTree &tree, const std::string &name) {
 	return found.value();
 }
 
-// ---------------------------------------------------------------------------
-// The naive model the index is checked against: everything by walking parents.
-// ---------------------------------------------------------------------------
-
-bool naive_is_ancestor_or_self(const Arrays &t, uint32_t a, uint32_t v) {
-	for (uint32_t cur = v; cur != NP; cur = t.parent[cur]) {
-		if (cur == a) {
-			return true;
-		}
-	}
-	return false;
-}
-
-uint32_t naive_lca(const Arrays &t, uint32_t a, uint32_t b) {
-	std::vector<bool> above_a(t.parent.size(), false);
-	for (uint32_t cur = a; cur != NP; cur = t.parent[cur]) {
-		above_a[cur] = true;
-	}
-	for (uint32_t cur = b; cur != NP; cur = t.parent[cur]) {
-		if (above_a[cur]) {
-			return cur;
-		}
-	}
-	FAIL("no common ancestor");
-	return NP;
-}
-
-uint32_t naive_depth(const Arrays &t, uint32_t v) {
-	uint32_t d = 0;
-	for (uint32_t cur = v; t.parent[cur] != NP; cur = t.parent[cur]) {
-		++d;
-	}
-	return d;
-}
-
-// The root distance, summed root first: the order the index promises, so even
-// non-dyadic lengths must match bit for bit.
-double naive_root_distance(const Arrays &t, uint32_t v) {
-	std::vector<uint32_t> path; // v up to (excluding) the root
-	for (uint32_t cur = v; t.parent[cur] != NP; cur = t.parent[cur]) {
-		path.push_back(cur);
-	}
-	double d = 0.0;
-	for (auto it = path.rbegin(); it != path.rend(); ++it) {
-		d += t.length[*it];
-	}
-	return d;
-}
-
-// ---------------------------------------------------------------------------
-// Random trees. Structure first (each node's parent is an earlier node, and often
-// the immediately preceding one, so long chains appear), then the labels are
-// shuffled so the numbering is in no particular order.
-// ---------------------------------------------------------------------------
-
-Arrays random_tree(std::mt19937 &rng, uint32_t n, bool dyadic) {
-	std::vector<uint32_t> structural_parent(n, NP);
-	std::uniform_real_distribution<double> unit(0.0, 1.0);
-	for (uint32_t k = 1; k < n; ++k) {
-		if (unit(rng) < 0.3) {
-			structural_parent[k] = k - 1;
-		} else {
-			structural_parent[k] = std::uniform_int_distribution<uint32_t>(0, k - 1)(rng);
-		}
-	}
-	std::vector<uint32_t> label(n);
-	std::iota(label.begin(), label.end(), 0u);
-	std::shuffle(label.begin(), label.end(), rng);
-
-	const double dyadic_lengths[] = {0.0, 0.0, 0.125, 0.25, 0.5, 1.0, 2.0};
-	Arrays t;
-	t.parent.assign(n, NP);
-	t.length.assign(n, 0.0);
-	for (uint32_t k = 0; k < n; ++k) {
-		if (structural_parent[k] != NP) {
-			t.parent[label[k]] = label[structural_parent[k]];
-		}
-		t.length[label[k]] = dyadic ? dyadic_lengths[std::uniform_int_distribution<int>(0, 6)(rng)] : unit(rng);
-	}
-	// The root's own length is ignored, whatever it holds.
-	t.length[label[0]] = kNaN;
-	return t;
-}
-
-// A caterpillar `levels` deep: internal node k (index k) is the parent of internal node
-// k+1 and of tip k (index levels + k); the deepest internal node also holds the last tip.
-// Every edge has length 1, so root distances are exact integers.
-Arrays caterpillar(uint32_t levels) {
-	const uint32_t n = 2 * levels + 1;
-	Arrays t;
-	t.parent.assign(n, NP);
-	t.length.assign(n, 1.0);
-	for (uint32_t k = 1; k < levels; ++k) {
-		t.parent[k] = k - 1;
-	}
-	for (uint32_t k = 0; k < levels; ++k) {
-		t.parent[levels + k] = k;
-	}
-	t.parent[2 * levels] = levels - 1;
-	return t;
-}
-
-void require_matches_naive(const TreeIndex &idx, const Arrays &t) {
+void require_matches_naive(const TreeIndex &idx, const TreeArrays &t) {
 	const uint32_t n = static_cast<uint32_t>(t.parent.size());
 	REQUIRE(idx.size() == n);
 

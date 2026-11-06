@@ -309,6 +309,7 @@ list(
   src/MzXMLReader.cpp
   src/ncbi_client.cpp
   src/ncbi_parser.cpp
+  src/NearestTip.cpp
   src/NewickTree.cpp
   src/paf_parser.cpp
   src/per_run_reader.cpp
@@ -460,6 +461,7 @@ list(
   src/MzMLReader.cpp
   src/MzXMLReader.cpp
   src/ncbi_parser.cpp
+  src/NearestTip.cpp
   src/NewickTree.cpp
   src/paf_parser.cpp
   src/pick_anchors.cpp
@@ -538,6 +540,7 @@ list(
   test/cpp/test_MzMLReader.cpp
   test/cpp/test_MzXMLReader.cpp
   test/cpp/test_ncbi_client.cpp
+  test/cpp/test_NearestTip.cpp
   test/cpp/test_NewickParser.cpp
   test/cpp/test_paf_parser.cpp
   test/cpp/test_PickAnchors.cpp
