@@ -153,23 +153,33 @@ TreeTableArrays ReadTreeArrays(ClientContext &context, const std::string &table_
                                const std::unordered_set<std::string_view> &keep_names, const LogicalType &name_type) {
 	auto info = GetTableOrViewColumns(context, table_name, "Tree table");
 	const bool has_names = HasColumn(info, "name");
-	// The names are matched as text; the column as it is read is projected too, last, only
-	// so that its type can be checked against the bound one.
-	const std::string name_proj = has_names ? "name::VARCHAR" : "CAST(NULL AS VARCHAR)";
+	// The names are matched as text. VARCHAR names, the usual case, are read as they are, so
+	// the type of the read shows whether they still are VARCHAR; it is checked before any
+	// row is read as text. Names bound with another type are cast to text, and the column as
+	// it is read is projected too, last, only so that its type can be checked: a second copy
+	// of every VARCHAR name would cost more.
+	const bool names_uncast = name_type.id() == LogicalTypeId::VARCHAR;
+	const idx_t name_type_col = names_uncast ? 2 : 4;
+	std::string name_proj = "CAST(NULL AS VARCHAR)";
+	if (has_names) {
+		name_proj = names_uncast ? "name" : "name::VARCHAR";
+	}
 	const std::string bl_proj = HasColumn(info, "branch_length") ? "branch_length::DOUBLE" : "CAST(NULL AS DOUBLE)";
 	// No ORDER BY: DenseTree numbers the rows itself, and sorting here would carry every
 	// name through the sort.
 	const std::string query = "SELECT node_index::BIGINT, parent_index::BIGINT, " + name_proj + ", " + bl_proj +
-	                          (has_names ? ", name" : "") + " FROM " + SQLIdentifier::ToString(table_name);
+	                          (has_names && !names_uncast ? ", name" : "") + " FROM " +
+	                          SQLIdentifier::ToString(table_name);
 
 	auto conn = MakeReadOnlyHelperConnection(context);
 	auto stream = SubmitStream(conn, query);
 	if (stream->HasError()) {
 		throw InvalidInputException("Failed to read from tree table '%s': %s", table_name, stream->GetError());
 	}
-	if (has_names && stream->GetTypes()[4] != name_type) {
-		throw std::invalid_argument("column 'name' is " + stream->GetTypes()[4].ToString() + " now but was " +
-		                            name_type.ToString() + " when the statement was bound; run or prepare it again");
+	if (has_names && stream->GetTypes()[name_type_col] != name_type) {
+		throw std::invalid_argument("column 'name' is " + stream->GetTypes()[name_type_col].ToString() +
+		                            " now but was " + name_type.ToString() +
+		                            " when the statement was bound; run or prepare it again");
 	}
 
 	std::vector<int64_t> node_ids;

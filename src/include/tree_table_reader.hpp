@@ -46,9 +46,9 @@ struct TreeTableArrays {
 // Read a tree table or view once, streaming, keeping each node's name only when it is in
 // `keep_names`. ReadTreeTable and BuildTreeAndNodeIds hold every row, name included, twice
 // over: loading the Greengenes2 2024.09 tree (24.5M nodes) from Parquet that way was
-// killed at an 18 GB memory cap, and this way peaked at 2.6 GB resident. Names are read as
-// name::VARCHAR, as ReadTreeTable reads them; a missing name or branch_length column reads
-// as NULL.
+// killed at an 18 GB memory cap, and this way peaked at 2.6 GB resident. Names are matched
+// as text: VARCHAR names as they are, others cast with name::VARCHAR, as ReadTreeTable reads
+// them; a missing name or branch_length column reads as NULL.
 //
 // `name_type` is the type Bind saw for the name column. A view can change type without a
 // catalog change (one over a file that is rewritten, under a prepared statement), and names

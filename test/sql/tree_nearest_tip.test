@@ -435,6 +435,44 @@ EXECUTE nearest;
 B	g1	A
 B	g2	D
 
+# Bound with integer names, then only the tree's names become text. The tree's names are
+# read as text either way, so this is caught only by checking the type they are read in.
+statement ok
+COPY (SELECT node_index, parent_index, name, branch_length FROM big) TO '{TEST_DIR}/prep_big_tree.csv';
+
+statement ok
+COPY (SELECT * FROM big_targets) TO '{TEST_DIR}/prep_big_targets.csv';
+
+statement ok
+COPY (SELECT * FROM big_queries) TO '{TEST_DIR}/prep_big_queries.csv';
+
+statement ok
+CREATE VIEW prep_big_tree AS SELECT * FROM read_csv('{TEST_DIR}/prep_big_tree.csv');
+
+statement ok
+CREATE VIEW prep_big_targets AS SELECT * FROM read_csv('{TEST_DIR}/prep_big_targets.csv');
+
+statement ok
+CREATE VIEW prep_big_queries AS SELECT * FROM read_csv('{TEST_DIR}/prep_big_queries.csv');
+
+statement ok
+PREPARE nearest_big AS
+SELECT query, target FROM tree_nearest_tip('prep_big_tree', 'prep_big_targets', 'prep_big_queries') ORDER BY query;
+
+query II
+EXECUTE nearest_big;
+----
+1	9
+2	1
+
+statement ok
+COPY (SELECT node_index, parent_index, name, branch_length FROM ex1) TO '{TEST_DIR}/prep_big_tree.csv';
+
+statement error
+EXECUTE nearest_big;
+----
+<REGEX>:.*tree_nearest_tip: the tree 'prep_big_tree' cannot be searched: column 'name' is VARCHAR now but was BIGINT when the statement was bound.*
+
 # =============================================================================
 # Names that are not tips, or name more than one tip
 # =============================================================================
