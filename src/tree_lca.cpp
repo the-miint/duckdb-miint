@@ -8,13 +8,12 @@
 #include "tree_table_reader.hpp"
 
 #include "duckdb/common/exception.hpp"
-#include "duckdb/common/string_util.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
-#include "duckdb/parallel/task_scheduler.hpp"
 
 #include <algorithm>
 #include <atomic>
 #include <functional>
+#include <stdexcept>
 #include <unordered_set>
 #include <utility>
 
@@ -67,15 +66,9 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 	auto tree_columns = GetTableOrViewColumns(context, data->tree_table, "Tree table");
 	auto pair_columns = GetTableOrViewColumns(context, data->pairs_table, "Pairs table");
 
-	LogicalType tree_name, a_type, b_type;
-	if (!FindColumnType(tree_columns, "name", tree_name)) {
-		throw BinderException("%s: tree table '%s' has no 'name' column", kFn, data->tree_table);
-	}
-	// The tree is read in its own projection, so passing it as the pairs would read it twice.
-	if (StringUtil::CIEquals(data->pairs_table, data->tree_table)) {
-		throw BinderException("%s: '%s' is the tree table; pass the pairs as a relation of their own", kFn,
-		                      data->pairs_table);
-	}
+	const LogicalType tree_name = TipNameType(kFn, data->tree_table, tree_columns);
+	RejectTreeAs(kFn, data->tree_table, data->pairs_table, "pass the pairs as a relation of their own");
+	LogicalType a_type, b_type;
 	if (!FindColumnType(pair_columns, "a", a_type)) {
 		throw BinderException("%s: pairs table '%s' has no 'a' column", kFn, data->pairs_table);
 	}
@@ -87,10 +80,6 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 		                      "and 'a' and 'b' are %s and %s in '%s'; cast them to one of %s",
 		                      kFn, tree_name.ToString(), data->tree_table, a_type.ToString(), b_type.ToString(),
 		                      data->pairs_table, AllowedIdTypeList());
-	}
-	if (!IsAllowedIdType(tree_name)) {
-		throw BinderException("%s: tip names must be %s, but they are %s; cast them", kFn, AllowedIdTypeList(),
-		                      tree_name.ToString());
 	}
 	data->name_type = tree_name;
 	data->ignore_missing = GetBoolParam(input, "ignore_missing", false);
@@ -163,9 +152,7 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	                           [](const Pair &pair) { return pair.a->second.count != 1 || pair.b->second.count != 1; }),
 	            pairs.end());
 
-	const idx_t blocks = (state->pairs.size() + STANDARD_VECTOR_SIZE - 1) / STANDARD_VECTOR_SIZE;
-	const idx_t threads = TaskScheduler::GetScheduler(context).NumberOfThreads();
-	state->max_threads = std::max<idx_t>(1, std::min(blocks, threads));
+	state->max_threads = ThreadsForClaims(context, state->pairs.size(), STANDARD_VECTOR_SIZE);
 	return std::move(state);
 }
 
@@ -195,12 +182,11 @@ void Execute(ClientContext &, TableFunctionInput &data_p, DataChunk &output) {
 		const uint32_t b = pair.b->second.node;
 		const uint32_t l = index.lca(a, b);
 		lca[i] = state.tree.node_ids[l];
-		const auto d = index.path_length(a, b, l);
-		if (d) {
-			distance[i] = *d;
-			distance_valid.SetValid(i);
-		} else {
-			distance_valid.SetInvalid(i);
+		try {
+			SetDistance(distance, distance_valid, i, index.path_length(a, b, l));
+		} catch (const std::overflow_error &) {
+			throw InvalidInputException("%s: the path between '%s' and '%s' is outside DOUBLE's range", kFn,
+			                            pair.a->first, pair.b->first);
 		}
 	}
 	output.SetChildCardinality(count);

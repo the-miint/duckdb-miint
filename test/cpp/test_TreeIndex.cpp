@@ -340,30 +340,6 @@ TEST_CASE("TreeIndex: a distance is unknown exactly when its path crosses an unk
 	}
 }
 
-TEST_CASE("TreeIndex: a path length is the difference of root distances, as the nearest-tip search takes it",
-          "[TreeIndex]") {
-	// The nearest-tip search scores a target as (D[q] - D[lca]) + (D[t] - D[lca]). A path
-	// length must be that same double, or the same pair could get two different distances
-	// from two functions.
-	std::mt19937 rng(20261108);
-	for (int trial = 0; trial < 30; ++trial) {
-		const uint32_t n = std::uniform_int_distribution<uint32_t>(2, 100)(rng);
-		auto t = random_tree(rng, n, false);
-		CAPTURE(trial, n);
-		for (auto policy : {LengthPolicy::Searchable, LengthPolicy::UnknownAllowed}) {
-			auto idx = TreeIndex::Build(t.parent, t.length, nullptr, policy);
-			for (uint32_t a = 0; a < n; ++a) {
-				for (uint32_t b = 0; b < n; ++b) {
-					const uint32_t l = idx.lca(a, b);
-					const double expected =
-					    (idx.root_distance(a) - idx.root_distance(l)) + (idx.root_distance(b) - idx.root_distance(l));
-					REQUIRE(idx.path_length(a, b, l) == expected);
-				}
-			}
-		}
-	}
-}
-
 TEST_CASE("TreeIndex: a fully specified tree gets the same root distances under either policy", "[TreeIndex]") {
 	std::mt19937 rng(20261109);
 	for (int trial = 0; trial < 30; ++trial) {
@@ -379,12 +355,29 @@ TEST_CASE("TreeIndex: a fully specified tree gets the same root distances under 
 	}
 }
 
-TEST_CASE("TreeIndex: unknown and negative lengths are still refused for a search", "[TreeIndex]") {
-	// The default policy is unchanged: lengths a pruning search cannot use are errors.
-	REQUIRE_THROWS_WITH(TreeIndex::Build({NP, 0}, {kNaN, kNaN}, nullptr, LengthPolicy::Searchable),
-	                    ContainsSubstring("NULL or NaN"));
-	REQUIRE_THROWS_WITH(TreeIndex::Build({NP, 0}, {kNaN, -1.0}, nullptr, LengthPolicy::Searchable),
-	                    ContainsSubstring("negative"));
+TEST_CASE("TreeIndex: an index records its length policy, Searchable by default", "[TreeIndex]") {
+	// The nearest-tip search refuses an index that is not Searchable, so the default must be.
+	REQUIRE(TreeIndex::Build({NP, 0}, {kNaN, 1.0}).length_policy() == LengthPolicy::Searchable);
+	REQUIRE(TreeIndex::Build({NP, 0}, {kNaN, 1.0}, nullptr, LengthPolicy::UnknownAllowed).length_policy() ==
+	        LengthPolicy::UnknownAllowed);
+}
+
+TEST_CASE("TreeIndex: a distance outside DOUBLE's range is an error, not an infinity", "[TreeIndex]") {
+	// Each root distance is in range, but a path through the root sums two of them, and with
+	// negative lengths a node and its ancestor can sit at opposite ends of the range.
+	const double big = 1e308;
+	for (auto policy : {LengthPolicy::Searchable, LengthPolicy::UnknownAllowed}) {
+		CAPTURE(policy == LengthPolicy::Searchable);
+		auto idx = TreeIndex::Build({NP, 0, 0}, {kNaN, big, big}, nullptr, policy);
+		REQUIRE_THROWS_AS(idx.path_length(1, 2, 0), std::overflow_error);
+		REQUIRE(idx.path_length(1, 1, 1) == 0.0);
+		REQUIRE(idx.distance_to_ancestor(1, 0) == big);
+	}
+	// 0 over 1 (big), 1 over 2 (-big), 2 over 3 (-big): node 1 is at big and node 3 at -big.
+	auto swing = TreeIndex::Build({NP, 0, 1, 2}, {kNaN, big, -big, -big}, nullptr, LengthPolicy::UnknownAllowed);
+	REQUIRE_THROWS_AS(swing.distance_to_ancestor(3, 1), std::overflow_error);
+	REQUIRE(swing.distance_to_ancestor(3, 2) == -big);
+	REQUIRE(swing.distance_to_ancestor(3, 0) == -big);
 }
 
 TEST_CASE("TreeIndex: infinite lengths and overflowing distances are errors under either policy", "[TreeIndex]") {

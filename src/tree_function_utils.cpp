@@ -1,11 +1,14 @@
 #include "tree_function_utils.hpp"
 
+#include "id_column_utils.hpp"
+#include "miint_streaming_query.hpp"
 #include "tree_table_reader.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/exception/binder_exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/connection.hpp"
-#include "duckdb/main/query_result.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
 
 #include <algorithm>
@@ -25,6 +28,24 @@ bool FindColumnType(const TableOrViewColumns &columns, const std::string &column
 	return false;
 }
 
+LogicalType TipNameType(const char *fn, const std::string &tree_table, const TableOrViewColumns &tree_columns) {
+	LogicalType type;
+	if (!FindColumnType(tree_columns, "name", type)) {
+		throw BinderException("%s: tree table '%s' has no 'name' column", fn, tree_table);
+	}
+	if (!IsAllowedIdType(type)) {
+		throw BinderException("%s: tip names must be %s, but they are %s; cast them", fn, AllowedIdTypeList(),
+		                      type.ToString());
+	}
+	return type;
+}
+
+void RejectTreeAs(const char *fn, const std::string &tree_table, const std::string &relation, const char *remedy) {
+	if (StringUtil::CIEquals(relation, tree_table)) {
+		throw BinderException("%s: '%s' is the tree table; %s", fn, relation, remedy);
+	}
+}
+
 void ReadRelation(ClientContext &context, const char *fn, const std::string &relation,
                   const std::vector<std::pair<std::string, LogicalType>> &columns,
                   const std::function<void(DataChunk &)> &consume) {
@@ -35,11 +56,11 @@ void ReadRelation(ClientContext &context, const char *fn, const std::string &rel
 	sql += " FROM " + SQLIdentifier::ToString(relation);
 
 	auto conn = MakeReadOnlyHelperConnection(context);
-	auto result = conn.Query(sql);
-	if (result->HasError()) {
-		throw InvalidInputException("%s: failed to read '%s': %s", fn, relation, result->GetError());
+	auto stream = SubmitStream(conn, sql);
+	if (stream->HasError()) {
+		throw InvalidInputException("%s: failed to read '%s': %s", fn, relation, stream->GetError());
 	}
-	auto &types = result->GetTypes();
+	auto &types = stream->GetTypes();
 	for (size_t i = 0; i < columns.size(); ++i) {
 		if (types[i] != columns[i].second) {
 			throw InvalidInputException(
@@ -47,12 +68,16 @@ void ReadRelation(ClientContext &context, const char *fn, const std::string &rel
 			    fn, columns[i].first, relation, types[i].ToString(), columns[i].second.ToString());
 		}
 	}
-	while (auto chunk = result->Fetch()) {
+	while (auto chunk = stream->Fetch()) {
 		if (chunk->size() == 0) {
 			break;
 		}
 		context.InterruptCheck();
 		consume(*chunk);
+	}
+	// A read that fails part-way ends the stream like a finished one; only the error tells.
+	if (stream->HasError()) {
+		throw InvalidInputException("%s: failed to read '%s': %s", fn, relation, stream->GetError());
 	}
 }
 
@@ -94,6 +119,12 @@ IndexedTree ReadIndexedTree(ClientContext &context, const char *fn, const std::s
 	// The rest of the arrays are released here: the index, the ids and the matches are all
 	// a caller needs.
 	return out;
+}
+
+idx_t ThreadsForClaims(ClientContext &context, idx_t items, idx_t per_claim) {
+	const idx_t claims = (items + per_claim - 1) / per_claim;
+	const idx_t threads = TaskScheduler::GetScheduler(context).NumberOfThreads();
+	return std::max<idx_t>(1, std::min(claims, threads));
 }
 
 void RequireUnambiguousTips(const char *fn, const std::string &tree_table, const TipMatches &tips, const char *who) {

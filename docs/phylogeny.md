@@ -174,7 +174,7 @@ A query's **eligible targets** are the target tips in its group (every target, w
 - **Ties.** A tie means exactly equal `DOUBLE` distances. The tie goes to the smallest target name: by bytes for `VARCHAR`, whatever its collation; by value for `BIGINT` (so `9` before `10`); in DuckDB's own order for `UUID`. `n_tied` counts every tied target. Zero-length branches tie exactly, but two paths of mathematically equal length can round to different doubles and then do not tie.
 - **Groups.** A query competes only with targets that have the same `grp` value. A query in two groups gives two rows. A `NULL` `grp` matches nothing: a target with `NULL` `grp` is in no group, and a query with `NULL` `grp` gets a row with no target.
 - **Names.** Only tips are matched, and a name matches byte for byte, whatever its collation; an internal node's label is a missing name. A name that labels two or more tips is an error, but only when a query or target uses it. Repeated rows and `NULL` names in `targets_table` and `queries_table` are ignored.
-- **Branch lengths.** A `NULL`, NaN, infinite or negative branch length below the root is an error naming the node, since a path through it has no usable length. The root's own length is ignored. A tree with a few tiny negative lengths (rounding left by a placement tool, for example) can be read through a view that reads them as 0; see the examples.
+- **Branch lengths.** A `NULL`, NaN, infinite or negative branch length below the root is an error naming the node. The search prunes by distance, which needs distances that only grow away from the root: a negative length breaks that, and an unknown one cannot promise it. [`tree_node_depths`](#node-depths), [`tree_lca`](#lowest-common-ancestor) and [`tree_ancestors`](#ancestors) only add lengths up, and accept both. The root's own length is ignored. A tree with a few tiny negative lengths (rounding left by a placement tool, for example) can be read through a view that reads them as 0; see the examples.
 - **Row order** is not promised; use `ORDER BY`. Queries are answered in parallel.
 - Each relation is read once, at execution; one relation passed as both `targets_table` and `queries_table` is read once for both.
 
@@ -222,9 +222,9 @@ SELECT * FROM tree_nearest_tip('tree_clamped', 'label_targets', 'label_queries')
 - `grp` is in only one of `targets_table` and `queries_table`, or has different types in them.
 - `scope` is not `'path'` or `'clade'`.
 - A query or target name is not a tip and `ignore_missing := false`, or names two or more tips.
-- The tree cannot be searched: a `NULL` or repeated `node_index`, a `parent_index` that is no row's `node_index`, no rows, not exactly one root, a cycle, a `NULL`, NaN, infinite or negative branch length below the root, or a root distance (the sum of the branch lengths above a node) past the largest `DOUBLE`.
+- The tree cannot be searched: a `NULL` or repeated `node_index`, a `parent_index` that is no row's `node_index`, no rows, not exactly one root, a cycle, a `NULL`, NaN, infinite or negative branch length below the root, or a root distance (the sum of the branch lengths above a node) outside `DOUBLE`'s range.
 - A `name` or `grp` column is read with a type other than the one the statement was bound with: a view over a file that was rewritten after `PREPARE`, for example. Run or prepare the statement again.
-- The path from a query to its nearest target is past the largest `DOUBLE`. Each root distance is in range, but a path adds two of them.
+- The path from a query to its nearest target is outside `DOUBLE`'s range. Each root distance is in range, but a path adds two of them.
 
 **Performance note:** of the tree's names, only those the queries and targets use are kept, so memory grows with the number of nodes and with the number of distinct query and target names. On the full Greengenes2 2024.09 tree (24.5M nodes, 23.4M tips), read from Parquet at 8 threads, loading took about 2.4 s at a peak of 2.6 GB (the process's peak resident memory), and 20,000 queries against 50,000 targets in 5,000 groups took about 3 s in all. Making every tip of a tree of tens of millions of tips both a query and a target holds every name several times over: an estimated tens of GB for that tree, not measured.
 
@@ -248,8 +248,8 @@ Every node's depth (the number of edges from the root) and its distance from the
 | `distance_to_root` | DOUBLE | The sum of the branch lengths from the root down to the node, or `NULL` when one of them is unknown |
 
 **Behavior / semantics:**
-- **Branch lengths.** A `NULL` (or NaN) length is unknown: every node below it has a `NULL` distance, and its depth is unchanged. A negative length is summed like any other. An infinite length, or a distance past the largest `DOUBLE`, is an error. The root's own length is ignored. These rules differ from [`tree_nearest_tip`](#nearest-target-tip)'s, which refuses `NULL` and negative lengths: its search relies on distances that only grow away from the root, while these functions only add lengths up. So here an unknown length leaves only the distances across it unknown, and a negative one is summed. An infinite length or an overflowing sum is not an unknown but a value no distance can use, and every tree function refuses it.
-- **Distance.** The distance is summed edge by edge from the root, the same root distance `tree_nearest_tip`, [`tree_lca`](#lowest-common-ancestor) and [`tree_ancestors`](#ancestors) work from, so their distances agree to the bit.
+- **Branch lengths.** A `NULL` (or NaN) length is unknown: every node below it has a `NULL` distance, and its depth is unchanged. A negative length is summed like any other. An infinite length, or a distance outside `DOUBLE`'s range, is an error: not an unknown, but a value no distance can use. The root's own length is ignored. [`tree_nearest_tip`](#nearest-target-tip) refuses `NULL` and negative lengths too (see "Branch lengths" there); this function, [`tree_lca`](#lowest-common-ancestor) and [`tree_ancestors`](#ancestors) only add lengths up, so an unknown length leaves only the distances across it unknown.
+- **Distance.** The distance is summed edge by edge from the root. Every tree function on this page that reports a distance works from this root distance, so their distances agree to the bit.
 - **Row order** is not promised; use `ORDER BY`. Rows are produced in parallel.
 - The tree is read once, at execution.
 
@@ -277,9 +277,9 @@ ORDER BY d.depth, t.name;
 
 **Error conditions:**
 - `tree_table` does not exist, or lacks `node_index` or `parent_index`.
-- The tree cannot be read: a `NULL` or repeated `node_index`, a `parent_index` that is no row's `node_index`, no rows, not exactly one root, a cycle, an infinite branch length below the root, or a root distance past the largest `DOUBLE`.
+- The tree cannot be read: a `NULL` or repeated `node_index`, a `parent_index` that is no row's `node_index`, no rows, not exactly one root, a cycle, an infinite branch length below the root, or a root distance outside `DOUBLE`'s range.
 
-**Performance note:** on the full Greengenes2 2024.09 tree (24.5M nodes), read from Parquet at 8 threads, `tree_node_depths` took 0.8 s at a peak of 1.8 GB (the process's peak resident memory).
+**Performance note:** on the full Greengenes2 2024.09 tree (24.5M nodes), read from Parquet at 8 threads, `tree_node_depths` took 0.8 s at a peak of 1.8 GB (the process's peak resident memory). Measured on a 16-core AMD Ryzen 9 9950X3D with no other load.
 
 ### Lowest common ancestor
 
@@ -305,7 +305,7 @@ For each pair of tips, their lowest common ancestor (the smallest clade holding 
 
 **Behavior / semantics:**
 - **Distance.** The path length is `(D(a) - D(lca)) + (D(b) - D(lca))`, where `D` is the [distance from the root](#node-depths). It is the same double [`tree_nearest_tip`](#nearest-target-tip) reports for the same two tips, so the two can be joined on distance, and either order of a pair gives the same double. It is also exactly the sum of the two tips' [`tree_ancestors`](#ancestors) distances to the LCA. Its rounding is the same as `tree_nearest_tip`'s (see "Distance" there).
-- **Branch lengths.** A `NULL` (or NaN) length is unknown: a path that crosses it has a `NULL` distance, while a path that avoids it, even between tips below it, has a distance. The LCA does not depend on lengths. A negative length is summed like any other; an infinite length, or a root distance past the largest `DOUBLE`, is an error. See [Node depths](#node-depths) for why these rules differ from `tree_nearest_tip`'s.
+- **Branch lengths.** A `NULL` (or NaN) length is unknown: a path that crosses it has a `NULL` distance, while a path that avoids it, even between tips below it, has a distance. The LCA does not depend on lengths. A negative length is summed like any other. An infinite length, or a root distance or path length outside `DOUBLE`'s range, is an error. See [Node depths](#node-depths) for how these rules relate to `tree_nearest_tip`'s.
 - **Pairs.** `(a, b)` and `(b, a)` are different pairs, and a repeated pair gives one row. A pair with a `NULL` name gets no row. A tip paired with itself has itself as LCA, at distance 0.
 - **Names.** Only tips are matched, and a name matches byte for byte, whatever its collation; an internal node's label is a missing name. A name that labels two or more tips is an error, but only when a pair uses it, and even with `ignore_missing := true`.
 - **Row order** is not promised; use `ORDER BY`. Pairs are answered in parallel.
@@ -339,8 +339,9 @@ SELECT a, b, distance FROM tree_lca('tree', 'all_pairs');
 - `a`, `b` and the tree's `name` differ in type, or are not `VARCHAR`, `BIGINT` or `UUID`.
 - A name is not a tip and `ignore_missing := false`, or names two or more tips.
 - The tree cannot be read: as for [`tree_node_depths`](#node-depths).
+- A pair's path length is outside `DOUBLE`'s range (the message names the pair).
 
-**Performance note:** of the tree's names, only those the pairs use are kept, so memory grows with the number of nodes and the number of distinct names in the pairs. On the full Greengenes2 2024.09 tree (24.5M nodes, 23.4M tips), read from Parquet at 8 threads, 1,000,000 pairs took 8.5 s at a peak of 3.7 GB (the process's peak resident memory); most of that time is spent reading the tree and matching its names, on one thread. On a 2M-node tree, 1,000,000 pairs took 1.8 s.
+**Performance note:** of the tree's names, only those the pairs use are kept, so memory grows with the number of nodes and the number of distinct names in the pairs. On the full Greengenes2 2024.09 tree (24.5M nodes, 23.4M tips), read from Parquet at 8 threads, 1,000,000 pairs took 8.5 s at a peak of 3.7 GB (the process's peak resident memory), most of it on one thread: the call's CPU time was close to its wall time. On a 2M-node tree, 1,000,000 pairs took 1.8 s. Measured on a 16-core AMD Ryzen 9 9950X3D with no other load.
 
 ### Ancestors
 
@@ -366,7 +367,7 @@ Every node's ancestors as rows: the node itself, its parent, and so on up to the
 A node has `depth + 1` rows, so every node of a tree gives `sum(depth + 1)` rows in all: use [`tree_node_depths`](#node-depths) to size a call before running it on a large tree. To leave the node itself out, filter `WHERE edges > 0`.
 
 **Behavior / semantics:**
-- **Branch lengths.** A `NULL` (or NaN) length is unknown: a distance across it is `NULL`, while a node's distances to the ancestors below that edge stay known. A negative length is summed like any other; an infinite length, or a root distance past the largest `DOUBLE`, is an error. See [Node depths](#node-depths) for why these rules differ from `tree_nearest_tip`'s.
+- **Branch lengths.** A `NULL` (or NaN) length is unknown: a distance across it is `NULL`, while a node's distances to the ancestors below that edge stay known. A negative length is summed like any other. An infinite length, or a root distance or distance outside `DOUBLE`'s range, is an error. See [Node depths](#node-depths) for how these rules relate to `tree_nearest_tip`'s.
 - **Distance.** `D` is the [distance from the root](#node-depths), so a node's row for the root has its `distance_to_root`, and the distances of two tips to their LCA add up exactly to [`tree_lca`](#lowest-common-ancestor)'s distance.
 - **Streaming.** Rows stream out as they are produced and are never all held at once, so a call can produce billions of rows, for an aggregate or a `COPY` to consume.
 - **Row order** is not promised; use `ORDER BY`. Rows are produced in parallel.
@@ -411,10 +412,11 @@ GROUP BY a.name;
 
 **Error conditions:**
 - A table does not exist; `tree_table` lacks `node_index` or `parent_index`; `nodes_table` lacks `node_index`, has a `node_index` that is not an integer type, or is `tree_table`.
-- A `node_index` in `nodes_table` is not a node of the tree (the message lists them).
+- A `node_index` in `nodes_table` is not a node of the tree (the message lists them), or is outside `BIGINT`'s range.
 - The tree cannot be read: as for [`tree_node_depths`](#node-depths).
+- A distance between a node and an ancestor is outside `DOUBLE`'s range (negative lengths can put them at opposite ends of it).
 
-**Performance note:** on the full Greengenes2 2024.09 tree (24.5M nodes; deepest node 977 edges down), read from Parquet at 8 threads, all 1.94 billion rows took 2.1 s into `SELECT count(*), sum(edges)`, at a peak of 1.8 GB (the process's peak resident memory). The rows for 20,000 tips of a 2M-node tree whose deepest node is 143,597 edges down, 210 million rows, took 0.2 s.
+**Performance note:** on the full Greengenes2 2024.09 tree (24.5M nodes; deepest node 977 edges down), read from Parquet at 8 threads, all 1.94 billion rows took 2.1 s into `SELECT count(*), sum(edges)`, at a peak of 1.8 GB (the process's peak resident memory). The rows for 20,000 tips of a 2M-node tree whose deepest node is 143,597 edges down, 210 million rows, took 0.2 s. Measured on a 16-core AMD Ryzen 9 9950X3D with no other load.
 
 ### Phylogenetic placement (krepp)
 

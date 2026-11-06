@@ -21,7 +21,8 @@ enum class LengthPolicy {
 // Every subtree is a contiguous range of preorder positions, so "is a an ancestor of v"
 // is one interval test, and the lowest ancestor of a node whose subtree contains some
 // preorder position is found by climbing with skew-binary jump pointers (one pointer per
-// node) in O(log depth). Memory is O(n): about 28 bytes per node. On trees of tens of
+// node) in O(log depth). Memory is O(n): about 28 bytes per node, 32 when some length is
+// unknown. On trees of tens of
 // millions of nodes that matters: O(n log n) structures would take several times as much
 // (binary lifting about 4 times, an Euler-tour sparse table about 7).
 //
@@ -36,10 +37,8 @@ public:
 	//
 	// Throws std::invalid_argument when the arrays differ in size or are empty, when there
 	// is not exactly one root, when a parent is out of range, when some node is not
-	// connected to the root (a cycle), when a non-root edge's length is infinite, or when a
-	// root distance overflows. Under LengthPolicy::Searchable a NaN (NULL) or negative length
-	// is an error too: root distances are sums of branch lengths, and a search that prunes by
-	// distance needs them known and growing monotonically away from the root.
+	// connected to the root (a cycle), when a non-root edge's length is infinite, when a root
+	// distance is outside a double's range, or when a length breaks `policy` (see LengthPolicy).
 	//
 	// `node_ids` (optional, same size) maps each dense index to the caller's identifier,
 	// used only to name nodes in error messages.
@@ -105,14 +104,17 @@ public:
 	}
 
 	// The length of the path from v up to a, which is v or an ancestor of v: D[v] - D[a].
-	// nullopt when an edge on it has an unknown length. Throws std::invalid_argument when a
-	// is not above v.
+	// nullopt when an edge on it has an unknown length. Throws std::out_of_range for a node
+	// out of range, std::invalid_argument when a is neither v nor an ancestor of v, and
+	// std::overflow_error when the length is outside a double's range (root distances at
+	// opposite ends of it, which negative lengths allow).
 	std::optional<double> distance_to_ancestor(uint32_t v, uint32_t a) const;
 
 	// The length of the path between a and b, whose lowest common ancestor is lca:
 	// (D[a] - D[lca]) + (D[b] - D[lca]), the expression the nearest-tip search scores with,
 	// so both give the same double for the same pair, in either order. nullopt when an edge
-	// on the path has an unknown length.
+	// on the path has an unknown length. Throws as distance_to_ancestor does, and
+	// std::overflow_error when the sum of the two halves is outside a double's range.
 	std::optional<double> path_length(uint32_t a, uint32_t b, uint32_t lca) const;
 
 private:

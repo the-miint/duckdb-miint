@@ -12,7 +12,6 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/value_map.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
-#include "duckdb/parallel/task_scheduler.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -134,21 +133,15 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 	auto target_columns = GetTableOrViewColumns(context, data->targets_table, "Targets table");
 	auto query_columns = GetTableOrViewColumns(context, data->queries_table, "Queries table");
 
-	LogicalType tree_name, target_name, query_name, tree_length;
-	if (!FindColumnType(tree_columns, "name", tree_name)) {
-		throw BinderException("%s: tree table '%s' has no 'name' column", kFn, data->tree_table);
-	}
+	const LogicalType tree_name = TipNameType(kFn, data->tree_table, tree_columns);
+	LogicalType target_name, query_name, tree_length;
 	if (!FindColumnType(tree_columns, "branch_length", tree_length)) {
 		throw BinderException("%s: tree table '%s' has no 'branch_length' column", kFn, data->tree_table);
 	}
-	// The tree is read in its own projection, so passing it as targets or queries would read
-	// it twice; its internal labels are not tips either.
+	// The tree's internal labels are not tips either.
 	for (const auto *names_table : {&data->targets_table, &data->queries_table}) {
-		if (StringUtil::CIEquals(*names_table, data->tree_table)) {
-			throw BinderException("%s: '%s' is the tree table; pass the tip names as a relation of their own, such "
-			                      "as a view of the tree's tips",
-			                      kFn, *names_table);
-		}
+		RejectTreeAs(kFn, data->tree_table, *names_table,
+		             "pass the tip names as a relation of their own, such as a view of the tree's tips");
 	}
 	if (!FindColumnType(target_columns, "name", target_name)) {
 		throw BinderException("%s: targets table '%s' has no 'name' column", kFn, data->targets_table);
@@ -161,10 +154,6 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 		                      "%s in '%s' and %s in '%s'; cast them to one of %s",
 		                      kFn, tree_name.ToString(), data->tree_table, target_name.ToString(), data->targets_table,
 		                      query_name.ToString(), data->queries_table, AllowedIdTypeList());
-	}
-	if (!IsAllowedIdType(tree_name)) {
-		throw BinderException("%s: tip names must be %s, but they are %s; cast them", kFn, AllowedIdTypeList(),
-		                      tree_name.ToString());
 	}
 	data->name_type = tree_name;
 
@@ -347,9 +336,7 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 		}
 	}
 
-	const idx_t blocks = (state->queries.size() + STANDARD_VECTOR_SIZE - 1) / STANDARD_VECTOR_SIZE;
-	const idx_t threads = TaskScheduler::GetScheduler(context).NumberOfThreads();
-	state->max_threads = std::max<idx_t>(1, std::min(blocks, threads));
+	state->max_threads = ThreadsForClaims(context, state->queries.size(), STANDARD_VECTOR_SIZE);
 	return std::move(state);
 }
 

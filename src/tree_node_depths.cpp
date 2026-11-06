@@ -6,7 +6,6 @@
 #include "tree_table_reader.hpp"
 
 #include "duckdb/common/vector/flat_vector.hpp"
-#include "duckdb/parallel/task_scheduler.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -56,9 +55,7 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	state->tree = ReadIndexedTree(context, kFn, bind.tree_table, no_names, LogicalType::INVALID,
 	                              miint::LengthPolicy::UnknownAllowed, "read");
 
-	const idx_t blocks = (state->tree.index.size() + STANDARD_VECTOR_SIZE - 1) / STANDARD_VECTOR_SIZE;
-	const idx_t threads = TaskScheduler::GetScheduler(context).NumberOfThreads();
-	state->max_threads = std::max<idx_t>(1, std::min(blocks, threads));
+	state->max_threads = ThreadsForClaims(context, state->tree.index.size(), STANDARD_VECTOR_SIZE);
 	return std::move(state);
 }
 
@@ -82,13 +79,8 @@ void Execute(ClientContext &, TableFunctionInput &data_p, DataChunk &output) {
 		const auto v = static_cast<uint32_t>(start + i);
 		node[i] = state.tree.node_ids[v];
 		depth[i] = index.depth(v);
-		const auto d = index.distance_to_ancestor(v, index.root());
-		if (d) {
-			distance[i] = *d;
-			distance_valid.SetValid(i);
-		} else {
-			distance_valid.SetInvalid(i);
-		}
+		// A root distance is in a double's range (TreeIndex::Build checks), so this cannot overflow.
+		SetDistance(distance, distance_valid, i, index.distance_to_ancestor(v, index.root()));
 	}
 	output.SetChildCardinality(count);
 }

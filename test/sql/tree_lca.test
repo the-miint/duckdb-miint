@@ -148,6 +148,29 @@ SELECT * FROM tree_lca('ex1_inf', 'ex1_pairs');
 ----
 tree_lca: the tree 'ex1_inf' cannot be read: the branch length of node_index 4 is not finite
 
+# Two root distances can each be in DOUBLE's range while the path through the root,
+# their sum, is not. That is an error, not an infinite distance.
+statement ok
+CREATE TABLE far_apart AS
+SELECT * FROM (VALUES (0, NULL, 'root', NULL), (1, 0, 'P', 1e308), (2, 0, 'Q', 1e308), (3, 0, 'R', 1.0))
+AS v(node_index, parent_index, name, branch_length);
+
+statement ok
+CREATE TABLE pairs_far AS SELECT * FROM (VALUES ('P', 'R'), ('P', 'Q')) AS v(a, b);
+
+statement error
+SELECT * FROM tree_lca('far_apart', 'pairs_far');
+----
+tree_lca: the path between 'P' and 'Q' is outside DOUBLE's range
+
+statement ok
+CREATE TABLE pairs_near AS SELECT 'P' AS a, 'R' AS b;
+
+query TTR
+SELECT a, b, distance FROM tree_lca('far_apart', 'pairs_near');
+----
+P	R	1e+308
+
 # Without a branch_length column every length is unknown: the LCAs only, and a tip is 0
 # from itself.
 statement ok
@@ -213,6 +236,14 @@ CREATE TABLE mixed_pairs AS SELECT 'A' AS a, 2::BIGINT AS b;
 
 statement error
 SELECT * FROM tree_lca('ex1', 'mixed_pairs');
+----
+tree_lca: tip names must have one type in the tree and the pairs
+
+statement ok
+CREATE TABLE mixed_pairs_a AS SELECT 2::BIGINT AS a, 'A' AS b;
+
+statement error
+SELECT * FROM tree_lca('ex1', 'mixed_pairs_a');
 ----
 tree_lca: tip names must have one type in the tree and the pairs
 
@@ -376,7 +407,9 @@ SELECT list(node_index) <> list_sort(list(node_index)) FROM ex1_shuffled;
 true
 
 query I
-SELECT count(*) FROM (SELECT * FROM tree_lca('ex1_shuffled', 'ex1_pairs') EXCEPT SELECT * FROM tree_lca('ex1', 'ex1_pairs'));
+WITH got AS MATERIALIZED (SELECT * FROM tree_lca('ex1_shuffled', 'ex1_pairs')),
+     want AS MATERIALIZED (SELECT * FROM tree_lca('ex1', 'ex1_pairs'))
+SELECT (SELECT count(*) FROM (FROM got EXCEPT ALL FROM want)) + (SELECT count(*) FROM (FROM want EXCEPT ALL FROM got));
 ----
 0
 
@@ -480,8 +513,9 @@ statement ok
 EXPLAIN SELECT * FROM tree_lca('ex1_volatile', 'pairs_volatile');
 
 query I
-SELECT count(*) FROM (
-    SELECT * FROM tree_lca('ex1_volatile', 'pairs_volatile') EXCEPT SELECT * FROM tree_lca('ex1', 'ex1_pairs'));
+WITH got AS MATERIALIZED (SELECT * FROM tree_lca('ex1_volatile', 'pairs_volatile')),
+     want AS MATERIALIZED (SELECT * FROM tree_lca('ex1', 'ex1_pairs'))
+SELECT (SELECT count(*) FROM (FROM got EXCEPT ALL FROM want)) + (SELECT count(*) FROM (FROM want EXCEPT ALL FROM got));
 ----
 0
 
@@ -551,14 +585,17 @@ SELECT (SELECT count(*) FROM (SELECT * FROM cat_many EXCEPT ALL SELECT * FROM ca
 
 query I
 SELECT count(*) FROM cat_many r JOIN cat c ON c.name = r.b
-WHERE r.lca_index <> c.parent_index OR r.distance <> CASE WHEN r.a = 't0' THEN 2 ELSE 3 END;
+WHERE r.lca_index IS DISTINCT FROM c.parent_index OR r.distance IS DISTINCT FROM CASE WHEN r.a = 't0' THEN 2 ELSE 3 END;
 ----
 0
 
 # =============================================================================
-# Relation names are quoted where the SQL is built. The pairs are read first: under
-# unquoted concatenation the first name, and under a naive "-wrap the second, would
-# read the pairs and then run the DROP.
+# Relation names are quoted where the SQL is built: a name that unquoted
+# concatenation (the first call's pairs) or a naive "-wrap (the second call's) would
+# turn into two statements reads the relation it names, and nothing else runs. Each
+# name starts with a relation that exists, so either mistake gives a valid first
+# statement. Reads are streamed, and a streamed read refuses a second statement, so
+# the call fails; a reader that ran it would drop the victim.
 # =============================================================================
 
 statement ok
@@ -597,6 +634,8 @@ statement ok
 CREATE TEMP VIEW tmp_pairs AS SELECT * FROM ex1_pairs;
 
 query I
-SELECT count(*) FROM (SELECT * FROM tree_lca('tmp_tree', 'tmp_pairs') EXCEPT SELECT * FROM tree_lca('ex1', 'ex1_pairs'));
+WITH got AS MATERIALIZED (SELECT * FROM tree_lca('tmp_tree', 'tmp_pairs')),
+     want AS MATERIALIZED (SELECT * FROM tree_lca('ex1', 'ex1_pairs'))
+SELECT (SELECT count(*) FROM (FROM got EXCEPT ALL FROM want)) + (SELECT count(*) FROM (FROM want EXCEPT ALL FROM got));
 ----
 0

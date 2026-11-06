@@ -944,10 +944,11 @@ RESET threads;
 
 # =============================================================================
 # Relation names are quoted where the SQL is built: a name that unquoted
-# concatenation would turn into a second statement reads the relation it names,
-# and nothing else runs. Each name starts with a relation that exists, so that
-# under unquoted concatenation (the targets name, read first) or a naive "-wrap
-# (the queries name) the first statement would succeed and the DROP would run.
+# concatenation (the targets name) or a naive "-wrap (the queries name) would turn
+# into two statements reads the relation it names, and nothing else runs. Each name
+# starts with a relation that exists, so either mistake gives a valid first statement.
+# Reads are streamed, and a streamed read refuses a second statement, so the call
+# fails; a reader that ran it would drop the victim.
 # =============================================================================
 
 statement ok

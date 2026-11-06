@@ -75,9 +75,9 @@ SELECT node_index, parent_index, name, CASE WHEN name = 'x' THEN 'nan'::DOUBLE E
 FROM ex1;
 
 query I
-SELECT count(*) FROM (
-    SELECT node_index, depth, distance_to_root FROM tree_node_depths('ex1_x_nan')
-    EXCEPT SELECT node_index, depth, distance_to_root FROM tree_node_depths('ex1_x_null'));
+WITH got AS MATERIALIZED (SELECT node_index, depth, distance_to_root FROM tree_node_depths('ex1_x_nan')),
+     want AS MATERIALIZED (SELECT node_index, depth, distance_to_root FROM tree_node_depths('ex1_x_null'))
+SELECT (SELECT count(*) FROM (FROM got EXCEPT ALL FROM want)) + (SELECT count(*) FROM (FROM want EXCEPT ALL FROM got));
 ----
 0
 
@@ -124,8 +124,9 @@ CREATE TABLE ex1_root_len AS
 SELECT node_index, parent_index, name, CASE WHEN name = 'root' THEN -3.0 ELSE branch_length END AS branch_length FROM ex1;
 
 query I
-SELECT count(*) FROM (
-    SELECT * FROM tree_node_depths('ex1_root_len') EXCEPT SELECT * FROM tree_node_depths('ex1'));
+WITH got AS MATERIALIZED (SELECT * FROM tree_node_depths('ex1_root_len')),
+     want AS MATERIALIZED (SELECT * FROM tree_node_depths('ex1'))
+SELECT (SELECT count(*) FROM (FROM got EXCEPT ALL FROM want)) + (SELECT count(*) FROM (FROM want EXCEPT ALL FROM got));
 ----
 0
 
@@ -157,7 +158,9 @@ statement ok
 CREATE TABLE ex1_unnamed AS SELECT node_index, parent_index, branch_length FROM ex1;
 
 query I
-SELECT count(*) FROM (SELECT * FROM tree_node_depths('ex1_unnamed') EXCEPT SELECT * FROM tree_node_depths('ex1'));
+WITH got AS MATERIALIZED (SELECT * FROM tree_node_depths('ex1_unnamed')),
+     want AS MATERIALIZED (SELECT * FROM tree_node_depths('ex1'))
+SELECT (SELECT count(*) FROM (FROM got EXCEPT ALL FROM want)) + (SELECT count(*) FROM (FROM want EXCEPT ALL FROM got));
 ----
 0
 
@@ -166,8 +169,9 @@ CREATE VIEW ex1_names_unreadable AS
 SELECT node_index, parent_index, CAST(error('names read') AS VARCHAR) AS name, branch_length FROM ex1;
 
 query I
-SELECT count(*) FROM (
-    SELECT * FROM tree_node_depths('ex1_names_unreadable') EXCEPT SELECT * FROM tree_node_depths('ex1'));
+WITH got AS MATERIALIZED (SELECT * FROM tree_node_depths('ex1_names_unreadable')),
+     want AS MATERIALIZED (SELECT * FROM tree_node_depths('ex1'))
+SELECT (SELECT count(*) FROM (FROM got EXCEPT ALL FROM want)) + (SELECT count(*) FROM (FROM want EXCEPT ALL FROM got));
 ----
 0
 
@@ -185,7 +189,9 @@ SELECT list(node_index) <> list_sort(list(node_index)) FROM ex1_shuffled;
 true
 
 query I
-SELECT count(*) FROM (SELECT * FROM tree_node_depths('ex1_shuffled') EXCEPT SELECT * FROM tree_node_depths('ex1'));
+WITH got AS MATERIALIZED (SELECT * FROM tree_node_depths('ex1_shuffled')),
+     want AS MATERIALIZED (SELECT * FROM tree_node_depths('ex1'))
+SELECT (SELECT count(*) FROM (FROM got EXCEPT ALL FROM want)) + (SELECT count(*) FROM (FROM want EXCEPT ALL FROM got));
 ----
 0
 
@@ -346,9 +352,9 @@ SELECT (SELECT count(*) FROM (SELECT * FROM cat_many EXCEPT ALL SELECT * FROM ca
 
 query I
 SELECT count(*) FROM cat_many d JOIN cat c USING (node_index)
-WHERE d.distance_to_root <> d.depth
-   OR (c.name IN ('t0', 't1') AND d.depth <> 4999)
-   OR (c.is_tip AND c.name NOT IN ('t0', 't1') AND d.depth <> 5000 - CAST(substr(c.name, 2) AS BIGINT));
+WHERE d.distance_to_root IS DISTINCT FROM d.depth
+   OR (c.name IN ('t0', 't1') AND d.depth IS DISTINCT FROM 4999)
+   OR (c.is_tip AND c.name NOT IN ('t0', 't1') AND d.depth IS DISTINCT FROM 5000 - CAST(substr(c.name, 2) AS BIGINT));
 ----
 0
 
@@ -384,6 +390,8 @@ statement ok
 CREATE TEMP TABLE tmp_tree AS SELECT * FROM ex1;
 
 query I
-SELECT count(*) FROM (SELECT * FROM tree_node_depths('tmp_tree') EXCEPT SELECT * FROM tree_node_depths('ex1'));
+WITH got AS MATERIALIZED (SELECT * FROM tree_node_depths('tmp_tree')),
+     want AS MATERIALIZED (SELECT * FROM tree_node_depths('ex1'))
+SELECT (SELECT count(*) FROM (FROM got EXCEPT ALL FROM want)) + (SELECT count(*) FROM (FROM want EXCEPT ALL FROM got));
 ----
 0

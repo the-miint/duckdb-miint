@@ -167,7 +167,7 @@ TreeIndex TreeIndex::Build(const std::vector<uint32_t> &parent, const std::vecto
 		}
 		if (!std::isfinite(idx.dist_[v])) {
 			throw std::invalid_argument("the root distance of " + NodeLabel(v, node_ids) +
-			                            " is not finite (the branch lengths above it sum past the largest double)");
+			                            " is not finite (the branch lengths above it sum outside a double's range)");
 		}
 		const uint32_t j1 = idx.jump_[p];
 		const uint32_t j2 = idx.jump_[j1];
@@ -259,7 +259,12 @@ std::optional<double> TreeIndex::distance_to_ancestor(uint32_t v, uint32_t a) co
 	if (!unknown_above_.empty() && unknown_above_[v] != unknown_above_[a]) {
 		return std::nullopt;
 	}
-	return dist_[v] - dist_[a];
+	const double d = dist_[v] - dist_[a];
+	if (!std::isfinite(d)) {
+		throw std::overflow_error("TreeIndex::distance_to_ancestor: the distance from node " + std::to_string(v) +
+		                          " up to node " + std::to_string(a) + " is outside a double's range");
+	}
+	return d;
 }
 
 std::optional<double> TreeIndex::path_length(uint32_t a, uint32_t b, uint32_t lca) const {
@@ -268,7 +273,12 @@ std::optional<double> TreeIndex::path_length(uint32_t a, uint32_t b, uint32_t lc
 	if (!up || !down) {
 		return std::nullopt;
 	}
-	return *up + *down;
+	const double d = *up + *down;
+	if (!std::isfinite(d)) {
+		throw std::overflow_error("TreeIndex::path_length: the path between node " + std::to_string(a) + " and node " +
+		                          std::to_string(b) + " is outside a double's range");
+	}
+	return d;
 }
 
 uint32_t TreeIndex::lowest_ancestor_containing(uint32_t from, uint32_t x) const {

@@ -7,12 +7,11 @@
 #include "tree_table_reader.hpp"
 
 #include "duckdb/common/exception.hpp"
-#include "duckdb/common/string_util.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
-#include "duckdb/parallel/task_scheduler.hpp"
 
 #include <algorithm>
 #include <atomic>
+#include <stdexcept>
 
 namespace duckdb {
 
@@ -74,12 +73,8 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 	// Schemas only: no rows are read until InitGlobal (docs/internals/architecture.md).
 	ValidateTreeTableSchema(context, data->tree_table);
 	if (data->has_nodes_table) {
-		// The tree is read in its own projection, so passing it as nodes_table would read it twice.
-		if (StringUtil::CIEquals(data->nodes_table, data->tree_table)) {
-			throw BinderException("%s: '%s' is the tree table; leave nodes_table out for every node, or pass the nodes "
-			                      "as a relation of their own",
-			                      kFn, data->nodes_table);
-		}
+		RejectTreeAs(kFn, data->tree_table, data->nodes_table,
+		             "leave nodes_table out for every node, or pass the nodes as a relation of their own");
 		auto columns = GetTableOrViewColumns(context, data->nodes_table, "Nodes table");
 		LogicalType type;
 		if (!FindColumnType(columns, "node_index", type)) {
@@ -157,9 +152,7 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 		state->node_count = state->tree.index.size();
 	}
 
-	const idx_t claims = (state->node_count + kNodesPerClaim - 1) / kNodesPerClaim;
-	const idx_t threads = TaskScheduler::GetScheduler(context).NumberOfThreads();
-	state->max_threads = std::max<idx_t>(1, std::min(claims, threads));
+	state->max_threads = ThreadsForClaims(context, state->node_count, kNodesPerClaim);
 	return std::move(state);
 }
 
@@ -201,12 +194,12 @@ void Execute(ClientContext &, TableFunctionInput &data_p, DataChunk &output) {
 		node_out[count] = ids[local.node];
 		ancestor_out[count] = ids[local.ancestor];
 		edges_out[count] = local.edges;
-		const auto d = index.distance_to_ancestor(local.node, local.ancestor);
-		if (d) {
-			distance_out[count] = *d;
-			distance_valid.SetValid(count);
-		} else {
-			distance_valid.SetInvalid(count);
+		try {
+			SetDistance(distance_out, distance_valid, count, index.distance_to_ancestor(local.node, local.ancestor));
+		} catch (const std::overflow_error &) {
+			throw InvalidInputException("%s: the distance from node_index %d up to node_index %d is outside DOUBLE's "
+			                            "range",
+			                            kFn, ids[local.node], ids[local.ancestor]);
 		}
 		++count;
 		local.ancestor = index.parent(local.ancestor);

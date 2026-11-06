@@ -123,12 +123,12 @@ SELECT (SELECT count(*) FROM (SELECT node_index, ancestor_index, edges FROM mod_
 ----
 0
 
-query I
-SELECT count(*) FROM mod_anc r JOIN tree_node_depths('mod') d USING (node_index)
+query II
+SELECT count(*), (SELECT count(*) FROM mod) FROM mod_anc r JOIN tree_node_depths('mod') d USING (node_index)
 JOIN mod t ON t.node_index = r.ancestor_index
 WHERE t.parent_index IS NULL AND r.edges = d.depth AND r.distance = d.distance_to_root;
 ----
-46
+46	46
 
 statement ok
 CREATE TABLE mod_pairs AS
@@ -170,9 +170,9 @@ statement ok
 CREATE TABLE nodes_int AS SELECT * FROM (VALUES (0::INTEGER), (8::INTEGER), (0::INTEGER), (NULL::INTEGER)) AS v(node_index);
 
 query I
-SELECT count(*) FROM (
-    SELECT * FROM tree_ancestors('ex1', nodes_table := 'nodes_int')
-    EXCEPT ALL SELECT * FROM tree_ancestors('ex1', nodes_table := 'nodes_ah'));
+WITH got AS MATERIALIZED (SELECT * FROM tree_ancestors('ex1', nodes_table := 'nodes_int')),
+     want AS MATERIALIZED (SELECT * FROM tree_ancestors('ex1', nodes_table := 'nodes_ah'))
+SELECT (SELECT count(*) FROM (FROM got EXCEPT ALL FROM want)) + (SELECT count(*) FROM (FROM want EXCEPT ALL FROM got));
 ----
 0
 
@@ -180,6 +180,15 @@ query I
 SELECT count(*) FROM tree_ancestors('ex1', nodes_table := 'nodes_int');
 ----
 6
+
+# An id outside BIGINT's range is no node's, and its read fails rather than wrapping.
+statement ok
+CREATE TABLE nodes_huge AS SELECT 9223372036854775808::UBIGINT AS node_index;
+
+statement error
+SELECT * FROM tree_ancestors('ex1', nodes_table := 'nodes_huge');
+----
+<REGEX>:.*tree_ancestors: failed to read 'nodes_huge'.*out of range.*
 
 statement ok
 CREATE TABLE nodes_utiny AS SELECT 8::UTINYINT AS node_index;
@@ -346,6 +355,40 @@ SELECT * FROM tree_ancestors('ex1_inf');
 ----
 tree_ancestors: the tree 'ex1_inf' cannot be read: the branch length of node_index 4 is not finite
 
+# Root distances can each be in DOUBLE's range while the distance between two of them is
+# not: R over P (1e308), P over Q (-1e308), Q over S (-1e308) puts P at 1e308 and S at
+# -1e308. S's distance up to P is an error, not an infinite distance; depths still work.
+statement ok
+CREATE TABLE swing AS
+SELECT * FROM (VALUES (0, NULL, NULL), (1, 0, 1e308), (2, 1, -1e308), (3, 2, -1e308))
+AS v(node_index, parent_index, branch_length);
+
+statement ok
+CREATE TABLE nodes_s AS SELECT 3 AS node_index;
+
+statement error
+SELECT * FROM tree_ancestors('swing', nodes_table := 'nodes_s');
+----
+tree_ancestors: the distance from node_index 3 up to node_index 1 is outside DOUBLE's range
+
+statement ok
+CREATE TABLE nodes_q AS SELECT 2 AS node_index;
+
+query IIR
+SELECT ancestor_index, edges, distance FROM tree_ancestors('swing', nodes_table := 'nodes_q') ORDER BY edges;
+----
+2	0	0.0
+1	1	-1e+308
+0	2	0.0
+
+query II
+SELECT node_index, depth FROM tree_node_depths('swing') ORDER BY node_index;
+----
+0	0
+1	1
+2	2
+3	3
+
 # Without a branch_length column every length is unknown, and a node is 0 from itself.
 statement ok
 CREATE TABLE ex1_no_lengths AS SELECT node_index, parent_index FROM ex1;
@@ -375,7 +418,9 @@ SELECT list(node_index) <> list_sort(list(node_index)) FROM ex1_shuffled;
 true
 
 query I
-SELECT count(*) FROM (SELECT * FROM tree_ancestors('ex1_shuffled') EXCEPT SELECT * FROM tree_ancestors('ex1'));
+WITH got AS MATERIALIZED (SELECT * FROM tree_ancestors('ex1_shuffled')),
+     want AS MATERIALIZED (SELECT * FROM tree_ancestors('ex1'))
+SELECT (SELECT count(*) FROM (FROM got EXCEPT ALL FROM want)) + (SELECT count(*) FROM (FROM want EXCEPT ALL FROM got));
 ----
 0
 
@@ -464,9 +509,9 @@ statement ok
 EXPLAIN SELECT * FROM tree_ancestors('ex1_volatile', nodes_table := 'nodes_volatile');
 
 query I
-SELECT count(*) FROM (
-    SELECT * FROM tree_ancestors('ex1_volatile', nodes_table := 'nodes_volatile')
-    EXCEPT SELECT * FROM tree_ancestors('ex1', nodes_table := 'nodes_ah'));
+WITH got AS MATERIALIZED (SELECT * FROM tree_ancestors('ex1_volatile', nodes_table := 'nodes_volatile')),
+     want AS MATERIALIZED (SELECT * FROM tree_ancestors('ex1', nodes_table := 'nodes_ah'))
+SELECT (SELECT count(*) FROM (FROM got EXCEPT ALL FROM want)) + (SELECT count(*) FROM (FROM want EXCEPT ALL FROM got));
 ----
 0
 
@@ -544,14 +589,17 @@ query I
 SELECT count(*) FROM cat_many r
 JOIN cat_depths dn ON dn.node_index = r.node_index
 JOIN cat_depths da ON da.node_index = r.ancestor_index
-WHERE da.depth <> dn.depth - r.edges OR r.distance <> r.edges OR r.edges > dn.depth;
+WHERE da.depth IS DISTINCT FROM dn.depth - r.edges OR r.distance IS DISTINCT FROM r.edges OR r.edges > dn.depth;
 ----
 0
 
 # =============================================================================
-# Relation names are quoted where the SQL is built. nodes_table is read first: under
-# unquoted concatenation the first call's, and under a naive "-wrap the second's, would
-# read the nodes and then run the DROP.
+# Relation names are quoted where the SQL is built: a name that unquoted
+# concatenation (the first call's nodes_table) or a naive "-wrap (the second call's)
+# would turn into two statements reads the relation it names, and nothing else runs.
+# Each name starts with a relation that exists, so either mistake gives a valid first
+# statement. Reads are streamed, and a streamed read refuses a second statement, so
+# the call fails; a reader that ran it would drop the victim.
 # =============================================================================
 
 statement ok
@@ -591,8 +639,8 @@ statement ok
 CREATE TEMP VIEW tmp_nodes AS SELECT * FROM nodes_ah;
 
 query I
-SELECT count(*) FROM (
-    SELECT * FROM tree_ancestors('tmp_tree', nodes_table := 'tmp_nodes')
-    EXCEPT SELECT * FROM tree_ancestors('ex1', nodes_table := 'nodes_ah'));
+WITH got AS MATERIALIZED (SELECT * FROM tree_ancestors('tmp_tree', nodes_table := 'tmp_nodes')),
+     want AS MATERIALIZED (SELECT * FROM tree_ancestors('ex1', nodes_table := 'nodes_ah'))
+SELECT (SELECT count(*) FROM (FROM got EXCEPT ALL FROM want)) + (SELECT count(*) FROM (FROM want EXCEPT ALL FROM got));
 ----
 0
