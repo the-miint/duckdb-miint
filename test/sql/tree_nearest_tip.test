@@ -11,7 +11,7 @@ require miint
 # checked against a brute-force oracle in test/cpp/test_NearestTip.cpp; this file checks
 # the SQL contract around it.
 
-# The request's tree, numbered A0 B1 C2 D3 E4 x5 F6 G7 H8 root9.
+# The worked example's tree, numbered A0 B1 C2 D3 E4 x5 F6 G7 H8 root9.
 statement ok
 COPY (SELECT '(((A:0.1,B:0.2)C:0.3,(D:0.4)E:0.5)x:0.1,(F:0.6,G:0.7)H:0.8)root;')
 TO '{TEST_DIR}/ex1.nwk' (FORMAT csv, HEADER false, DELIMITER E'\t');
@@ -26,7 +26,7 @@ statement ok
 CREATE TABLE ex1_queries AS SELECT * FROM (VALUES ('B'), ('F'), ('G')) AS v(name);
 
 # =============================================================================
-# The request's examples
+# Worked examples
 # =============================================================================
 
 query TTRIT
@@ -139,7 +139,7 @@ SELECT * FROM tree_nearest_tip('ex1', 'ex1_targets_gi', 'ex1_queries_g');
 tree_nearest_tip: 'grp' has different types
 
 # =============================================================================
-# Scope, ties and self (the request's examples)
+# Scope, ties and self
 # =============================================================================
 
 statement ok

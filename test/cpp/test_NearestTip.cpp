@@ -126,7 +126,7 @@ NearestTipResult oracle(const TreeArrays &t, const std::vector<uint32_t> &nodes,
 
 } // namespace
 
-TEST_CASE("NearestTip: the request's examples", "[NearestTip]") {
+TEST_CASE("NearestTip: a worked example, every edge on the path counted", "[NearestTip]") {
 	NamedTree t("(((A:0.1,B:0.2)C:0.3,(D:0.4)E:0.5)x:0.1,(F:0.6,G:0.7)H:0.8)root;");
 	auto targets = t.targets({"A", "D"});
 
@@ -158,7 +158,7 @@ TEST_CASE("NearestTip: a tie is counted and goes to the smallest name", "[Neares
 
 TEST_CASE("NearestTip: a tie across levels goes to the smallest name, not the first found", "[NearestTip]") {
 	// Z (under a) and B (under the root) are both at distance 2 from Q. The search reaches
-	// Z first; B wins because its name is smaller. pltax gave ties to the first child.
+	// Z first; B wins because its name is smaller, not because it was found first.
 	NamedTree t("((Q:1,Z:1)a:1,B:0)r;");
 	auto q = search(t, t.targets({"B", "Z"}), "Q");
 	REQUIRE(q.target == "B");
@@ -170,7 +170,7 @@ TEST_CASE("NearestTip: a tie across levels goes to the smallest name, not the fi
 TEST_CASE("NearestTip: the nearest target counts the edge down to it", "[NearestTip]") {
 	// From Q, the clade under `far` is entered by a long edge and the one under `near` by a
 	// short one; the nearest tip is under `near`, though `far`'s own tip edge is shorter.
-	// pltax compared children without the edge to the child.
+	// Comparing children without the edge down to each would pick `far`.
 	NamedTree t("(Q:1,(F:0.1)far:5,(N:2)near:1)r;");
 	auto q = search(t, t.targets({"F", "N"}), "Q");
 	REQUIRE(q.target == "N");
@@ -248,7 +248,7 @@ TEST_CASE("NearestTip: a deep caterpillar", "[NearestTip]") {
 	REQUIRE(r.lca == levels / 2);
 }
 
-TEST_CASE("NearestTip: the request's scope example", "[NearestTip]") {
+TEST_CASE("NearestTip: path and clade scope disagree", "[NearestTip]") {
 	// T2 is nearer by path, but T1 is in the smallest clade around Q that holds a target.
 	NamedTree t("((Q:0.1,T1:5.0)n1:0.1,T2:0.1)r;");
 	auto targets = t.targets({"T1", "T2"});
