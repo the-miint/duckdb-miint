@@ -1,0 +1,644 @@
+# name: test/sql/tree_nearest_tip.test
+# description: tree_nearest_tip finds each query tip's nearest target tip, with exact ties, per group
+# group: [sql]
+
+require miint
+
+# Placing a record whose taxon label is split across clades means taking the lineage of
+# the nearest tip carrying the same label. The search must count every edge on the path,
+# search within each label rather than across all of them, and never settle a tie
+# silently: the scikit-bio search this replaces got all three wrong. The search itself is
+# checked against a brute-force oracle in test/cpp/test_NearestTip.cpp; this file checks
+# the SQL contract around it.
+
+# The request's tree, numbered A0 B1 C2 D3 E4 x5 F6 G7 H8 root9.
+statement ok
+COPY (SELECT '(((A:0.1,B:0.2)C:0.3,(D:0.4)E:0.5)x:0.1,(F:0.6,G:0.7)H:0.8)root;')
+TO '{TEST_DIR}/ex1.nwk' (FORMAT csv, HEADER false, DELIMITER E'\t');
+
+statement ok
+CREATE TABLE ex1 AS SELECT * FROM read_newick('{TEST_DIR}/ex1.nwk');
+
+statement ok
+CREATE TABLE ex1_targets AS SELECT * FROM (VALUES ('A'), ('D')) AS v(name);
+
+statement ok
+CREATE TABLE ex1_queries AS SELECT * FROM (VALUES ('B'), ('F'), ('G')) AS v(name);
+
+# =============================================================================
+# The request's examples
+# =============================================================================
+
+query TTRIT
+SELECT r.query, r.target, round(r.distance, 12), r.n_tied, l.name
+FROM tree_nearest_tip('ex1', 'ex1_targets', 'ex1_queries') r JOIN ex1 l ON l.node_index = r.lca_index
+ORDER BY r.query;
+----
+B	A	0.3	1	C
+F	A	1.9	1	root
+G	A	2.0	1	root
+
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM tree_nearest_tip('ex1', 'ex1_targets', 'ex1_queries'));
+----
+query	VARCHAR
+target	VARCHAR
+distance	DOUBLE
+n_tied	BIGINT
+lca_index	BIGINT
+
+# lca_index is the caller's node_index, not an internal numbering.
+statement ok
+CREATE VIEW ex1_offset AS
+SELECT node_index + 1000 AS node_index, parent_index + 1000 AS parent_index, name, branch_length FROM ex1;
+
+query TI
+SELECT query, lca_index FROM tree_nearest_tip('ex1_offset', 'ex1_targets', 'ex1_queries') ORDER BY query;
+----
+B	1002
+F	1009
+G	1009
+
+# =============================================================================
+# Groups: a query competes only among the targets of its own group
+# =============================================================================
+
+statement ok
+CREATE TABLE ex1_targets_g AS SELECT * FROM (VALUES ('A', 'g1'), ('D', 'g2')) AS v(name, grp);
+
+# B in g2 must find D (1.4, through x), although A, in g1, is much nearer. B in g1 finds
+# A. A group with no targets and a NULL group find nothing.
+statement ok
+CREATE TABLE ex1_queries_g AS
+SELECT * FROM (VALUES ('B', 'g2'), ('B', 'g1'), ('B', 'g3'), ('B', NULL)) AS v(name, grp);
+
+query TTTRIT
+SELECT r.query, r.grp, r.target, round(r.distance, 12), r.n_tied, l.name
+FROM tree_nearest_tip('ex1', 'ex1_targets_g', 'ex1_queries_g') r LEFT JOIN ex1 l ON l.node_index = r.lca_index
+ORDER BY r.grp NULLS LAST;
+----
+B	g1	A	0.3	1	C
+B	g2	D	1.4	1	x
+B	g3	NULL	NULL	0	NULL
+B	NULL	NULL	NULL	0	NULL
+
+query TT
+SELECT column_name, column_type
+FROM (DESCRIBE SELECT * FROM tree_nearest_tip('ex1', 'ex1_targets_g', 'ex1_queries_g'));
+----
+query	VARCHAR
+grp	VARCHAR
+target	VARCHAR
+distance	DOUBLE
+n_tied	BIGINT
+lca_index	BIGINT
+
+# An INTEGER group keeps its type.
+statement ok
+CREATE TABLE ex1_targets_gi AS SELECT * FROM (VALUES ('A', 1), ('D', 2)) AS v(name, grp);
+
+statement ok
+CREATE TABLE ex1_queries_gi AS SELECT * FROM (VALUES ('B', 2)) AS v(name, grp);
+
+query TITR
+SELECT query, grp, target, round(distance, 12) FROM tree_nearest_tip('ex1', 'ex1_targets_gi', 'ex1_queries_gi');
+----
+B	2	D	1.4
+
+query T
+SELECT typeof(grp) FROM tree_nearest_tip('ex1', 'ex1_targets_gi', 'ex1_queries_gi');
+----
+INTEGER
+
+# A target with a NULL group belongs to no group.
+statement ok
+CREATE TABLE ex1_targets_gnull AS SELECT * FROM (VALUES ('A', NULL), ('D', 'g2')) AS v(name, grp);
+
+statement ok
+CREATE TABLE ex1_queries_gnull AS SELECT * FROM (VALUES ('F', 'g2')) AS v(name, grp);
+
+query TT
+SELECT query, target FROM tree_nearest_tip('ex1', 'ex1_targets_gnull', 'ex1_queries_gnull');
+----
+F	D
+
+# grp must be in both tables or in neither, with the same type.
+statement error
+SELECT * FROM tree_nearest_tip('ex1', 'ex1_targets_g', 'ex1_queries');
+----
+tree_nearest_tip: 'grp' must be in both
+
+statement error
+SELECT * FROM tree_nearest_tip('ex1', 'ex1_targets', 'ex1_queries_g');
+----
+tree_nearest_tip: 'grp' must be in both
+
+statement error
+SELECT * FROM tree_nearest_tip('ex1', 'ex1_targets_gi', 'ex1_queries_g');
+----
+tree_nearest_tip: 'grp' has different types
+
+# =============================================================================
+# Scope, ties and self (the request's examples)
+# =============================================================================
+
+statement ok
+COPY (SELECT '((Q:0.1,T1:5.0)n1:0.1,T2:0.1)r;') TO '{TEST_DIR}/scope.nwk' (FORMAT csv, HEADER false, DELIMITER E'\t');
+
+statement ok
+CREATE TABLE scope_tree AS SELECT * FROM read_newick('{TEST_DIR}/scope.nwk');
+
+statement ok
+CREATE TABLE t12 AS SELECT * FROM (VALUES ('T1'), ('T2')) AS v(name);
+
+statement ok
+CREATE TABLE q_only AS SELECT * FROM (VALUES ('Q')) AS v(name);
+
+query TRT
+SELECT r.target, round(r.distance, 12), l.name
+FROM tree_nearest_tip('scope_tree', 't12', 'q_only') r JOIN scope_tree l ON l.node_index = r.lca_index;
+----
+T2	0.3	r
+
+query TRT
+SELECT r.target, round(r.distance, 12), l.name
+FROM tree_nearest_tip('scope_tree', 't12', 'q_only', scope := 'clade') r JOIN scope_tree l ON l.node_index = r.lca_index;
+----
+T1	5.1	n1
+
+# The scope is not case-sensitive, and anything else is refused.
+query T
+SELECT target FROM tree_nearest_tip('scope_tree', 't12', 'q_only', scope := 'CLADE');
+----
+T1
+
+statement error
+SELECT * FROM tree_nearest_tip('scope_tree', 't12', 'q_only', scope := 'nearest');
+----
+tree_nearest_tip: scope must be 'path' or 'clade'
+
+statement ok
+COPY (SELECT '(Q:0.1,(T1:0.2,T2:0.2)n:0.1)r;') TO '{TEST_DIR}/ties.nwk' (FORMAT csv, HEADER false, DELIMITER E'\t');
+
+statement ok
+CREATE TABLE ties_tree AS SELECT * FROM read_newick('{TEST_DIR}/ties.nwk');
+
+query TRI
+SELECT target, round(distance, 12), n_tied FROM tree_nearest_tip('ties_tree', 't12', 'q_only');
+----
+T1	0.4	2
+
+statement ok
+COPY (SELECT '((T1:0.1,T2:0.2)a:0.1,T3:0.5)r;') TO '{TEST_DIR}/self.nwk' (FORMAT csv, HEADER false, DELIMITER E'\t');
+
+statement ok
+CREATE TABLE self_tree AS SELECT * FROM read_newick('{TEST_DIR}/self.nwk');
+
+statement ok
+CREATE TABLE t123 AS SELECT * FROM (VALUES ('T1'), ('T2'), ('T3')) AS v(name);
+
+statement ok
+CREATE TABLE q_t1 AS SELECT * FROM (VALUES ('T1')) AS v(name);
+
+query TRI
+SELECT target, round(distance, 12), n_tied FROM tree_nearest_tip('self_tree', 't123', 'q_t1');
+----
+T2	0.3	1
+
+query TRIT
+SELECT r.target, r.distance, r.n_tied, l.name
+FROM tree_nearest_tip('self_tree', 't123', 'q_t1', exclude_self := false) r JOIN self_tree l ON l.node_index = r.lca_index;
+----
+T1	0.0	1	T1
+
+# =============================================================================
+# Tip names may be BIGINT or UUID; the output keeps the type, and a tie goes to the
+# target ORDER BY puts first in that type
+# =============================================================================
+
+statement ok
+COPY (SELECT '((1:1,2:1)n:1,(9:1,10:1)m:1)r;') TO '{TEST_DIR}/bigint.nwk' (FORMAT csv, HEADER false, DELIMITER E'\t');
+
+statement ok
+CREATE TABLE big AS
+SELECT node_index, parent_index, branch_length, TRY_CAST(name AS BIGINT) AS name FROM read_newick('{TEST_DIR}/bigint.nwk');
+
+statement ok
+CREATE TABLE big_targets AS SELECT * FROM (VALUES (1::BIGINT), (9::BIGINT), (10::BIGINT)) AS v(name);
+
+statement ok
+CREATE TABLE big_queries AS SELECT * FROM (VALUES (1::BIGINT), (2::BIGINT)) AS v(name);
+
+# 9 and 10 tie at 4 from 1; numerically 9 comes first, though '10' sorts before '9' as text.
+query IIRI
+SELECT query, target, distance, n_tied FROM tree_nearest_tip('big', 'big_targets', 'big_queries') ORDER BY query;
+----
+1	9	4.0	2
+2	1	2.0	1
+
+query TT
+SELECT DISTINCT typeof(query), typeof(target) FROM tree_nearest_tip('big', 'big_targets', 'big_queries');
+----
+BIGINT	BIGINT
+
+statement ok
+COPY (SELECT '(00000000-0000-0000-0000-00000000000a:2,(80000000-0000-0000-0000-000000000000:1,7fffffff-ffff-ffff-ffff-ffffffffffff:1)n:1)r;')
+TO '{TEST_DIR}/uuid.nwk' (FORMAT csv, HEADER false, DELIMITER E'\t');
+
+statement ok
+CREATE TABLE uu AS
+SELECT node_index, parent_index, branch_length, TRY_CAST(name AS UUID) AS name FROM read_newick('{TEST_DIR}/uuid.nwk');
+
+statement ok
+CREATE TABLE uu_targets AS
+SELECT name FROM uu WHERE name IN ('80000000-0000-0000-0000-000000000000'::UUID, '7fffffff-ffff-ffff-ffff-ffffffffffff'::UUID);
+
+statement ok
+CREATE TABLE uu_queries AS SELECT * FROM (VALUES ('00000000-0000-0000-0000-00000000000a'::UUID)) AS v(name);
+
+query TIRTT
+SELECT target = (SELECT min(name) FROM uu_targets), n_tied, distance, typeof(query), typeof(target)
+FROM tree_nearest_tip('uu', 'uu_targets', 'uu_queries');
+----
+true	2	4.0	UUID	UUID
+
+# The three name columns must have one type, and it must be an id type.
+statement error
+SELECT * FROM tree_nearest_tip('ex1', 'big_targets', 'ex1_queries');
+----
+tree_nearest_tip: tip names must have the same type in all three tables
+
+statement error
+SELECT * FROM tree_nearest_tip('ex1', 'ex1_targets', 'big_queries');
+----
+tree_nearest_tip: tip names must have the same type in all three tables
+
+statement error
+SELECT * FROM tree_nearest_tip('big', 'big_targets', 'ex1_queries');
+----
+tree_nearest_tip: tip names must have the same type in all three tables
+
+statement ok
+CREATE TABLE small AS SELECT node_index, parent_index, branch_length, name::INTEGER AS name FROM big;
+
+statement ok
+CREATE TABLE small_names AS SELECT name::INTEGER AS name FROM big_targets;
+
+statement error
+SELECT * FROM tree_nearest_tip('small', 'small_names', 'small_names');
+----
+tree_nearest_tip: tip names must be VARCHAR, BIGINT, or UUID
+
+# =============================================================================
+# A name or group type that changes after the statement was prepared is refused, not
+# emitted under the old type. Views over CSV files change type without a catalog
+# change, so DuckDB keeps the prepared plan and its bound output types.
+# =============================================================================
+
+statement ok
+COPY (SELECT node_index, parent_index, name, branch_length FROM ex1) TO '{TEST_DIR}/prep_tree.csv';
+
+statement ok
+COPY (SELECT * FROM ex1_targets_g) TO '{TEST_DIR}/prep_targets.csv';
+
+statement ok
+COPY (SELECT * FROM ex1_queries_g) TO '{TEST_DIR}/prep_queries.csv';
+
+statement ok
+CREATE VIEW prep_tree AS SELECT * FROM read_csv('{TEST_DIR}/prep_tree.csv');
+
+statement ok
+CREATE VIEW prep_targets AS SELECT * FROM read_csv('{TEST_DIR}/prep_targets.csv');
+
+statement ok
+CREATE VIEW prep_queries AS SELECT * FROM read_csv('{TEST_DIR}/prep_queries.csv');
+
+statement ok
+PREPARE nearest AS SELECT query, grp, target FROM tree_nearest_tip('prep_tree', 'prep_targets', 'prep_queries')
+WHERE target IS NOT NULL ORDER BY grp;
+
+query TTT
+EXECUTE nearest;
+----
+B	g1	A
+B	g2	D
+
+# The groups become integers, which read_csv detects as BIGINT.
+statement ok
+COPY (SELECT name, CASE grp WHEN 'g1' THEN 1 WHEN 'g2' THEN 2 END AS grp FROM ex1_targets_g)
+TO '{TEST_DIR}/prep_targets.csv';
+
+statement ok
+COPY (SELECT name, CASE grp WHEN 'g1' THEN 1 WHEN 'g2' THEN 2 END AS grp FROM ex1_queries_g)
+TO '{TEST_DIR}/prep_queries.csv';
+
+statement error
+EXECUTE nearest;
+----
+<REGEX>:.*tree_nearest_tip: column 'grp' of 'prep_targets' is BIGINT now but was VARCHAR when the statement was bound.*
+
+# The names become integers in all three, consistently. The targets are read first.
+statement ok
+COPY (SELECT node_index, parent_index, name, branch_length FROM big) TO '{TEST_DIR}/prep_tree.csv';
+
+statement ok
+COPY (SELECT name, 'g1' AS grp FROM big_targets) TO '{TEST_DIR}/prep_targets.csv';
+
+statement ok
+COPY (SELECT name, 'g1' AS grp FROM big_queries) TO '{TEST_DIR}/prep_queries.csv';
+
+statement error
+EXECUTE nearest;
+----
+<REGEX>:.*tree_nearest_tip: column 'name' of 'prep_targets' is BIGINT now but was VARCHAR when the statement was bound.*
+
+# Only the queries' names change.
+statement ok
+COPY (SELECT node_index, parent_index, name, branch_length FROM ex1) TO '{TEST_DIR}/prep_tree.csv';
+
+statement ok
+COPY (SELECT * FROM ex1_targets_g) TO '{TEST_DIR}/prep_targets.csv';
+
+statement error
+EXECUTE nearest;
+----
+<REGEX>:.*tree_nearest_tip: column 'name' of 'prep_queries' is BIGINT now but was VARCHAR when the statement was bound.*
+
+# Back to the bound types, the prepared statement answers again.
+statement ok
+COPY (SELECT * FROM ex1_queries_g) TO '{TEST_DIR}/prep_queries.csv';
+
+query TTT
+EXECUTE nearest;
+----
+B	g1	A
+B	g2	D
+
+# =============================================================================
+# Names that are not tips, or name more than one tip
+# =============================================================================
+
+statement ok
+CREATE TABLE q_missing AS SELECT * FROM (VALUES ('B'), ('nope'), ('C')) AS v(name);
+
+# C is an internal node, not a tip, so it is missing too.
+statement error
+SELECT * FROM tree_nearest_tip('ex1', 'ex1_targets', 'q_missing');
+----
+<REGEX>:.*tree_nearest_tip: 2 query name\(s\) are not tips in the tree 'ex1': 'C', 'nope'.*
+
+statement ok
+CREATE TABLE t_missing AS SELECT * FROM (VALUES ('A'), ('gone')) AS v(name);
+
+statement error
+SELECT * FROM tree_nearest_tip('ex1', 't_missing', 'ex1_queries');
+----
+<REGEX>:.*tree_nearest_tip: 1 target name\(s\) are not tips in the tree 'ex1': 'gone'.*
+
+# With ignore_missing, a missing query has no row and a missing target is skipped.
+query TT
+SELECT query, target FROM tree_nearest_tip('ex1', 't_missing', 'q_missing', ignore_missing := true);
+----
+B	A
+
+statement ok
+COPY (SELECT '((A:1,B:1)c:1,(A:1,D:1)e:1)r;') TO '{TEST_DIR}/dup.nwk' (FORMAT csv, HEADER false, DELIMITER E'\t');
+
+statement ok
+CREATE TABLE dup_tree AS SELECT * FROM read_newick('{TEST_DIR}/dup.nwk');
+
+statement ok
+CREATE TABLE q_d AS SELECT * FROM (VALUES ('D')) AS v(name);
+
+statement ok
+CREATE TABLE t_a AS SELECT * FROM (VALUES ('A')) AS v(name);
+
+statement error
+SELECT * FROM tree_nearest_tip('dup_tree', 't_a', 'q_d');
+----
+tree_nearest_tip: tip name 'A' names 2 tips in the tree 'dup_tree'
+
+# A duplicate tip that nothing refers to is fine.
+statement ok
+CREATE TABLE t_b AS SELECT * FROM (VALUES ('B')) AS v(name);
+
+query TT
+SELECT query, target FROM tree_nearest_tip('dup_tree', 't_b', 'q_d');
+----
+D	B
+
+# =============================================================================
+# Branch lengths: every edge below the root needs a non-negative length
+# =============================================================================
+
+statement ok
+CREATE TABLE ex1_null_len AS
+SELECT node_index, parent_index, name, CASE WHEN name = 'E' THEN NULL ELSE branch_length END AS branch_length FROM ex1;
+
+statement error
+SELECT * FROM tree_nearest_tip('ex1_null_len', 'ex1_targets', 'ex1_queries');
+----
+<REGEX>:.*tree_nearest_tip: .*the branch length of node_index 4 is NULL.*
+
+statement ok
+CREATE TABLE ex1_neg_len AS
+SELECT node_index, parent_index, name, CASE WHEN name = 'G' THEN -0.5 ELSE branch_length END AS branch_length FROM ex1;
+
+statement error
+SELECT * FROM tree_nearest_tip('ex1_neg_len', 'ex1_targets', 'ex1_queries');
+----
+<REGEX>:.*tree_nearest_tip: .*the branch length of node_index 7 is negative.*
+
+# The root's length is ignored, whatever it is.
+statement ok
+CREATE TABLE ex1_root_len AS
+SELECT node_index, parent_index, name, CASE WHEN name = 'root' THEN -3.0 ELSE branch_length END AS branch_length FROM ex1;
+
+query TR
+SELECT query, round(distance, 12) FROM tree_nearest_tip('ex1_root_len', 'ex1_targets', 'ex1_queries') ORDER BY query;
+----
+B	0.3
+F	1.9
+G	2.0
+
+# =============================================================================
+# Duplicates, NULL names, empty inputs
+# =============================================================================
+
+statement ok
+CREATE TABLE t_dupes AS SELECT * FROM (VALUES ('A'), ('A'), (NULL), ('D')) AS v(name);
+
+statement ok
+CREATE TABLE q_dupes AS SELECT * FROM (VALUES ('B'), ('B'), (NULL), ('F')) AS v(name);
+
+query TTI
+SELECT query, target, n_tied FROM tree_nearest_tip('ex1', 't_dupes', 'q_dupes') ORDER BY query;
+----
+B	A	1
+F	A	1
+
+statement ok
+CREATE TABLE t_none (name VARCHAR);
+
+query TTRIT
+SELECT query, target, distance, n_tied, lca_index FROM tree_nearest_tip('ex1', 't_none', 'ex1_queries') ORDER BY query;
+----
+B	NULL	NULL	0	NULL
+F	NULL	NULL	0	NULL
+G	NULL	NULL	0	NULL
+
+query I
+SELECT count(*) FROM tree_nearest_tip('ex1', 'ex1_targets', 't_none');
+----
+0
+
+# =============================================================================
+# Schema errors
+# =============================================================================
+
+statement ok
+CREATE TABLE ex1_unnamed AS SELECT node_index, parent_index, branch_length FROM ex1;
+
+statement error
+SELECT * FROM tree_nearest_tip('ex1_unnamed', 'ex1_targets', 'ex1_queries');
+----
+tree_nearest_tip: tree table 'ex1_unnamed' has no 'name' column
+
+statement ok
+CREATE TABLE no_name_col AS SELECT * FROM (VALUES ('A')) AS v(label);
+
+statement error
+SELECT * FROM tree_nearest_tip('ex1', 'no_name_col', 'ex1_queries');
+----
+tree_nearest_tip: targets table 'no_name_col' has no 'name' column
+
+statement error
+SELECT * FROM tree_nearest_tip('ex1', 'ex1_targets', 'no_name_col');
+----
+tree_nearest_tip: queries table 'no_name_col' has no 'name' column
+
+statement error
+SELECT * FROM tree_nearest_tip('nope', 'ex1_targets', 'ex1_queries');
+----
+does not exist
+
+# =============================================================================
+# Each relation is read exactly once, at execution. The volatility sits in a column
+# the read must evaluate (an unreferenced nextval() would be pruned; see
+# rype_single_read.test), and it is inert.
+# =============================================================================
+
+statement ok
+CREATE SEQUENCE tree_seq START 1;
+
+statement ok
+CREATE SEQUENCE targets_seq START 1;
+
+statement ok
+CREATE SEQUENCE queries_seq START 1;
+
+statement ok
+CREATE VIEW ex1_volatile AS
+SELECT node_index, parent_index, name, branch_length + 0 * nextval('tree_seq') AS branch_length FROM ex1;
+
+statement ok
+CREATE VIEW targets_volatile AS SELECT concat(name, repeat('x', 0 * nextval('targets_seq'))) AS name FROM ex1_targets;
+
+statement ok
+CREATE VIEW queries_volatile AS SELECT concat(name, repeat('x', 0 * nextval('queries_seq'))) AS name FROM ex1_queries;
+
+# EXPLAIN binds without executing, and binding reads no rows.
+statement ok
+EXPLAIN SELECT * FROM tree_nearest_tip('ex1_volatile', 'targets_volatile', 'queries_volatile');
+
+query TTR
+SELECT query, target, round(distance, 12)
+FROM tree_nearest_tip('ex1_volatile', 'targets_volatile', 'queries_volatile') ORDER BY query;
+----
+B	A	0.3
+F	A	1.9
+G	A	2.0
+
+# 10 tree rows, 2 targets, 3 queries, each evaluated once (a root length is NULL, and
+# NULL + 0 * nextval still evaluates nextval).
+query III
+SELECT currval('tree_seq'), currval('targets_seq'), currval('queries_seq');
+----
+10	2	3
+
+# Planning reads no rows: a view whose rows cannot be read still plans.
+statement ok
+CREATE VIEW boom AS SELECT CAST(error('read at planning') AS VARCHAR) AS name FROM ex1_targets;
+
+statement ok
+EXPLAIN SELECT * FROM tree_nearest_tip('ex1', 'boom', 'ex1_queries');
+
+statement error
+SELECT * FROM tree_nearest_tip('ex1', 'boom', 'ex1_queries');
+----
+read at planning
+
+# =============================================================================
+# Enough queries for several threads: every query answered exactly once, and the
+# answers do not depend on how many threads share the work.
+# A caterpillar of 5000 tips, every edge of length 1: t_i (i >= 2) hangs off the node
+# above t_(i-1)'s. t_0 and t_1 are siblings at 2; t_2 is 3 from t_0, t_1 and t_3; every
+# later t_i is 3 from both neighbours (the last from its one), and the tie goes to the
+# neighbour whose name sorts first as text, so t_11 beats t_9.
+# =============================================================================
+
+statement ok
+CREATE TABLE cat_newick AS
+SELECT repeat('(', 4999) || 't0:1,t1:1' || string_agg('):1,t' || i || ':1', '' ORDER BY i) || ');' AS nwk
+FROM generate_series(2, 4999) AS s(i);
+
+statement ok
+COPY cat_newick TO '{TEST_DIR}/caterpillar.nwk' (FORMAT csv, HEADER false, DELIMITER E'\t');
+
+statement ok
+CREATE TABLE cat AS SELECT * FROM read_newick('{TEST_DIR}/caterpillar.nwk');
+
+statement ok
+CREATE TABLE cat_tips AS SELECT name FROM cat WHERE is_tip;
+
+statement ok
+SET threads = 8;
+
+statement ok
+CREATE TABLE cat_many AS SELECT * FROM tree_nearest_tip('cat', 'cat_tips', 'cat_tips');
+
+statement ok
+SET threads = 1;
+
+statement ok
+CREATE TABLE cat_one AS SELECT * FROM tree_nearest_tip('cat', 'cat_tips', 'cat_tips');
+
+query III
+SELECT count(*), count(DISTINCT query), count(*) FILTER (WHERE target IS NULL) FROM cat_many;
+----
+5000	5000	0
+
+query I
+SELECT (SELECT count(*) FROM (SELECT * FROM cat_many EXCEPT ALL SELECT * FROM cat_one))
+     + (SELECT count(*) FROM (SELECT * FROM cat_one EXCEPT ALL SELECT * FROM cat_many));
+----
+0
+
+query TTRI
+SELECT query, target, distance, n_tied FROM cat_many WHERE query IN ('t0', 't1', 't2', 't3', 't4999') ORDER BY query;
+----
+t0	t1	2.0	1
+t1	t0	2.0	1
+t2	t0	3.0	3
+t3	t2	3.0	2
+t4999	t4998	3.0	1
+
+query I
+SELECT count(*) FROM (SELECT *, CAST(substr(query, 2) AS BIGINT) AS i FROM cat_many)
+WHERE i BETWEEN 3 AND 4998
+  AND NOT (target = least('t' || (i - 1), 't' || (i + 1)) AND distance = 3 AND n_tied = 2);
+----
+0
+
+statement ok
+RESET threads;

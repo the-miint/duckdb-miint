@@ -25,13 +25,13 @@ TreeIndex TreeIndex::Build(const std::vector<uint32_t> &parent, const std::vecto
                            const std::vector<int64_t> *node_ids) {
 	const size_t n_size = parent.size();
 	if (n_size == 0) {
-		throw std::invalid_argument("TreeIndex: the tree is empty");
+		throw std::invalid_argument("the tree is empty");
 	}
 	if (branch_length.size() != n_size || (node_ids && node_ids->size() != n_size)) {
-		throw std::invalid_argument("TreeIndex: the parent, branch length and node id arrays differ in size");
+		throw std::invalid_argument("the parent, branch length and node id arrays differ in size");
 	}
 	if (n_size >= NO_PARENT) {
-		throw std::invalid_argument("TreeIndex: too many nodes (" + std::to_string(n_size) + ")");
+		throw std::invalid_argument("too many nodes (" + std::to_string(n_size) + ")");
 	}
 	const uint32_t n = static_cast<uint32_t>(n_size);
 
@@ -43,15 +43,14 @@ TreeIndex TreeIndex::Build(const std::vector<uint32_t> &parent, const std::vecto
 			root = v;
 			++n_roots;
 		} else if (parent[v] >= n) {
-			throw std::invalid_argument("TreeIndex: the parent of " + NodeLabel(v, node_ids) + " is out of range");
+			throw std::invalid_argument("the parent of " + NodeLabel(v, node_ids) + " is out of range");
 		}
 	}
 	if (n_roots == 0) {
-		throw std::invalid_argument("TreeIndex: the tree has no root (every node has a parent)");
+		throw std::invalid_argument("the tree has no root (every node has a parent)");
 	}
 	if (n_roots > 1) {
-		throw std::invalid_argument("TreeIndex: the tree has " + std::to_string(n_roots) +
-		                            " roots; a tree has exactly one");
+		throw std::invalid_argument("the tree has " + std::to_string(n_roots) + " roots; a tree has exactly one");
 	}
 
 	// Children in compressed form, each node's children in ascending index.
@@ -103,7 +102,7 @@ TreeIndex TreeIndex::Build(const std::vector<uint32_t> &parent, const std::vecto
 	if (order.size() != n) {
 		for (uint32_t v = 0; v < n; ++v) {
 			if (idx.pre_[v] == NO_PARENT) {
-				throw std::invalid_argument("TreeIndex: " + NodeLabel(v, node_ids) +
+				throw std::invalid_argument(NodeLabel(v, node_ids) +
 				                            " is not connected to the root (the parent links form a cycle)");
 			}
 		}
@@ -116,13 +115,13 @@ TreeIndex TreeIndex::Build(const std::vector<uint32_t> &parent, const std::vecto
 		}
 		const double bl = branch_length[v];
 		if (std::isnan(bl)) {
-			throw std::invalid_argument("TreeIndex: the branch length of " + NodeLabel(v, node_ids) + " is NULL");
+			throw std::invalid_argument("the branch length of " + NodeLabel(v, node_ids) + " is NULL");
 		}
 		if (!std::isfinite(bl)) {
-			throw std::invalid_argument("TreeIndex: the branch length of " + NodeLabel(v, node_ids) + " is not finite");
+			throw std::invalid_argument("the branch length of " + NodeLabel(v, node_ids) + " is not finite");
 		}
 		if (bl < 0) {
-			throw std::invalid_argument("TreeIndex: the branch length of " + NodeLabel(v, node_ids) + " is negative (" +
+			throw std::invalid_argument("the branch length of " + NodeLabel(v, node_ids) + " is negative (" +
 			                            std::to_string(bl) + ")");
 		}
 	}

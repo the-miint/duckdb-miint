@@ -382,6 +382,7 @@ list(
   src/taxdump_archive.cpp
   src/taxdump_parser.cpp
   src/taxonomy_lineage.cpp
+  src/tree_nearest_tip.cpp
   src/tree_resolve_multifurcations.cpp
   src/tree_resolve_placement.cpp
   src/tree_table_reader.cpp
