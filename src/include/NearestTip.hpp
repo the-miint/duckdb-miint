@@ -7,7 +7,17 @@
 
 namespace miint {
 
+enum class NearestTipScope {
+	// The nearest eligible target by path length, anywhere in the tree.
+	Path,
+	// The lowest ancestor-or-self of the query whose subtree holds an eligible target,
+	// then the nearest eligible target by path length within that subtree. This can be
+	// farther than the path-nearest target, which may lie outside the smallest clade.
+	Clade,
+};
+
 struct NearestTipOptions {
+	NearestTipScope scope = NearestTipScope::Path;
 	// A query that is itself a target ignores itself.
 	bool exclude_self = true;
 };
@@ -32,7 +42,11 @@ struct NearestTipResult {
 //
 // Search climbs from the query through only those ancestors under which a new target
 // appears, scoring each level's targets in increasing root distance (at a fixed level,
-// distance is monotone in it), and stops once no higher level can be closer.
+// distance is monotone in it), and stops once no higher level can be closer, or, for the
+// clade scope, after the first level that holds an eligible target.
+//
+// Groups are separate instances over one TreeIndex; Search is const and may be called
+// from several threads at once.
 class NearestTipTargets {
 public:
 	// `nodes[i]` is a target's tree node and `name_ranks[i]` its place in name order (a

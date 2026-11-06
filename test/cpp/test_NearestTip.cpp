@@ -18,6 +18,7 @@ using Catch::Approx;
 using Catch::Matchers::ContainsSubstring;
 using miint::NearestTipOptions;
 using miint::NearestTipResult;
+using miint::NearestTipScope;
 using miint::NearestTipTargets;
 using miint::TreeIndex;
 using namespace miint::test;
@@ -65,23 +66,44 @@ struct Found {
 	std::string lca;
 };
 
-Found search(const NamedTree &t, const NearestTipTargets &targets, const std::string &query, bool exclude_self = true) {
+Found search(const NamedTree &t, const NearestTipTargets &targets, const std::string &query, bool exclude_self = true,
+             NearestTipScope scope = NearestTipScope::Path) {
 	NearestTipOptions options;
 	options.exclude_self = exclude_self;
+	options.scope = scope;
 	auto r = targets.Search(t.node(query), options);
 	return {t.name(r.target), r.distance, r.n_tied, t.name(r.lca)};
 }
 
 // The brute-force answer: every eligible target scored with the same distance formula,
-// from the naive model's LCA and root distances.
+// from the naive model's LCA and root distances. For the clade scope, only the targets
+// in the lowest ancestor-or-self of the query that holds any eligible target compete.
 NearestTipResult oracle(const TreeArrays &t, const std::vector<uint32_t> &nodes, const std::vector<uint32_t> &ranks,
-                        uint32_t query, bool exclude_self) {
+                        uint32_t query, bool exclude_self, NearestTipScope scope = NearestTipScope::Path) {
+	auto eligible = [&](uint32_t target) {
+		return !(exclude_self && target == query);
+	};
+	uint32_t clade = kNoParent;
+	if (scope == NearestTipScope::Clade) {
+		for (uint32_t a = query; a != kNoParent && clade == kNoParent; a = t.parent[a]) {
+			for (uint32_t target : nodes) {
+				if (eligible(target) && naive_is_ancestor_or_self(t, a, target)) {
+					clade = a;
+					break;
+				}
+			}
+		}
+	}
+
 	NearestTipResult best;
 	uint32_t best_rank = UINT32_MAX;
 	const double dq = naive_root_distance(t, query);
 	for (size_t i = 0; i < nodes.size(); ++i) {
 		const uint32_t target = nodes[i];
-		if (exclude_self && target == query) {
+		if (!eligible(target)) {
+			continue;
+		}
+		if (scope == NearestTipScope::Clade && !naive_is_ancestor_or_self(t, clade, target)) {
 			continue;
 		}
 		const uint32_t l = naive_lca(t, query, target);
@@ -226,11 +248,65 @@ TEST_CASE("NearestTip: a deep caterpillar", "[NearestTip]") {
 	REQUIRE(r.lca == levels / 2);
 }
 
-TEST_CASE("NearestTip: random trees agree with a brute-force search", "[NearestTip]") {
+TEST_CASE("NearestTip: the request's scope example", "[NearestTip]") {
+	// T2 is nearer by path, but T1 is in the smallest clade around Q that holds a target.
+	NamedTree t("((Q:0.1,T1:5.0)n1:0.1,T2:0.1)r;");
+	auto targets = t.targets({"T1", "T2"});
+
+	auto path = search(t, targets, "Q", true, NearestTipScope::Path);
+	REQUIRE(path.target == "T2");
+	REQUIRE(path.distance == Approx(0.3).margin(1e-12));
+	REQUIRE(path.lca == "r");
+
+	auto clade = search(t, targets, "Q", true, NearestTipScope::Clade);
+	REQUIRE(clade.target == "T1");
+	REQUIRE(clade.distance == Approx(5.1).margin(1e-12));
+	REQUIRE(clade.n_tied == 1);
+	REQUIRE(clade.lca == "n1");
+}
+
+TEST_CASE("NearestTip: the clade scope counts ties inside the clade", "[NearestTip]") {
+	// The smallest clade around Q holding a target is the root's; T1 and T2 tie in it.
+	NamedTree t("(Q:1,(T1:1,T2:1)n:1)r;");
+	auto q = search(t, t.targets({"T1", "T2"}), "Q", true, NearestTipScope::Clade);
+	REQUIRE(q.target == "T1");
+	REQUIRE(q.distance == 3.0);
+	REQUIRE(q.n_tied == 2);
+	REQUIRE(q.lca == "r");
+}
+
+TEST_CASE("NearestTip: a query that may be its own target, by scope", "[NearestTip]") {
+	// Q's sibling T is at distance 0. Under 'path' it ties with Q itself; under 'clade' the
+	// smallest clade holding an eligible target is Q's own (a tip), so T is not in it.
+	NamedTree t("((Q:0,T:0)a:1,U:1)r;");
+	auto targets = t.targets({"Q", "T", "U"});
+
+	auto path = search(t, targets, "Q", false, NearestTipScope::Path);
+	REQUIRE(path.target == "Q");
+	REQUIRE(path.distance == 0.0);
+	REQUIRE(path.n_tied == 2);
+
+	auto clade = search(t, targets, "Q", false, NearestTipScope::Clade);
+	REQUIRE(clade.target == "Q");
+	REQUIRE(clade.distance == 0.0);
+	REQUIRE(clade.n_tied == 1);
+	REQUIRE(clade.lca == "Q");
+
+	// Excluding itself, Q's smallest clade with a target is a's, holding T.
+	auto excluded = search(t, targets, "Q", true, NearestTipScope::Clade);
+	REQUIRE(excluded.target == "T");
+	REQUIRE(excluded.lca == "a");
+}
+
+TEST_CASE("NearestTip: random trees and groups agree with a brute-force search", "[NearestTip]") {
+	// Several target sets (groups) over one tree index, as the SQL function builds them:
+	// a name rank per tip shared by every group, and groups that overlap. Every tip is a
+	// query against every group, in both scopes, with and without itself.
 	std::mt19937 rng(20261106);
 	const double target_fractions[] = {0.0, 0.1, 0.5, 1.0};
-	for (int trial = 0; trial < 200; ++trial) {
-		const uint32_t n = std::uniform_int_distribution<uint32_t>(1, 150)(rng);
+	std::uniform_real_distribution<double> unit(0.0, 1.0);
+	for (int trial = 0; trial < 150; ++trial) {
+		const uint32_t n = std::uniform_int_distribution<uint32_t>(1, 120)(rng);
 		const bool dyadic = trial % 3 != 0;
 		auto t = random_tree(rng, n, dyadic);
 		auto index = TreeIndex::Build(t.parent, t.length);
@@ -241,31 +317,48 @@ TEST_CASE("NearestTip: random trees agree with a brute-force search", "[NearestT
 				tips.push_back(v);
 			}
 		}
-		const double fraction = target_fractions[trial % 4];
-		std::vector<uint32_t> nodes;
-		std::uniform_real_distribution<double> unit(0.0, 1.0);
-		for (uint32_t v : tips) {
-			if (unit(rng) < fraction) {
-				nodes.push_back(v);
+		std::vector<uint32_t> tip_rank(n, 0);
+		{
+			std::vector<uint32_t> order(tips.size());
+			std::iota(order.begin(), order.end(), 0u);
+			std::shuffle(order.begin(), order.end(), rng);
+			for (size_t i = 0; i < tips.size(); ++i) {
+				tip_rank[tips[i]] = order[i];
 			}
 		}
-		std::vector<uint32_t> ranks(nodes.size());
-		std::iota(ranks.begin(), ranks.end(), 0u);
-		std::shuffle(ranks.begin(), ranks.end(), rng);
-		NearestTipTargets targets(index, nodes, ranks);
+
+		const int n_groups = std::uniform_int_distribution<int>(1, 4)(rng);
+		std::vector<std::vector<uint32_t>> group_nodes(n_groups);
+		std::vector<std::vector<uint32_t>> group_ranks(n_groups);
+		std::vector<NearestTipTargets> groups;
+		for (int g = 0; g < n_groups; ++g) {
+			const double fraction = target_fractions[(trial + g) % 4];
+			for (uint32_t v : tips) {
+				if (unit(rng) < fraction) {
+					group_nodes[g].push_back(v);
+					group_ranks[g].push_back(tip_rank[v]);
+				}
+			}
+			groups.emplace_back(index, group_nodes[g], group_ranks[g]);
+		}
 
 		for (uint32_t q : tips) {
-			for (bool exclude_self : {true, false}) {
-				CAPTURE(trial, n, dyadic, fraction, q, exclude_self);
-				auto expected = oracle(t, nodes, ranks, q, exclude_self);
-				NearestTipOptions options;
-				options.exclude_self = exclude_self;
-				auto got = targets.Search(q, options);
-				REQUIRE(got.target == expected.target);
-				REQUIRE(got.n_tied == expected.n_tied);
-				if (expected.target != NO_TARGET) {
-					REQUIRE(got.distance == expected.distance);
-					REQUIRE(got.lca == expected.lca);
+			for (int g = 0; g < n_groups; ++g) {
+				for (auto scope : {NearestTipScope::Path, NearestTipScope::Clade}) {
+					for (bool exclude_self : {true, false}) {
+						CAPTURE(trial, n, dyadic, g, q, scope == NearestTipScope::Clade, exclude_self);
+						auto expected = oracle(t, group_nodes[g], group_ranks[g], q, exclude_self, scope);
+						NearestTipOptions options;
+						options.scope = scope;
+						options.exclude_self = exclude_self;
+						auto got = groups[g].Search(q, options);
+						REQUIRE(got.target == expected.target);
+						REQUIRE(got.n_tied == expected.n_tied);
+						if (expected.target != NO_TARGET) {
+							REQUIRE(got.distance == expected.distance);
+							REQUIRE(got.lca == expected.lca);
+						}
+					}
 				}
 			}
 		}

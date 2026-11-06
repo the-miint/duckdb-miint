@@ -120,8 +120,12 @@ NearestTipResult NearestTipTargets::Search(uint32_t query, const NearestTipOptio
 	const uint32_t pq = tree.pre(query);
 	size_t below = std::lower_bound(pos_.begin(), pos_.end(), pq) - pos_.begin();
 	size_t above = std::upper_bound(pos_.begin(), pos_.end(), pq) - pos_.begin();
+	// For the clade scope, the lowest ancestor-or-self of the query holding an eligible
+	// target, once known: the query itself when it is one.
+	uint32_t clade = TreeIndex::NO_PARENT;
 	if (above > below && !options.exclude_self) {
 		offer(below, 0.0, query);
+		clade = query;
 	}
 
 	uint32_t cur = query;
@@ -142,6 +146,12 @@ NearestTipResult NearestTipTargets::Search(uint32_t query, const NearestTipOptio
 			}
 		}
 
+		// A clade search competes only within the first level holding an eligible target
+		// (the query's own descendants count when the query is a target itself).
+		if (options.scope == NearestTipScope::Clade && clade != TreeIndex::NO_PARENT && level != clade) {
+			break;
+		}
+
 		// Every target from here up is at least D[q] - D[level] away, and that grows as
 		// the levels rise (lengths are non-negative), so once it is beyond the best
 		// nothing further can win or tie.
@@ -155,6 +165,11 @@ NearestTipResult NearestTipTargets::Search(uint32_t query, const NearestTipOptio
 		const size_t new_above = std::upper_bound(pos_.begin() + above, pos_.end(), tree.last(level)) - pos_.begin();
 		score_slice(new_below, below, up, dl, level);
 		score_slice(above, new_above, up, dl, level);
+		// Every level brings in at least one target, so the first scored level is the
+		// lowest one holding an eligible target.
+		if (clade == TreeIndex::NO_PARENT) {
+			clade = level;
+		}
 
 		below = new_below;
 		above = new_above;
