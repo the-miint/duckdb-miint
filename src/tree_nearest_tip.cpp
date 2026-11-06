@@ -1,7 +1,6 @@
 #include "tree_nearest_tip.hpp"
 
 #include "NearestTip.hpp"
-#include "NewickTree.hpp"
 #include "TreeIndex.hpp"
 #include "catalog_utils.hpp"
 #include "id_column_utils.hpp"
@@ -21,6 +20,7 @@
 #include <atomic>
 #include <numeric>
 #include <set>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -298,25 +298,29 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	}
 
 	{
-		auto tree = BuildTreeAndNodeIds(context, bind.tree_table);
+		// Only the names that queries and targets use are kept from the tree: on trees of
+		// tens of millions of tips, holding every name does not fit.
+		std::unordered_set<std::string_view> keep_names;
+		keep_names.reserve(tips.size());
+		for (const auto &tip : tips) {
+			keep_names.insert(tip.first);
+		}
+		TreeTableArrays tree;
 		try {
-			state->index = miint::TreeIndex::FromNewickTree(tree.tree, &tree.node_ids);
+			tree = ReadTreeArrays(context, bind.tree_table, keep_names);
+			state->index = miint::TreeIndex::Build(tree.tree.parent, tree.tree.branch_length, &tree.tree.node_ids);
 		} catch (const std::invalid_argument &e) {
 			throw InvalidInputException("%s: the tree '%s' cannot be searched: %s", kFn, bind.tree_table, e.what());
 		}
-		for (uint32_t v = 0; v < tree.tree.num_nodes(); ++v) {
-			if (!tree.tree.is_tip(v)) {
-				continue;
-			}
-			auto match = tips.find(tree.tree.name(v));
-			if (match != tips.end()) {
-				match->second.node = v;
-				++match->second.count;
+		for (const auto &named : tree.named) {
+			if (state->index.is_tip(named.first)) {
+				auto &match = tips.at(named.second);
+				match.node = named.first;
+				++match.count;
 			}
 		}
-		state->node_ids = std::move(tree.node_ids);
-		// The parsed tree is released here: the index and the names in use are all the
-		// search needs.
+		state->node_ids = std::move(tree.tree.node_ids);
+		// The arrays are released here: the index and the names in use are all the search needs.
 	}
 
 	std::vector<std::string> ambiguous;

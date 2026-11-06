@@ -44,6 +44,7 @@ void require_matches_naive(const TreeIndex &idx, const TreeArrays &t) {
 		REQUIRE(idx.parent(v) == t.parent[v]);
 		REQUIRE(idx.depth(v) == naive_depth(t, v));
 		REQUIRE(idx.root_distance(v) == naive_root_distance(t, v));
+		REQUIRE(idx.is_tip(v) == naive_is_tip(t, v));
 	}
 	for (uint32_t a = 0; a < n; ++a) {
 		for (uint32_t v = 0; v < n; ++v) {
@@ -201,4 +202,142 @@ TEST_CASE("TreeIndex: FromNewickTree applies the same validation", "[TreeIndex]"
 	// B has no branch length.
 	auto tree = miint::NewickTree::parse("(A:1,B)R;");
 	REQUIRE_THROWS_WITH(TreeIndex::FromNewickTree(tree), ContainsSubstring("NULL"));
+}
+
+// ---------------------------------------------------------------------------
+// DenseTree: a tree table's rows, in any order and with any distinct ids, numbered
+// densely for TreeIndex::Build. Callers number nodes however they like (read_newick's
+// postorder, an offset, a sparse key) and store rows in any order, so neither may change
+// the tree that is built.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+using miint::DenseTree;
+
+struct Rows {
+	std::vector<int64_t> id;
+	std::vector<int64_t> parent_id;
+	std::vector<bool> has_parent;
+	std::vector<double> length;
+};
+
+DenseTree dense(Rows rows) {
+	return DenseTree::FromRows(std::move(rows.id), std::move(rows.parent_id), std::move(rows.has_parent),
+	                           std::move(rows.length));
+}
+
+// The rows of tree t with node v given id ids[v], stored in the order `order`.
+Rows rows_of(const TreeArrays &t, const std::vector<int64_t> &ids, const std::vector<uint32_t> &order) {
+	Rows r;
+	for (uint32_t v : order) {
+		r.id.push_back(ids[v]);
+		r.has_parent.push_back(t.parent[v] != NP);
+		r.parent_id.push_back(t.parent[v] != NP ? ids[t.parent[v]] : 0);
+		r.length.push_back(t.length[v]);
+	}
+	return r;
+}
+
+} // namespace
+
+TEST_CASE("DenseTree: contiguous ids in order keep their order", "[TreeIndex]") {
+	// R(1003) over C(1002), C over A(1000) and B(1001): read_newick's postorder, offset by 1000.
+	auto d = dense({{1000, 1001, 1002, 1003}, {1002, 1002, 1003, 0}, {true, true, true, false}, {1.0, 2.0, 3.0, kNaN}});
+	REQUIRE(d.node_ids == std::vector<int64_t> {1000, 1001, 1002, 1003});
+	REQUIRE(d.parent == std::vector<uint32_t> {2, 2, 3, NP});
+	REQUIRE(d.branch_length[2] == 3.0);
+	REQUIRE(std::isnan(d.branch_length[3]));
+	REQUIRE(d.find(1001) == 1);
+	REQUIRE(d.find(999) == DenseTree::NOT_FOUND);
+	REQUIRE(d.find(1004) == DenseTree::NOT_FOUND);
+}
+
+TEST_CASE("DenseTree: rows out of order with sparse ids are numbered by ascending id", "[TreeIndex]") {
+	// The same tree as above, ids 40 (A), 10 (B), 30 (C), -5 (R), rows in no order. Dense
+	// order is ascending id: R, B, C, A.
+	auto d = dense({{30, 40, -5, 10}, {-5, 30, 0, 30}, {true, true, false, true}, {3.0, 1.0, kNaN, 2.0}});
+	REQUIRE(d.node_ids == std::vector<int64_t> {-5, 10, 30, 40});
+	REQUIRE(d.parent == std::vector<uint32_t> {NP, 2, 0, 2});
+	REQUIRE(std::isnan(d.branch_length[0]));
+	REQUIRE(d.branch_length[1] == 2.0);
+	REQUIRE(d.branch_length[2] == 3.0);
+	REQUIRE(d.branch_length[3] == 1.0);
+	REQUIRE(d.find(30) == 2);
+	REQUIRE(d.find(20) == DenseTree::NOT_FOUND);
+	REQUIRE(d.find(-6) == DenseTree::NOT_FOUND);
+	REQUIRE(d.find(41) == DenseTree::NOT_FOUND);
+}
+
+TEST_CASE("DenseTree: ids at both ends of the int64 range", "[TreeIndex]") {
+	// The id span overflows int64, so a contiguity test done in signed arithmetic would be
+	// undefined; three ids that are far from contiguous must not be taken for contiguous.
+	const int64_t lo = std::numeric_limits<int64_t>::min();
+	const int64_t hi = std::numeric_limits<int64_t>::max();
+	auto d = dense({{hi, lo, 0}, {0, 0, 0}, {true, true, false}, {1.0, 2.0, kNaN}});
+	REQUIRE(d.node_ids == std::vector<int64_t> {lo, 0, hi});
+	REQUIRE(d.parent == std::vector<uint32_t> {1, NP, 1});
+	REQUIRE(d.find(lo) == 0);
+	REQUIRE(d.find(hi) == 2);
+	REQUIRE(d.find(1) == DenseTree::NOT_FOUND);
+	REQUIRE(d.find(lo + 1) == DenseTree::NOT_FOUND);
+}
+
+TEST_CASE("DenseTree: any row order and any ids give the same tree", "[TreeIndex]") {
+	std::mt19937 rng(20261106);
+	for (int trial = 0; trial < 40; ++trial) {
+		const uint32_t n = std::uniform_int_distribution<uint32_t>(1, 150)(rng);
+		auto t = random_tree(rng, n, trial % 2 == 0);
+		// Distinct ids: contiguous from an offset, or sparse and signed.
+		std::vector<int64_t> ids(n);
+		const bool contiguous = trial % 3 == 0;
+		for (uint32_t v = 0; v < n; ++v) {
+			ids[v] = contiguous ? 500 + v : static_cast<int64_t>(v) * 7919 - 100000;
+		}
+		std::shuffle(ids.begin(), ids.end(), rng);
+		std::vector<uint32_t> order(n);
+		std::iota(order.begin(), order.end(), 0u);
+		std::shuffle(order.begin(), order.end(), rng);
+		CAPTURE(trial, n, contiguous);
+
+		auto d = dense(rows_of(t, ids, order));
+		REQUIRE(std::is_sorted(d.node_ids.begin(), d.node_ids.end()));
+		for (uint32_t v = 0; v < n; ++v) {
+			const uint32_t dv = d.find(ids[v]);
+			REQUIRE(dv < n);
+			REQUIRE(d.node_ids[dv] == ids[v]);
+			if (t.parent[v] == NP) {
+				REQUIRE(d.parent[dv] == NP);
+			} else {
+				REQUIRE(d.parent[dv] == d.find(ids[t.parent[v]]));
+				REQUIRE(d.branch_length[dv] == t.length[v]);
+			}
+		}
+		// And it is a tree the index accepts, with the same root distances.
+		auto idx = TreeIndex::Build(d.parent, d.branch_length, &d.node_ids);
+		for (uint32_t v = 0; v < n; ++v) {
+			REQUIRE(idx.root_distance(d.find(ids[v])) == naive_root_distance(t, v));
+		}
+	}
+}
+
+TEST_CASE("DenseTree: rejects rows that cannot be numbered", "[TreeIndex]") {
+	SECTION("no rows") {
+		REQUIRE_THROWS_WITH(dense({}), ContainsSubstring("empty"));
+	}
+	SECTION("columns of different lengths") {
+		REQUIRE_THROWS_WITH(dense({{1, 2}, {0}, {false, true}, {1.0, 1.0}}), ContainsSubstring("size"));
+	}
+	SECTION("a repeated id, out of order") {
+		REQUIRE_THROWS_WITH(dense({{7, 3, 7}, {0, 7, 3}, {false, true, true}, {kNaN, 1.0, 1.0}}),
+		                    ContainsSubstring("node_index 7 appears more than once"));
+	}
+	SECTION("a parent id that is no row's id") {
+		REQUIRE_THROWS_WITH(dense({{0, 1, 2}, {2, 99, 0}, {true, true, false}, {1.0, 1.0, kNaN}}),
+		                    ContainsSubstring("parent_index of node_index 1 (99)"));
+	}
+	SECTION("a parent id outside a contiguous range") {
+		REQUIRE_THROWS_WITH(dense({{0, 1, 2}, {3, 2, 0}, {true, true, false}, {1.0, 1.0, kNaN}}),
+		                    ContainsSubstring("parent_index of node_index 0 (3)"));
+	}
 }

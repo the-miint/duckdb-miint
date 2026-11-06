@@ -2,7 +2,9 @@
 
 #include "NewickTree.hpp"
 
+#include <algorithm>
 #include <cmath>
+#include <numeric>
 #include <stdexcept>
 #include <string>
 
@@ -17,6 +19,16 @@ std::string NodeLabel(uint32_t v, const std::vector<int64_t> *node_ids) {
 		return "node_index " + std::to_string((*node_ids)[v]);
 	}
 	return "node " + std::to_string(v);
+}
+
+template <class T>
+std::vector<T> Permuted(const std::vector<T> &values, const std::vector<uint32_t> &order) {
+	std::vector<T> out;
+	out.reserve(order.size());
+	for (uint32_t i : order) {
+		out.push_back(values[i]);
+	}
+	return out;
 }
 
 } // namespace
@@ -162,6 +174,70 @@ TreeIndex TreeIndex::FromNewickTree(const NewickTree &tree, const std::vector<in
 		branch_length[v] = tree.branch_length(static_cast<uint32_t>(v));
 	}
 	return Build(parent, branch_length, node_ids);
+}
+
+DenseTree DenseTree::FromRows(std::vector<int64_t> node_ids, std::vector<int64_t> parent_ids,
+                              std::vector<bool> has_parent, std::vector<double> branch_length) {
+	const size_t n = node_ids.size();
+	if (parent_ids.size() != n || has_parent.size() != n || branch_length.size() != n) {
+		throw std::invalid_argument("the node, parent and branch length columns differ in size");
+	}
+	if (n == 0) {
+		throw std::invalid_argument("the tree is empty");
+	}
+	if (n >= TreeIndex::NO_PARENT) {
+		throw std::invalid_argument("too many nodes (" + std::to_string(n) + ")");
+	}
+
+	// Rows in ascending id. They usually are already (read_newick numbers in row order),
+	// and then nothing moves.
+	if (!std::is_sorted(node_ids.begin(), node_ids.end())) {
+		std::vector<uint32_t> order(n);
+		std::iota(order.begin(), order.end(), 0u);
+		std::sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) { return node_ids[a] < node_ids[b]; });
+		node_ids = Permuted(node_ids, order);
+		parent_ids = Permuted(parent_ids, order);
+		has_parent = Permuted(has_parent, order);
+		branch_length = Permuted(branch_length, order);
+	}
+	for (size_t i = 1; i < n; ++i) {
+		if (node_ids[i] == node_ids[i - 1]) {
+			throw std::invalid_argument("node_index " + std::to_string(node_ids[i]) + " appears more than once");
+		}
+	}
+
+	DenseTree out;
+	out.node_ids = std::move(node_ids);
+	out.branch_length = std::move(branch_length);
+	out.parent.resize(n);
+	for (size_t i = 0; i < n; ++i) {
+		if (!has_parent[i]) {
+			out.parent[i] = TreeIndex::NO_PARENT;
+			continue;
+		}
+		const uint32_t p = out.find(parent_ids[i]);
+		if (p == NOT_FOUND) {
+			throw std::invalid_argument("the parent_index of node_index " + std::to_string(out.node_ids[i]) + " (" +
+			                            std::to_string(parent_ids[i]) + ") is not the node_index of any row");
+		}
+		out.parent[i] = p;
+	}
+	return out;
+}
+
+uint32_t DenseTree::find(int64_t node_id) const {
+	if (node_ids.empty()) {
+		return NOT_FOUND;
+	}
+	// Offsets in unsigned arithmetic, which is defined across the whole int64 range. The ids
+	// are sorted and distinct, so they are contiguous exactly when they span n - 1.
+	const uint64_t first = static_cast<uint64_t>(node_ids.front());
+	if (static_cast<uint64_t>(node_ids.back()) - first == node_ids.size() - 1) {
+		const uint64_t offset = static_cast<uint64_t>(node_id) - first;
+		return offset < node_ids.size() ? static_cast<uint32_t>(offset) : NOT_FOUND;
+	}
+	auto it = std::lower_bound(node_ids.begin(), node_ids.end(), node_id);
+	return (it != node_ids.end() && *it == node_id) ? static_cast<uint32_t>(it - node_ids.begin()) : NOT_FOUND;
 }
 
 uint32_t TreeIndex::lowest_ancestor_containing(uint32_t from, uint32_t x) const {

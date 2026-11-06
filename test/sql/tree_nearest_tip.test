@@ -462,6 +462,107 @@ F	1.9
 G	2.0
 
 # =============================================================================
+# The tree's rows: any order and any distinct node_index values give the same answers,
+# lca_index included in the caller's numbering. Rows that do not form one tree are
+# errors naming the tree and the row.
+# =============================================================================
+
+# Stored in an order that is not node_index order.
+statement ok
+CREATE TABLE ex1_shuffled AS SELECT * FROM ex1 ORDER BY hash(node_index);
+
+query I
+SELECT list(node_index) <> list_sort(list(node_index)) FROM ex1_shuffled;
+----
+true
+
+query TTRII
+SELECT query, target, round(distance, 12), n_tied, lca_index
+FROM tree_nearest_tip('ex1_shuffled', 'ex1_targets', 'ex1_queries') ORDER BY query;
+----
+B	A	0.3	1	2
+F	A	1.9	1	9
+G	A	2.0	1	9
+
+# Sparse, negative ids that run against the tree's postorder: C (2) is 16, the root (9) is -33.
+statement ok
+CREATE VIEW ex1_spread AS
+SELECT 30 - 7 * node_index AS node_index, 30 - 7 * parent_index AS parent_index, name, branch_length FROM ex1;
+
+query TTRII
+SELECT query, target, round(distance, 12), n_tied, lca_index
+FROM tree_nearest_tip('ex1_spread', 'ex1_targets', 'ex1_queries') ORDER BY query;
+----
+B	A	0.3	1	16
+F	A	1.9	1	-33
+G	A	2.0	1	-33
+
+statement ok
+CREATE TABLE ex1_dup_index AS SELECT * FROM ex1 UNION ALL SELECT * FROM ex1 WHERE name = 'F';
+
+statement error
+SELECT * FROM tree_nearest_tip('ex1_dup_index', 'ex1_targets', 'ex1_queries');
+----
+tree_nearest_tip: the tree 'ex1_dup_index' cannot be searched: node_index 6 appears more than once
+
+statement ok
+CREATE TABLE ex1_dangling AS
+SELECT node_index, CASE WHEN name = 'D' THEN 99 ELSE parent_index END AS parent_index, name, branch_length FROM ex1;
+
+statement error
+SELECT * FROM tree_nearest_tip('ex1_dangling', 'ex1_targets', 'ex1_queries');
+----
+tree_nearest_tip: the tree 'ex1_dangling' cannot be searched: the parent_index of node_index 3 (99) is not the node_index of any row
+
+statement ok
+CREATE TABLE ex1_null_index AS
+SELECT CASE WHEN name = 'D' THEN NULL ELSE node_index END AS node_index, parent_index, name, branch_length FROM ex1;
+
+statement error
+SELECT * FROM tree_nearest_tip('ex1_null_index', 'ex1_targets', 'ex1_queries');
+----
+tree_nearest_tip: the tree 'ex1_null_index' cannot be searched: a row's node_index is NULL
+
+statement ok
+CREATE TABLE ex1_no_rows AS SELECT * FROM ex1 WHERE false;
+
+statement error
+SELECT * FROM tree_nearest_tip('ex1_no_rows', 'ex1_targets', 'ex1_queries');
+----
+tree_nearest_tip: the tree 'ex1_no_rows' cannot be searched: the tree is empty
+
+statement ok
+CREATE TABLE ex1_two_roots AS
+SELECT node_index, CASE WHEN name = 'H' THEN NULL ELSE parent_index END AS parent_index, name, branch_length FROM ex1;
+
+statement error
+SELECT * FROM tree_nearest_tip('ex1_two_roots', 'ex1_targets', 'ex1_queries');
+----
+tree_nearest_tip: the tree 'ex1_two_roots' cannot be searched: the tree has 2 roots
+
+# x (5) under C (2), which is under x: A, B, C, D, E and x never reach the root.
+statement ok
+CREATE TABLE ex1_cycle AS
+SELECT node_index, CASE WHEN name = 'x' THEN 2 ELSE parent_index END AS parent_index, name, branch_length FROM ex1;
+
+statement error
+SELECT * FROM tree_nearest_tip('ex1_cycle', 'ex1_targets', 'ex1_queries');
+----
+tree_nearest_tip: the tree 'ex1_cycle' cannot be searched: node_index 0 is not connected to the root
+
+# A tree whose rows fail as they are read reports that failure, not a tree that looks empty
+# or cut short.
+statement ok
+CREATE VIEW ex1_read_fails AS
+SELECT node_index, parent_index, name, CASE WHEN name = 'H' THEN error('tree rows unreadable') ELSE branch_length END AS branch_length
+FROM ex1;
+
+statement error
+SELECT * FROM tree_nearest_tip('ex1_read_fails', 'ex1_targets', 'ex1_queries');
+----
+tree rows unreadable
+
+# =============================================================================
 # Duplicates, NULL names, empty inputs
 # =============================================================================
 

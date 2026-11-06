@@ -78,6 +78,11 @@ public:
 		return contains(a, pre_[v]);
 	}
 
+	// True when v has no children: its subtree is v alone.
+	bool is_tip(uint32_t v) const {
+		return pre_[v] == last_[v];
+	}
+
 	// The lowest ancestor-or-self of `from` whose subtree contains preorder position x.
 	uint32_t lowest_ancestor_containing(uint32_t from, uint32_t x) const;
 
@@ -94,6 +99,28 @@ private:
 	std::vector<uint32_t> jump_;
 	std::vector<double> dist_;
 	uint32_t root_ = NO_PARENT;
+};
+
+// A tree's rows as a table holds them, numbered densely for TreeIndex::Build.
+//
+// Rows may come in any order and their ids may be any distinct values: dense index i is
+// the row with the i-th smallest id, so the dense numbering keeps the caller's order.
+struct DenseTree {
+	static constexpr uint32_t NOT_FOUND = UINT32_MAX;
+
+	std::vector<int64_t> node_ids; // each dense index's id, ascending
+	std::vector<uint32_t> parent;  // dense; TreeIndex::NO_PARENT where the row has no parent
+	std::vector<double> branch_length;
+
+	// One entry per row: its id, its parent's id (ignored where has_parent is false) and
+	// the length of the edge above it. Throws std::invalid_argument when the columns differ
+	// in size, when there are no rows, when an id repeats, or when a parent id is no row's id.
+	static DenseTree FromRows(std::vector<int64_t> node_ids, std::vector<int64_t> parent_ids,
+	                          std::vector<bool> has_parent, std::vector<double> branch_length);
+
+	// The dense index of an id, or NOT_FOUND when no row has it. O(1) when the ids are
+	// contiguous, as read_newick's are; a binary search otherwise.
+	uint32_t find(int64_t node_id) const;
 };
 
 } // namespace miint
