@@ -232,7 +232,7 @@ DenseTree DenseTree::FromRows(std::vector<int64_t> node_ids, std::vector<int64_t
 	return out;
 }
 
-uint32_t DenseTree::find(int64_t node_id) const {
+uint32_t DenseTree::Find(const std::vector<int64_t> &node_ids, int64_t node_id) {
 	if (node_ids.empty()) {
 		return NOT_FOUND;
 	}

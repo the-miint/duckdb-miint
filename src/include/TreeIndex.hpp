@@ -142,7 +142,11 @@ struct DenseTree {
 
 	// The dense index of an id, or NOT_FOUND when no row has it. O(1) when the ids are
 	// contiguous, as read_newick's are; a binary search otherwise.
-	uint32_t find(int64_t node_id) const;
+	uint32_t find(int64_t node_id) const {
+		return Find(node_ids, node_id);
+	}
+	// The same over a DenseTree's node_ids, kept after the rest of it is released.
+	static uint32_t Find(const std::vector<int64_t> &node_ids, int64_t node_id);
 };
 
 } // namespace miint

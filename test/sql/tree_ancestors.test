@@ -1,0 +1,554 @@
+# name: test/sql/tree_ancestors.test
+# description: tree_ancestors gives every (node, ancestor) pair, with the edges and distance between them
+# group: [sql]
+
+require miint
+
+# The ancestors of each node, as rows, turn tree questions into joins: "the first
+# ancestor with property P" is this joined to P plus arg_min(edges); "the LCA of two
+# nodes" is their common ancestor with the fewest edges. That only works if every
+# ancestor is there exactly once, the node itself included (edges 0), and if a distance
+# across an unknown (NULL) length is unknown, never a number computed as if it were 0.
+
+# The tree, numbered A0 B1 C2 D3 E4 x5 F6 G7 H8 root9.
+statement ok
+COPY (SELECT '(((A:0.1,B:0.2)C:0.3,(D:0.4)E:0.5)x:0.1,(F:0.6,G:0.7)H:0.8)root;')
+TO '{TEST_DIR}/ex1.nwk' (FORMAT csv, HEADER false, DELIMITER E'\t');
+
+statement ok
+CREATE TABLE ex1 AS SELECT * FROM read_newick('{TEST_DIR}/ex1.nwk');
+
+# =============================================================================
+# Worked example: the whole closure, 29 rows (one per node and ancestor-or-self)
+# =============================================================================
+
+query TTIR
+SELECT n.name, a.name, r.edges, round(r.distance, 12)
+FROM tree_ancestors('ex1') r JOIN ex1 n ON n.node_index = r.node_index JOIN ex1 a ON a.node_index = r.ancestor_index
+ORDER BY r.node_index, r.edges;
+----
+A	A	0	0.0
+A	C	1	0.1
+A	x	2	0.4
+A	root	3	0.5
+B	B	0	0.0
+B	C	1	0.2
+B	x	2	0.5
+B	root	3	0.6
+C	C	0	0.0
+C	x	1	0.3
+C	root	2	0.4
+D	D	0	0.0
+D	E	1	0.4
+D	x	2	0.9
+D	root	3	1.0
+E	E	0	0.0
+E	x	1	0.5
+E	root	2	0.6
+x	x	0	0.0
+x	root	1	0.1
+F	F	0	0.0
+F	H	1	0.6
+F	root	2	1.4
+G	G	0	0.0
+G	H	1	0.7
+G	root	2	1.5
+H	H	0	0.0
+H	root	1	0.8
+root	root	0	0.0
+
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM tree_ancestors('ex1'));
+----
+node_index	BIGINT
+ancestor_index	BIGINT
+edges	BIGINT
+distance	DOUBLE
+
+# =============================================================================
+# The recipes the rows are for
+# =============================================================================
+
+# The first ancestor (not the node itself) with a property: here, the clades labelled x
+# and H.
+statement ok
+CREATE TABLE has_p AS SELECT * FROM (VALUES ('x'), ('H')) AS v(name);
+
+query TT
+SELECT n.name, f.name
+FROM (
+    SELECT r.node_index, arg_min(r.ancestor_index, r.edges) AS first_p
+    FROM tree_ancestors('ex1') r JOIN ex1 a ON a.node_index = r.ancestor_index JOIN has_p p ON p.name = a.name
+    WHERE r.edges > 0
+    GROUP BY r.node_index) q
+JOIN ex1 n ON n.node_index = q.node_index JOIN ex1 f ON f.node_index = q.first_p
+ORDER BY q.node_index;
+----
+A	x
+B	x
+C	x
+D	x
+E	x
+F	H
+G	H
+
+# On a tree with FastTree's lengths: the rows are the closure a recursive walk up the
+# parents finds, each node with depth + 1 of them; a node's row for the root is its depth
+# and its distance from the root, to the bit; and for every ordered pair of tips, the
+# common ancestor with the fewest edges is tree_lca's, at the sum of the two distances to
+# it, to the bit.
+statement ok
+CREATE TABLE mod AS SELECT * FROM read_newick('data/fasttree/moderate.golden.nwk');
+
+statement ok
+CREATE TABLE mod_anc AS SELECT * FROM tree_ancestors('mod');
+
+statement ok
+CREATE TABLE mod_walk AS
+WITH RECURSIVE up(node_index, ancestor_index, edges) AS (
+    SELECT node_index, node_index, 0 FROM mod
+    UNION ALL
+    SELECT u.node_index, m.parent_index, u.edges + 1
+    FROM up u JOIN mod m ON m.node_index = u.ancestor_index WHERE m.parent_index IS NOT NULL)
+SELECT * FROM up;
+
+query III
+SELECT (SELECT count(*) FROM mod_anc), (SELECT count(*) FROM mod_walk), (SELECT sum(depth + 1) FROM tree_node_depths('mod'));
+----
+373	373	373
+
+query I
+SELECT (SELECT count(*) FROM (SELECT node_index, ancestor_index, edges FROM mod_anc EXCEPT ALL SELECT * FROM mod_walk))
+     + (SELECT count(*) FROM (SELECT * FROM mod_walk EXCEPT ALL SELECT node_index, ancestor_index, edges FROM mod_anc));
+----
+0
+
+query I
+SELECT count(*) FROM mod_anc r JOIN tree_node_depths('mod') d USING (node_index)
+JOIN mod t ON t.node_index = r.ancestor_index
+WHERE t.parent_index IS NULL AND r.edges = d.depth AND r.distance = d.distance_to_root;
+----
+46
+
+statement ok
+CREATE TABLE mod_pairs AS
+SELECT ta.name AS a, tb.name AS b, ta.node_index AS na, tb.node_index AS nb
+FROM (SELECT name, node_index FROM mod WHERE is_tip) ta, (SELECT name, node_index FROM mod WHERE is_tip) tb;
+
+query II
+SELECT count(*), count(*) FILTER (WHERE j.lca = l.lca_index AND j.distance = l.distance)
+FROM (
+    SELECT p.a, p.b, arg_min(x.ancestor_index, x.edges) AS lca, arg_min(x.distance + y.distance, x.edges) AS distance
+    FROM mod_pairs p
+    JOIN mod_anc x ON x.node_index = p.na
+    JOIN mod_anc y ON y.node_index = p.nb AND y.ancestor_index = x.ancestor_index
+    GROUP BY p.a, p.b) j
+JOIN tree_lca('mod', 'mod_pairs') l ON l.a = j.a AND l.b = j.b;
+----
+576	576
+
+# =============================================================================
+# nodes_table: only the listed nodes, by node_index
+# =============================================================================
+
+statement ok
+CREATE TABLE nodes_ah AS SELECT * FROM (VALUES (0::BIGINT), (8::BIGINT)) AS v(node_index);
+
+query IIIR
+SELECT node_index, ancestor_index, edges, round(distance, 12)
+FROM tree_ancestors('ex1', nodes_table := 'nodes_ah') ORDER BY node_index, edges;
+----
+0	0	0	0.0
+0	2	1	0.1
+0	5	2	0.4
+0	9	3	0.5
+8	8	0	0.0
+8	9	1	0.8
+
+# Any integer type; NULL ids are dropped and a repeated id counts once.
+statement ok
+CREATE TABLE nodes_int AS SELECT * FROM (VALUES (0::INTEGER), (8::INTEGER), (0::INTEGER), (NULL::INTEGER)) AS v(node_index);
+
+query I
+SELECT count(*) FROM (
+    SELECT * FROM tree_ancestors('ex1', nodes_table := 'nodes_int')
+    EXCEPT ALL SELECT * FROM tree_ancestors('ex1', nodes_table := 'nodes_ah'));
+----
+0
+
+query I
+SELECT count(*) FROM tree_ancestors('ex1', nodes_table := 'nodes_int');
+----
+6
+
+statement ok
+CREATE TABLE nodes_utiny AS SELECT 8::UTINYINT AS node_index;
+
+query II
+SELECT node_index, ancestor_index FROM tree_ancestors('ex1', nodes_table := 'nodes_utiny') ORDER BY edges;
+----
+8	8
+8	9
+
+# A NULL nodes_table is every node, and an empty one is none.
+query I
+SELECT count(*) FROM tree_ancestors('ex1', nodes_table := NULL);
+----
+29
+
+statement ok
+CREATE TABLE nodes_none (node_index BIGINT);
+
+query I
+SELECT count(*) FROM tree_ancestors('ex1', nodes_table := 'nodes_none');
+----
+0
+
+statement ok
+CREATE TABLE nodes_only_null AS SELECT NULL::BIGINT AS node_index FROM range(3);
+
+query I
+SELECT count(*) FROM tree_ancestors('ex1', nodes_table := 'nodes_only_null');
+----
+0
+
+# An id that is no node's is an error, listing the ids.
+statement ok
+CREATE TABLE nodes_missing AS SELECT * FROM (VALUES (0), (100), (99), (100)) AS v(node_index);
+
+statement error
+SELECT * FROM tree_ancestors('ex1', nodes_table := 'nodes_missing');
+----
+tree_ancestors: 2 node_index value(s) in 'nodes_missing' are not in the tree 'ex1': '99', '100'
+
+statement ok
+CREATE TABLE nodes_text AS SELECT '0' AS node_index;
+
+statement error
+SELECT * FROM tree_ancestors('ex1', nodes_table := 'nodes_text');
+----
+tree_ancestors: node_index in 'nodes_text' must be an integer type, but it is VARCHAR
+
+statement ok
+CREATE TABLE nodes_unkeyed AS SELECT 0 AS id;
+
+statement error
+SELECT * FROM tree_ancestors('ex1', nodes_table := 'nodes_unkeyed');
+----
+tree_ancestors: nodes table 'nodes_unkeyed' has no 'node_index' column
+
+# The tree as its own nodes_table would be read twice. Identifiers are case-insensitive.
+statement error
+SELECT * FROM tree_ancestors('ex1', nodes_table := 'EX1');
+----
+tree_ancestors: 'EX1' is the tree table; leave nodes_table out for every node, or pass the nodes as a relation of their own
+
+statement error
+SELECT * FROM tree_ancestors('ex1', nodes_table := 'nope');
+----
+does not exist
+
+# =============================================================================
+# Branch lengths
+# =============================================================================
+
+# E's length is unknown: D is still 0.4 from E, but every distance across E's edge is
+# unknown. Edges are unaffected.
+statement ok
+CREATE TABLE ex1_e_null AS
+SELECT node_index, parent_index, name, CASE WHEN name = 'E' THEN NULL ELSE branch_length END AS branch_length FROM ex1;
+
+statement ok
+CREATE TABLE nodes_de AS SELECT * FROM (VALUES (3), (4), (1)) AS v(node_index);
+
+query IIIR
+SELECT node_index, ancestor_index, edges, round(distance, 12)
+FROM tree_ancestors('ex1_e_null', nodes_table := 'nodes_de') ORDER BY node_index, edges;
+----
+1	1	0	0.0
+1	2	1	0.2
+1	5	2	0.5
+1	9	3	0.6
+3	3	0	0.0
+3	4	1	0.4
+3	5	2	NULL
+3	9	3	NULL
+4	4	0	0.0
+4	5	1	NULL
+4	9	2	NULL
+
+# A negative length is summed like any other.
+statement ok
+CREATE TABLE ex1_neg AS
+SELECT node_index, parent_index, name, CASE WHEN name = 'G' THEN -0.5 ELSE branch_length END AS branch_length FROM ex1;
+
+statement ok
+CREATE TABLE nodes_g AS SELECT 7 AS node_index;
+
+query IIR
+SELECT ancestor_index, edges, round(distance, 12) FROM tree_ancestors('ex1_neg', nodes_table := 'nodes_g') ORDER BY edges;
+----
+7	0	0.0
+8	1	-0.5
+9	2	0.3
+
+statement ok
+CREATE TABLE ex1_inf AS
+SELECT node_index, parent_index, name, CASE WHEN name = 'E' THEN 'inf'::DOUBLE ELSE branch_length END AS branch_length
+FROM ex1;
+
+statement error
+SELECT * FROM tree_ancestors('ex1_inf');
+----
+tree_ancestors: the tree 'ex1_inf' cannot be read: the branch length of node_index 4 is not finite
+
+# Without a branch_length column every length is unknown, and a node is 0 from itself.
+statement ok
+CREATE TABLE ex1_no_lengths AS SELECT node_index, parent_index FROM ex1;
+
+query IIIR
+SELECT node_index, ancestor_index, edges, distance FROM tree_ancestors('ex1_no_lengths', nodes_table := 'nodes_ah')
+ORDER BY node_index, edges;
+----
+0	0	0	0.0
+0	2	1	NULL
+0	5	2	NULL
+0	9	3	NULL
+8	8	0	0.0
+8	9	1	NULL
+
+# =============================================================================
+# The tree's rows: any order and any distinct node_index values, in the caller's
+# numbering, nodes_table included. Rows that do not form one tree are errors.
+# =============================================================================
+
+statement ok
+CREATE TABLE ex1_shuffled AS SELECT * FROM ex1 ORDER BY hash(node_index);
+
+query I
+SELECT list(node_index) <> list_sort(list(node_index)) FROM ex1_shuffled;
+----
+true
+
+query I
+SELECT count(*) FROM (SELECT * FROM tree_ancestors('ex1_shuffled') EXCEPT SELECT * FROM tree_ancestors('ex1'));
+----
+0
+
+# Sparse, negative ids that run against the tree's postorder: A (0) is 30, C (2) is 16,
+# x (5) is -5 and the root (9) is -33.
+statement ok
+CREATE VIEW ex1_spread AS
+SELECT 30 - 7 * node_index AS node_index, 30 - 7 * parent_index AS parent_index, name, branch_length FROM ex1;
+
+statement ok
+CREATE TABLE nodes_spread_a AS SELECT 30 AS node_index;
+
+query IIIR
+SELECT node_index, ancestor_index, edges, round(distance, 12)
+FROM tree_ancestors('ex1_spread', nodes_table := 'nodes_spread_a') ORDER BY edges;
+----
+30	30	0	0.0
+30	16	1	0.1
+30	-5	2	0.4
+30	-33	3	0.5
+
+# 0 is A's node_index in ex1 but no node's in ex1_spread.
+statement error
+SELECT * FROM tree_ancestors('ex1_spread', nodes_table := 'nodes_ah');
+----
+tree_ancestors: 2 node_index value(s) in 'nodes_ah' are not in the tree 'ex1_spread': '0', '8'
+
+statement ok
+CREATE TABLE ex1_cycle AS
+SELECT node_index, CASE WHEN name = 'x' THEN 2 ELSE parent_index END AS parent_index, name, branch_length FROM ex1;
+
+statement error
+SELECT * FROM tree_ancestors('ex1_cycle');
+----
+tree_ancestors: the tree 'ex1_cycle' cannot be read: node_index 0 is not connected to the root
+
+statement ok
+CREATE TABLE ex1_no_rows AS SELECT * FROM ex1 WHERE false;
+
+statement error
+SELECT * FROM tree_ancestors('ex1_no_rows');
+----
+tree_ancestors: the tree 'ex1_no_rows' cannot be read: the tree is empty
+
+# A tree of one node is its own ancestor.
+statement ok
+CREATE TABLE one_node AS SELECT 42 AS node_index, NULL::BIGINT AS parent_index;
+
+query IIIR
+SELECT * FROM tree_ancestors('one_node');
+----
+42	42	0	0.0
+
+statement ok
+CREATE TABLE no_parent_col AS SELECT node_index, name FROM ex1;
+
+statement error
+SELECT * FROM tree_ancestors('no_parent_col');
+----
+missing required column 'parent_index'
+
+statement error
+SELECT * FROM tree_ancestors('nope');
+----
+does not exist
+
+# =============================================================================
+# Each relation is read exactly once, at execution. The volatility sits in a column the
+# read must evaluate (docs/internals/reading-tables-views.md), and it is inert.
+# =============================================================================
+
+statement ok
+CREATE SEQUENCE tree_seq START 1;
+
+statement ok
+CREATE SEQUENCE nodes_seq START 1;
+
+statement ok
+CREATE VIEW ex1_volatile AS
+SELECT node_index, parent_index, name, branch_length + 0 * nextval('tree_seq') AS branch_length FROM ex1;
+
+statement ok
+CREATE VIEW nodes_volatile AS SELECT node_index + 0 * nextval('nodes_seq') AS node_index FROM nodes_ah;
+
+statement ok
+EXPLAIN SELECT * FROM tree_ancestors('ex1_volatile', nodes_table := 'nodes_volatile');
+
+query I
+SELECT count(*) FROM (
+    SELECT * FROM tree_ancestors('ex1_volatile', nodes_table := 'nodes_volatile')
+    EXCEPT SELECT * FROM tree_ancestors('ex1', nodes_table := 'nodes_ah'));
+----
+0
+
+query II
+SELECT currval('tree_seq'), currval('nodes_seq');
+----
+10	2
+
+# Planning reads no rows.
+statement ok
+CREATE VIEW boom AS SELECT CAST(error('read at planning') AS BIGINT) AS node_index FROM nodes_ah;
+
+statement ok
+EXPLAIN SELECT * FROM tree_ancestors('ex1', nodes_table := 'boom');
+
+statement error
+SELECT * FROM tree_ancestors('ex1', nodes_table := 'boom');
+----
+read at planning
+
+# =============================================================================
+# Rows stream: one node's ancestors can run past an output chunk, and the next call
+# carries on where it stopped. A caterpillar of 5000 tips, every edge of length 1: t_0
+# and t_1 are 4999 edges from the root and t_i (i >= 2) 5000 - i. Its first 200 tips have
+# 980,299 (node, ancestor) rows in all, spread over several threads; each node has every
+# edge count from 0 to its depth exactly once, at the ancestor that many levels up.
+# =============================================================================
+
+statement ok
+CREATE TABLE cat_newick AS
+SELECT repeat('(', 4999) || 't0:1,t1:1' || string_agg('):1,t' || i || ':1', '' ORDER BY i) || ');' AS nwk
+FROM generate_series(2, 4999) AS s(i);
+
+statement ok
+COPY cat_newick TO '{TEST_DIR}/caterpillar.nwk' (FORMAT csv, HEADER false, DELIMITER E'\t');
+
+statement ok
+CREATE TABLE cat AS SELECT * FROM read_newick('{TEST_DIR}/caterpillar.nwk');
+
+statement ok
+CREATE TABLE cat_nodes AS SELECT node_index FROM cat WHERE is_tip AND CAST(substr(name, 2) AS BIGINT) < 200;
+
+statement ok
+CREATE TABLE cat_depths AS SELECT * FROM tree_node_depths('cat');
+
+statement ok
+SET threads = 8;
+
+statement ok
+CREATE TABLE cat_many AS SELECT * FROM tree_ancestors('cat', nodes_table := 'cat_nodes');
+
+statement ok
+SET threads = 1;
+
+statement ok
+CREATE TABLE cat_one AS SELECT * FROM tree_ancestors('cat', nodes_table := 'cat_nodes');
+
+statement ok
+RESET threads;
+
+query III
+SELECT count(*), count(DISTINCT (node_index, edges)),
+       (SELECT sum(depth + 1) FROM cat_depths JOIN cat_nodes USING (node_index))
+FROM cat_many;
+----
+980299	980299	980299
+
+query I
+SELECT (SELECT count(*) FROM (SELECT * FROM cat_many EXCEPT ALL SELECT * FROM cat_one))
+     + (SELECT count(*) FROM (SELECT * FROM cat_one EXCEPT ALL SELECT * FROM cat_many));
+----
+0
+
+query I
+SELECT count(*) FROM cat_many r
+JOIN cat_depths dn ON dn.node_index = r.node_index
+JOIN cat_depths da ON da.node_index = r.ancestor_index
+WHERE da.depth <> dn.depth - r.edges OR r.distance <> r.edges OR r.edges > dn.depth;
+----
+0
+
+# =============================================================================
+# Relation names are quoted where the SQL is built. nodes_table is read first: under
+# unquoted concatenation the first call's, and under a naive "-wrap the second's, would
+# read the nodes and then run the DROP.
+# =============================================================================
+
+statement ok
+CREATE TABLE injection_victim AS SELECT 1 AS x;
+
+statement ok
+CREATE TABLE "ex1; DROP TABLE injection_victim; --" AS SELECT * FROM ex1;
+
+statement ok
+CREATE TABLE "nodes_ah; DROP TABLE injection_victim; --" AS SELECT * FROM nodes_ah;
+
+statement ok
+CREATE TABLE "nodes_ah""; DROP TABLE injection_victim; --" AS SELECT * FROM nodes_ah;
+
+query I
+SELECT count(*) FROM tree_ancestors('ex1; DROP TABLE injection_victim; --',
+                                    nodes_table := 'nodes_ah; DROP TABLE injection_victim; --');
+----
+6
+
+query I
+SELECT count(*) FROM tree_ancestors('ex1', nodes_table := 'nodes_ah"; DROP TABLE injection_victim; --');
+----
+6
+
+query I
+SELECT count(*) FROM injection_victim;
+----
+1
+
+# TEMP relations resolve as permanent ones do
+# (docs/internals/reading-tables-views.md, "TEMP tables and views").
+statement ok
+CREATE TEMP TABLE tmp_tree AS SELECT * FROM ex1;
+
+statement ok
+CREATE TEMP VIEW tmp_nodes AS SELECT * FROM nodes_ah;
+
+query I
+SELECT count(*) FROM (
+    SELECT * FROM tree_ancestors('tmp_tree', nodes_table := 'tmp_nodes')
+    EXCEPT SELECT * FROM tree_ancestors('ex1', nodes_table := 'nodes_ah'));
+----
+0
