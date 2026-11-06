@@ -60,7 +60,7 @@ void require_matches_naive(const TreeIndex &idx, const TreeArrays &t) {
 TEST_CASE("TreeIndex: root distance and depth on a hand-written tree", "[TreeIndex]") {
 	// Dyadic lengths, so every expected sum is exact. G's own length (3) is ignored.
 	auto tree = miint::NewickTree::parse("((A:0.5,B:0.25)C:1,(D:0.125,E:2)F:0.75)G:3;");
-	auto idx = TreeIndex::FromNewickTree(tree);
+	auto idx = index_of(tree);
 
 	REQUIRE(idx.root() == node_named(tree, "G"));
 	REQUIRE(idx.root_distance(node_named(tree, "G")) == 0.0);
@@ -83,7 +83,7 @@ TEST_CASE("TreeIndex: root distance and depth on a hand-written tree", "[TreeInd
 
 TEST_CASE("TreeIndex: lowest_ancestor_containing climbs to the first subtree holding a position", "[TreeIndex]") {
 	auto tree = miint::NewickTree::parse("((A:1,B:1)C:1,(D:1,(E:1,F:1)G:1)H:1)R;");
-	auto idx = TreeIndex::FromNewickTree(tree);
+	auto idx = index_of(tree);
 	auto at = [&](const char *name) {
 		return node_named(tree, name);
 	};
@@ -120,7 +120,8 @@ TEST_CASE("TreeIndex: a single node is a tree", "[TreeIndex]") {
 
 TEST_CASE("TreeIndex: a 200,000-level caterpillar builds and answers without recursion", "[TreeIndex]") {
 	// Placement trees nest this deep. A recursive build would overflow the stack, and a
-	// parent-by-parent climb would be slow; the answers here are known in closed form.
+	// parent-by-parent climb would take O(depth) steps; the answers here are known in
+	// closed form.
 	const uint32_t levels = 200000;
 	auto t = caterpillar(levels);
 	auto idx = TreeIndex::Build(t.parent, t.length);
@@ -138,7 +139,8 @@ TEST_CASE("TreeIndex: a 200,000-level caterpillar builds and answers without rec
 		uint32_t a = pick(rng);
 		uint32_t b = pick(rng);
 		// Tips k and m (k < m) meet at internal node k; the last tip shares node levels-1.
-		uint32_t expected = std::min(std::min(a, b), levels - 1);
+		// A tip is its own LCA.
+		uint32_t expected = a == b ? tip(a) : std::min(std::min(a, b), levels - 1);
 		CAPTURE(a, b);
 		REQUIRE(idx.lca(tip(a), tip(b)) == expected);
 	}
@@ -183,7 +185,7 @@ TEST_CASE("TreeIndex: rejects a NULL, infinite or negative branch length below t
 	std::vector<int64_t> ids = {1000, 1001, 1002};
 	SECTION("NULL") {
 		REQUIRE_THROWS_WITH(TreeIndex::Build({NP, 0, 0}, {1.0, 1.0, kNaN}, &ids),
-		                    ContainsSubstring("node_index 1002") && ContainsSubstring("NULL"));
+		                    ContainsSubstring("node_index 1002") && ContainsSubstring("NULL or NaN"));
 	}
 	SECTION("negative") {
 		REQUIRE_THROWS_WITH(TreeIndex::Build({NP, 0, 0}, {1.0, -0.5, 1.0}, &ids),
@@ -198,10 +200,12 @@ TEST_CASE("TreeIndex: rejects a NULL, infinite or negative branch length below t
 	}
 }
 
-TEST_CASE("TreeIndex: FromNewickTree applies the same validation", "[TreeIndex]") {
-	// B has no branch length.
-	auto tree = miint::NewickTree::parse("(A:1,B)R;");
-	REQUIRE_THROWS_WITH(TreeIndex::FromNewickTree(tree), ContainsSubstring("NULL"));
+TEST_CASE("TreeIndex: rejects root distances that overflow", "[TreeIndex]") {
+	// Each length is finite, but their sum is not; a distance from it would be infinite or NaN.
+	const double big = std::numeric_limits<double>::max() / 2 * 1.5;
+	REQUIRE_THROWS_WITH(TreeIndex::Build({NP, 0, 1}, {kNaN, big, big}), ContainsSubstring("node 2") &&
+	                                                                        ContainsSubstring("root distance") &&
+	                                                                        ContainsSubstring("not finite"));
 }
 
 // ---------------------------------------------------------------------------

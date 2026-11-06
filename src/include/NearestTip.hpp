@@ -55,10 +55,6 @@ public:
 	NearestTipTargets(const TreeIndex &index, const std::vector<uint32_t> &nodes,
 	                  const std::vector<uint32_t> &name_ranks);
 
-	size_t size() const {
-		return pos_.size();
-	}
-
 	NearestTipResult Search(uint32_t query, const NearestTipOptions &options = {}) const;
 
 private:

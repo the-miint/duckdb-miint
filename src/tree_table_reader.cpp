@@ -175,6 +175,7 @@ TreeTableArrays ReadTreeArrays(ClientContext &context, const std::string &table_
 		if (rows == 0) {
 			break;
 		}
+		context.InterruptCheck();
 		UnifiedVectorFormat node_data, parent_data, name_data, bl_data;
 		chunk->data[0].ToUnifiedFormat(node_data);
 		chunk->data[1].ToUnifiedFormat(parent_data);

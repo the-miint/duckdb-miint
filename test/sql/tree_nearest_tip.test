@@ -7,8 +7,7 @@ require miint
 # Placing a record whose taxon label is split across clades means taking the lineage of
 # the nearest tip carrying the same label. The search must count every edge on the path,
 # search within each label rather than across all of them, and never settle a tie
-# silently: the scikit-bio search this replaces got all three wrong. The search itself is
-# checked against a brute-force oracle in test/cpp/test_NearestTip.cpp; this file checks
+# silently. The search itself is checked against a brute-force oracle in test/cpp/test_NearestTip.cpp; this file checks
 # the SQL contract around it.
 
 # The worked example's tree, numbered A0 B1 C2 D3 E4 x5 F6 G7 H8 root9.
@@ -122,6 +121,19 @@ SELECT query, target FROM tree_nearest_tip('ex1', 'ex1_targets_gnull', 'ex1_quer
 ----
 F	D
 
+# A target in two groups competes in both: in g2, A (0.3 from B) beats D (1.4).
+statement ok
+CREATE TABLE t_two_groups AS SELECT * FROM (VALUES ('A', 'g1'), ('A', 'g2'), ('D', 'g2')) AS v(name, grp);
+
+statement ok
+CREATE TABLE q_two_groups AS SELECT * FROM (VALUES ('B', 'g1'), ('B', 'g2')) AS v(name, grp);
+
+query TTT
+SELECT query, grp, target FROM tree_nearest_tip('ex1', 't_two_groups', 'q_two_groups') ORDER BY grp;
+----
+B	g1	A
+B	g2	A
+
 # grp must be in both tables or in neither, with the same type.
 statement error
 SELECT * FROM tree_nearest_tip('ex1', 'ex1_targets_g', 'ex1_queries');
@@ -187,6 +199,37 @@ query TRI
 SELECT target, round(distance, 12), n_tied FROM tree_nearest_tip('ties_tree', 't12', 'q_only');
 ----
 T1	0.4	2
+
+# VARCHAR ties go by bytes, whatever the collation: 'B' (0x42) before 'a' (0x61), though a
+# case-insensitive ORDER BY puts 'a' first.
+statement ok
+CREATE TABLE case_tree AS
+SELECT node_index, parent_index, CASE name WHEN 'T1' THEN 'a' WHEN 'T2' THEN 'B' ELSE name END AS name, branch_length
+FROM ties_tree;
+
+statement ok
+CREATE TABLE t_aB AS SELECT * FROM (VALUES ('a'), ('B')) AS v(name);
+
+query TI
+SELECT target, n_tied FROM tree_nearest_tip('case_tree', 't_aB', 'q_only');
+----
+B	2
+
+statement ok
+CREATE TABLE case_tree_nocase AS
+SELECT node_index, parent_index, name::VARCHAR COLLATE NOCASE AS name, branch_length FROM case_tree;
+
+statement ok
+CREATE TABLE t_aB_nocase AS SELECT name::VARCHAR COLLATE NOCASE AS name FROM t_aB;
+
+statement ok
+CREATE TABLE q_only_nocase AS SELECT name::VARCHAR COLLATE NOCASE AS name FROM q_only;
+
+query TT
+SELECT target, (SELECT min(name) FROM t_aB_nocase)
+FROM tree_nearest_tip('case_tree_nocase', 't_aB_nocase', 'q_only_nocase');
+----
+B	a
 
 statement ok
 COPY (SELECT '((T1:0.1,T2:0.2)a:0.1,T3:0.5)r;') TO '{TEST_DIR}/self.nwk' (FORMAT csv, HEADER false, DELIMITER E'\t');
@@ -261,6 +304,11 @@ SELECT target = (SELECT min(name) FROM uu_targets), n_tied, distance, typeof(que
 FROM tree_nearest_tip('uu', 'uu_targets', 'uu_queries');
 ----
 true	2	4.0	UUID	UUID
+
+query T
+SELECT query = '00000000-0000-0000-0000-00000000000a'::UUID FROM tree_nearest_tip('uu', 'uu_targets', 'uu_queries');
+----
+true
 
 # The three name columns must have one type, and it must be an id type.
 statement error
@@ -418,6 +466,12 @@ SELECT * FROM tree_nearest_tip('dup_tree', 't_a', 'q_d');
 ----
 tree_nearest_tip: tip name 'A' names 2 tips in the tree 'dup_tree'
 
+# ignore_missing skips names that are missing, not names that are ambiguous.
+statement error
+SELECT * FROM tree_nearest_tip('dup_tree', 't_a', 'q_d', ignore_missing := true);
+----
+tree_nearest_tip: tip name 'A' names 2 tips in the tree 'dup_tree'
+
 # A duplicate tip that nothing refers to is fine.
 statement ok
 CREATE TABLE t_b AS SELECT * FROM (VALUES ('B')) AS v(name);
@@ -449,6 +503,17 @@ SELECT * FROM tree_nearest_tip('ex1_neg_len', 'ex1_targets', 'ex1_queries');
 ----
 <REGEX>:.*tree_nearest_tip: .*the branch length of node_index 7 is negative.*
 
+# A stored NaN has no length either, and is not reported as if it were NULL.
+statement ok
+CREATE TABLE ex1_nan_len AS
+SELECT node_index, parent_index, name, CASE WHEN name = 'E' THEN 'nan'::DOUBLE ELSE branch_length END AS branch_length
+FROM ex1;
+
+statement error
+SELECT * FROM tree_nearest_tip('ex1_nan_len', 'ex1_targets', 'ex1_queries');
+----
+<REGEX>:.*tree_nearest_tip: .*the branch length of node_index 4 is NULL or NaN.*
+
 # The root's length is ignored, whatever it is.
 statement ok
 CREATE TABLE ex1_root_len AS
@@ -464,7 +529,7 @@ G	2.0
 # =============================================================================
 # The tree's rows: any order and any distinct node_index values give the same answers,
 # lca_index included in the caller's numbering. Rows that do not form one tree are
-# errors naming the tree and the row.
+# errors naming the tree, and the row where there is one.
 # =============================================================================
 
 # Stored in an order that is not node_index order.
@@ -593,6 +658,17 @@ SELECT count(*) FROM tree_nearest_tip('ex1', 'ex1_targets', 't_none');
 ----
 0
 
+# A view whose names are a constant NULL (a constant vector, not stored NULLs) names nothing.
+statement ok
+CREATE VIEW t_const_null AS SELECT NULL::VARCHAR AS name FROM range(3);
+
+query TTI
+SELECT query, target, n_tied FROM tree_nearest_tip('ex1', 't_const_null', 'ex1_queries') ORDER BY query;
+----
+B	NULL	0
+F	NULL	0
+G	NULL	0
+
 # =============================================================================
 # Schema errors
 # =============================================================================
@@ -604,6 +680,27 @@ statement error
 SELECT * FROM tree_nearest_tip('ex1_unnamed', 'ex1_targets', 'ex1_queries');
 ----
 tree_nearest_tip: tree table 'ex1_unnamed' has no 'name' column
+
+# Without lengths there are no distances; refused before any row is read.
+statement ok
+CREATE TABLE ex1_no_lengths AS SELECT node_index, parent_index, name FROM ex1;
+
+statement error
+SELECT * FROM tree_nearest_tip('ex1_no_lengths', 'ex1_targets', 'ex1_queries');
+----
+tree_nearest_tip: tree table 'ex1_no_lengths' has no 'branch_length' column
+
+# The tree as targets or queries would be read twice, and its internal labels are not
+# tips. Identifiers are case-insensitive, so 'EX1' is the tree too.
+statement error
+SELECT * FROM tree_nearest_tip('ex1', 'EX1', 'ex1_queries');
+----
+tree_nearest_tip: 'EX1' is the tree table; pass the tip names as a relation of their own
+
+statement error
+SELECT * FROM tree_nearest_tip('ex1', 'ex1_targets', 'ex1');
+----
+tree_nearest_tip: 'ex1' is the tree table
 
 statement ok
 CREATE TABLE no_name_col AS SELECT * FROM (VALUES ('A')) AS v(label);
@@ -626,7 +723,7 @@ does not exist
 # =============================================================================
 # Each relation is read exactly once, at execution. The volatility sits in a column
 # the read must evaluate (an unreferenced nextval() would be pruned; see
-# rype_single_read.test), and it is inert.
+# docs/internals/reading-tables-views.md), and it is inert.
 # =============================================================================
 
 statement ok
@@ -767,3 +864,57 @@ WHERE i BETWEEN 3 AND 4998
 
 statement ok
 RESET threads;
+
+# =============================================================================
+# Relation names are quoted where the SQL is built: a name that unquoted
+# concatenation would turn into a second statement reads the relation it names,
+# and nothing else runs.
+# =============================================================================
+
+statement ok
+CREATE TABLE injection_victim AS SELECT 1 AS x;
+
+statement ok
+CREATE TABLE "tree; DROP TABLE injection_victim; --" AS SELECT * FROM ex1;
+
+statement ok
+CREATE TABLE "targets""; DROP TABLE injection_victim; --" AS SELECT * FROM ex1_targets;
+
+statement ok
+CREATE TABLE "queries; DROP TABLE injection_victim; --" AS SELECT * FROM ex1_queries;
+
+query TTR
+SELECT query, target, round(distance, 12) FROM tree_nearest_tip(
+    'tree; DROP TABLE injection_victim; --',
+    'targets"; DROP TABLE injection_victim; --',
+    'queries; DROP TABLE injection_victim; --') ORDER BY query;
+----
+B	A	0.3
+F	A	1.9
+G	A	2.0
+
+query I
+SELECT count(*) FROM injection_victim;
+----
+1
+
+# =============================================================================
+# TEMP tables and views resolve as permanent ones do: the reads run on a helper
+# connection, which must see the caller's TEMP objects (temp_table_resolution.test).
+# =============================================================================
+
+statement ok
+CREATE TEMP TABLE tmp_tree AS SELECT * FROM ex1;
+
+statement ok
+CREATE TEMP VIEW tmp_targets AS SELECT * FROM ex1_targets;
+
+statement ok
+CREATE TEMP TABLE tmp_queries AS SELECT * FROM ex1_queries;
+
+query TTR
+SELECT query, target, round(distance, 12) FROM tree_nearest_tip('tmp_tree', 'tmp_targets', 'tmp_queries') ORDER BY query;
+----
+B	A	0.3
+F	A	1.9
+G	A	2.0

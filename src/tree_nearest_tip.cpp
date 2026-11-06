@@ -83,8 +83,7 @@ bool FindColumnType(const TableOrViewColumns &columns, const std::string &column
 // Bind fixed the output types. A relation can change type without a catalog change (a
 // view over a file that is rewritten, under a prepared statement), so a column read with
 // another type is refused rather than emitted under the old one. The check uses the types
-// of the read itself: the catalog's view of a view keeps the types of its last binding,
-// which can be stale.
+// of the read itself (docs/internals/reading-tables-views.md says why not the catalog's).
 void RequireBoundType(const std::string &relation, const std::string &column, const LogicalType &now,
                       const LogicalType &bound) {
 	if (now != bound) {
@@ -123,6 +122,7 @@ std::vector<NamedRow> ReadNames(ClientContext &context, const std::string &relat
 		if (chunk->size() == 0) {
 			break;
 		}
+		context.InterruptCheck();
 		ExtractIdColumnAsStrings(*chunk, 0, bind.name_type, names, nulls);
 		for (idx_t i = 0; i < chunk->size(); ++i) {
 			if (!nulls[i]) {
@@ -133,9 +133,9 @@ std::vector<NamedRow> ReadNames(ClientContext &context, const std::string &relat
 	return rows;
 }
 
-// Sort ids in their SQL type's order, so a tie goes to the target ORDER BY puts first:
-// bytes for VARCHAR, numbers for BIGINT, and DuckDB's own UUID comparison (of the stored
-// value ParseUuidOrThrow returns) for UUID.
+// Sort ids so a tie goes to the smallest name in its type's order: VARCHAR by bytes,
+// whatever its collation; BIGINT by value; UUID by its canonical text, which DuckDB orders
+// the same way as the UUIDs themselves.
 template <class KEY>
 void SortByKeys(std::vector<std::string> &ids, const std::vector<KEY> &keys) {
 	std::vector<size_t> order(ids.size());
@@ -152,6 +152,7 @@ void SortByKeys(std::vector<std::string> &ids, const std::vector<KEY> &keys) {
 void SortInTypeOrder(std::vector<std::string> &ids, const LogicalType &type) {
 	switch (type.id()) {
 	case LogicalTypeId::VARCHAR:
+	case LogicalTypeId::UUID:
 		std::sort(ids.begin(), ids.end());
 		return;
 	case LogicalTypeId::BIGINT: {
@@ -159,15 +160,6 @@ void SortInTypeOrder(std::vector<std::string> &ids, const LogicalType &type) {
 		keys.reserve(ids.size());
 		for (auto &id : ids) {
 			keys.push_back(::miint::ParseIdAsInt64(id).value());
-		}
-		SortByKeys(ids, keys);
-		return;
-	}
-	case LogicalTypeId::UUID: {
-		std::vector<hugeint_t> keys;
-		keys.reserve(ids.size());
-		for (auto &id : ids) {
-			keys.push_back(ParseUuidOrThrow(id));
 		}
 		SortByKeys(ids, keys);
 		return;
@@ -206,9 +198,21 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 	auto target_columns = GetTableOrViewColumns(context, data->targets_table, "Targets table");
 	auto query_columns = GetTableOrViewColumns(context, data->queries_table, "Queries table");
 
-	LogicalType tree_name, target_name, query_name;
+	LogicalType tree_name, target_name, query_name, tree_length;
 	if (!FindColumnType(tree_columns, "name", tree_name)) {
 		throw BinderException("%s: tree table '%s' has no 'name' column", kFn, data->tree_table);
+	}
+	if (!FindColumnType(tree_columns, "branch_length", tree_length)) {
+		throw BinderException("%s: tree table '%s' has no 'branch_length' column", kFn, data->tree_table);
+	}
+	// The tree is read in its own projection, so passing it as targets or queries would read
+	// it twice; its internal labels are not tips either.
+	for (const auto *names_table : {&data->targets_table, &data->queries_table}) {
+		if (StringUtil::CIEquals(*names_table, data->tree_table)) {
+			throw BinderException("%s: '%s' is the tree table; pass the tip names as a relation of their own, such "
+			                      "as SELECT name FROM %s WHERE is_tip",
+			                      kFn, *names_table, data->tree_table);
+		}
 	}
 	if (!FindColumnType(target_columns, "name", target_name)) {
 		throw BinderException("%s: targets table '%s' has no 'name' column", kFn, data->targets_table);
@@ -303,8 +307,7 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	}
 
 	{
-		// Only the names that queries and targets use are kept from the tree: on trees of
-		// tens of millions of tips, holding every name does not fit.
+		// Only the names that queries and targets use are kept from the tree.
 		std::unordered_set<std::string_view> keep_names;
 		keep_names.reserve(tips.size());
 		for (const auto &tip : tips) {

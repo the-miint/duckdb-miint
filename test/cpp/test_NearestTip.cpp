@@ -33,8 +33,7 @@ struct NamedTree {
 	miint::NewickTree tree;
 	TreeIndex index;
 
-	explicit NamedTree(const char *newick)
-	    : tree(miint::NewickTree::parse(newick)), index(TreeIndex::FromNewickTree(tree)) {
+	explicit NamedTree(const char *newick) : tree(miint::NewickTree::parse(newick)), index(index_of(tree)) {
 	}
 
 	uint32_t node(const std::string &name) const {

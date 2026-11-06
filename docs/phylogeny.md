@@ -139,21 +139,21 @@ COPY (
 
 ### Nearest target tip
 
-For each query tip, find the nearest tip among a set of target tips, measured along the tree, and report how close the decision was. With groups, each query searches only the targets in its own group, in one call for every group. A typical use is a record whose taxon label is split across clades (polyphyletic): it takes the lineage of the nearest tip that carries the same label. The same search gives the closest reference genome to a placed sequence, or nearest-neighbour taxonomy on a tree.
+For each query tip, find the nearest tip among a set of target tips, measured along the tree, and how many targets tie for nearest. With groups, each query searches only the targets in its own group, in one call for every group. A typical use is a record whose taxon label is split across clades (the label is not monophyletic): it takes the lineage of the nearest tip that carries the same label. The same search gives the closest reference genome to a placed sequence, or nearest-neighbour taxonomy on a tree.
 
 **Function signature**:
 
 `tree_nearest_tip(tree_table, targets_table, queries_table, scope := 'path', exclude_self := true, ignore_missing := false)`
 
 **Parameters:**
-- `tree_table` (VARCHAR): Name of a table or view containing tree data in [`read_newick`](reading.md#newick) schema. `node_index`, `parent_index`, `name` and `branch_length` are used. The rows may be stored in any order and numbered with any distinct `node_index` values.
+- `tree_table` (VARCHAR): Name of a table or view containing tree data in [`read_newick`](reading.md#newick) schema. `node_index`, `parent_index`, `name` and `branch_length` are required. The rows may be stored in any order and numbered with any distinct `node_index` values. It cannot also be `targets_table` or `queries_table`: pass the tip names as a relation of their own, such as `SELECT name FROM tree WHERE is_tip`.
 - `targets_table` (VARCHAR): Name of a table or view with a `name` column of target tip names, and optionally a `grp` column.
 - `queries_table` (VARCHAR): Name of a table or view with a `name` column of query tip names, and optionally a `grp` column.
-- `scope` (VARCHAR, default `'path'`): `'path'` picks the nearest target by path length. `'clade'` picks the lowest ancestor of the query that has an eligible target below it, then the nearest target below that ancestor; this can be farther than the path-nearest target (see the examples).
+- `scope` (VARCHAR, default `'path'`): `'path'` picks the nearest target by path length. `'clade'` picks the lowest ancestor of the query that has an eligible target below it, then the nearest target below that ancestor; this can be farther than the path-nearest target (see the examples). Clades depend on where the tree is rooted, so on an unrooted tree (a trifurcating root, as `phylogeny_fasttree` writes) `'clade'` answers for an arbitrary root; `'path'` does not depend on the root.
 - `exclude_self` (BOOLEAN, default `true`): A query that is also a target ignores itself. With `false`, such a query finds itself at distance 0.
 - `ignore_missing` (BOOLEAN, default `false`): When `false`, a query or target name that is not a tip in the tree is an error (the message lists the names). When `true`, a missing query gets no row and a missing target is skipped.
 
-The `name` columns of all three tables must have the same type: `VARCHAR`, `BIGINT` or `UUID`. Use a cast when they differ. `grp` must be in both `targets_table` and `queries_table` or in neither, with the same type in both.
+A query's **eligible targets** are the target tips in its group (every target, without groups), less the query itself under `exclude_self`. The `name` columns of all three tables must have the same type: `VARCHAR`, `BIGINT` or `UUID`. Use a cast when they differ. `grp` must be in both `targets_table` and `queries_table` or in neither, with the same type in both.
 
 **Output schema:** One row per distinct (query name, `grp`):
 
@@ -167,13 +167,13 @@ The `name` columns of all three tables must have the same type: `VARCHAR`, `BIGI
 | `lca_index` | BIGINT | The `node_index` (in `tree_table`'s numbering) of the query–target lowest common ancestor, or `NULL` |
 
 **Behavior / semantics:**
-- **Distance.** The path length is `(D(q) - D(lca)) + (D(t) - D(lca))`, where `D` is the sum of branch lengths from the root down to a node. It depends only on the two tips: not on child order, and not on the other targets in the group. Because it is a difference of root distances, its rounding error is about `1e-16` times the root distances involved: where root distances are far larger than the branches near the tips, two nearby distances can round to the same double (a tie) or swap.
+- **Distance.** The path length is `(D(q) - D(lca)) + (D(t) - D(lca))`, where `D` is the sum of branch lengths from the root down to a node. It depends only on the two tips: not on child order, and not on the other targets in the group. Because it is a difference of root distances, each summed edge by edge from the root, its rounding error grows with the root distances involved (about `1e-16` of them for each edge on the way down): where root distances are far larger than the branches near the tips, two nearby distances can round to the same double (a tie) or swap.
 - **Ties.** A tie means exactly equal `DOUBLE` distances. The tie goes to the smallest target name: by bytes for `VARCHAR`, whatever its collation; by value for `BIGINT` (so `9` before `10`); in DuckDB's own order for `UUID`. `n_tied` counts every tied target. Zero-length branches tie exactly, but two paths of mathematically equal length can round to different doubles and then do not tie.
 - **Groups.** A query competes only with targets that have the same `grp` value. A query in two groups gives two rows. A `NULL` `grp` matches nothing: a target with `NULL` `grp` is in no group, and a query with `NULL` `grp` gets a row with no target.
 - **Names.** Only tips are matched; an internal node's label is a missing name. A name that labels two or more tips is an error, but only when a query or target uses it. Repeated rows and `NULL` names in `targets_table` and `queries_table` are ignored.
-- **Branch lengths.** A `NULL` or negative branch length below the root is an error naming the node, since a path through it has no length. The root's own length is ignored. A tree with a few tiny negative lengths (rounding left by a placement tool, for example) can be read through a view that reads them as 0; see the examples.
+- **Branch lengths.** A `NULL`, NaN, infinite or negative branch length below the root is an error naming the node, since a path through it has no usable length. The root's own length is ignored. A tree with a few tiny negative lengths (rounding left by a placement tool, for example) can be read through a view that reads them as 0; see the examples.
 - **Row order** is not promised; use `ORDER BY`. Queries are answered in parallel.
-- Each of the three relations is read once, at execution; one relation passed as both `targets_table` and `queries_table` is read once for both.
+- Each relation is read once, at execution; one relation passed as both `targets_table` and `queries_table` is read once for both.
 
 **Examples:**
 ```sql
@@ -214,14 +214,14 @@ SELECT * FROM tree_nearest_tip('tree_clamped', 'label_targets', 'label_queries')
 ```
 
 **Error conditions:**
-- A table does not exist, or lacks its `name` column; `tree_table` lacks `node_index` or `parent_index`.
+- A table does not exist, or lacks its `name` column; `tree_table` lacks `node_index`, `parent_index` or `branch_length`, or is also passed as `targets_table` or `queries_table`.
 - The three `name` columns differ in type, or are not `VARCHAR`, `BIGINT` or `UUID`.
 - `grp` is in only one of `targets_table` and `queries_table`, or has different types in them.
 - `scope` is not `'path'` or `'clade'`.
 - A query or target name is not a tip and `ignore_missing := false`, or names two or more tips.
-- The tree cannot be searched: a `NULL` or repeated `node_index`, a `parent_index` that is no row's `node_index`, no rows, not exactly one root, a cycle, or a `NULL` or negative branch length below the root.
+- The tree cannot be searched: a `NULL` or repeated `node_index`, a `parent_index` that is no row's `node_index`, no rows, not exactly one root, a cycle, a `NULL`, NaN, infinite or negative branch length below the root, or branch lengths that sum past the largest `DOUBLE`.
 
-**Performance note:** the tree is read as a stream that keeps node, parent and branch-length arrays and only the names the queries and targets use: about 100 bytes per node at peak. Each query climbs only through the ancestors where new targets come into reach, using jump pointers, so deep chains of placements do not slow it down. On the full Greengenes2 2024.09 tree (24.5M nodes, 23.4M tips) at 8 threads, loading takes about 2.4 s and 2.6 GB, and 20,000 queries against 50,000 targets in 5,000 groups take about 3 s in total. Memory also grows with the number of distinct query and target names, so making every tip of a tree of tens of millions of tips both a query and a target can need tens of GB.
+**Performance note:** of the tree's names, only those the queries and targets use are kept, so memory grows with the number of nodes and with the number of distinct query and target names. On the full Greengenes2 2024.09 tree (24.5M nodes, 23.4M tips), read from Parquet at 8 threads, loading took about 2.4 s at a peak of 2.6 GB (the process's peak resident memory), and 20,000 queries against 50,000 targets in 5,000 groups took about 3 s in all. Making every tip of a tree of tens of millions of tips both a query and a target holds every name several times over and can need tens of GB.
 
 ### Phylogenetic placement (krepp)
 

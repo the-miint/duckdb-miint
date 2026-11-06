@@ -5,16 +5,14 @@
 
 namespace miint {
 
-class NewickTree;
-
 // A read-only index over a rooted tree for ancestor, LCA and root-distance queries.
 //
 // Every subtree is a contiguous range of preorder positions, so "is a an ancestor of v"
 // is one interval test, and the lowest ancestor of a node whose subtree contains some
 // preorder position is found by climbing with skew-binary jump pointers (one pointer per
-// node) in O(log depth). Memory is O(n): about 28 bytes per node, which matters on trees
-// of tens of millions of nodes where O(n log n) structures (binary lifting, an Euler-tour
-// sparse table) would not fit.
+// node) in O(log depth). Memory is O(n): about 28 bytes per node. On trees of tens of
+// millions of nodes that matters: O(n log n) structures (binary lifting, an Euler-tour
+// sparse table) would take about log2(n), some 25, times as much.
 //
 // Built iteratively, so arbitrarily deep trees cannot overflow the stack. The input's
 // node numbering is not required to be in any order.
@@ -27,17 +25,15 @@ public:
 	//
 	// Throws std::invalid_argument when the arrays differ in size or are empty, when there
 	// is not exactly one root, when a parent is out of range, when some node is not
-	// connected to the root (a cycle), or when a non-root edge's length is NaN (NULL),
-	// infinite or negative. Root distances are sums of branch lengths, and a search that
-	// prunes by distance needs them to grow monotonically away from the root.
+	// connected to the root (a cycle), when a non-root edge's length is NaN (NULL),
+	// infinite or negative, or when a root distance overflows to infinity. Root distances
+	// are sums of branch lengths, and a search that prunes by distance needs them finite
+	// and growing monotonically away from the root.
 	//
 	// `node_ids` (optional, same size) maps each dense index to the caller's identifier,
 	// used only to name nodes in error messages.
 	static TreeIndex Build(const std::vector<uint32_t> &parent, const std::vector<double> &branch_length,
 	                       const std::vector<int64_t> *node_ids = nullptr);
-
-	// Build from a parsed or built tree, with the same validation.
-	static TreeIndex FromNewickTree(const NewickTree &tree, const std::vector<int64_t> *node_ids = nullptr);
 
 	size_t size() const {
 		return parent_.size();

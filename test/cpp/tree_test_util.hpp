@@ -1,5 +1,6 @@
 #pragma once
 
+#include "NewickTree.hpp"
 #include "TreeIndex.hpp"
 
 #include <algorithm>
@@ -21,9 +22,23 @@ struct TreeArrays {
 
 constexpr uint32_t kNoParent = TreeIndex::NO_PARENT;
 
+static_assert(TreeIndex::NO_PARENT == NewickTree::NO_PARENT, "both trees mark the root the same way");
+
+// The index of a parsed Newick tree, through the same validation as any other input.
+inline TreeIndex index_of(const NewickTree &tree) {
+	const uint32_t n = static_cast<uint32_t>(tree.num_nodes());
+	std::vector<uint32_t> parent(n);
+	std::vector<double> length(n);
+	for (uint32_t v = 0; v < n; ++v) {
+		parent[v] = tree.parent(v);
+		length[v] = tree.branch_length(v);
+	}
+	return TreeIndex::Build(parent, length);
+}
+
 // ---------------------------------------------------------------------------
 // A naive model of the tree, by walking parents: what the index and the searches built
-// on it are checked against. Shared by test_TreeIndex.cpp and test_NearestTip.cpp.
+// on it are checked against.
 // ---------------------------------------------------------------------------
 
 inline bool naive_is_ancestor_or_self(const TreeArrays &t, uint32_t a, uint32_t v) {

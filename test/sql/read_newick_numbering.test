@@ -4,8 +4,9 @@
 
 require miint
 
-# Callers process nodes in node_index order and rely on every child preceding its parent,
-# so the numbering is part of read_newick's contract rather than an accident of the parser.
+# A caller can process nodes in node_index order and rely on every child preceding its
+# parent (one pass computes anything that needs the children first), so the numbering is
+# part of read_newick's contract rather than an accident of the parser.
 # The expected rows below are worked out by hand from the Newick strings.
 
 # =============================================================================
@@ -62,6 +63,24 @@ SELECT node_index, name, parent_index FROM read_newick('{TEST_DIR}/multi.nwk') O
 1	B	3
 2	C	3
 3	D	NULL
+
+# Several files: each tree is numbered from 0 on its own.
+query TITI
+SELECT parse_filename(filepath), node_index, name, parent_index
+FROM read_newick(['{TEST_DIR}/multi.nwk', '{TEST_DIR}/nested.nwk'], include_filepath := true)
+ORDER BY parse_filename(filepath), node_index;
+----
+multi.nwk	0	A	3
+multi.nwk	1	B	3
+multi.nwk	2	C	3
+multi.nwk	3	D	NULL
+nested.nwk	0	A	2
+nested.nwk	1	B	2
+nested.nwk	2	C	6
+nested.nwk	3	D	5
+nested.nwk	4	E	5
+nested.nwk	5	F	6
+nested.nwk	6	G	NULL
 
 # A unifurcation (B has one child) and an unnamed internal node, which reads as ''.
 statement ok

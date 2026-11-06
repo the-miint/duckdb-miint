@@ -1,7 +1,5 @@
 #include "TreeIndex.hpp"
 
-#include "NewickTree.hpp"
-
 #include <algorithm>
 #include <cmath>
 #include <numeric>
@@ -9,8 +7,6 @@
 #include <string>
 
 namespace miint {
-
-static_assert(TreeIndex::NO_PARENT == NewickTree::NO_PARENT, "both trees mark the root the same way");
 
 namespace {
 
@@ -127,7 +123,7 @@ TreeIndex TreeIndex::Build(const std::vector<uint32_t> &parent, const std::vecto
 		}
 		const double bl = branch_length[v];
 		if (std::isnan(bl)) {
-			throw std::invalid_argument("the branch length of " + NodeLabel(v, node_ids) + " is NULL");
+			throw std::invalid_argument("the branch length of " + NodeLabel(v, node_ids) + " is NULL or NaN");
 		}
 		if (!std::isfinite(bl)) {
 			throw std::invalid_argument("the branch length of " + NodeLabel(v, node_ids) + " is not finite");
@@ -150,6 +146,10 @@ TreeIndex TreeIndex::Build(const std::vector<uint32_t> &parent, const std::vecto
 		const uint32_t p = parent[v];
 		idx.depth_[v] = idx.depth_[p] + 1;
 		idx.dist_[v] = idx.dist_[p] + branch_length[v];
+		if (!std::isfinite(idx.dist_[v])) {
+			throw std::invalid_argument("the root distance of " + NodeLabel(v, node_ids) +
+			                            " is not finite (the branch lengths above it sum past the largest double)");
+		}
 		const uint32_t j1 = idx.jump_[p];
 		const uint32_t j2 = idx.jump_[j1];
 		idx.jump_[v] = (idx.depth_[p] - idx.depth_[j1] == idx.depth_[j1] - idx.depth_[j2]) ? j2 : p;
@@ -163,17 +163,6 @@ TreeIndex TreeIndex::Build(const std::vector<uint32_t> &parent, const std::vecto
 		}
 	}
 	return idx;
-}
-
-TreeIndex TreeIndex::FromNewickTree(const NewickTree &tree, const std::vector<int64_t> *node_ids) {
-	const size_t n = tree.num_nodes();
-	std::vector<uint32_t> parent(n);
-	std::vector<double> branch_length(n);
-	for (size_t v = 0; v < n; ++v) {
-		parent[v] = tree.parent(static_cast<uint32_t>(v));
-		branch_length[v] = tree.branch_length(static_cast<uint32_t>(v));
-	}
-	return Build(parent, branch_length, node_ids);
 }
 
 DenseTree DenseTree::FromRows(std::vector<int64_t> node_ids, std::vector<int64_t> parent_ids,
