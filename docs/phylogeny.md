@@ -6,6 +6,7 @@ Methods for estimating and operating on phylogenies.
 
 - [Shear (subset to tips)](#shear-subset-to-tips) - Prune a tree down to a set of tips.
 - [Resolve multifurcations](#resolve-multifurcations) - Resolve polytomies into a strictly bifurcating tree.
+- [Nearest target tip](#nearest-target-tip) - For each query tip, the nearest of a set of target tips by path length, per group, with exact ties.
 - [Phylogenetic placement (krepp)](#phylogenetic-placement-krepp) - Place query sequences onto a backbone phylogeny with krepp.
 - [Build a krepp index](#build-a-krepp-index) - Build the index `place_krepp` reads, from relations.
 - [Resolve placements](#resolve-placements) - Fully resolve sequence placements against a backbone.
@@ -33,6 +34,8 @@ Subset ("shear" / prune) a tree down to a specified set of tips. This is the ope
 
 **Output schema:** Same as [`read_newick`](reading.md#newick) (without filepath), reindexed 0-based:
 - `node_index` (BIGINT), `name` (VARCHAR), `branch_length` (DOUBLE, nullable), `edge_id` (BIGINT, nullable), `parent_index` (BIGINT, nullable, NULL for root), `is_tip` (BOOLEAN).
+
+The kept nodes keep their relative `node_index` order, so a tree in `read_newick`'s postorder numbering (see [Newick](reading.md#newick), "Node numbering") is sheared into a tree in postorder numbering.
 
 The schema is `UNION ALL`-compatible with `read_newick` and can be written straight back out with `COPY ... (FORMAT NEWICK)`.
 
@@ -100,7 +103,7 @@ Resolve every multifurcation (a node with more than two children — a "polytomy
 **Parameters:**
 - `tree_table` (VARCHAR): Name of a table or view containing tree data in [`read_newick`](reading.md#newick) schema (requires `node_index` and `parent_index`; `name`, `branch_length`, `edge_id` optional).
 
-**Output schema:** Same as [`read_newick`](reading.md#newick) (without filepath), reindexed 0-based: `node_index`, `name`, `branch_length`, `edge_id`, `parent_index`, `is_tip`. The schema is `UNION ALL`-compatible with `read_newick`, can be written back out with `COPY ... (FORMAT NEWICK)`, and feeds directly into `phylo_independent_contrasts`.
+**Output schema:** Same as [`read_newick`](reading.md#newick) (without filepath), reindexed 0-based: `node_index`, `name`, `branch_length`, `edge_id`, `parent_index`, `is_tip`. The schema is `UNION ALL`-compatible with `read_newick`, can be written back out with `COPY ... (FORMAT NEWICK)`, and feeds directly into `phylo_independent_contrasts`. Original nodes keep their relative order and the new connector nodes are numbered after all of them, so when anything was resolved the output is **not** in `read_newick`'s postorder numbering.
 
 **Behavior / semantics:**
 - A node with `m ≥ 3` children `c0, c1, …, c(m-1)` (in `node_index` order) is resolved into a **deterministic left-comb**: the node keeps `c0` and a new internal node `N1`; `N1` keeps `c1` and `N2`; … ; `N(m-2)` keeps `c(m-2)` and `c(m-1)`. This inserts `m-2` new internal nodes.
@@ -133,6 +136,94 @@ COPY (
 **Error conditions:**
 - `tree_table` does not exist.
 - `tree_table` missing required `node_index` / `parent_index` columns.
+
+### Nearest target tip
+
+For each query tip, find the nearest tip among a set of target tips, measured along the tree, and how many targets tie for nearest. With groups, each query searches only the targets in its own group, in one call for every group. A typical use is a record whose taxon label is split across clades (the label is not monophyletic): it takes the lineage of the nearest tip that carries the same label. The same search gives the closest reference genome to a placed sequence, or nearest-neighbour taxonomy on a tree.
+
+**Function signature**:
+
+`tree_nearest_tip(tree_table, targets_table, queries_table, scope := 'path', exclude_self := true, ignore_missing := false)`
+
+**Parameters:**
+- `tree_table` (VARCHAR): Name of a table or view containing tree data in [`read_newick`](reading.md#newick) schema. `node_index`, `parent_index`, `name` and `branch_length` are required. The rows may be stored in any order and numbered with any distinct `node_index` values. It cannot also be `targets_table` or `queries_table`: pass the tip names as a relation of their own, such as a view `CREATE VIEW tips AS SELECT name FROM tree WHERE is_tip`.
+- `targets_table` (VARCHAR): Name of a table or view with a `name` column of target tip names, and optionally a `grp` column.
+- `queries_table` (VARCHAR): Name of a table or view with a `name` column of query tip names, and optionally a `grp` column.
+- `scope` (VARCHAR, default `'path'`): `'path'` picks the nearest target by path length. `'clade'` picks the lowest ancestor of the query that has an eligible target below it, then the nearest target below that ancestor; this can be farther than the path-nearest target (see the examples). Clades depend on where the tree is rooted, so on an unrooted tree (a trifurcating root, as `phylogeny_fasttree` writes) `'clade'` answers for an arbitrary root; `'path'` does not depend on the root.
+- `exclude_self` (BOOLEAN, default `true`): A query that is also a target ignores itself. With `false`, such a query finds itself at distance 0.
+- `ignore_missing` (BOOLEAN, default `false`): When `false`, a query or target name that is not a tip in the tree is an error (the message lists the names). When `true`, a missing query gets no row and a missing target is skipped.
+
+A query's **eligible targets** are the target tips in its group (every target, without groups), less the query itself under `exclude_self`. The `name` columns of all three tables must have the same type: `VARCHAR`, `BIGINT` or `UUID`. Use a cast when they differ. `grp` must be in both `targets_table` and `queries_table` or in neither, with the same type in both.
+
+**Output schema:** One row per distinct (query name, `grp`):
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `query` | the name type | The query tip |
+| `grp` | the `grp` type | The query's group; only when groups are used |
+| `target` | the name type | The nearest eligible target tip, or `NULL` when there is none |
+| `distance` | DOUBLE | The path length from query to target, or `NULL` |
+| `n_tied` | BIGINT | How many eligible targets share that distance: 1 without a tie, 0 when there is no eligible target |
+| `lca_index` | BIGINT | The `node_index` (in `tree_table`'s numbering) of the query–target lowest common ancestor, or `NULL` |
+
+**Behavior / semantics:**
+- **Distance.** The path length is `(D(q) - D(lca)) + (D(t) - D(lca))`, where `D` is the sum of branch lengths from the root down to a node. It depends only on the two tips: not on child order, and not on the other targets in the group. Because it is a difference of root distances, each summed edge by edge from the root, its rounding error grows with the root distances involved (about `1e-16` of them for each edge on the way down): where root distances are far larger than the branches near the tips, two nearby distances can round to the same double (a tie) or swap.
+- **Ties.** A tie means exactly equal `DOUBLE` distances. The tie goes to the smallest target name: by bytes for `VARCHAR`, whatever its collation; by value for `BIGINT` (so `9` before `10`); in DuckDB's own order for `UUID`. `n_tied` counts every tied target. Zero-length branches tie exactly, but two paths of mathematically equal length can round to different doubles and then do not tie.
+- **Groups.** A query competes only with targets that have the same `grp` value. A query in two groups gives two rows. A `NULL` `grp` matches nothing: a target with `NULL` `grp` is in no group, and a query with `NULL` `grp` gets a row with no target.
+- **Names.** Only tips are matched, and a name matches byte for byte, whatever its collation; an internal node's label is a missing name. A name that labels two or more tips is an error, but only when a query or target uses it. Repeated rows and `NULL` names in `targets_table` and `queries_table` are ignored.
+- **Branch lengths.** A `NULL`, NaN, infinite or negative branch length below the root is an error naming the node, since a path through it has no usable length. The root's own length is ignored. A tree with a few tiny negative lengths (rounding left by a placement tool, for example) can be read through a view that reads them as 0; see the examples.
+- **Row order** is not promised; use `ORDER BY`. Queries are answered in parallel.
+- Each relation is read once, at execution; one relation passed as both `targets_table` and `queries_table` is read once for both.
+
+**Examples:**
+```sql
+-- Tree (((A:0.1,B:0.2)C:0.3,(D:0.4)E:0.5)x:0.1,(F:0.6,G:0.7)H:0.8)root;
+CREATE TABLE tree AS SELECT * FROM read_newick('ex.nwk');
+CREATE TABLE targets AS SELECT * FROM (VALUES ('A'), ('D')) AS v(name);
+CREATE TABLE queries AS SELECT * FROM (VALUES ('B'), ('F'), ('G')) AS v(name);
+
+SELECT r.query, r.target, round(r.distance, 12) AS distance, r.n_tied, l.name AS lca
+FROM tree_nearest_tip('tree', 'targets', 'queries') r
+JOIN tree l ON l.node_index = r.lca_index
+ORDER BY r.query;
+-- B  A  0.3  1  C
+-- F  A  1.9  1  root
+-- G  A  2.0  1  root
+
+-- Groups: with A in g1, D in g2 and query B in g2, B gets D at 1.4 (LCA x),
+-- although A is nearer.
+
+-- Scope. Tree ((Q:0.1,T1:5.0)n1:0.1,T2:0.1)r; with targets T1 and T2, query Q:
+--   scope := 'path'  gives T2 at 0.3, LCA r;
+--   scope := 'clade' gives T1 at 5.1, LCA n1, the smallest clade around Q that holds a target.
+
+-- A label split across clades: tips(name, label, in_main_clade). Members outside the
+-- label's main clade take the lineage of the nearest member inside it, one search per
+-- label, all in one call.
+CREATE TABLE label_targets AS SELECT name, label AS grp FROM tips WHERE in_main_clade;
+CREATE TABLE label_queries AS SELECT name, label AS grp FROM tips WHERE NOT in_main_clade;
+SELECT r.query, r.grp, r.target, r.distance, r.n_tied, lin.lineage
+FROM tree_nearest_tip('tree', 'label_targets', 'label_queries') r
+LEFT JOIN lineages lin ON lin.name = r.target;
+
+-- A tree with tiny negative branch lengths: read them as 0.
+CREATE VIEW tree_clamped AS
+SELECT * REPLACE (CASE WHEN branch_length < 0 THEN 0 ELSE branch_length END AS branch_length)
+FROM read_parquet('big_tree.parquet');
+SELECT * FROM tree_nearest_tip('tree_clamped', 'label_targets', 'label_queries');
+```
+
+**Error conditions:**
+- A table does not exist, or lacks its `name` column; `tree_table` lacks `node_index`, `parent_index` or `branch_length`, or is also passed as `targets_table` or `queries_table`.
+- The three `name` columns differ in type, or are not `VARCHAR`, `BIGINT` or `UUID`.
+- `grp` is in only one of `targets_table` and `queries_table`, or has different types in them.
+- `scope` is not `'path'` or `'clade'`.
+- A query or target name is not a tip and `ignore_missing := false`, or names two or more tips.
+- The tree cannot be searched: a `NULL` or repeated `node_index`, a `parent_index` that is no row's `node_index`, no rows, not exactly one root, a cycle, a `NULL`, NaN, infinite or negative branch length below the root, or a root distance (the sum of the branch lengths above a node) past the largest `DOUBLE`.
+- A `name` or `grp` column is read with a type other than the one the statement was bound with: a view over a file that was rewritten after `PREPARE`, for example. Run or prepare the statement again.
+- The path from a query to its nearest target is past the largest `DOUBLE`. Each root distance is in range, but a path adds two of them.
+
+**Performance note:** of the tree's names, only those the queries and targets use are kept, so memory grows with the number of nodes and with the number of distinct query and target names. On the full Greengenes2 2024.09 tree (24.5M nodes, 23.4M tips), read from Parquet at 8 threads, loading took about 2.4 s at a peak of 2.6 GB (the process's peak resident memory), and 20,000 queries against 50,000 targets in 5,000 groups took about 3 s in all. Making every tip of a tree of tens of millions of tips both a query and a target holds every name several times over: an estimated tens of GB for that tree, not measured.
 
 ### Phylogenetic placement (krepp)
 
@@ -341,7 +432,7 @@ Resolve phylogenetic placements into a reference tree, returning a fully resolve
 - `placements_table` (VARCHAR): Name of a table or view containing placement data: `fragment_id` (VARCHAR, BIGINT or UUID, as a `read_id`, so `place_krepp`'s `fragment` of any id type can be used; the placed tip is named with its text), `edge_id` (BIGINT, INTEGER, UBIGINT or UINTEGER), and `like_weight_ratio`, `distal_length` and `pendant_length` (each DOUBLE or FLOAT)
 
 **Output schema:** Same as [`read_newick`](reading.md#newick) (without filepath):
-- `node_index` (BIGINT): 0-based index of node in resolved tree
+- `node_index` (BIGINT): 0-based index of node in resolved tree. Original nodes keep their relative order and the nodes created for placements are numbered after all of them, so the output is **not** in `read_newick`'s postorder numbering.
 - `name` (VARCHAR): Node label (placed fragments use their fragment_id as name)
 - `branch_length` (DOUBLE, nullable): Branch length
 - `edge_id` (BIGINT, nullable): Edge identifier (NULL for newly created nodes)

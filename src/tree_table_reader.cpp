@@ -1,5 +1,6 @@
 #include "tree_table_reader.hpp"
 #include "catalog_utils.hpp"
+#include "miint_streaming_query.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/connection.hpp"
 #include "duckdb/main/database.hpp"
@@ -7,6 +8,7 @@
 #include "duckdb/common/types/data_chunk.hpp"
 #include <cmath>
 #include <limits>
+#include <stdexcept>
 
 namespace duckdb {
 
@@ -143,6 +145,98 @@ TreeWithNodeIds BuildTreeAndNodeIds(ClientContext &context, const std::string &t
 		out.tree = miint::NewickTree::build(node_inputs);
 	} catch (const std::exception &e) {
 		throw InvalidInputException("Failed to build tree from '%s': %s", table_name, e.what());
+	}
+	return out;
+}
+
+TreeTableArrays ReadTreeArrays(ClientContext &context, const std::string &table_name,
+                               const std::unordered_set<std::string_view> &keep_names, const LogicalType &name_type) {
+	auto info = GetTableOrViewColumns(context, table_name, "Tree table");
+	const bool has_names = HasColumn(info, "name");
+	// The names are matched as text. VARCHAR names, the usual case, are read as they are, so
+	// the type of the read shows whether they still are VARCHAR; it is checked before any
+	// row is read as text. Names bound with another type are cast to text, and the column as
+	// it is read is projected too, last, only so that its type can be checked: a second copy
+	// of every VARCHAR name would cost more.
+	const bool names_uncast = name_type.id() == LogicalTypeId::VARCHAR;
+	const idx_t name_type_col = names_uncast ? 2 : 4;
+	std::string name_proj = "CAST(NULL AS VARCHAR)";
+	if (has_names) {
+		name_proj = names_uncast ? "name" : "name::VARCHAR";
+	}
+	const std::string bl_proj = HasColumn(info, "branch_length") ? "branch_length::DOUBLE" : "CAST(NULL AS DOUBLE)";
+	// No ORDER BY: DenseTree numbers the rows itself, and sorting here would carry every
+	// name through the sort.
+	const std::string query = "SELECT node_index::BIGINT, parent_index::BIGINT, " + name_proj + ", " + bl_proj +
+	                          (has_names && !names_uncast ? ", name" : "") + " FROM " +
+	                          SQLIdentifier::ToString(table_name);
+
+	auto conn = MakeReadOnlyHelperConnection(context);
+	auto stream = SubmitStream(conn, query);
+	if (stream->HasError()) {
+		throw InvalidInputException("Failed to read from tree table '%s': %s", table_name, stream->GetError());
+	}
+	if (has_names && stream->GetTypes()[name_type_col] != name_type) {
+		throw std::invalid_argument("column 'name' is " + stream->GetTypes()[name_type_col].ToString() +
+		                            " now but was " + name_type.ToString() +
+		                            " when the statement was bound; run or prepare it again");
+	}
+
+	std::vector<int64_t> node_ids;
+	std::vector<int64_t> parent_ids;
+	std::vector<bool> has_parent;
+	std::vector<double> branch_lengths;
+	std::vector<std::pair<int64_t, std::string>> named_ids;
+	while (auto chunk = stream->Fetch()) {
+		const idx_t rows = chunk->size();
+		if (rows == 0) {
+			break;
+		}
+		context.InterruptCheck();
+		UnifiedVectorFormat node_data, parent_data, name_data, bl_data;
+		chunk->data[0].ToUnifiedFormat(node_data);
+		chunk->data[1].ToUnifiedFormat(parent_data);
+		chunk->data[2].ToUnifiedFormat(name_data);
+		chunk->data[3].ToUnifiedFormat(bl_data);
+		auto node_values = UnifiedVectorFormat::GetData<int64_t>(node_data);
+		auto parent_values = UnifiedVectorFormat::GetData<int64_t>(parent_data);
+		auto name_values = UnifiedVectorFormat::GetData<string_t>(name_data);
+		auto bl_values = UnifiedVectorFormat::GetData<double>(bl_data);
+		for (idx_t i = 0; i < rows; ++i) {
+			const auto ni = node_data.sel->get_index(i);
+			if (!node_data.validity.RowIsValid(ni)) {
+				throw std::invalid_argument("a row's node_index is NULL");
+			}
+			node_ids.push_back(node_values[ni]);
+
+			const auto pi = parent_data.sel->get_index(i);
+			const bool parent_valid = parent_data.validity.RowIsValid(pi);
+			has_parent.push_back(parent_valid);
+			parent_ids.push_back(parent_valid ? parent_values[pi] : 0);
+
+			const auto bi = bl_data.sel->get_index(i);
+			branch_lengths.push_back(bl_data.validity.RowIsValid(bi) ? bl_values[bi]
+			                                                         : std::numeric_limits<double>::quiet_NaN());
+
+			const auto mi = name_data.sel->get_index(i);
+			if (name_data.validity.RowIsValid(mi)) {
+				const std::string_view name(name_values[mi].GetData(), name_values[mi].GetSize());
+				if (keep_names.count(name)) {
+					named_ids.emplace_back(node_values[ni], std::string(name));
+				}
+			}
+		}
+	}
+	if (stream->HasError()) {
+		throw InvalidInputException("Failed to read from tree table '%s': %s", table_name, stream->GetError());
+	}
+
+	TreeTableArrays out;
+	out.tree = miint::DenseTree::FromRows(std::move(node_ids), std::move(parent_ids), std::move(has_parent),
+	                                      std::move(branch_lengths));
+	out.named.reserve(named_ids.size());
+	for (auto &named : named_ids) {
+		out.named.emplace_back(out.tree.find(named.first), std::move(named.second));
 	}
 	return out;
 }

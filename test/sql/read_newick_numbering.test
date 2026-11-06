@@ -1,0 +1,219 @@
+# name: test/sql/read_newick_numbering.test
+# description: node_index is a postorder numbering, siblings in Newick order, root last; shear_tree keeps it
+# group: [sql]
+
+require miint
+
+# A caller can process nodes in node_index order and rely on every child preceding its
+# parent (one pass computes anything that needs the children first), so the numbering is
+# part of read_newick's contract rather than an accident of the parser.
+# The expected rows below are worked out by hand from the Newick strings.
+
+# =============================================================================
+# A postorder check, used on larger trees below. In a postorder numbering every
+# subtree occupies the index range that ends at its root: a node with d descendants
+# has exactly the indices [v - d, v - 1] below it. Indices are dense from 0 and the
+# root is last.
+# =============================================================================
+
+statement ok
+CREATE MACRO is_postorder(tbl) AS TABLE
+WITH RECURSIVE
+    t AS (SELECT node_index, parent_index FROM query_table(tbl)),
+    anc(node, ancestor) AS (
+        SELECT node_index, parent_index FROM t WHERE parent_index IS NOT NULL
+        UNION ALL
+        SELECT anc.node, t.parent_index
+        FROM anc JOIN t ON t.node_index = anc.ancestor
+        WHERE t.parent_index IS NOT NULL
+    ),
+    spans AS (
+        SELECT ancestor, count(*) AS d, min(node) AS lo, max(node) AS hi FROM anc GROUP BY ancestor
+    )
+SELECT (SELECT min(node_index) = 0 AND max(node_index) = count(*) - 1 FROM t)
+   AND (SELECT max(node_index) FROM t) = (SELECT node_index FROM t WHERE parent_index IS NULL)
+   AND (SELECT coalesce(bool_and(lo = ancestor - d AND hi = ancestor - 1), true) FROM spans) AS is_postorder;
+
+# =============================================================================
+# read_newick: explicit numbering
+# =============================================================================
+
+statement ok
+COPY (SELECT '((A:1,B:2)C:3,(D:4,E:5)F:6)G;') TO '{TEST_DIR}/nested.nwk' (FORMAT csv, HEADER false, DELIMITER E'\t');
+
+query ITI
+SELECT node_index, name, parent_index FROM read_newick('{TEST_DIR}/nested.nwk') ORDER BY node_index;
+----
+0	A	2
+1	B	2
+2	C	6
+3	D	5
+4	E	5
+5	F	6
+6	G	NULL
+
+# A multifurcation: siblings keep their left-to-right order.
+statement ok
+COPY (SELECT '(A,B,C)D;') TO '{TEST_DIR}/multi.nwk' (FORMAT csv, HEADER false, DELIMITER E'\t');
+
+query ITI
+SELECT node_index, name, parent_index FROM read_newick('{TEST_DIR}/multi.nwk') ORDER BY node_index;
+----
+0	A	3
+1	B	3
+2	C	3
+3	D	NULL
+
+# Several files: each tree is numbered from 0 on its own.
+query TITI
+SELECT parse_filename(filepath), node_index, name, parent_index
+FROM read_newick(['{TEST_DIR}/multi.nwk', '{TEST_DIR}/nested.nwk'], include_filepath := true)
+ORDER BY parse_filename(filepath), node_index;
+----
+multi.nwk	0	A	3
+multi.nwk	1	B	3
+multi.nwk	2	C	3
+multi.nwk	3	D	NULL
+nested.nwk	0	A	2
+nested.nwk	1	B	2
+nested.nwk	2	C	6
+nested.nwk	3	D	5
+nested.nwk	4	E	5
+nested.nwk	5	F	6
+nested.nwk	6	G	NULL
+
+# A unifurcation (B has one child) and an unnamed internal node, which reads as ''.
+statement ok
+COPY (SELECT '((A)B,(C,D),E)R;') TO '{TEST_DIR}/uni.nwk' (FORMAT csv, HEADER false, DELIMITER E'\t');
+
+query ITI
+SELECT node_index, name, parent_index FROM read_newick('{TEST_DIR}/uni.nwk') ORDER BY node_index;
+----
+0	A	1
+1	B	6
+2	C	4
+3	D	4
+4	(empty)	6
+5	E	6
+6	R	NULL
+
+# =============================================================================
+# read_jplace_newick uses the same parser and the same numbering.
+# Tree: ((A:0.1,B:0.2):0.3{0},(C:0.4,D:0.5):0.6{1}):0.0{2};
+# =============================================================================
+
+query ITII
+SELECT node_index, name, parent_index, edge_id FROM read_jplace_newick('data/jplace/test.jplace') ORDER BY node_index;
+----
+0	A	2	NULL
+1	B	2	NULL
+2	(empty)	6	0
+3	C	5	NULL
+4	D	5	NULL
+5	(empty)	6	1
+6	(empty)	NULL	2
+
+# =============================================================================
+# shear_tree keeps the relative order of the nodes it keeps
+# =============================================================================
+
+statement ok
+CREATE TABLE nested AS SELECT * FROM read_newick('{TEST_DIR}/nested.nwk');
+
+statement ok
+CREATE TABLE keep_ade AS SELECT * FROM (VALUES ('A'), ('D'), ('E')) AS v(name);
+
+# collapse := true drops C (one kept child); A, D, E, F, G keep their relative order.
+query ITI
+SELECT node_index, name, parent_index FROM shear_tree('nested', 'keep_ade') ORDER BY node_index;
+----
+0	A	4
+1	D	3
+2	E	3
+3	F	4
+4	G	NULL
+
+query ITI
+SELECT node_index, name, parent_index FROM shear_tree('nested', 'keep_ade', collapse := false) ORDER BY node_index;
+----
+0	A	1
+1	C	5
+2	D	4
+3	E	4
+4	F	5
+5	G	NULL
+
+# The order comes from node_index, not from how the tree table happens to be stored.
+statement ok
+CREATE TABLE nested_desc AS SELECT * FROM nested ORDER BY node_index DESC;
+
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM shear_tree('nested', 'keep_ade') EXCEPT ALL SELECT * FROM shear_tree('nested_desc', 'keep_ade'))
+    UNION ALL
+    (SELECT * FROM shear_tree('nested_desc', 'keep_ade') EXCEPT ALL SELECT * FROM shear_tree('nested', 'keep_ade'))
+);
+----
+0
+
+# =============================================================================
+# The postorder property on a larger tree, and on shears of it
+# =============================================================================
+
+statement ok
+CREATE TABLE moderate AS SELECT * FROM read_newick('data/fasttree/moderate.golden.nwk');
+
+query I
+SELECT count(*) > 20 FROM moderate WHERE is_tip;
+----
+true
+
+query I
+SELECT is_postorder FROM is_postorder('moderate');
+----
+true
+
+# Keep every other tip (by node_index), so the shear has to drop and merge nodes.
+statement ok
+CREATE TABLE every_other AS
+SELECT name FROM (SELECT name, row_number() OVER (ORDER BY node_index) AS r FROM moderate WHERE is_tip) WHERE r % 2 = 0;
+
+statement ok
+CREATE TABLE moderate_sheared AS SELECT * FROM shear_tree('moderate', 'every_other');
+
+statement ok
+CREATE TABLE moderate_sheared_full AS SELECT * FROM shear_tree('moderate', 'every_other', collapse := false);
+
+query II
+SELECT (SELECT is_postorder FROM is_postorder('moderate_sheared')),
+       (SELECT is_postorder FROM is_postorder('moderate_sheared_full'));
+----
+true	true
+
+# =============================================================================
+# The check discriminates: tree_resolve_multifurcations appends its new internal
+# nodes after the original ones, so its output is not postorder. If this ever came
+# back true, the check above would be proving nothing.
+# =============================================================================
+
+statement ok
+CREATE TABLE multi AS SELECT * FROM read_newick('{TEST_DIR}/multi.nwk');
+
+statement ok
+CREATE TABLE multi_resolved AS SELECT * FROM tree_resolve_multifurcations('multi');
+
+query I
+SELECT is_postorder FROM is_postorder('multi_resolved');
+----
+false
+
+# Children before parents and the root last are not enough: here the subtree under 3
+# ({0, 2}) is split by node 1, which belongs to the subtree under 5.
+statement ok
+CREATE TABLE interleaved AS
+SELECT * FROM (VALUES (0, 3), (1, 5), (2, 3), (3, 6), (4, 5), (5, 6), (6, NULL)) AS v(node_index, parent_index);
+
+query I
+SELECT is_postorder FROM is_postorder('interleaved');
+----
+false

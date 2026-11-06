@@ -20,4 +20,13 @@ inline void AddNamedParameter(TableFunction &fn, const char *name, LogicalType t
 	}
 }
 
+//! The value of a BOOLEAN named option, or `default_value` when it is absent or NULL.
+inline bool GetBoolParam(TableFunctionBindInput &input, const std::string &key, bool default_value) {
+	auto it = input.named_parameters.find(Identifier(key));
+	if (it == input.named_parameters.end() || it->second.IsNull()) {
+		return default_value;
+	}
+	return BooleanValue::Get(it->second);
+}
+
 } // namespace duckdb
