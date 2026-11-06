@@ -278,6 +278,10 @@ CREATE VIEW prep_pairs AS SELECT * FROM read_csv('{TEST_DIR}/prep_pairs.csv');
 statement ok
 PREPARE lca AS SELECT a, b, lca_index FROM tree_lca('prep_tree', 'prep_pairs') ORDER BY a, b;
 
+statement ok
+PREPARE lca_lenient AS
+SELECT a, b, lca_index FROM tree_lca('prep_tree', 'prep_pairs', ignore_missing := true) ORDER BY a, b;
+
 query TTI
 EXECUTE lca;
 ----
@@ -307,6 +311,22 @@ EXECUTE lca;
 ----
 <REGEX>:.*tree_lca: column 'b' of 'prep_pairs' is BIGINT now but was VARCHAR when the statement was bound.*
 
+# Only the tree's names change. They are matched as text, so its integer names would
+# otherwise match no pair: an error naming the wrong cause, or, under ignore_missing, no
+# rows and no error.
+statement ok
+COPY (SELECT * FROM ex1_pairs) TO '{TEST_DIR}/prep_pairs.csv';
+
+statement error
+EXECUTE lca;
+----
+<REGEX>:.*tree_lca: the tree 'prep_tree' cannot be read: column 'name' is BIGINT now but was VARCHAR when the statement was bound.*
+
+statement error
+EXECUTE lca_lenient;
+----
+<REGEX>:.*tree_lca: the tree 'prep_tree' cannot be read: column 'name' is BIGINT now but was VARCHAR when the statement was bound.*
+
 statement ok
 COPY (SELECT node_index, parent_index, name, branch_length FROM ex1) TO '{TEST_DIR}/prep_tree.csv';
 
@@ -315,6 +335,16 @@ COPY (SELECT * FROM ex1_pairs) TO '{TEST_DIR}/prep_pairs.csv';
 
 query TTI
 EXECUTE lca;
+----
+A	A	0
+A	D	5
+A	F	9
+B	A	2
+F	G	8
+G	A	9
+
+query TTI
+EXECUTE lca_lenient;
 ----
 A	A	0
 A	D	5

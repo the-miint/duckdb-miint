@@ -338,6 +338,7 @@ SELECT a, b, distance FROM tree_lca('tree', 'all_pairs');
 - A table does not exist; `tree_table` lacks `node_index`, `parent_index` or `name`, or is also passed as `pairs_table`; `pairs_table` lacks `a` or `b`.
 - `a`, `b` and the tree's `name` differ in type, or are not `VARCHAR`, `BIGINT` or `UUID`.
 - A name is not a tip and `ignore_missing := false`, or names two or more tips.
+- `a`, `b` or the tree's `name` is read with a type other than the one the statement was bound with: a view over a file that was rewritten after `PREPARE`, for example. Run or prepare the statement again.
 - The tree cannot be read: as for [`tree_node_depths`](#node-depths).
 - A pair's path length is outside `DOUBLE`'s range (the message names the pair).
 
@@ -413,6 +414,7 @@ GROUP BY a.name;
 **Error conditions:**
 - A table does not exist; `tree_table` lacks `node_index` or `parent_index`; `nodes_table` lacks `node_index`, has a `node_index` that is not an integer type, or is `tree_table`.
 - A `node_index` in `nodes_table` is not a node of the tree (the message lists them), or is outside `BIGINT`'s range.
+- `nodes_table`'s `node_index` is read with a type other than the one the statement was bound with, as for [`tree_lca`](#lowest-common-ancestor).
 - The tree cannot be read: as for [`tree_node_depths`](#node-depths).
 - A distance between a node and an ancestor is outside `DOUBLE`'s range (negative lengths can put them at opposite ends of it).
 
