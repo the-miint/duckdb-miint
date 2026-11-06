@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <stdexcept>
@@ -387,4 +388,17 @@ TEST_CASE("NearestTip: rejects malformed target sets", "[NearestTip]") {
 	REQUIRE_THROWS_WITH(NearestTipTargets(t.index, {a, b}, {0}), ContainsSubstring("size"));
 	REQUIRE_THROWS_WITH(NearestTipTargets(t.index, {a, a}, {0, 1}), ContainsSubstring("twice"));
 	REQUIRE_THROWS_WITH(NearestTipTargets(t.index, {a, 99}, {0, 1}), ContainsSubstring("out of range"));
+}
+
+TEST_CASE("NearestTip: refuses an index that allows unknown or negative lengths", "[NearestTip]") {
+	// The search prunes on root distances that only grow away from the root. An index
+	// built for unknown lengths counts an unknown length as 0 and accepts negative ones,
+	// so a search over it could return wrong answers without an error, whatever this
+	// tree's own lengths are.
+	const std::vector<uint32_t> parent = {TreeIndex::NO_PARENT, 0, 0};
+	const std::vector<double> length = {std::numeric_limits<double>::quiet_NaN(), 1.0, 2.0};
+	auto lenient = TreeIndex::Build(parent, length, nullptr, miint::LengthPolicy::UnknownAllowed);
+	REQUIRE_THROWS_WITH(NearestTipTargets(lenient, {1, 2}, {0, 1}), ContainsSubstring("LengthPolicy::Searchable"));
+	auto strict = TreeIndex::Build(parent, length);
+	REQUIRE_NOTHROW(NearestTipTargets(strict, {1, 2}, {0, 1}));
 }

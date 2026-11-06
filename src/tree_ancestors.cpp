@@ -28,6 +28,7 @@ struct BindData : public TableFunctionData {
 	std::string tree_table;
 	bool has_nodes_table = false;
 	std::string nodes_table;
+	LogicalType node_type;
 };
 
 struct GlobalState : public GlobalTableFunctionState {
@@ -88,6 +89,7 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 			throw BinderException("%s: node_index in '%s' must be an integer type, but it is %s", kFn,
 			                      data->nodes_table, type.ToString());
 		}
+		data->node_type = type;
 	}
 
 	names.emplace_back("node_index");
@@ -105,14 +107,17 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	auto &bind = input.bind_data->Cast<BindData>();
 	auto state = make_uniq<GlobalState>();
 
-	// nodes_table first, once: its distinct ids, ascending, NULLs dropped. Any integer type
-	// is read as BIGINT; a value out of BIGINT's range fails the read.
+	// nodes_table first, once: its distinct ids, ascending, NULLs dropped. node_index must
+	// still have the integer type it was bound with (a cast of anything else, such as 3.6,
+	// would name another node); its values are read as BIGINT, and one out of BIGINT's
+	// range fails the read.
 	std::vector<int64_t> ids;
 	if (bind.has_nodes_table) {
-		ReadRelation(context, kFn, bind.nodes_table, {{"CAST(node_index AS BIGINT)", LogicalType::BIGINT}},
+		ReadRelation(context, kFn, bind.nodes_table,
+		             {{"node_index", bind.node_type}, {"CAST(node_index AS BIGINT)", LogicalType::BIGINT}},
 		             [&](DataChunk &chunk) {
 			             UnifiedVectorFormat format;
-			             chunk.data[0].ToUnifiedFormat(format);
+			             chunk.data[1].ToUnifiedFormat(format);
 			             auto values = UnifiedVectorFormat::GetData<int64_t>(format);
 			             for (idx_t i = 0; i < chunk.size(); ++i) {
 				             const auto k = format.sel->get_index(i);

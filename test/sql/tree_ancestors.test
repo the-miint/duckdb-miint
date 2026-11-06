@@ -229,6 +229,50 @@ SELECT * FROM tree_ancestors('ex1', nodes_table := 'nodes_text');
 ----
 tree_ancestors: node_index in 'nodes_text' must be an integer type, but it is VARCHAR
 
+# A node_index type that changes after the statement was prepared is refused, not cast:
+# 3.6 would round to node 4 and list the ancestors of a node nobody asked for. Views over
+# CSV files change type without a catalog change.
+statement ok
+COPY (SELECT * FROM nodes_ah) TO '{TEST_DIR}/prep_nodes.csv';
+
+statement ok
+CREATE VIEW prep_nodes AS SELECT * FROM read_csv('{TEST_DIR}/prep_nodes.csv');
+
+statement ok
+PREPARE anc AS SELECT node_index, ancestor_index FROM tree_ancestors('ex1', nodes_table := 'prep_nodes')
+ORDER BY node_index, edges;
+
+query II
+EXECUTE anc;
+----
+0	0
+0	2
+0	5
+0	9
+8	8
+8	9
+
+statement ok
+COPY (SELECT 3.6 AS node_index) TO '{TEST_DIR}/prep_nodes.csv';
+
+statement error
+EXECUTE anc;
+----
+<REGEX>:.*tree_ancestors: column 'node_index' of 'prep_nodes' is DOUBLE now but was BIGINT when the statement was bound.*
+
+statement ok
+COPY (SELECT * FROM nodes_ah) TO '{TEST_DIR}/prep_nodes.csv';
+
+query II
+EXECUTE anc;
+----
+0	0
+0	2
+0	5
+0	9
+8	8
+8	9
+
 statement ok
 CREATE TABLE nodes_unkeyed AS SELECT 0 AS id;
 

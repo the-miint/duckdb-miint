@@ -53,6 +53,10 @@ public:
 	uint32_t root() const {
 		return root_;
 	}
+	// The policy the index was built under.
+	LengthPolicy length_policy() const {
+		return policy_;
+	}
 	uint32_t parent(uint32_t v) const {
 		return parent_[v];
 	}
@@ -121,6 +125,7 @@ private:
 	// Edges of unknown length between the root and each node, held only when there are any.
 	std::vector<uint32_t> unknown_above_;
 	uint32_t root_ = NO_PARENT;
+	LengthPolicy policy_ = LengthPolicy::Searchable;
 };
 
 // A tree's rows as a table holds them, numbered densely for TreeIndex::Build.

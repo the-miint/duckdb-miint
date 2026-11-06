@@ -83,6 +83,7 @@ TreeIndex TreeIndex::Build(const std::vector<uint32_t> &parent, const std::vecto
 
 	TreeIndex idx;
 	idx.root_ = root;
+	idx.policy_ = policy;
 	idx.parent_ = parent;
 	idx.pre_.assign(n, NO_PARENT);
 	idx.last_.assign(n, 0);

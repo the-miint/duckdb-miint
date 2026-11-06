@@ -25,7 +25,10 @@ bool FindColumnType(const TableOrViewColumns &columns, const std::string &column
 
 // Read `columns` (each an expression and the type it was bound with) from a relation, once,
 // at execution, over a helper connection (docs/internals/reading-tables-views.md), and hand
-// each non-empty chunk to `consume`. `fn` names the function in errors.
+// each non-empty chunk to `consume`. `fn` names the function in errors. The expressions are
+// spliced into the SQL as they are, and an error names a column by its expression, so pass
+// constants of your own (a column name, or a cast of one), never anything a user supplied;
+// the relation's name is quoted.
 //
 // Bind fixed the output types. A relation can change type without a catalog change (a
 // view over a file that is rewritten, under a prepared statement), so a column read with

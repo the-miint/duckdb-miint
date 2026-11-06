@@ -111,30 +111,34 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	auto state = make_uniq<GlobalState>();
 
 	// The pairs first, once: their names are the only ones kept from the tree. A pair with a
-	// NULL name is dropped, and a repeated pair kept once.
-	struct PairHash {
-		size_t operator()(const std::pair<const TipEntry *, const TipEntry *> &p) const {
-			return std::hash<const void *>()(p.first) ^ (std::hash<const void *>()(p.second) * 0x9e3779b97f4a7c15ULL);
-		}
-	};
-	std::unordered_set<std::pair<const TipEntry *, const TipEntry *>, PairHash> seen;
-	std::vector<Pair> pairs;
-	std::vector<std::string> a_names, b_names;
-	std::vector<bool> a_nulls, b_nulls;
-	ReadRelation(context, kFn, bind.pairs_table, {{"a", bind.name_type}, {"b", bind.name_type}}, [&](DataChunk &chunk) {
-		ExtractIdColumnAsStrings(chunk, 0, bind.name_type, a_names, a_nulls);
-		ExtractIdColumnAsStrings(chunk, 1, bind.name_type, b_names, b_nulls);
-		for (idx_t i = 0; i < chunk.size(); ++i) {
-			if (a_nulls[i] || b_nulls[i]) {
-				continue;
+	// NULL name is dropped, and a repeated pair kept once. The set that finds repeats is
+	// released before the tree is read.
+	{
+		struct PairHash {
+			size_t operator()(const std::pair<const TipEntry *, const TipEntry *> &p) const {
+				return std::hash<const void *>()(p.first) ^
+				       (std::hash<const void *>()(p.second) * 0x9e3779b97f4a7c15ULL);
 			}
-			const TipEntry *a = &*state->tips.emplace(std::move(a_names[i]), TipMatch {}).first;
-			const TipEntry *b = &*state->tips.emplace(std::move(b_names[i]), TipMatch {}).first;
-			if (seen.emplace(a, b).second) {
-				pairs.push_back({a, b});
-			}
-		}
-	});
+		};
+		std::unordered_set<std::pair<const TipEntry *, const TipEntry *>, PairHash> seen;
+		std::vector<std::string> a_names, b_names;
+		std::vector<bool> a_nulls, b_nulls;
+		ReadRelation(context, kFn, bind.pairs_table, {{"a", bind.name_type}, {"b", bind.name_type}},
+		             [&](DataChunk &chunk) {
+			             ExtractIdColumnAsStrings(chunk, 0, bind.name_type, a_names, a_nulls);
+			             ExtractIdColumnAsStrings(chunk, 1, bind.name_type, b_names, b_nulls);
+			             for (idx_t i = 0; i < chunk.size(); ++i) {
+				             if (a_nulls[i] || b_nulls[i]) {
+					             continue;
+				             }
+				             const TipEntry *a = &*state->tips.emplace(std::move(a_names[i]), TipMatch {}).first;
+				             const TipEntry *b = &*state->tips.emplace(std::move(b_names[i]), TipMatch {}).first;
+				             if (seen.emplace(a, b).second) {
+					             state->pairs.push_back({a, b});
+				             }
+			             }
+		             });
+	}
 
 	state->tree = ReadIndexedTree(context, kFn, bind.tree_table, state->tips, bind.name_type,
 	                              miint::LengthPolicy::UnknownAllowed, "read");
@@ -154,11 +158,10 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 		}
 	}
 	// Under ignore_missing, a pair with a name that is no tip has no row.
-	for (const auto &pair : pairs) {
-		if (pair.a->second.count == 1 && pair.b->second.count == 1) {
-			state->pairs.push_back(pair);
-		}
-	}
+	auto &pairs = state->pairs;
+	pairs.erase(std::remove_if(pairs.begin(), pairs.end(),
+	                           [](const Pair &pair) { return pair.a->second.count != 1 || pair.b->second.count != 1; }),
+	            pairs.end());
 
 	const idx_t blocks = (state->pairs.size() + STANDARD_VECTOR_SIZE - 1) / STANDARD_VECTOR_SIZE;
 	const idx_t threads = TaskScheduler::GetScheduler(context).NumberOfThreads();
