@@ -138,7 +138,7 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 	if (!FindColumnType(tree_columns, "branch_length", tree_length)) {
 		throw BinderException("%s: tree table '%s' has no 'branch_length' column", kFn, data->tree_table);
 	}
-	// The tree's internal labels are not tips either.
+	// Nor could the tree stand in for a list of tip names: its internal labels are not tips.
 	for (const auto *names_table : {&data->targets_table, &data->queries_table}) {
 		RejectTreeAs(kFn, data->tree_table, *names_table,
 		             "pass the tip names as a relation of their own, such as a view of the tree's tips");
