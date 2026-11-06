@@ -45,8 +45,8 @@ struct TreeTableArrays {
 
 // Read a tree table or view once, streaming, keeping each node's name only when it is in
 // `keep_names`. ReadTreeTable and BuildTreeAndNodeIds hold every row, name included, twice
-// over: loading the Greengenes2 2024.09 tree (24.5M nodes) that way took more than 18 GB,
-// and this way 2.6 GB (peak RSS). Names are read as
+// over: loading the Greengenes2 2024.09 tree (24.5M nodes) from Parquet that way was
+// killed at an 18 GB memory cap, and this way peaked at 2.6 GB resident. Names are read as
 // name::VARCHAR, as ReadTreeTable reads them; a missing name or branch_length column reads
 // as NULL.
 //

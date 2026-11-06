@@ -11,8 +11,8 @@ namespace miint {
 // is one interval test, and the lowest ancestor of a node whose subtree contains some
 // preorder position is found by climbing with skew-binary jump pointers (one pointer per
 // node) in O(log depth). Memory is O(n): about 28 bytes per node. On trees of tens of
-// millions of nodes that matters: O(n log n) structures (binary lifting, an Euler-tour
-// sparse table) would take about log2(n), some 25, times as much.
+// millions of nodes that matters: O(n log n) structures would take several times as much
+// (binary lifting about 4 times, an Euler-tour sparse table about 7).
 //
 // Built iteratively, so arbitrarily deep trees cannot overflow the stack. The input's
 // node numbering is not required to be in any order.

@@ -136,19 +136,6 @@ std::vector<NamedRow> ReadNames(ClientContext &context, const std::string &relat
 // Sort ids so a tie goes to the smallest name in its type's order: VARCHAR by bytes,
 // whatever its collation; BIGINT by value; UUID by its canonical text, which DuckDB orders
 // the same way as the UUIDs themselves.
-template <class KEY>
-void SortByKeys(std::vector<std::string> &ids, const std::vector<KEY> &keys) {
-	std::vector<size_t> order(ids.size());
-	std::iota(order.begin(), order.end(), size_t(0));
-	std::sort(order.begin(), order.end(), [&](size_t a, size_t b) { return keys[a] < keys[b]; });
-	std::vector<std::string> sorted;
-	sorted.reserve(ids.size());
-	for (size_t i : order) {
-		sorted.push_back(std::move(ids[i]));
-	}
-	ids = std::move(sorted);
-}
-
 void SortInTypeOrder(std::vector<std::string> &ids, const LogicalType &type) {
 	switch (type.id()) {
 	case LogicalTypeId::VARCHAR:
@@ -156,12 +143,15 @@ void SortInTypeOrder(std::vector<std::string> &ids, const LogicalType &type) {
 		std::sort(ids.begin(), ids.end());
 		return;
 	case LogicalTypeId::BIGINT: {
-		std::vector<int64_t> keys;
-		keys.reserve(ids.size());
+		std::vector<std::pair<int64_t, std::string>> keyed;
+		keyed.reserve(ids.size());
 		for (auto &id : ids) {
-			keys.push_back(::miint::ParseIdAsInt64(id).value());
+			keyed.emplace_back(::miint::ParseIdAsInt64(id).value(), std::move(id));
 		}
-		SortByKeys(ids, keys);
+		std::sort(keyed.begin(), keyed.end());
+		for (size_t i = 0; i < keyed.size(); ++i) {
+			ids[i] = std::move(keyed[i].second);
+		}
 		return;
 	}
 	default:
@@ -210,8 +200,8 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 	for (const auto *names_table : {&data->targets_table, &data->queries_table}) {
 		if (StringUtil::CIEquals(*names_table, data->tree_table)) {
 			throw BinderException("%s: '%s' is the tree table; pass the tip names as a relation of their own, such "
-			                      "as SELECT name FROM %s WHERE is_tip",
-			                      kFn, *names_table, data->tree_table);
+			                      "as a view of the tree's tips",
+			                      kFn, *names_table);
 		}
 	}
 	if (!FindColumnType(target_columns, "name", target_name)) {

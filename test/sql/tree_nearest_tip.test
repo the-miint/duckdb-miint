@@ -7,8 +7,8 @@ require miint
 # Placing a record whose taxon label is split across clades means taking the lineage of
 # the nearest tip carrying the same label. The search must count every edge on the path,
 # search within each label rather than across all of them, and never settle a tie
-# silently. The search itself is checked against a brute-force oracle in test/cpp/test_NearestTip.cpp; this file checks
-# the SQL contract around it.
+# silently. The search itself is checked against a brute-force oracle in
+# test/cpp/test_NearestTip.cpp; this file checks the SQL contract around it.
 
 # The worked example's tree, numbered A0 B1 C2 D3 E4 x5 F6 G7 H8 root9.
 statement ok
@@ -658,7 +658,7 @@ SELECT count(*) FROM tree_nearest_tip('ex1', 'ex1_targets', 't_none');
 ----
 0
 
-# A view whose names are a constant NULL (a constant vector, not stored NULLs) names nothing.
+# A view whose names are all a literal NULL names nothing.
 statement ok
 CREATE VIEW t_const_null AS SELECT NULL::VARCHAR AS name FROM range(3);
 
@@ -695,7 +695,7 @@ tree_nearest_tip: tree table 'ex1_no_lengths' has no 'branch_length' column
 statement error
 SELECT * FROM tree_nearest_tip('ex1', 'EX1', 'ex1_queries');
 ----
-tree_nearest_tip: 'EX1' is the tree table; pass the tip names as a relation of their own
+tree_nearest_tip: 'EX1' is the tree table; pass the tip names as a relation of their own, such as a view of the tree's tips
 
 statement error
 SELECT * FROM tree_nearest_tip('ex1', 'ex1_targets', 'ex1');
@@ -868,26 +868,28 @@ RESET threads;
 # =============================================================================
 # Relation names are quoted where the SQL is built: a name that unquoted
 # concatenation would turn into a second statement reads the relation it names,
-# and nothing else runs.
+# and nothing else runs. Each name starts with a relation that exists, so that
+# under unquoted concatenation (the targets name, read first) or a naive "-wrap
+# (the queries name) the first statement would succeed and the DROP would run.
 # =============================================================================
 
 statement ok
 CREATE TABLE injection_victim AS SELECT 1 AS x;
 
 statement ok
-CREATE TABLE "tree; DROP TABLE injection_victim; --" AS SELECT * FROM ex1;
+CREATE TABLE "ex1; DROP TABLE injection_victim; --" AS SELECT * FROM ex1;
 
 statement ok
-CREATE TABLE "targets""; DROP TABLE injection_victim; --" AS SELECT * FROM ex1_targets;
+CREATE TABLE "ex1_targets; DROP TABLE injection_victim; --" AS SELECT * FROM ex1_targets;
 
 statement ok
-CREATE TABLE "queries; DROP TABLE injection_victim; --" AS SELECT * FROM ex1_queries;
+CREATE TABLE "ex1_queries""; DROP TABLE injection_victim; --" AS SELECT * FROM ex1_queries;
 
 query TTR
 SELECT query, target, round(distance, 12) FROM tree_nearest_tip(
-    'tree; DROP TABLE injection_victim; --',
-    'targets"; DROP TABLE injection_victim; --',
-    'queries; DROP TABLE injection_victim; --') ORDER BY query;
+    'ex1; DROP TABLE injection_victim; --',
+    'ex1_targets; DROP TABLE injection_victim; --',
+    'ex1_queries"; DROP TABLE injection_victim; --') ORDER BY query;
 ----
 B	A	0.3
 F	A	1.9
@@ -900,7 +902,8 @@ SELECT count(*) FROM injection_victim;
 
 # =============================================================================
 # TEMP tables and views resolve as permanent ones do: the reads run on a helper
-# connection, which must see the caller's TEMP objects (temp_table_resolution.test).
+# connection, which must see the caller's TEMP objects
+# (docs/internals/reading-tables-views.md, "TEMP tables and views").
 # =============================================================================
 
 statement ok
