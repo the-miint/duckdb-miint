@@ -143,11 +143,42 @@ TEST_CASE("TaxonomyStore rejects empty and duplicate feature_ids", "[taxonomy_st
 	           ContainsSubstring("row 2 (empty feature_id), column 'class'"));
 }
 
-// tax2tree's own token list. How cleaning applies the tokens differs; see TaxonomyStore.hpp.
-TEST_CASE("DefaultBadNameTokens is tax2tree's BAD_NAMES", "[taxonomy_store]") {
-	CHECK(DefaultBadNameTokens() == std::vector<std::string> {"environmental sample", "uncultured", "UNNAMEABLE",
-	                                                          "unclassified", "unidentified", "cluster", "isolate",
-	                                                          "environmental samples"});
+// tax2tree's own token list, in its order, then incertae sedis in two spellings, which
+// tax2tree lacks. How cleaning applies the tokens differs too; see TaxonomyStore.hpp.
+TEST_CASE("DefaultBadNameTokens is tax2tree's BAD_NAMES, then incertae sedis", "[taxonomy_store]") {
+	CHECK(DefaultBadNameTokens() ==
+	      std::vector<std::string> {"environmental sample", "uncultured", "UNNAMEABLE", "unclassified", "unidentified",
+	                                "cluster", "isolate", "environmental samples", "incertae sedis", "incertae_sedis"});
+}
+
+// An incertae sedis taxon holds members whose placement is uncertain; it is not a clade, so
+// it is a placeholder like "uncultured" and is cut. The cost is every name below it: NCBI
+// files the genus Sulfobacillus under "Clostridiales Family XVII. Incertae Sedis", and the
+// cut drops the genus with the family.
+TEST_CASE("TaxonomyStore reads incertae sedis as a placeholder", "[taxonomy_store]") {
+	SECTION("a uniquely named one truncates its lineage, the names below it included") {
+		TaxonomyStore store({Row("G1", {"A", "B", "C", "D", "Clostridiales Family XVII. Incertae Sedis",
+		                                "Sulfobacillus", "Sulfobacillus thermosulfidooxidans"})});
+		CHECK(Text(store, 0, kOrder) == "D");
+		CHECK(Text(store, 0, kFamily) == "<missing>");
+		CHECK(Text(store, 0, kGenus) == "<missing>");
+		REQUIRE(store.Truncations().size() == 1);
+		CHECK(store.Truncations()[0].token == "incertae sedis");
+	}
+	SECTION("the underscore spelling is cut too, in any case") {
+		TaxonomyStore store({Row("G1", {"A", "B", "C", "D", "D_fam_Incertae_sedis", "Foo"})});
+		CHECK(Text(store, 0, kFamily) == "<missing>");
+		REQUIRE(store.Truncations().size() == 1);
+		CHECK(store.Truncations()[0].token == "incertae_sedis");
+	}
+	SECTION("one bare placeholder under several parents is cut, not a multi-parent error") {
+		// Cleaning runs before the name checks, so the placeholder never reaches them.
+		std::vector<TaxonomyRow> rows;
+		for (int i = 1; i <= 3; i++) {
+			rows.push_back(Row("G" + std::to_string(i), {"A", "B", "C", "D" + std::to_string(i), "Incertae Sedis"}));
+		}
+		CHECK(ErrorOf(rows).empty());
+	}
 }
 
 // Emptying only the bad rank would leave the names below it under a missing rank: a gap.
@@ -249,10 +280,10 @@ TEST_CASE("TaxonomyStore rejects a name with more than one parent", "[taxonomy_s
 	SECTION("a name under many parents lists the first 3") {
 		std::vector<TaxonomyRow> rows;
 		for (int i = 1; i <= 5; i++) {
-			rows.push_back(Row("G" + std::to_string(i), {"A", "B", "C", "D" + std::to_string(i), "Incertae Sedis"}));
+			rows.push_back(Row("G" + std::to_string(i), {"A", "B", "C", "D" + std::to_string(i), "Foo"}));
 		}
 		auto message = ErrorOf(rows);
-		CHECK_THAT(message, ContainsSubstring("'Incertae Sedis' (family) is under 5 different order names"));
+		CHECK_THAT(message, ContainsSubstring("'Foo' (family) is under 5 different order names"));
 		CHECK_THAT(message, ContainsSubstring("o__D3], and 2 more"));
 		CHECK_THAT(message, !ContainsSubstring("o__D4"));
 	}

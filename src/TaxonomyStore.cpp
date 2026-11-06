@@ -84,10 +84,13 @@ std::string RowText(const std::string &feature_id, size_t row) {
 const std::vector<std::string> &DefaultBadNameTokens() {
 	// BAD_NAMES in biocore/tax2tree's t2t/nlevel.py, in its order. The first token that
 	// matches is the one recorded, so "environmental samples" is recorded as
-	// "environmental sample".
+	// "environmental sample". Then incertae sedis, spelled with a space and with an
+	// underscore, which tax2tree reads as a name: it marks members of uncertain placement,
+	// not a clade.
 	static const std::vector<std::string> tokens = {
-	    "environmental sample", "uncultured", "UNNAMEABLE", "unclassified",
-	    "unidentified",         "cluster",    "isolate",    "environmental samples"};
+	    "environmental sample", "uncultured",    "UNNAMEABLE", "unclassified",
+	    "unidentified",         "cluster",       "isolate",    "environmental samples",
+	    "incertae sedis",       "incertae_sedis"};
 	return tokens;
 }
 

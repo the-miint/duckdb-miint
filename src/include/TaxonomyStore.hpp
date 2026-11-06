@@ -26,8 +26,9 @@ struct TaxonomyRow {
 	LineageRanks ranks;
 };
 
-// tax2tree's bad-name tokens. A rank value containing one, case-insensitively, is a
-// placeholder ("uncultured bacterium"), not a name.
+// tax2tree's bad-name tokens, then "incertae sedis" and "incertae_sedis", which tax2tree
+// lacks. A rank value containing one, case-insensitively, is a placeholder ("uncultured
+// bacterium", "Clostridiales Family XVII. Incertae Sedis"), not a name.
 const std::vector<std::string> &DefaultBadNameTokens();
 
 // A lineage cut short by a bad-name token: `rank` and every deeper rank were emptied.
@@ -55,7 +56,8 @@ struct LineageTruncation {
 // below it, become missing; then a lineage missing its domain or its phylum becomes missing
 // entirely (the row is non-informative). Cleaning runs first so that a lineage cut back to
 // its domain is emptied too. tax2tree differs: it empties only the bad rank, which leaves a
-// gap, and its min-informative rule tests the phylum alone, before the bad-name filter.
+// gap; its min-informative rule tests the phylum alone, before the bad-name filter; and its
+// tokens do not include incertae sedis.
 //
 // Accessors take rows, ranks (kLineageRanks indexes) and NameIds in range; kMissingName is
 // not a NameId.
