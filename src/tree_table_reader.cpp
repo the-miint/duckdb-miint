@@ -150,19 +150,26 @@ TreeWithNodeIds BuildTreeAndNodeIds(ClientContext &context, const std::string &t
 }
 
 TreeTableArrays ReadTreeArrays(ClientContext &context, const std::string &table_name,
-                               const std::unordered_set<std::string_view> &keep_names) {
+                               const std::unordered_set<std::string_view> &keep_names, const LogicalType &name_type) {
 	auto info = GetTableOrViewColumns(context, table_name, "Tree table");
-	const std::string name_proj = HasColumn(info, "name") ? "name::VARCHAR" : "CAST(NULL AS VARCHAR)";
+	const bool has_names = HasColumn(info, "name");
+	// The names are matched as text; the column as it is read is projected too, last, only
+	// so that its type can be checked against the bound one.
+	const std::string name_proj = has_names ? "name::VARCHAR" : "CAST(NULL AS VARCHAR)";
 	const std::string bl_proj = HasColumn(info, "branch_length") ? "branch_length::DOUBLE" : "CAST(NULL AS DOUBLE)";
 	// No ORDER BY: DenseTree numbers the rows itself, and sorting here would carry every
 	// name through the sort.
 	const std::string query = "SELECT node_index::BIGINT, parent_index::BIGINT, " + name_proj + ", " + bl_proj +
-	                          " FROM " + SQLIdentifier::ToString(table_name);
+	                          (has_names ? ", name" : "") + " FROM " + SQLIdentifier::ToString(table_name);
 
 	auto conn = MakeReadOnlyHelperConnection(context);
 	auto stream = SubmitStream(conn, query);
 	if (stream->HasError()) {
 		throw InvalidInputException("Failed to read from tree table '%s': %s", table_name, stream->GetError());
+	}
+	if (has_names && stream->GetTypes()[4] != name_type) {
+		throw std::invalid_argument("column 'name' is " + stream->GetTypes()[4].ToString() + " now but was " +
+		                            name_type.ToString() + " when the statement was bound; run or prepare it again");
 	}
 
 	std::vector<int64_t> node_ids;

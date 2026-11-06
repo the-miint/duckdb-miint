@@ -20,6 +20,7 @@
 #include <atomic>
 #include <numeric>
 #include <set>
+#include <stdexcept>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
@@ -275,7 +276,8 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 
 	// Each relation is read exactly once. Targets and queries are read in their own types,
 	// which ReadNames checks against the bound output types. Tree names are only matched,
-	// as text, and never emitted, so the tree's reader (ReadTreeArrays) reads them as text.
+	// as text, and never emitted, so the tree's reader (ReadTreeArrays) reads them as text,
+	// after checking their type against the bound one.
 	// One relation as both targets and queries (identifiers are case-insensitive) is read
 	// once for both, so both roles see the same rows.
 	const auto targets = ReadNames(context, bind.targets_table, bind);
@@ -305,7 +307,7 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 		}
 		TreeTableArrays tree;
 		try {
-			tree = ReadTreeArrays(context, bind.tree_table, keep_names);
+			tree = ReadTreeArrays(context, bind.tree_table, keep_names, bind.name_type);
 			state->index = miint::TreeIndex::Build(tree.tree.parent, tree.tree.branch_length, &tree.tree.node_ids);
 		} catch (const std::invalid_argument &e) {
 			throw InvalidInputException("%s: the tree '%s' cannot be searched: %s", kFn, bind.tree_table, e.what());
@@ -474,7 +476,12 @@ void Execute(ClientContext &, TableFunctionInput &data_p, DataChunk &output) {
 		}
 		miint::NearestTipResult found;
 		if (entry.group != kNoGroup) {
-			found = state.groups[entry.group].Search(entry.node, bind.options);
+			try {
+				found = state.groups[entry.group].Search(entry.node, bind.options);
+			} catch (const std::overflow_error &) {
+				throw InvalidInputException("%s: the path from '%s' to its nearest target is outside DOUBLE's range",
+				                            kFn, entry.name);
+			}
 		}
 		tied[i] = static_cast<int64_t>(found.n_tied);
 		if (found.target == miint::NearestTipResult::NO_TARGET) {

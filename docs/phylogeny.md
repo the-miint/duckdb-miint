@@ -220,6 +220,8 @@ SELECT * FROM tree_nearest_tip('tree_clamped', 'label_targets', 'label_queries')
 - `scope` is not `'path'` or `'clade'`.
 - A query or target name is not a tip and `ignore_missing := false`, or names two or more tips.
 - The tree cannot be searched: a `NULL` or repeated `node_index`, a `parent_index` that is no row's `node_index`, no rows, not exactly one root, a cycle, a `NULL`, NaN, infinite or negative branch length below the root, or a root distance (the sum of the branch lengths above a node) past the largest `DOUBLE`.
+- A `name` or `grp` column is read with a type other than the one the statement was bound with: a view over a file that was rewritten after `PREPARE`, for example. Run or prepare the statement again.
+- The path from a query to its nearest target is past the largest `DOUBLE`. Each root distance is in range, but a path adds two of them.
 
 **Performance note:** of the tree's names, only those the queries and targets use are kept, so memory grows with the number of nodes and with the number of distinct query and target names. On the full Greengenes2 2024.09 tree (24.5M nodes, 23.4M tips), read from Parquet at 8 threads, loading took about 2.4 s at a peak of 2.6 GB (the process's peak resident memory), and 20,000 queries against 50,000 targets in 5,000 groups took about 3 s in all. Making every tip of a tree of tens of millions of tips both a query and a target holds every name several times over: an estimated tens of GB for that tree, not measured.
 

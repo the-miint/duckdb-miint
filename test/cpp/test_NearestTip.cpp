@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <numeric>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -362,6 +363,21 @@ TEST_CASE("NearestTip: random trees and groups agree with a brute-force search",
 			}
 		}
 	}
+}
+
+// Each root distance is in range, but a path adds two of them. A distance that is not a
+// double is refused rather than reported; only the nearest target's distance matters, so
+// a farther target out of range does not stop a nearer one in range.
+TEST_CASE("NearestTip: a nearest distance outside a double's range is refused", "[NearestTip]") {
+	NamedTree t("(P:1e308,Q:1e308,S:1)r;");
+	REQUIRE_THROWS_AS(search(t, t.targets({"Q"}), "P"), std::overflow_error);
+	REQUIRE_THROWS_WITH(search(t, t.targets({"Q"}), "P"), ContainsSubstring("outside a double's range"));
+
+	// S is 1e308 + 1 from P, which is in range; Q is not, and loses.
+	auto near = search(t, t.targets({"Q", "S"}), "P");
+	REQUIRE(near.target == "S");
+	REQUIRE(near.distance == 1e308 + 1.0);
+	REQUIRE(near.n_tied == 1);
 }
 
 TEST_CASE("NearestTip: rejects malformed target sets", "[NearestTip]") {

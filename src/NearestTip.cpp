@@ -1,6 +1,7 @@
 #include "NearestTip.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <limits>
 #include <numeric>
@@ -174,6 +175,12 @@ NearestTipResult NearestTipTargets::Search(uint32_t query, const NearestTipOptio
 		below = new_below;
 		above = new_above;
 		cur = level;
+	}
+	// Each root distance is in range, but a path adds two of them. Only the reported
+	// distance matters: a nearer target in range always beats one out of range.
+	if (best.target != NearestTipResult::NO_TARGET && !std::isfinite(best.distance)) {
+		throw std::overflow_error("NearestTipTargets::Search: the path from query node " + std::to_string(query) +
+		                          " to its nearest target is outside a double's range");
 	}
 	return best;
 }

@@ -412,9 +412,22 @@ EXECUTE nearest;
 ----
 <REGEX>:.*tree_nearest_tip: column 'name' of 'prep_queries' is BIGINT now but was VARCHAR when the statement was bound.*
 
-# Back to the bound types, the prepared statement answers again.
+# Only the tree's names change. The tree's names are matched as text, so the integer
+# names would otherwise be read as names that no target or query uses.
 statement ok
 COPY (SELECT * FROM ex1_queries_g) TO '{TEST_DIR}/prep_queries.csv';
+
+statement ok
+COPY (SELECT node_index, parent_index, name, branch_length FROM big) TO '{TEST_DIR}/prep_tree.csv';
+
+statement error
+EXECUTE nearest;
+----
+<REGEX>:.*tree_nearest_tip: the tree 'prep_tree' cannot be searched: column 'name' is BIGINT now but was VARCHAR when the statement was bound.*
+
+# Back to the bound types, the prepared statement answers again.
+statement ok
+COPY (SELECT node_index, parent_index, name, branch_length FROM ex1) TO '{TEST_DIR}/prep_tree.csv';
 
 query TTT
 EXECUTE nearest;
@@ -525,6 +538,32 @@ SELECT query, round(distance, 12) FROM tree_nearest_tip('ex1_root_len', 'ex1_tar
 B	0.3
 F	1.9
 G	2.0
+
+# Each root distance is in range, but the path from P to Q adds two of them: a distance
+# outside DOUBLE's range is refused, not reported as inf. A nearer target in range is
+# still the answer (1e308 + 1 rounds to 1e308).
+statement ok
+CREATE TABLE far_apart AS SELECT * FROM (VALUES (0, NULL, 'root', NULL), (1, 0, 'P', 1e308), (2, 0, 'Q', 1e308),
+(3, 0, 'S', 1.0)) AS v(node_index, parent_index, name, branch_length);
+
+statement ok
+CREATE TABLE far_q AS SELECT 'Q' AS name;
+
+statement ok
+CREATE TABLE far_qs AS SELECT * FROM (VALUES ('Q'), ('S')) AS v(name);
+
+statement ok
+CREATE TABLE far_p AS SELECT 'P' AS name;
+
+statement error
+SELECT * FROM tree_nearest_tip('far_apart', 'far_q', 'far_p');
+----
+tree_nearest_tip: the path from 'P' to its nearest target is outside DOUBLE's range
+
+query TTT
+SELECT query, target, distance = 1e308 FROM tree_nearest_tip('far_apart', 'far_qs', 'far_p');
+----
+P	S	true
 
 # =============================================================================
 # The tree's rows: any order and any distinct node_index values give the same answers,

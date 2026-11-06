@@ -55,6 +55,9 @@ public:
 	NearestTipTargets(const TreeIndex &index, const std::vector<uint32_t> &nodes,
 	                  const std::vector<uint32_t> &name_ranks);
 
+	// Throws std::out_of_range for a query node out of range, and std::overflow_error when
+	// the nearest target's distance is outside a double's range (each root distance is in
+	// range, but a path adds two of them).
 	NearestTipResult Search(uint32_t query, const NearestTipOptions &options = {}) const;
 
 private:
