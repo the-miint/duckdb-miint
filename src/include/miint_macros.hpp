@@ -2755,8 +2755,12 @@ const std::string INFER_TRIM = // NOLINT
 // read_ncbi_taxdump (NULL source => auto-download + cache the canonical NCBI dump).
 //
 // Each rank goes to the column lineage_rank names, the mapping read_ncbi_lineage uses
-// (FindRankColumn, src/include/taxonomy_lineage.hpp), so the two cannot drift;
-// test/sql/taxonomy_lineage.test pins both functions' schemas to the same columns.
+// (FindRankColumn, src/include/taxonomy_lineage.hpp), so the two cannot map a rank
+// differently. The column names are written out below; test/sql/taxonomy_lineage.test pins
+// both functions' schemas to the same columns. lineage_rank runs once per node, in `tree`,
+// not once per row of the walk, and is called as system.main.lineage_rank: a macro body
+// resolves its callees in the caller's catalog, so a bare name would let a user's own
+// lineage_rank replace the mapping (see "THE QUALIFICATION IS LOAD-BEARING" above).
 // Legacy 'superkingdom' and newer 'domain' both collapse to `domain`;
 // phylum/class/order/family/genus/species/strain map to like-named columns; every other
 // rank (clade, subspecies, no rank, ...) is dropped. The
@@ -2770,7 +2774,7 @@ const std::string INFER_TRIM = // NOLINT
 const std::string TAXONOMY_LINEAGE = // NOLINT
     "CREATE OR REPLACE MACRO taxonomy_lineage(taxids := NULL, source := NULL, refresh := false) AS TABLE "
     "WITH RECURSIVE tree AS MATERIALIZED ( "
-    "    SELECT node_index, parent_index, name, rank "
+    "    SELECT node_index, parent_index, name, rank, system.main.lineage_rank(rank) AS rank_column "
     "    FROM read_ncbi_taxdump(source, refresh := refresh) "
     "), "
     "seeds(q_taxid) AS ( "
@@ -2786,11 +2790,11 @@ const std::string TAXONOMY_LINEAGE = // NOLINT
     "                         ELSE v END "
     "    FROM (SELECT UNNEST(taxids)::BIGINT AS v) "
     "), "
-    "walk(q_taxid, cur, w_name, w_rank, w_parent) AS ( "
-    "    SELECT s.q_taxid, t.node_index, t.name, t.rank, t.parent_index "
+    "walk(q_taxid, cur, w_name, w_rank, w_column, w_parent) AS ( "
+    "    SELECT s.q_taxid, t.node_index, t.name, t.rank, t.rank_column, t.parent_index "
     "    FROM seeds s JOIN tree t ON t.node_index = s.q_taxid "
     "    UNION ALL "
-    "    SELECT w.q_taxid, t.node_index, t.name, t.rank, t.parent_index "
+    "    SELECT w.q_taxid, t.node_index, t.name, t.rank, t.rank_column, t.parent_index "
     "    FROM walk w JOIN tree t ON t.node_index = w.w_parent "
     "), "
     "collapsed AS ( "
@@ -2812,7 +2816,7 @@ const std::string TAXONOMY_LINEAGE = // NOLINT
     "        NULLIF(MAX(CASE WHEN w_column = 'genus'   THEN w_name END), '') AS genus, "
     "        NULLIF(MAX(CASE WHEN w_column = 'species' THEN w_name END), '') AS species, "
     "        NULLIF(MAX(CASE WHEN w_column = 'strain'  THEN w_name END), '') AS strain "
-    "    FROM (SELECT *, lineage_rank(w_rank) AS w_column FROM walk) "
+    "    FROM walk "
     "    GROUP BY q_taxid "
     ") "
     "SELECT "

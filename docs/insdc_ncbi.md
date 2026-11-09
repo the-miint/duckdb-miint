@@ -690,6 +690,7 @@ HAVING bool_or(gtdb_label(phylum).suffix IS NOT NULL);
 -- the genus base and the epithet, is the caller's choice.
 SELECT s.genus_base, s.epithet, list(DISTINCT species ORDER BY species) AS labels
 FROM (SELECT species, gtdb_species_label(species) AS s FROM gtdb)
+WHERE s IS NOT NULL
 GROUP BY ALL
 HAVING count(DISTINCT species) > 1;
 

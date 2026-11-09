@@ -151,7 +151,7 @@ std::string FormatLineage(const Lineage &l) {
 
 } // namespace
 
-const LineageRank *FindRankColumn(const std::string &ncbi_rank) {
+const LineageRank *FindRankColumn(std::string_view ncbi_rank) {
 	if (ncbi_rank == "superkingdom") {
 		return &kLineageRanks[0]; // domain
 	}

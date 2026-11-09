@@ -278,6 +278,7 @@ list(
   src/formula_function.cpp
   src/formula_parser.cpp
   src/gfa_parser.cpp
+  src/gtdb_label.cpp
   src/hfile_duckdb.cpp
   src/id_column_codec.cpp
   src/IntervalCompressor.cpp
@@ -286,6 +287,7 @@ list(
   src/KSW2Aligner.cpp
   src/line_file_scan.cpp
   src/line_splitter.cpp
+  src/lineage_rank.cpp
   src/mass_tables.cpp
   src/massql_function.cpp
   src/massql_parser.cpp
@@ -313,8 +315,6 @@ list(
   src/NewickTree.cpp
   src/paf_parser.cpp
   src/parse_lineage.cpp
-  src/lineage_rank.cpp
-  src/gtdb_label.cpp
   src/per_run_reader.cpp
   src/per_sample_table_function.cpp
   src/phylo_ancestral_ml.cpp
