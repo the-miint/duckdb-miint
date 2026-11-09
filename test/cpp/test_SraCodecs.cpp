@@ -10,6 +10,7 @@
 #include <vector>
 
 using namespace miint::sra;
+using miint_test::PackedRows;
 using miint_test::ThrowsTypeMentioning;
 
 // Hand-built inputs for the two codecs public runs use. The expected values follow ncbi-vdb's
@@ -185,8 +186,7 @@ TEST_CASE("DecodeBlob passes through a stage the writer skipped", "[sra]") {
 	f.version = 0;
 	f.osize = 3;
 	blob.frames = {f};
-	blob.page_map.row_length = {3};
-	blob.page_map.data_offset = {0};
+	blob.page_map = PackedRows({3});
 	DecodedBlob d = DecodeBlob(blob, "<INSDC:4na:bin>zip_encoding#1", ElementType {8, false});
 	CHECK(d.data == std::vector<uint8_t> {7, 8, 9});
 	CHECK(d.elem_count == 3);
@@ -197,8 +197,76 @@ TEST_CASE("DecodeBlob byte-swaps an unencoded big-endian payload of wide element
 	blob.bytes = {0, 0, 1, 2};
 	blob.payload_bits = 32;
 	blob.big_endian = true;
-	blob.page_map.row_length = {1};
-	blob.page_map.data_offset = {0};
+	blob.page_map = PackedRows({1});
 	DecodedBlob d = DecodeBlob(blob, "", U32);
 	CHECK(As<uint32_t>(d.data) == std::vector<uint32_t> {0x0102});
+}
+
+TEST_CASE("DecodeBlob refuses a page map addressing past the decoded elements", "[sra]") {
+	// Offsets come from the file. One near 2^64 plus its row's length wraps to a small number, so
+	// each row is checked on its own: a wrapped sum must not pass the bound.
+	VdbBlob blob;
+	blob.bytes = {7, 8, 9};
+	blob.payload_bits = 24;
+	blob.page_map = PackedRows({3, 2});
+	blob.page_map.runs[1].offset = UINT64_MAX - 1;
+	CHECK(ThrowsTypeMentioning<SraFormatError>([&] { DecodeBlob(blob, "", ElementType {8, false}); }, "page map"));
+	blob.page_map.runs[1].offset = 2;
+	CHECK(ThrowsTypeMentioning<SraFormatError>([&] { DecodeBlob(blob, "", ElementType {8, false}); }, "page map"));
+}
+
+TEST_CASE("DecodeBlob refuses izip on elements narrower than a byte", "[sra]") {
+	// izip encodes whole integers; a 2na column claiming it is refused, not divided by zero.
+	VdbBlob blob;
+	blob.bytes = {0};
+	blob.payload_bits = 8;
+	blob.frames = {IzipFrame(2, 1, {0, 0})};
+	blob.frames[0].osize = 1;
+	blob.page_map = PackedRows({4});
+	CHECK(ThrowsTypeMentioning<SraUnsupportedError>(
+	    [&] { DecodeBlob(blob, "izip_encoding#1", ElementTypeOf("INSDC:2na:packed")); }, "2-bit"));
+}
+
+TEST_CASE("A frame's decoded size is bounded by its compressed bytes", "[sra]") {
+	// Deflate expands at most about 1032 to 1: a frame claiming a terabyte from a few bytes is
+	// damage, refused before a buffer is sized from it.
+	std::vector<uint8_t> src(16, 0);
+	HeaderFrame zip;
+	zip.version = 1;
+	zip.osize = int64_t(1) << 40;
+	uint64_t bits = 0;
+	CHECK(ThrowsTypeMentioning<SraFormatError>([&] { Unzip(zip, src.data(), src.size(), bits); }, "inflate"));
+	HeaderFrame iz = IzipFrame(2, 1, {0, 0});
+	CHECK(ThrowsTypeMentioning<SraFormatError>(
+	    [&] {
+		    Iunzip(iz, src.data(), src.size(), ElementType {8, false}, uint64_t(1) << 40);
+	    },
+	    "inflate"));
+	// With no byte planes the values come from the header alone (a constant column), so no byte
+	// count bounds them: a size cap does.
+	HeaderFrame constant = IzipFrame(2, 0, {5, 0});
+	CHECK(ThrowsTypeMentioning<SraUnsupportedError>(
+	    [&] {
+		    Iunzip(constant, nullptr, 0, ElementType {8, false}, uint64_t(1) << 40);
+	    },
+	    "GiB"));
+}
+
+TEST_CASE("A column stored without encoding refuses a blob that carries one", "[sra]") {
+	// The column's metadata records no encoding, yet the blob has an encoding header that the
+	// writer did not mark as skipped: reading its compressed bytes as elements would return
+	// garbage, so it is damage.
+	VdbBlob blob;
+	blob.bytes = {7, 8, 9};
+	blob.payload_bits = 24;
+	HeaderFrame f;
+	f.version = 1;
+	f.osize = 3;
+	blob.frames = {f};
+	blob.page_map = PackedRows({3});
+	CHECK(ThrowsTypeMentioning<SraFormatError>(
+	    [&] {
+		    DecodeBlob(blob, "", ElementType {8, false});
+	    },
+	    "without encoding"));
 }

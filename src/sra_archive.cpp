@@ -94,6 +94,13 @@ KarArchive::KarArchive(std::shared_ptr<const SraByteSource> source) : source_(st
 		                     ", outside the file");
 	}
 
+	// Public archives' tables of contents are a few KB. The header's offset is read only up to a
+	// bound, so a damaged one cannot make the reader take the whole file into memory.
+	constexpr uint64_t MAX_TOC = uint64_t(64) << 20;
+	if (data_offset_ - HEADER > MAX_TOC) {
+		throw SraUnsupportedError("a table of contents of " + std::to_string(data_offset_ - HEADER) +
+		                          " bytes (public archives' are a few KB)");
+	}
 	auto toc = source_->Read(HEADER, size_t(data_offset_ - HEADER));
 	// Each TOC node: name length, name, mtime, mode, type, then a type-specific body. A directory's
 	// body is another tree, holding its children.
@@ -129,11 +136,13 @@ KarArchive::KarArchive(std::shared_ptr<const SraByteSource> source) : source_(st
 			case 2: { // file
 				need(16);
 				entry.type = KarEntry::Type::File;
-				entry.offset = data_offset_ + LoadU64(p);
+				uint64_t relative = LoadU64(p);
 				entry.size = LoadU64(p + 8);
-				if (entry.offset > file_size || entry.size > file_size - entry.offset) {
+				// Compared before adding, so a huge offset cannot wrap into the file.
+				if (relative > file_size - data_offset_ || entry.size > file_size - data_offset_ - relative) {
 					throw SraFormatError("archive entry '" + entry.path + "' runs past the end of the file");
 				}
+				entry.offset = data_offset_ + relative;
 				break;
 			}
 			case 6: // empty file

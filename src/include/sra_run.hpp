@@ -2,6 +2,7 @@
 
 #include "sra_archive.hpp"
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <set>
@@ -47,6 +48,10 @@ struct Spot {
 	std::vector<uint32_t> read_len;
 	std::vector<uint8_t> read_type; // empty when the table has no READ_TYPE column
 	bool has_read_type = false;
+	// The spot's name ($sn); has_name is false when the table has no way to name spots, and
+	// fasterq-dump then leaves the name out of its deflines.
+	bool has_name = false;
+	std::string name;
 };
 
 // Reads spots of a classified run. The logical columns are taken the way the run's schema
@@ -55,7 +60,10 @@ struct Spot {
 // changes, from the table's metadata. Not thread-safe; use one reader per thread.
 class SpotReader {
 public:
-	explicit SpotReader(std::shared_ptr<const SraTable> table);
+	// A reader of the same run as `share_from` takes its name index rather than reading another
+	// copy: each decoding thread has a reader, and the index of a run that stores whole names
+	// holds tens of bytes per spot.
+	explicit SpotReader(std::shared_ptr<const SraTable> table, const SpotReader *share_from = nullptr);
 	~SpotReader();
 
 	// The table's row ids are [FirstRow(), FirstRow() + RowCount()).
@@ -65,6 +73,9 @@ public:
 	// it would stop: READ_START and READ_LEN counts differ, a read runs past the spot, or the
 	// spot's bases and qualities differ in length.
 	void Read(int64_t row_id, Spot &out);
+	// Hints to the byte source that rows [first, end) will be read soon: on S3 the blocks of a
+	// work unit are fetched before a thread reaches them.
+	void PrefetchRows(int64_t first, int64_t end);
 
 private:
 	struct Impl;
@@ -85,6 +96,8 @@ struct SraRead {
 	int64_t spot = 0;             // $si
 	uint32_t read_number = 0;     // $ri: the read's position in its spot, 1-based
 	uint32_t destination = 0;     // 0: the unpaired (or only) file; n: file _n
+	bool has_name = false;        // the spot's
+	std::string name;             // $sn
 	std::string bases;            // $rl is its length
 	std::vector<uint8_t> quality; // phred, capped at 93 as fasterq-dump prints it ('~')
 };

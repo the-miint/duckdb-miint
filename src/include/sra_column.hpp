@@ -52,14 +52,32 @@ struct HeaderFrame {
 	std::vector<int64_t> args;
 };
 
-// Per row of a blob: how many elements it has and where they start in the decoded data.
-// Several rows may share one stored record (the same offset).
+// How a blob's rows map onto its decoded elements. Kept as the runs the page map stores, not per
+// row: a blob of millions of empty rows (VDB cuts blobs by size) is a few bytes on disk and must
+// stay small here.
 struct PageMap {
-	std::vector<uint32_t> row_length;
-	std::vector<uint64_t> data_offset;
+	// Rows [first_row, first_row + rows) hold `length` elements each. The first starts at element
+	// `offset` and each next one `step` elements after it: `length` when every row has its own
+	// record, 0 when the rows share one.
+	struct Run {
+		uint64_t first_row = 0;
+		uint64_t rows = 0;
+		uint32_t length = 0;
+		uint64_t offset = 0;
+		uint64_t step = 0;
+	};
+	std::vector<Run> runs; // in row order, covering rows [0, row_count)
+	uint64_t row_count = 0;
 
-	// Elements the decoded data must hold for every row to be in range: the end of the
-	// furthest row.
+	// Row i's length and first element; i < row_count. `hint` is the run a caller found last:
+	// rows are read in order, so it usually holds the next one too and saves the search.
+	void Row(uint64_t i, uint32_t &length, uint64_t &offset, size_t &hint) const;
+	void Row(uint64_t i, uint32_t &length, uint64_t &offset) const {
+		size_t hint = 0;
+		Row(i, length, offset, hint);
+	}
+	// The end of the furthest row, or UINT64_MAX when that sum would overflow: the bound a blob's
+	// decoded elements must meet.
 	uint64_t ElementsSpanned() const;
 };
 
@@ -119,6 +137,8 @@ public:
 	// checksum mismatch, SraUnsupportedError for MD5 checksums.
 	std::vector<uint8_t> ReadBlob(const BlobLoc &loc) const;
 	VdbBlob ReadVdbBlob(const BlobLoc &loc) const;
+	// Hints to the byte source that the blobs holding rows [first, end) will be read soon.
+	void PrefetchRows(int64_t first, int64_t end) const;
 
 private:
 	const KarArchive *archive_;

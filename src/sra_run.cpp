@@ -2,9 +2,11 @@
 
 #include "sra_codecs.hpp"
 #include "sra_column.hpp"
+#include "sra_name.hpp"
 
 #include <algorithm>
 #include <cstring>
+#include <optional>
 
 namespace miint {
 namespace sra {
@@ -196,13 +198,45 @@ public:
 		}
 		if (current_ == nullptr || row < current_->start_id ||
 		    row >= current_->start_id + int64_t(current_->id_count)) {
-			current_ = &physical_->Index().Locate(row);
-			blob_ = DecodeBlob(physical_->ReadVdbBlob(*current_), physical_->Encoding(), type_);
+			// current_ names the decoded blob only once it is decoded, so a failed decode leaves
+			// no stale pairing behind.
+			const BlobLoc &loc = physical_->Index().Locate(row);
+			current_ = nullptr;
+			blob_ = DecodeBlob(physical_->ReadVdbBlob(loc), physical_->Encoding(), type_);
+			current_ = &loc;
+			run_hint_ = 0;
 		}
-		size_t i = size_t(row - current_->start_id);
+		uint32_t length;
+		blob_.page_map.Row(uint64_t(row - current_->start_id), length, offset, run_hint_);
 		data = blob_.data.data();
-		offset = blob_.page_map.data_offset[i];
-		count = blob_.page_map.row_length[i];
+		count = length;
+	}
+
+	void PrefetchRows(int64_t first, int64_t end) const {
+		if (physical_) {
+			physical_->PrefetchRows(first, end);
+		}
+	}
+
+	// The row's cell as text (an ascii column).
+	std::string Text(int64_t row) {
+		const uint8_t *data;
+		uint64_t offset, count;
+		Cell(row, data, offset, count);
+		return std::string(reinterpret_cast<const char *>(data) + offset, count);
+	}
+
+	// The first element of an I32 cell, or nothing when the cell is empty.
+	std::optional<int32_t> FirstInt(int64_t row) {
+		const uint8_t *data;
+		uint64_t offset, count;
+		Cell(row, data, offset, count);
+		if (count == 0) {
+			return std::nullopt;
+		}
+		int32_t v;
+		std::memcpy(&v, data + offset * 4, 4);
+		return v;
 	}
 
 	template <typename T>
@@ -224,6 +258,7 @@ private:
 	std::unique_ptr<PhysicalColumn> physical_;
 	const BlobLoc *current_ = nullptr;
 	DecodedBlob blob_;
+	size_t run_hint_ = 0; // the page-map run of the row read last
 };
 
 // INSDC 4na: each bit a base (A=1, C=2, G=4, T=8), so an ambiguity code is the OR of its bases.
@@ -231,15 +266,40 @@ const char FOUR_NA_TEXT[17] = ".ACMGRSVTWYHKDBN";
 
 } // namespace
 
+namespace {
+bool StartsWith(const std::string &s, const std::string &prefix) {
+	return s.compare(0, prefix.size(), prefix) == 0;
+}
+} // namespace
+
 struct SpotReader::Impl {
 	std::shared_ptr<const SraTable> table;
 	std::unique_ptr<ColumnSource> read, altread, quality, read_start, read_len, read_type;
+
+	// How the schema names spots (NAME = _out_name, its first alternative whose inputs exist).
+	enum class Naming {
+		None,     // no alternative resolves: fasterq-dump prints no $sn
+		NoCoord,  // format_spot_name_no_coord(fmt): align tables
+		Coord,    // format_spot_name(fmt, X, Y [, spot_name]): skeyname tables
+		SpotName, // the stored name verbatim
+	};
+	Naming naming = Naming::None;
+	std::string fixed_format;               // align tables without RAW_NAME: '$R'
+	std::unique_ptr<ColumnSource> name_fmt; // NAME_FMT, or RAW_NAME on align:tbl:seq#2
+	std::shared_ptr<const SkeyIndex> skey;  // projects a format for rows with an empty NAME_FMT
+	uint32_t skey_ord = 0;                  // the ordinal of the last key projected, and the key
+	std::string skey_key;
+	std::unique_ptr<ColumnSource> x, y;      // coordinates
+	std::unique_ptr<ColumnSource> spot_name; // SPOT_NAME, or RAW_NAME
+
+	void ResolveNaming(const SraTable &t, const Impl *share_from);
 	int64_t first = 1;
 	uint64_t count = 0;
 	std::vector<uint8_t> bases4na;
 };
 
-SpotReader::SpotReader(std::shared_ptr<const SraTable> table) : impl_(std::make_unique<Impl>()) {
+SpotReader::SpotReader(std::shared_ptr<const SraTable> table, const SpotReader *share_from)
+    : impl_(std::make_unique<Impl>()) {
 	Impl &m = *impl_;
 	m.table = std::move(table);
 	const SraTable &t = *m.table;
@@ -268,9 +328,74 @@ SpotReader::SpotReader(std::shared_ptr<const SraTable> table) : impl_(std::make_
 	}
 	// fasterq-dump iterates over the rows of READ.
 	m.read->Range(m.first, m.count);
+	m.ResolveNaming(t, share_from ? share_from->impl_.get() : nullptr);
+}
+
+// Chooses how spots are named, as VDB resolves the schema's alternatives when a cursor opens:
+//   align:tbl:seq    out_name_fmt = .RAW_NAME | '$R' (#2), '$R' (#1.x); no coordinates
+//   skeyname tables  out_name_fmt = idx:text:project<'skey'>(.NAME_FMT), X = .X, Y = .Y,
+//                    out_spot_name = .SPOT_NAME | .RAW_NAME
+//   _out_name = format_spot_name(fmt, X, Y, spot_name) | format_spot_name(fmt, X, Y)
+//             | format_spot_name_no_coord(fmt) | out_spot_name
+void SpotReader::Impl::ResolveNaming(const SraTable &t, const Impl *share_from) {
+	Impl &m = *this;
+	auto ascii = [&](const char *name) {
+		return ColumnSource::Exists(t, name) ? std::make_unique<ColumnSource>(t, name, "ascii") : nullptr;
+	};
+	const std::string type = t.TableType();
+	if (StartsWith(type, "NCBI:align:tbl:seq")) {
+		m.naming = Naming::NoCoord;
+		bool raw_name_format = !StartsWith(type, "NCBI:align:tbl:seq#1");
+		m.name_fmt = raw_name_format ? ascii("RAW_NAME") : nullptr;
+		if (!m.name_fmt) {
+			m.fixed_format = "$R";
+		}
+		return;
+	}
+	m.spot_name = ascii("SPOT_NAME");
+	if (!m.spot_name) {
+		m.spot_name = ascii("RAW_NAME");
+	}
+	// The format exists only through the index: without it, VDB cannot build the projection and
+	// names fall back to the stored spot name, whatever NAME_FMT holds.
+	std::string skey_path = t.Prefix() + "idx/skey";
+	if (t.Archive().Find(skey_path) != nullptr) {
+		m.name_fmt = ascii("NAME_FMT");
+		if (!m.name_fmt) {
+			throw SraUnsupportedError("an skey index without a NAME_FMT column (an older spot-name schema, which no "
+			                          "public run surveyed had)");
+		}
+		if (share_from && share_from->table == table && share_from->skey) {
+			m.skey = share_from->skey;
+		} else {
+			m.skey = std::make_shared<const SkeyIndex>(t.Archive().ReadFile(skey_path));
+		}
+	}
+	if (m.name_fmt) {
+		if (ColumnSource::Exists(t, "X") && ColumnSource::Exists(t, "Y")) {
+			m.x = std::make_unique<ColumnSource>(t, "X", "INSDC:coord:val");
+			m.y = std::make_unique<ColumnSource>(t, "Y", "INSDC:coord:val");
+			m.naming = Naming::Coord;
+		} else {
+			m.naming = Naming::NoCoord;
+			m.spot_name.reset(); // format_spot_name_no_coord takes the format only
+		}
+	} else if (m.spot_name) {
+		m.naming = Naming::SpotName;
+	}
 }
 
 SpotReader::~SpotReader() = default;
+
+void SpotReader::PrefetchRows(int64_t first, int64_t end) {
+	Impl &m = *impl_;
+	for (auto *col : {m.read.get(), m.altread.get(), m.quality.get(), m.read_start.get(), m.read_len.get(),
+	                  m.read_type.get(), m.name_fmt.get(), m.x.get(), m.y.get(), m.spot_name.get()}) {
+		if (col) {
+			col->PrefetchRows(first, end);
+		}
+	}
+}
 
 int64_t SpotReader::FirstRow() const {
 	return impl_->first;
@@ -283,7 +408,10 @@ uint64_t SpotReader::RowCount() const {
 void SpotReader::Read(int64_t row_id, Spot &out) {
 	Impl &m = *impl_;
 	out.row_id = row_id;
-	const std::string where = "spot " + std::to_string(row_id);
+	// Built only for an error: Read runs once per spot.
+	auto where = [row_id] {
+		return "spot " + std::to_string(row_id);
+	};
 
 	// READ = 2na bases, two bits each, most significant first, widened to 4na and ORed with the
 	// right-aligned ALTREAD (ambiguity codes): bit_or<ALIGN_RIGHT> in the schema.
@@ -301,7 +429,7 @@ void SpotReader::Read(int64_t row_id, Spot &out) {
 		uint64_t alt_off, alt_n;
 		m.altread->Cell(row_id, alt, alt_off, alt_n);
 		if (alt_n > n) {
-			throw SraFormatError(where + ": ALTREAD is longer than READ");
+			throw SraFormatError(where() + ": ALTREAD is longer than READ");
 		}
 		for (uint64_t j = 0; j < alt_n; j++) {
 			m.bases4na[n - alt_n + j] |= alt[alt_off + j];
@@ -322,19 +450,47 @@ void SpotReader::Read(int64_t row_id, Spot &out) {
 		out.read_type.clear();
 	}
 
+	// The spot's name.
+	using Naming = Impl::Naming;
+	out.has_name = m.naming != Naming::None;
+	out.name.clear();
+	if (m.naming == Naming::SpotName) {
+		out.name = m.spot_name->Text(row_id);
+	} else if (m.naming != Naming::None) {
+		std::string fmt = m.name_fmt ? m.name_fmt->Text(row_id) : m.fixed_format;
+		if (fmt.empty() && m.skey) {
+			uint32_t ord = m.skey->Ordinal(row_id);
+			if (ord != m.skey_ord) {
+				m.skey_key = m.skey->KeyOfOrdinal(ord);
+				m.skey_ord = ord;
+			}
+			fmt = m.skey_key;
+		}
+		std::string stored = m.spot_name ? m.spot_name->Text(row_id) : std::string();
+		if (m.naming == Naming::Coord) {
+			out.name = FormatSpotName(fmt, m.x->FirstInt(row_id), m.y->FirstInt(row_id), row_id, stored);
+		} else {
+			out.name = FormatSpotNameNoCoord(fmt, row_id, stored);
+		}
+	}
+
+	if (out.has_name) {
+		CheckSpotName(out.name, row_id);
+	}
+
 	// fasterq-dump's per-spot checks (fq_seq_ua_iter.c); each stops the run.
 	if (out.read_start.size() != out.read_len.size()) {
-		throw SraFormatError(where + ": READ_START has " + std::to_string(out.read_start.size()) +
+		throw SraFormatError(where() + ": READ_START has " + std::to_string(out.read_start.size()) +
 		                     " reads but READ_LEN has " + std::to_string(out.read_len.size()));
 	}
 	for (size_t i = 0; i < out.read_len.size(); i++) {
 		if (out.read_start[i] < 0 || uint64_t(out.read_start[i]) + out.read_len[i] > n) {
-			throw SraFormatError(where + ": read " + std::to_string(i + 1) + " runs past the spot's " +
+			throw SraFormatError(where() + ": read " + std::to_string(i + 1) + " runs past the spot's " +
 			                     std::to_string(n) + " bases");
 		}
 	}
 	if (out.quality.size() != n) {
-		throw SraFormatError(where + ": " + std::to_string(n) + " bases but " + std::to_string(out.quality.size()) +
+		throw SraFormatError(where() + ": " + std::to_string(n) + " bases but " + std::to_string(out.quality.size()) +
 		                     " qualities");
 	}
 }
@@ -349,6 +505,8 @@ void Emit(const Spot &spot, uint32_t read_number, uint32_t destination, size_t s
 	r.spot = spot.row_id;
 	r.read_number = read_number;
 	r.destination = destination;
+	r.has_name = spot.has_name;
+	r.name = spot.name;
 	r.bases = spot.bases.substr(start, len);
 	r.quality.resize(len);
 	for (size_t i = 0; i < len; i++) {
@@ -365,10 +523,12 @@ bool Biological(const Spot &spot, size_t i) {
 void RouteSpot(const Spot &spot, SplitMode mode, bool include_technical, std::vector<SraRead> &out) {
 	// split-3 always skips technical reads (perform_fastq_split_3_join).
 	bool skip_tech = mode == SplitMode::Split3 || !include_technical;
-	const std::string where = "spot " + std::to_string(spot.row_id);
+	auto where = [&spot] {
+		return "spot " + std::to_string(spot.row_id);
+	};
 	bool use_types = skip_tech && spot.has_read_type;
 	if (use_types && spot.read_type.size() != spot.read_len.size()) {
-		throw SraFormatError(where + ": READ_TYPE has " + std::to_string(spot.read_type.size()) +
+		throw SraFormatError(where() + ": READ_TYPE has " + std::to_string(spot.read_type.size()) +
 		                     " reads but READ_LEN has " + std::to_string(spot.read_len.size()));
 	}
 	const size_t reads = spot.read_len.size();

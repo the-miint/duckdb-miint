@@ -5,6 +5,9 @@
 
 #include <zlib.h>
 
+#include <algorithm>
+#include <atomic>
+#include <cstring>
 #include <fstream>
 #include <map>
 #include <string>
@@ -12,11 +15,13 @@
 
 using namespace miint::sra;
 using miint_test::OpenSraFixture;
+using miint_test::SlurpBytes;
+using miint_test::SraArchiveFromBytes;
 using miint_test::ThrowsTypeMentioning;
 
-// The reader must write exactly the reads fasterq-dump writes, in its order, to the same files.
-// Routing rules follow tbl_join.c (sra-tools 3.4.1); the fixtures and oracles are described in
-// data/sra/README.md. Spot names ($sn) are not compared here: they come in phase 6.
+// The reader must write exactly the reads fasterq-dump writes, in its order, to the same files,
+// under the same spot names. Routing rules follow tbl_join.c (sra-tools 3.4.1); the fixtures and
+// oracles are described in data/sra/README.md.
 
 namespace {
 Spot MakeSpot(std::string bases, std::vector<int32_t> start, std::vector<uint32_t> len, std::vector<uint8_t> type) {
@@ -43,6 +48,8 @@ std::vector<SraRead> Route(const Spot &s, SplitMode mode, bool tech = false) {
 // One FASTQ record of an oracle file.
 struct OracleRecord {
 	std::string id; // "$ac.$si" or "$ac.$si/$ri"
+	bool has_name = false;
+	std::string name; // $sn: between the id and " length=", and may contain spaces
 	std::string length_field;
 	std::string bases;
 	std::string quality;
@@ -70,8 +77,14 @@ std::vector<OracleRecord> ReadOracle(const std::string &path) {
 	while (pos < text.size()) {
 		OracleRecord r;
 		std::string header = line();
-		r.id = header.substr(1, header.find(' ') - 1);
-		r.length_field = header.substr(header.rfind(' ') + 1);
+		size_t first_space = header.find(' ');
+		size_t length_at = header.rfind(' ');
+		r.id = header.substr(1, first_space - 1);
+		r.length_field = header.substr(length_at + 1);
+		r.has_name = length_at > first_space;
+		if (r.has_name) {
+			r.name = header.substr(first_space + 1, length_at - first_space - 1);
+		}
 		r.bases = line();
 		line();
 		r.quality = line();
@@ -127,6 +140,8 @@ void CompareWithOracle(const std::string &run, const std::vector<SraRead> &ours,
 		}
 		INFO("record " << i << " " << expected[i].id);
 		REQUIRE(id == expected[i].id);
+		REQUIRE(r.has_name == expected[i].has_name);
+		REQUIRE(r.name == expected[i].name);
 		REQUIRE(r.bases == expected[i].bases);
 		REQUIRE(QualityText(r.quality) == expected[i].quality);
 		REQUIRE("length=" + std::to_string(r.bases.size()) == expected[i].length_field);
@@ -214,6 +229,7 @@ TEST_CASE("Qualities above 93 are written as 93", "[sra]") {
 	Spot s = MakeSpot("AC", {0}, {2}, {BIO});
 	s.quality = {93, 120};
 	auto reads = Route(s, SplitMode::Spot);
+	REQUIRE(reads.size() == 1);
 	CHECK(reads[0].quality == std::vector<uint8_t> {93, 93});
 }
 
@@ -255,6 +271,88 @@ TEST_CASE("split-spot rows are one per read", "[sra]") {
 	REQUIRE(rows.size() == 3);
 	CHECK(rows[2].read_number == 3);
 	CHECK_FALSE(rows[2].paired);
+}
+
+// A fixture with every occurrence of a name (in its table of contents and its schema text) renamed,
+// which removes that object from the table without touching anything else.
+namespace {
+SraTable WithRenamed(const std::string &run, const std::string &from, const std::string &to) {
+	auto bytes = SlurpBytes("data/sra/" + run + ".sra");
+	auto at = bytes.begin();
+	while ((at = std::search(at, bytes.end(), from.begin(), from.end())) != bytes.end()) {
+		at = std::copy(to.begin(), to.end(), at);
+	}
+	return SraTable(SraArchiveFromBytes(std::move(bytes)));
+}
+} // namespace
+
+namespace {
+// An in-memory archive that counts the bytes read from it.
+class CountingSource : public SraByteSource {
+public:
+	explicit CountingSource(std::vector<uint8_t> bytes) : bytes_(std::move(bytes)) {
+	}
+	uint64_t Size() const override {
+		return bytes_.size();
+	}
+	void ReadAt(uint64_t pos, uint8_t *buf, size_t n) const override {
+		std::memcpy(buf, bytes_.data() + pos, n);
+		read_ += n;
+	}
+	uint64_t BytesRead() const {
+		return read_;
+	}
+
+private:
+	std::vector<uint8_t> bytes_;
+	mutable std::atomic<uint64_t> read_ {0};
+};
+} // namespace
+
+TEST_CASE("Readers of one run share its name index", "[sra]") {
+	// Each decoding thread has a reader. A run that stores whole names as keys has an index of
+	// tens of bytes per spot, so a reader made for another thread takes the first one's index
+	// rather than reading its own copy.
+	auto source = std::make_shared<CountingSource>(SlurpBytes("data/sra/SRR24770212.sra"));
+	auto t = std::make_shared<const SraTable>(std::make_shared<const KarArchive>(source));
+	const uint64_t skey_bytes = t->Archive().Find("tbl/SEQUENCE/idx/skey")->size;
+	SpotReader first(t);
+	uint64_t before = source->BytesRead();
+	SpotReader alone(t);
+	const uint64_t unshared = source->BytesRead() - before;
+	before = source->BytesRead();
+	SpotReader sharing(t, &first);
+	const uint64_t shared = source->BytesRead() - before;
+	CHECK(unshared - shared == skey_bytes);
+	Spot a, b;
+	for (int64_t row = first.FirstRow(); row < first.FirstRow() + int64_t(first.RowCount()); row++) {
+		first.Read(row, a);
+		sharing.Read(row, b);
+		REQUIRE(a.name == b.name);
+	}
+}
+
+TEST_CASE("A name format is only taken through the skey index", "[sra]") {
+	// The schemas produce the format with idx:text:project<'skey'>(.NAME_FMT), which VDB cannot
+	// build without the index: the name then falls back to the stored spot name, even when
+	// NAME_FMT holds a format. (Every public run surveyed without the index had an empty NAME_FMT,
+	// so either reading gives the same names there.)
+	auto t = std::make_shared<const SraTable>(WithRenamed("SRR34459993", "skey", "skez"));
+	REQUIRE(t->Static("SPOT_NAME") != nullptr);
+	REQUIRE(t->Archive().Find("tbl/SEQUENCE/idx/skey") == nullptr);
+	SpotReader reader(t);
+	Spot spot;
+	reader.Read(1, spot);
+	CHECK(spot.has_name);
+	CHECK(spot.name == t->Static("SPOT_NAME")->row);
+}
+
+TEST_CASE("An skey index without a NAME_FMT column is refused", "[sra]") {
+	// The older skeyname schema, which projects with no column to fall back on and fails a row the
+	// index has no key for; no surveyed public run has it.
+	auto t = std::make_shared<const SraTable>(WithRenamed("SRR32151205", "NAME_FMT", "NAME_FMU"));
+	REQUIRE_FALSE(t->HasPhysical("NAME_FMT"));
+	CHECK(ThrowsTypeMentioning<SraUnsupportedError>([&] { SpotReader reader(t); }, "NAME_FMT"));
 }
 
 TEST_CASE("Spots of every fixture match fasterq-dump's split-3 output", "[sra]") {

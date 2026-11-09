@@ -13,6 +13,8 @@
 
 using namespace miint::sra;
 using miint_test::OpenSraFixture;
+using miint_test::RowLengths;
+using miint_test::RowOffsets;
 using miint_test::SlurpBytes;
 using miint_test::SraArchiveFromBytes;
 using miint_test::ThrowsTypeMentioning;
@@ -148,11 +150,12 @@ TEST_CASE("PhysicalColumn reads a column's type, encoding and index", "[sra]") {
 TEST_CASE("A v1 blob gives every row the fixed length its header records", "[sra]") {
 	SraTable t(OpenSraFixture("SRR4424282.sra"));
 	PhysicalColumn read(t, "READ");
+	REQUIRE_FALSE(read.Index().blobs.empty());
 	VdbBlob blob = read.ReadVdbBlob(read.Index().blobs[0]);
 	CHECK(blob.frames.empty());
 	CHECK(blob.big_endian);
-	CHECK(blob.page_map.row_length == std::vector<uint32_t> {500, 500, 500});
-	CHECK(blob.page_map.data_offset == std::vector<uint64_t> {0, 500, 1000});
+	CHECK(RowLengths(blob.page_map) == std::vector<uint32_t> {500, 500, 500});
+	CHECK(RowOffsets(blob.page_map) == std::vector<uint64_t> {0, 500, 1000});
 	// 382 stored bytes = 3 header bytes + 375 bytes of 2-bit bases + a 4-byte CRC.
 	CHECK(blob.PayloadSize() == 375);
 	CHECK(blob.payload_bits == 3000);
@@ -163,12 +166,14 @@ TEST_CASE("A v2 blob's page map shares one record among repeated rows", "[sra]")
 	// so only 132 records follow. Rows must map onto records, not onto 148 slots.
 	SraTable t(OpenSraFixture("ERR932865.sra"));
 	PhysicalColumn read(t, "READ");
+	REQUIRE_FALSE(read.Index().blobs.empty());
 	VdbBlob blob = read.ReadVdbBlob(read.Index().blobs[0]);
-	REQUIRE(blob.page_map.row_length.size() == 148);
-	CHECK(blob.page_map.data_offset[0] == 0);
-	CHECK(blob.page_map.data_offset[1] == 40);
-	CHECK(blob.page_map.data_offset[2] == 80);
-	CHECK(blob.page_map.data_offset[3] == 80); // data_run [1, 1, 2, ...]: rows 2 and 3 share
+	REQUIRE(blob.page_map.row_count == 148);
+	auto offsets = RowOffsets(blob.page_map);
+	CHECK(offsets[0] == 0);
+	CHECK(offsets[1] == 40);
+	CHECK(offsets[2] == 80);
+	CHECK(offsets[3] == 80); // data_run [1, 1, 2, ...]: rows 2 and 3 share
 	CHECK(blob.page_map.ElementsSpanned() == 132 * 40);
 	CHECK(blob.payload_bits == 132 * 40 * 2);
 }
@@ -178,10 +183,32 @@ TEST_CASE("A v2 blob with variable row lengths and padding bits", "[sra]") {
 	PhysicalColumn read(t, "READ");
 	REQUIRE(read.Index().blobs.size() == 1);
 	VdbBlob blob = read.ReadVdbBlob(read.Index().blobs[0]);
-	CHECK(blob.page_map.row_length.size() == 1690);
+	CHECK(blob.page_map.row_count == 1690);
 	// 227,706 payload bytes, the last 6 bits padding: 910,821 bases.
 	CHECK(blob.payload_bits == 227706u * 8 - 6);
 	CHECK(blob.page_map.ElementsSpanned() * 2 == blob.payload_bits);
+}
+
+TEST_CASE("PrefetchRows hints the bytes of the blobs holding the rows", "[sra]") {
+	// On S3 the scan hints a work unit's blobs when the unit is claimed, so they are fetched
+	// before the thread reaches them. The hint must name the blobs' bytes in the file.
+	struct HintRecorder : SraFileSource {
+		using SraFileSource::SraFileSource;
+		void Prefetch(uint64_t pos, uint64_t n) const override {
+			hints.emplace_back(pos, n);
+		}
+		mutable std::vector<std::pair<uint64_t, uint64_t>> hints;
+	};
+	auto source = std::make_shared<HintRecorder>("data/sra/SRR4424282.sra");
+	SraTable t(std::make_shared<const KarArchive>(source));
+	PhysicalColumn read(t, "READ");
+	read.PrefetchRows(1, 4);
+	// READ/data starts at 2612; its one blob holds all three rows in 382 bytes.
+	REQUIRE(source->hints.size() == 1);
+	CHECK(source->hints[0] == std::make_pair<uint64_t, uint64_t>(2612, 382));
+	source->hints.clear();
+	read.PrefetchRows(4, 9); // past the last row: nothing
+	CHECK(source->hints.empty());
 }
 
 TEST_CASE("ReadBlob rejects a blob whose CRC32 does not match", "[sra]") {
@@ -190,6 +217,7 @@ TEST_CASE("ReadBlob rejects a blob whose CRC32 does not match", "[sra]") {
 	bytes[2612 + 10] ^= 0x01;
 	SraTable t(SraArchiveFromBytes(bytes));
 	PhysicalColumn read(t, "READ");
+	REQUIRE_FALSE(read.Index().blobs.empty());
 	CHECK(ThrowsTypeMentioning<SraFormatError>([&] { read.ReadBlob(read.Index().blobs[0]); }, "checksum"));
 }
 
@@ -221,7 +249,7 @@ TEST_CASE("Every blob of every fixture is located, verified and framed", "[sra]"
 			bool single_stage = col.Encoding().empty() || col.Encoding().find("zip_encoding#1") != std::string::npos;
 			for (const auto &loc : locs) {
 				VdbBlob blob = col.ReadVdbBlob(loc);
-				REQUIRE(blob.page_map.row_length.size() == loc.id_count);
+				REQUIRE(blob.page_map.row_count == loc.id_count);
 				uint64_t elems = blob.page_map.ElementsSpanned();
 				if (blob.frames.empty() || (blob.frames[0].flags & 1)) {
 					CHECK(blob.payload_bits == elems * elem_bits);
@@ -301,8 +329,8 @@ TEST_CASE("A random-access page map gives each row its own offset", "[sra]") {
 	auto deflated = RawDeflate(body);
 	pm.insert(pm.end(), deflated.begin(), deflated.end());
 	VdbBlob blob = ParseVdbBlob(V2Blob(pm, std::vector<uint8_t>(16)), 3, 32);
-	CHECK(blob.page_map.row_length == std::vector<uint32_t> {2, 2, 2});
-	CHECK(blob.page_map.data_offset == std::vector<uint64_t> {0, 2, 0});
+	CHECK(RowLengths(blob.page_map) == std::vector<uint32_t> {2, 2, 2});
+	CHECK(RowOffsets(blob.page_map) == std::vector<uint64_t> {0, 2, 0});
 	CHECK(blob.page_map.ElementsSpanned() == 4);
 }
 
@@ -314,8 +342,8 @@ TEST_CASE("A version 0 page map is read without inflating", "[sra]") {
 		PutVlenU(pm, v);
 	}
 	VdbBlob blob = ParseVdbBlob(V2Blob(pm, std::vector<uint8_t>(13)), 3, 8);
-	CHECK(blob.page_map.row_length == std::vector<uint32_t> {3, 5, 5});
-	CHECK(blob.page_map.data_offset == std::vector<uint64_t> {0, 3, 8});
+	CHECK(RowLengths(blob.page_map) == std::vector<uint32_t> {3, 5, 5});
+	CHECK(RowOffsets(blob.page_map) == std::vector<uint64_t> {0, 3, 8});
 	CHECK(blob.payload_bits == 13 * 8);
 }
 
@@ -338,4 +366,41 @@ TEST_CASE("ElementBits knows the stored types a sequence table uses", "[sra]") {
 	CHECK(ElementBits("INSDC:SRA:xread_type") == 8);
 	CHECK(ElementBits("ascii") == 8);
 	CHECK_THROWS_AS(ElementBits("NCBI:isamp1"), SraUnsupportedError);
+}
+
+// Counts in a file are only trusted as far as the bytes behind them: a damaged or crafted file
+// must fail on its own bytes, quickly, and never make the reader allocate in proportion to a
+// count it merely claims.
+
+TEST_CASE("A page map of empty rows needs no memory per row", "[sra]") {
+	// VDB cuts blobs by size, so a column of mostly empty cells (ALTREAD) can put millions of rows
+	// in one blob, described by a handful of bytes. 2^40 rows must not mean 2^40 entries.
+	std::vector<uint8_t> pm {uint8_t((0 << 2) | 0)}; // version 0, variant 0: every row the same
+	PutVlenU(pm, 0);                                 // length 0
+	const uint64_t rows = uint64_t(1) << 40;
+	VdbBlob blob = ParseVdbBlob(V2Blob(pm, {}), rows, 8);
+	CHECK(blob.page_map.row_count == rows);
+	uint32_t length = 7;
+	uint64_t offset = 7;
+	blob.page_map.Row(rows - 1, length, offset);
+	CHECK(length == 0);
+}
+
+TEST_CASE("A page map's counts are bounded by its bytes", "[sra]") {
+	// 2^31 length runs claimed, with a stream that inflates to a few bytes: each stored value
+	// takes at least a byte, so the claim is refused before any buffer is sized from it.
+	std::vector<uint8_t> pm {uint8_t((1 << 2) | 2)}; // version 1, variant 2
+	PutVlenU(pm, uint64_t(1) << 31);
+	auto deflated = RawDeflate({1, 1});
+	pm.insert(pm.end(), deflated.begin(), deflated.end());
+	CHECK(ThrowsTypeMentioning<SraFormatError>([&] { ParseVdbBlob(V2Blob(pm, {}), 1, 8); }, "page map"));
+}
+
+TEST_CASE("An index block cannot hold more blobs than rows", "[sra]") {
+	// A predictable block records its blob count in the locator; every blob holds a row at least.
+	std::vector<uint8_t> idx1 = Idx1Empty();
+	PutLoc(idx1, 0, (uint32_t(1) << 20) | (3u << 27) | (3u << 29), 10, 1); // 2^20 blobs, 10 rows
+	std::vector<uint8_t> idx2(12);
+	CHECK(ThrowsTypeMentioning<SraFormatError>(
+	    [&] { ColumnIndex::Parse(ColumnHeader(1 << 30, 12, 0, 1, 0), {}, idx1, idx2); }, "more blobs"));
 }

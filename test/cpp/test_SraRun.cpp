@@ -11,7 +11,7 @@ using miint_test::OpenSraFixture;
 using miint_test::ThrowsTypeMentioning;
 
 // Which runs miint reads is decided by the tables present, the table type, the Lite markers and
-// the column encodings: never by platform (Daniel, 2026-11-04). fasterq-dump reads PacBio and
+// the column encodings: never by platform. fasterq-dump reads PacBio and
 // Nanopore runs loaded as ordinary sequence tables exactly as it reads Illumina runs, and nearly
 // every current Nanopore run is one, so a platform rule would refuse runs that decode
 // identically. data/sra/README.md describes the fixtures.
@@ -38,8 +38,8 @@ RunFacts IlluminaFacts() {
 } // namespace
 
 TEST_CASE("Every decodable fixture is accepted", "[sra]") {
-	// The 15 runs in the README's accepted table and the 3 PacBio/Nanopore runs: flat tables,
-	// every supported table type, PacBio HiFi and both Nanopore loads.
+	// Every accepted fixture in data/sra/README.md: flat tables, every supported table type,
+	// PacBio HiFi and both Nanopore loads.
 	const std::vector<std::string> accepted = {
 	    "SRR32151205.sra", "SRR34459993.sra", "ERR16653849.sra", "ERR5009897.sra",  "SRR4424282.sra",
 	    "SRR6016450.sra",  "DRR501055.sra",   "SRR4439672.sra",  "SRR24770212.sra", "ERR8523629.sra",
