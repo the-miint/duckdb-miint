@@ -18,6 +18,7 @@ MIINT provides integration with NCBI's GenBank and RefSeq.
   - [Collapse the tree to lineages (`taxonomy_lineage`)](#collapse-the-tree-to-lineages-taxonomy_lineage) - Offline: rank-collapse a taxdump tree, identical schema to `read_ncbi_lineage`.
   - [Parse lineage strings (`parse_lineage`)](#parse-lineage-strings-parse_lineage) - Turn a `d__…; p__…` lineage string (GTDB, Greengenes2, tax2tree) into the shared schema's rank columns.
   - [Map an NCBI rank to its column (`lineage_rank`)](#map-an-ncbi-rank-to-its-column-lineage_rank) - The shared schema's column an NCBI rank collapses into, so `superkingdom` and `domain` look up alike.
+  - [Split GTDB labels (`gtdb_label`, `gtdb_species_label`)](#split-gtdb-labels-gtdb_label-gtdb_species_label) - A GTDB name's base and the suffix that marks a split taxon (`Bacillota_A`), to find polyphyly.
 
 ### Accessions are literals, not table names
 
@@ -644,4 +645,54 @@ SELECT lineage_rank(rank) AS column_name, rank, count(*) AS nodes
 FROM read_ncbi_taxdump()
 GROUP BY ALL
 ORDER BY column_name NULLS LAST, rank;
+```
+
+### Split GTDB labels (`gtdb_label`, `gtdb_species_label`)
+
+GTDB marks the parts of a taxon it has split with a suffix: `Bacillota_A`, `Pseudomonas_E`,
+and at species `Pseudomonas_E fluorescens_B`. These functions split a name into its base
+name, which the parts share, and its suffix, so a split (polyphyletic) taxon can be found by
+grouping on the base. [`parse_lineage`](#parse-lineage-strings-parse_lineage) keeps names
+whole, as the shared schema does; split them afterwards. The functions only split: any
+grouping key is the caller's to build from the parts.
+
+**Parameters:**
+- `name` (VARCHAR): one name, without its rank prefix, as `parse_lineage` returns it (`Bacillota_A`, not `p__Bacillota_A`).
+
+**Returns:** all fields VARCHAR.
+- `gtdb_label(name)`: `STRUCT(base, suffix)`, for the ranks above species.
+- `gtdb_species_label(name)`: `STRUCT(genus_base, genus_suffix, epithet, epithet_suffix)`.
+
+A suffix is returned without its underscore (`Bacillota_A` gives `Bacillota` and `A`), and a
+name without one has a NULL suffix. A name that does not fit the rules below, or a NULL
+name, gives NULL rather than an error, and so do its fields.
+
+**Rules:**
+- A name is ASCII letters, digits and `-`: `CAG-41`, `UBA1234`.
+- A suffix is `_` followed by runs of capital letters and digits joined by single underscores: `_A`, `_A1`, or `_Y_123`, which is one suffix, `Y_123`. `Foo_A_`, `Foo__A` and `Foo_a` do not fit.
+- A species is the genus label, one space, then the epithet, each with its own optional suffix. The epithet may hold single spaces and dots, as in `bar subsp. baz`, and its suffix may only sit at its very end: `bar subsp. baz_A` fits, `bar_A subsp. baz` does not.
+
+**Examples:**
+```sql
+-- A GTDB taxonomy file (bac120_taxonomy.tsv: accession, then the lineage), in the
+-- shared schema's columns.
+CREATE TABLE gtdb AS
+SELECT column0 AS accession, unnest(parse_lineage(column1))
+FROM read_csv('bac120_taxonomy.tsv', delim = '\t', header = false);
+
+-- Phyla that GTDB splits: a base name some of whose labels carry a suffix.
+SELECT gtdb_label(phylum).base AS base, list(DISTINCT phylum ORDER BY phylum) AS labels
+FROM gtdb
+GROUP BY base
+HAVING bool_or(gtdb_label(phylum).suffix IS NOT NULL);
+
+-- Species that share a genus base and an epithet but differ by suffix. The key, here
+-- the genus base and the epithet, is the caller's choice.
+SELECT s.genus_base, s.epithet, list(DISTINCT species ORDER BY species) AS labels
+FROM (SELECT species, gtdb_species_label(species) AS s FROM gtdb)
+GROUP BY ALL
+HAVING count(DISTINCT species) > 1;
+
+-- Names that do not fit the rules.
+SELECT DISTINCT genus FROM gtdb WHERE genus IS NOT NULL AND gtdb_label(genus) IS NULL;
 ```

@@ -1,0 +1,153 @@
+# name: test/sql/gtdb_label.test
+# description: gtdb_label and gtdb_species_label split GTDB names into base names and suffixes
+# group: [sql]
+
+require miint
+
+# GTDB marks the parts of a split taxon with a suffix: Bacillota_A, Pseudomonas_E. The
+# split gives the base name, which groups the parts, and the suffix without its
+# underscore. A suffix is runs of capitals and digits joined by single underscores, so
+# Y_123 is one suffix.
+statement ok
+CREATE TABLE labels(i INTEGER, name VARCHAR);
+
+statement ok
+INSERT INTO labels VALUES (1, 'Bacillota_A'), (2, 'Pseudomonas_E'), (3, 'Bacillota'), (4, 'CAG-41'), (5, 'UBA1234'),
+(6, 'Foo_Y_123'), (7, 'Foo_A1');
+
+query ITT
+SELECT i, gtdb_label(name).base, gtdb_label(name).suffix FROM labels ORDER BY i;
+----
+1	Bacillota	A
+2	Pseudomonas	E
+3	Bacillota	NULL
+4	CAG-41	NULL
+5	UBA1234	NULL
+6	Foo	Y_123
+7	Foo	A1
+
+# A name that does not fit gives NULL, not an error: a trailing or doubled underscore, a
+# suffix with lower case or nothing before or after the underscore, a rank prefix (pass
+# the name, as parse_lineage returns it), a space or a dot, an empty name.
+statement ok
+CREATE TABLE bad_labels(i INTEGER, name VARCHAR);
+
+statement ok
+INSERT INTO bad_labels VALUES (1, 'Foo_A_'), (2, 'Foo__A'), (3, 'Foo_a'), (4, '_A'), (5, 'Foo_'), (6, 'p__Bacillota'),
+(7, 'Foo bar'), (8, 'Foo.bar'), (9, ''), (10, 'Foo_A bar'), (11, NULL);
+
+query IT
+SELECT i, gtdb_label(name) FROM bad_labels ORDER BY i;
+----
+1	NULL
+2	NULL
+3	NULL
+4	NULL
+5	NULL
+6	NULL
+7	NULL
+8	NULL
+9	NULL
+10	NULL
+11	NULL
+
+# Species: the genus label, one space, then the epithet, each with an optional suffix.
+# The epithet may hold single spaces and dots (bar subsp. baz); its suffix sits only at
+# its very end.
+statement ok
+CREATE TABLE species(i INTEGER, name VARCHAR);
+
+statement ok
+INSERT INTO species VALUES (1, 'Pseudomonas_E fluorescens_B'), (2, 'Escherichia coli'),
+(3, 'Prevotella sp000434975'), (4, 'Foo bar subsp. baz_A'), (5, 'Bacillus_A cereus'), (6, 'Foo bar_Y_123');
+
+query ITTTT
+SELECT i, s.genus_base, s.genus_suffix, s.epithet, s.epithet_suffix
+FROM (SELECT i, gtdb_species_label(name) AS s FROM species) ORDER BY i;
+----
+1	Pseudomonas	E	fluorescens	B
+2	Escherichia	NULL	coli	NULL
+3	Prevotella	NULL	sp000434975	NULL
+4	Foo	NULL	bar subsp. baz	A
+5	Bacillus	A	cereus	NULL
+6	Foo	NULL	bar	Y_123
+
+# A suffix inside the epithet, doubled or edge spaces, a genus alone, and malformed
+# suffixes give NULL.
+statement ok
+CREATE TABLE bad_species(i INTEGER, name VARCHAR);
+
+statement ok
+INSERT INTO bad_species VALUES (1, 'Foo bar_A subsp. baz'), (2, 'Foo  bar'), (3, 'Foo bar '), (4, ' Foo bar'),
+(5, 'Foo'), (6, 'Foo_A'), (7, 'Foo bar_'), (8, 'Foo bar__A'), (9, 'Foo_A_ bar'), (10, 'Foo bar_a'), (11, ''),
+(12, NULL);
+
+query IT
+SELECT i, gtdb_species_label(name) FROM bad_species ORDER BY i;
+----
+1	NULL
+2	NULL
+3	NULL
+4	NULL
+5	NULL
+6	NULL
+7	NULL
+8	NULL
+9	NULL
+10	NULL
+11	NULL
+12	NULL
+
+query TT
+SELECT typeof(gtdb_label('Foo_A')), typeof(gtdb_species_label('Foo bar'));
+----
+STRUCT(base VARCHAR, suffix VARCHAR)	STRUCT(genus_base VARCHAR, genus_suffix VARCHAR, epithet VARCHAR, epithet_suffix VARCHAR)
+
+# =============================================================================
+# Every string of up to six characters over a, B, 0, '-', '_', ' ' and '.' (137,256 of
+# them), split by each function and by a regular expression for the same rules. They
+# must agree on every string, and the expression must accept enough of them, with and
+# without suffixes, for the agreement to mean something.
+# =============================================================================
+
+statement ok
+CREATE TABLE strs AS
+WITH RECURSIVE s(x) AS (
+    SELECT unnest(['a', 'B', '0', '-', '_', ' ', '.'])
+    UNION ALL
+    SELECT x || c FROM s, (SELECT unnest(['a', 'B', '0', '-', '_', ' ', '.']) AS c) WHERE length(x) < 6
+)
+SELECT x FROM s;
+
+query I
+SELECT count(*) FROM strs;
+----
+137256
+
+statement ok
+CREATE TABLE label_oracle AS
+SELECT x, CASE WHEN regexp_full_match(x, '[A-Za-z0-9-]+(?:_[A-Z0-9]+(?:_[A-Z0-9]+)*)?')
+               THEN {'base': r.base, 'suffix': NULLIF(r.suffix, '')} END AS want
+FROM (SELECT x, regexp_extract(x, '^([A-Za-z0-9-]+)(?:_([A-Z0-9]+(?:_[A-Z0-9]+)*))?$', ['base', 'suffix']) AS r
+      FROM strs);
+
+query III
+SELECT count(*) FILTER (WHERE gtdb_label(x) IS DISTINCT FROM want), count(want), count(want.suffix) FROM label_oracle;
+----
+0	6844	1384
+
+statement ok
+CREATE TABLE species_oracle AS
+SELECT x, CASE WHEN regexp_full_match(x, '[A-Za-z0-9-]+(?:_[A-Z0-9]+(?:_[A-Z0-9]+)*)? [A-Za-z0-9.-]+(?: [A-Za-z0-9.-]+)*(?:_[A-Z0-9]+(?:_[A-Z0-9]+)*)?')
+               THEN {'genus_base': r.genus_base, 'genus_suffix': NULLIF(r.genus_suffix, ''),
+                     'epithet': r.epithet, 'epithet_suffix': NULLIF(r.epithet_suffix, '')} END AS want
+FROM (SELECT x, regexp_extract(x, '^([A-Za-z0-9-]+)(?:_([A-Z0-9]+(?:_[A-Z0-9]+)*))? ([A-Za-z0-9.-]+(?: [A-Za-z0-9.-]+)*)(?:_([A-Z0-9]+(?:_[A-Z0-9]+)*))?$',
+                              ['genus_base', 'genus_suffix', 'epithet', 'epithet_suffix']) AS r
+      FROM strs);
+
+query IIII
+SELECT count(*) FILTER (WHERE gtdb_species_label(x) IS DISTINCT FROM want), count(want), count(want.genus_suffix),
+       count(want.epithet_suffix)
+FROM species_oracle;
+----
+0	11260	480	480

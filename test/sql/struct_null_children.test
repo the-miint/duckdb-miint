@@ -26,7 +26,7 @@
 # The bare-STRUCT returners in src/ are: qc_functions.cpp (3 return types, 4 sites),
 # merge_pairs_function.cpp, extract_linked_amplicon.cpp, ks_2samp.cpp,
 # pairwise_align_shared.hpp (2 templates serving 8 SQL functions),
-# compute_msa_consensus.cpp and parse_lineage.cpp -- all covered here or, for merge_pairs_vsearch, in
+# compute_msa_consensus.cpp, parse_lineage.cpp and gtdb_label.cpp -- all covered here or, for merge_pairs_vsearch, in
 # test/sql/merge_pairs.test. install_gpl_boundary.cpp, miint_extension.cpp,
 # ena_modify_functions.cpp and ena_storage.cpp also return bare STRUCTs but never mark a
 # result row NULL at all, so there is nothing to pin.
@@ -222,6 +222,36 @@ FROM lineages ORDER BY id;
 ----
 1	false	false	false	false
 2	true	true	true	true
+
+# ---------------------------------------------------------------------------
+# gtdb_label and gtdb_species_label -- a label that does not fit is NULL, as is NULL
+#
+# The control row fills every field, so a NULL row after it that leaked would read
+# that row's parts back.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE TABLE gtdb_names(id INTEGER, label VARCHAR, species VARCHAR);
+
+statement ok
+INSERT INTO gtdb_names VALUES
+  (1, 'Bacillota_A', 'Pseudomonas_E fluorescens_B'),
+  (2, 'Bacillota_', 'Pseudomonas_E'),
+  (3, NULL, NULL);
+
+query IIIIIIII
+SELECT id,
+       gtdb_label(label) IS NULL                          AS label_null,
+       gtdb_label(label).base IS NULL                     AS f_base,
+       gtdb_label(label).suffix IS NULL                   AS f_suffix,
+       gtdb_species_label(species) IS NULL                AS species_null,
+       gtdb_species_label(species).genus_base IS NULL     AS f_genus_base,
+       gtdb_species_label(species).epithet IS NULL        AS f_epithet,
+       gtdb_species_label(species).epithet_suffix IS NULL AS f_epithet_suffix
+FROM gtdb_names ORDER BY id;
+----
+1	false	false	false	false	false	false	false
+2	true	true	true	true	true	true	true
+3	true	true	true	true	true	true	true
 
 # merge_pairs_vsearch has the same contract, but it needs vsearch, so its case lives in
 # test/sql/merge_pairs.test which already carries the require-env guard. A mid-file
