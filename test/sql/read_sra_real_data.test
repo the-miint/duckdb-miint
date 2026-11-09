@@ -1,0 +1,71 @@
+# name: test/sql/read_sra_real_data.test
+# description: read_sra renders two whole real runs as fasterq-dump's files byte for byte (data/sra/real_oracles.csv)
+# group: [sql]
+
+require miint
+
+# run_tests.sh downloads DRR274142 and SRR31286609 from NCBI's bucket and sets this only when both
+# match the sha256s recorded with their oracles.
+require-env SRA_REAL_DATA
+
+# The committed fixtures are a few hundred spots each; these runs are whole (42k and 76k spots),
+# so they cross many blobs of every column, many skey keys, and (DRR274142) unpaired spots among
+# pairs. fasterq-dump 3.4.1's output for them is too large to commit; its md5s are.
+
+statement ok
+CREATE TABLE expected AS
+SELECT run, mode, file, md5 FROM read_csv('data/sra/real_oracles.csv');
+
+# The same rendering as read_sra_fastq_render.test.
+statement ok
+CREATE MACRO fq(id, cmt, seq, qual) AS
+    '@' || id || ' ' || cmt || chr(10) || seq || chr(10) || '+' || id || ' ' || cmt || chr(10)
+    || array_to_string(list_transform(qual, lambda q: chr(CAST(q AS INTEGER) + 33)), '') || chr(10);
+
+statement ok
+CREATE MACRO r2_comment(cmt, seq) AS regexp_replace(cmt, 'length=[0-9]+$', 'length=' || length(seq));
+
+statement ok
+CREATE TABLE split3 AS
+SELECT row_number() OVER () AS pos, split_part(read_id, '.', 1) AS run, *
+FROM read_sra(['{SRA_REAL_DATA}/DRR274142.sra', '{SRA_REAL_DATA}/SRR31286609.sra']);
+
+statement ok
+CREATE TABLE rendered (run VARCHAR, mode VARCHAR, file VARCHAR, md5 VARCHAR);
+
+statement ok
+INSERT INTO rendered
+SELECT run, 'split_3', run || '.fastq', md5(string_agg(fq(read_id, comment, sequence1, qual1), '' ORDER BY pos))
+FROM split3 WHERE sequence2 IS NULL GROUP BY run
+UNION ALL
+SELECT run, 'split_3', run || '_1.fastq', md5(string_agg(fq(read_id, comment, sequence1, qual1), '' ORDER BY pos))
+FROM split3 WHERE sequence2 IS NOT NULL GROUP BY run
+UNION ALL
+SELECT run, 'split_3', run || '_2.fastq',
+       md5(string_agg(fq(read_id, r2_comment(comment, sequence2), sequence2, qual2), '' ORDER BY pos))
+FROM split3 WHERE sequence2 IS NOT NULL GROUP BY run;
+
+statement ok
+INSERT INTO rendered
+SELECT run, mode, run || '.fastq',
+       md5(string_agg(fq(read_id || '/' || read_number, comment, sequence1, qual1), '' ORDER BY pos))
+FROM (
+    SELECT 'split_spot' AS mode, row_number() OVER () AS pos, split_part(read_id, '.', 1) AS run, *
+    FROM read_sra(['{SRA_REAL_DATA}/DRR274142.sra', '{SRA_REAL_DATA}/SRR31286609.sra'], split := 'spot')
+    UNION ALL
+    SELECT 'split_spot_tech' AS mode, row_number() OVER () AS pos, split_part(read_id, '.', 1) AS run, *
+    FROM read_sra(['{SRA_REAL_DATA}/DRR274142.sra', '{SRA_REAL_DATA}/SRR31286609.sra'],
+                  split := 'spot', include_technical := true))
+GROUP BY run, mode;
+
+query I
+SELECT count(*) FROM expected JOIN rendered USING (run, mode, file);
+----
+9
+
+query III
+SELECT coalesce(e.run, r.run), coalesce(e.mode, r.mode), coalesce(e.file, r.file)
+FROM expected e FULL OUTER JOIN rendered r USING (run, mode, file)
+WHERE e.md5 IS DISTINCT FROM r.md5
+ORDER BY ALL;
+----

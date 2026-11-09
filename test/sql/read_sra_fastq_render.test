@@ -1,0 +1,81 @@
+# name: test/sql/read_sra_fastq_render.test
+# description: read_sra's rows rendered as FASTQ are fasterq-dump's files byte for byte (data/sra/README.md)
+# group: [sql]
+
+require miint
+
+# read_sra's contract is that its rows are fasterq-dump's output. read_fastx-level parity
+# (read_sra.test) leaves room for differences read_fastx does not see: R2's defline, the '/N'
+# suffix it strips, the '+' line. Rendering the rows back to FASTQ text the way fasterq-dump
+# writes it, and matching the md5 of every oracle file, closes that room.
+
+statement ok
+CREATE TABLE expected AS
+SELECT run, mode, file, md5 FROM read_csv('data/sra/oracle/oracle_md5.csv');
+
+# One FASTQ record, as fasterq-dump writes it: the defline repeated on the '+' line, qualities
+# as phred + 33.
+statement ok
+CREATE MACRO fq(id, cmt, seq, qual) AS
+    '@' || id || ' ' || cmt || chr(10) || seq || chr(10) || '+' || id || ' ' || cmt || chr(10)
+    || array_to_string(list_transform(qual, lambda q: chr(CAST(q AS INTEGER) + 33)), '') || chr(10);
+
+# Read 2's defline: the spot name with read 2's own length.
+statement ok
+CREATE MACRO r2_comment(cmt, seq) AS regexp_replace(cmt, 'length=[0-9]+$', 'length=' || length(seq));
+
+statement ok
+CREATE MACRO fixtures() AS ['data/sra/SRR32151205.sra', 'data/sra/SRR34459993.sra', 'data/sra/ERR16653849.sra',
+    'data/sra/ERR5009897.sra', 'data/sra/SRR4424282.sra', 'data/sra/SRR6016450.sra',
+    'data/sra/DRR501055.sra', 'data/sra/SRR4439672.sra', 'data/sra/SRR24770212.sra',
+    'data/sra/ERR8523629.sra', 'data/sra/SRR30810369.sra', 'data/sra/SRR30938008.sra',
+    'data/sra/ERR932865.sra', 'data/sra/ERR1160027.sra', 'data/sra/SRR14704581.sra',
+    'data/sra/SRR36240868.sra', 'data/sra/DRR880686.sra', 'data/sra/SRR37135232.sra'];
+
+# --split-3: mates go to _1 and _2, a spot with fewer than two biological reads to the unpaired file.
+statement ok
+CREATE TABLE split3 AS
+SELECT row_number() OVER () AS pos, split_part(read_id, '.', 1) AS run, *
+FROM read_sra(fixtures());
+
+statement ok
+CREATE TABLE rendered (run VARCHAR, mode VARCHAR, file VARCHAR, md5 VARCHAR);
+
+statement ok
+INSERT INTO rendered
+SELECT run, 'split_3', 'split_3/' || run || '.fastq.gz', md5(string_agg(fq(read_id, comment, sequence1, qual1), '' ORDER BY pos))
+FROM split3 WHERE sequence2 IS NULL GROUP BY run
+UNION ALL
+SELECT run, 'split_3', 'split_3/' || run || '_1.fastq.gz', md5(string_agg(fq(read_id, comment, sequence1, qual1), '' ORDER BY pos))
+FROM split3 WHERE sequence2 IS NOT NULL GROUP BY run
+UNION ALL
+SELECT run, 'split_3', 'split_3/' || run || '_2.fastq.gz',
+       md5(string_agg(fq(read_id, r2_comment(comment, sequence2), sequence2, qual2), '' ORDER BY pos))
+FROM split3 WHERE sequence2 IS NOT NULL GROUP BY run;
+
+# --split-spot, without and with --include-technical: every read on its own, '/' and its
+# position in the spot after the id.
+statement ok
+INSERT INTO rendered
+SELECT run, mode, 'split_spot/' || run || '.fastq.gz',
+       md5(string_agg(fq(read_id || '/' || read_number, comment, sequence1, qual1), '' ORDER BY pos))
+FROM (
+    SELECT 'split_spot' AS mode, row_number() OVER () AS pos, split_part(read_id, '.', 1) AS run, *
+    FROM read_sra(fixtures(), split := 'spot')
+    UNION ALL
+    SELECT 'split_spot_tech' AS mode, row_number() OVER () AS pos, split_part(read_id, '.', 1) AS run, *
+    FROM read_sra(fixtures(), split := 'spot', include_technical := true))
+GROUP BY run, mode;
+
+# Every oracle file is rendered, and nothing else is.
+query I
+SELECT count(*) FROM expected JOIN rendered USING (run, mode, file);
+----
+62
+
+query III
+SELECT coalesce(e.run, r.run), coalesce(e.mode, r.mode), coalesce(e.file, r.file)
+FROM expected e FULL OUTER JOIN rendered r USING (run, mode, file)
+WHERE e.md5 IS DISTINCT FROM r.md5
+ORDER BY ALL;
+----

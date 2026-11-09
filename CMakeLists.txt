@@ -392,6 +392,7 @@ list(
   src/sra_archive.cpp
   src/sra_codecs.cpp
   src/sra_column.cpp
+  src/sra_name.cpp
   src/sra_run.cpp
   src/sra_source.cpp
   src/table_function_common.cpp
@@ -502,6 +503,7 @@ list(
   src/sra_archive.cpp
   src/sra_codecs.cpp
   src/sra_column.cpp
+  src/sra_name.cpp
   src/sra_run.cpp
   src/sra_source.cpp
   src/taxdump_archive.cpp
@@ -592,6 +594,7 @@ list(
   test/cpp/test_SraArchive.cpp
   test/cpp/test_SraCodecs.cpp
   test/cpp/test_SraColumn.cpp
+  test/cpp/test_SraName.cpp
   test/cpp/test_SraRun.cpp
   test/cpp/test_SraSpots.cpp
   test/cpp/test_taxdump_archive.cpp

@@ -1,6 +1,8 @@
 #include "sra_source.hpp"
 
+#include <algorithm>
 #include <cstring>
+#include <stdexcept>
 
 namespace miint {
 namespace sra {

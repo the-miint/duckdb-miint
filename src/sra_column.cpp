@@ -1,6 +1,6 @@
 #include "sra_column.hpp"
 
-#include <zlib.h>
+#include "sra_codecs.hpp"
 
 #include <algorithm>
 #include <array>
@@ -85,6 +85,12 @@ void DecodeBlock(const std::vector<uint8_t> &idx1, size_t at, const std::vector<
 	}
 	if (count == 0) {
 		throw SraFormatError("an idx2 block holds no blobs");
+	}
+	// Every blob holds a row at least, so the block's rows bound its blob count before anything is
+	// sized from it.
+	if (count > id_range) {
+		throw SraFormatError("an idx2 block lists more blobs (" + std::to_string(count) + ") than rows (" +
+		                     std::to_string(id_range) + ")");
 	}
 	const uint8_t *id_s = blk + id_hdr + pg_hdr;
 	const uint8_t *pg_s = id_s + id_each * count;
@@ -346,26 +352,6 @@ std::vector<HeaderFrame> ParseHeaders(const uint8_t *p, size_t len) {
 	return frames;
 }
 
-std::vector<uint8_t> InflateRaw(const uint8_t *p, size_t len, size_t limit) {
-	std::vector<uint8_t> out(limit);
-	z_stream zs {};
-	if (inflateInit2(&zs, -15) != Z_OK) {
-		throw SraFormatError("cannot start inflating a page map");
-	}
-	zs.next_in = const_cast<Bytef *>(p);
-	zs.avail_in = uInt(len);
-	zs.next_out = out.data();
-	zs.avail_out = uInt(out.size());
-	int rc = inflate(&zs, Z_FINISH);
-	size_t produced = zs.total_out;
-	inflateEnd(&zs);
-	if (rc != Z_STREAM_END) {
-		throw SraFormatError("a page map does not inflate");
-	}
-	out.resize(produced);
-	return out;
-}
-
 // A page map tells, per row of a blob, how many elements the row has and where they start in the
 // decoded data. Rows of equal length come as (length, run) pairs; consecutive rows sharing one
 // stored record as data runs; version 2 instead records each row's offset ("random access").
@@ -400,81 +386,149 @@ PageMap ParsePageMap(const uint8_t *src, size_t len, uint64_t row_count) {
 	if (values > (uint64_t(1) << 32)) {
 		throw SraFormatError("a page map declares too many values");
 	}
-	std::vector<uint8_t> inflated;
 	const uint8_t *body = src + pos;
 	size_t body_len = len - pos;
+	// Every value is a vlen of at least one byte, and a deflated body expands at most
+	// MAX_DEFLATE_RATIO times: a count the bytes cannot hold is refused before anything is sized
+	// from it.
+	const uint64_t max_values = version >= 1 ? uint64_t(body_len) * MAX_DEFLATE_RATIO : uint64_t(body_len);
+	if (values > max_values) {
+		throw SraFormatError("a page map claims " + std::to_string(values) + " values in " + std::to_string(body_len) +
+		                     " bytes");
+	}
+	std::vector<uint8_t> inflated;
 	if (version >= 1 && values > 0) {
-		inflated = InflateRaw(body, body_len, size_t(values) * 10 + 16);
+		inflated.resize(size_t(values) * 10 + 16);
+		inflated.resize(InflateRaw(body, body_len, inflated.data(), inflated.size(), "a page map").produced);
 		body = inflated.data();
 		body_len = inflated.size();
 	}
 	size_t bpos = 0;
 	auto take = [&](uint64_t n) {
+		if (n > body_len - bpos) {
+			throw SraFormatError("a page map's values run past its end");
+		}
 		std::vector<uint64_t> v(n);
 		for (auto &x : v) {
 			x = ReadVlenU(body, body_len, bpos, what);
 		}
 		return v;
 	};
-
-	PageMap pm;
-	pm.row_length.reserve(row_count);
-	std::vector<uint64_t> data_run;
-	if (variant <= 1) {
-		if (row_len > UINT32_MAX) {
+	auto length_of = [](uint64_t length) {
+		if (length > UINT32_MAX) {
 			throw SraFormatError("a page map row length overflows");
 		}
-		pm.row_length.assign(row_count, uint32_t(row_len));
-		if (variant == 1) {
-			data_run = take(data_recs);
+		return uint32_t(length);
+	};
+	const std::string not_covered = "a page map's runs do not cover the blob's " + std::to_string(row_count) + " rows";
+
+	PageMap pm;
+	pm.row_count = row_count;
+	uint64_t covered = 0;
+	auto add = [&](uint64_t rows, uint32_t length, uint64_t offset, uint64_t step) {
+		if (rows > row_count - covered) {
+			throw SraFormatError(not_covered);
 		}
-	} else {
-		auto length = take(leng_recs);
-		auto leng_run = take(leng_recs);
-		for (uint64_t i = 0; i < leng_recs; i++) {
-			if (length[i] > UINT32_MAX || leng_run[i] > row_count - pm.row_length.size()) {
-				throw SraFormatError("a page map's length runs do not cover the blob's " + std::to_string(row_count) +
-				                     " rows");
-			}
-			pm.row_length.insert(pm.row_length.end(), leng_run[i], uint32_t(length[i]));
+		if (rows > 0) {
+			pm.runs.push_back({covered, rows, length, offset, step});
+			covered += rows;
 		}
-		if (variant == 3) {
-			data_run = take(data_recs);
+	};
+	// The next record's first element, refused rather than wrapped.
+	auto advance = [](uint64_t &offset, uint64_t length, uint64_t rows) {
+		if (length != 0 && rows > (UINT64_MAX - offset) / length) {
+			throw SraFormatError("a page map's records run past 2^64 elements");
 		}
+		offset += length * rows;
+	};
+
+	std::vector<uint64_t> length, leng_run;
+	if (variant >= 2) {
+		length = take(leng_recs);
+		leng_run = take(leng_recs);
 	}
-	if (pm.row_length.size() != row_count) {
-		throw SraFormatError("a page map's length runs do not cover the blob's " + std::to_string(row_count) + " rows");
+	std::vector<uint64_t> data_run;
+	if (variant == 1 || variant == 3) {
+		data_run = take(data_recs);
 	}
 
 	if (random_access && (variant == 0 || variant == 2)) {
-		pm.data_offset = take(row_count);
-	} else if (variant == 1 || variant == 3) {
-		// Each data run is one stored record shared by consecutive rows of equal length.
-		pm.data_offset.reserve(row_count);
-		uint64_t offset = 0;
-		for (uint64_t run : data_run) {
-			size_t first = pm.data_offset.size();
-			if (run == 0 || run > row_count - first) {
-				throw SraFormatError("a page map's data runs do not cover the blob's " + std::to_string(row_count) +
-				                     " rows");
+		// One stored offset per row: as many runs as offsets, so bounded by the map's bytes.
+		auto offsets = take(row_count);
+		uint64_t row = 0;
+		auto per_row = [&](uint64_t rows, uint32_t len) {
+			if (rows > row_count - row) {
+				throw SraFormatError(not_covered);
 			}
-			for (uint64_t r = 0; r < run; r++) {
-				if (pm.row_length[first + r] != pm.row_length[first]) {
-					throw SraFormatError("a page map shares one record among rows of different lengths");
-				}
-				pm.data_offset.push_back(offset);
+			for (uint64_t r = 0; r < rows; r++, row++) {
+				add(1, len, offsets[row], len);
 			}
-			offset += pm.row_length[first];
+		};
+		if (variant == 0) {
+			per_row(row_count, length_of(row_len));
+		} else {
+			for (uint64_t i = 0; i < leng_recs; i++) {
+				per_row(leng_run[i], length_of(length[i]));
+			}
 		}
-		if (pm.data_offset.size() != row_count) {
-			throw SraFormatError("a page map's data runs do not cover the blob's " + std::to_string(row_count) +
-			                     " rows");
+	} else if (variant == 0) {
+		add(row_count, length_of(row_len), 0, row_len);
+	} else if (variant == 2) {
+		uint64_t offset = 0;
+		for (uint64_t i = 0; i < leng_recs; i++) {
+			add(leng_run[i], length_of(length[i]), offset, length[i]);
+			advance(offset, length[i], leng_run[i]);
 		}
 	} else {
+		// Each data run is one stored record shared by consecutive rows of equal length.
 		uint64_t offset = 0;
-		for (uint32_t l : pm.row_length) {
-			pm.data_offset.push_back(offset);
-			offset += l;
+		size_t li = 0;
+		uint64_t left = variant == 3 && leng_recs > 0 ? leng_run[0] : 0;
+		for (uint64_t run : data_run) {
+			if (run == 0) {
+				throw SraFormatError(not_covered);
+			}
+			uint32_t len = length_of(row_len);
+			if (variant == 3) {
+				// The rows the record covers must all have one length, across length runs.
+				uint64_t need = run;
+				bool first = true;
+				while (need > 0) {
+					while (left == 0) {
+						if (++li >= leng_recs) {
+							throw SraFormatError(not_covered);
+						}
+						left = leng_run[li];
+					}
+					uint32_t here = length_of(length[li]);
+					if (first) {
+						len = here;
+						first = false;
+					} else if (here != len) {
+						throw SraFormatError("a page map shares one record among rows of different lengths");
+					}
+					uint64_t used = std::min(need, left);
+					need -= used;
+					left -= used;
+				}
+			}
+			add(run, len, offset, 0);
+			advance(offset, len, 1);
+		}
+	}
+	if (covered != row_count) {
+		throw SraFormatError(not_covered);
+	}
+	if (variant >= 2) {
+		uint64_t total = 0;
+		for (uint64_t r : leng_run) {
+			if (r > row_count - total) {
+				throw SraFormatError(not_covered);
+			}
+			total += r;
+		}
+		if (total != row_count) {
+			throw SraFormatError(not_covered);
 		}
 	}
 	if (bpos != body_len) {
@@ -487,10 +541,40 @@ PageMap ParsePageMap(const uint8_t *src, size_t len, uint64_t row_count) {
 
 uint64_t PageMap::ElementsSpanned() const {
 	uint64_t end = 0;
-	for (size_t i = 0; i < row_length.size(); i++) {
-		end = std::max(end, data_offset[i] + row_length[i]);
+	for (const Run &r : runs) {
+		// offset + step * (rows - 1) + length, saturating: a wrapped sum must not pass a bound.
+		uint64_t last = r.rows - 1;
+		if (r.step != 0 && last > (UINT64_MAX - r.offset) / r.step) {
+			return UINT64_MAX;
+		}
+		uint64_t start = r.offset + r.step * last;
+		if (r.length > UINT64_MAX - start) {
+			return UINT64_MAX;
+		}
+		end = std::max(end, start + r.length);
 	}
 	return end;
+}
+
+void PageMap::Row(uint64_t i, uint32_t &length, uint64_t &offset, size_t &hint) const {
+	if (i >= row_count) {
+		throw SraFormatError("a blob has no row " + std::to_string(i));
+	}
+	auto holds = [&](size_t k) {
+		return k < runs.size() && runs[k].first_row <= i && i - runs[k].first_row < runs[k].rows;
+	};
+	if (!holds(hint)) {
+		if (holds(hint + 1)) {
+			hint++;
+		} else {
+			auto it = std::upper_bound(runs.begin(), runs.end(), i,
+			                           [](uint64_t row, const Run &r) { return row < r.first_row; });
+			hint = size_t(std::prev(it) - runs.begin());
+		}
+	}
+	const Run &r = runs[hint];
+	length = r.length;
+	offset = r.offset + r.step * (i - r.first_row);
 }
 
 VdbBlob ParseVdbBlob(std::vector<uint8_t> bytes, uint64_t row_count, uint32_t elem_bits) {
@@ -533,9 +617,9 @@ VdbBlob ParseVdbBlob(std::vector<uint8_t> bytes, uint64_t row_count, uint32_t el
 			throw SraUnsupportedError("a legacy v1 blob without a row length");
 		}
 		blob.big_endian = byte_order == 2;
-		blob.page_map.row_length.assign(row_count, uint32_t(row_len));
-		for (uint64_t i = 0; i < row_count; i++) {
-			blob.page_map.data_offset.push_back(i * row_len);
+		blob.page_map.row_count = row_count;
+		if (row_count > 0) {
+			blob.page_map.runs.push_back({0, row_count, uint32_t(row_len), 0, row_len});
 		}
 		blob.payload_offset = offset;
 		blob.payload_bits = payload_bits;
@@ -686,6 +770,35 @@ std::vector<uint8_t> PhysicalColumn::ReadBlob(const BlobLoc &loc) const {
 		}
 	}
 	return bytes;
+}
+
+void PhysicalColumn::PrefetchRows(int64_t first, int64_t end) const {
+	const KarEntry *data = archive_->Find(dir_ + "/data");
+	if (data == nullptr || first >= end) {
+		return;
+	}
+	const auto &blobs = index_.blobs;
+	auto it = std::upper_bound(blobs.begin(), blobs.end(), first,
+	                           [](int64_t id, const BlobLoc &b) { return id < b.start_id; });
+	if (it != blobs.begin() && std::prev(it)->start_id + int64_t(std::prev(it)->id_count) > first) {
+		--it;
+	}
+	// Blobs of consecutive rows usually lie end to end: hint them as one range.
+	uint64_t run_start = 0, run_end = 0;
+	for (; it != blobs.end() && it->start_id < end; ++it) {
+		uint64_t at = it->pg * index_.page_size;
+		if (run_end != run_start && at != run_end) {
+			archive_->Source().Prefetch(data->offset + run_start, run_end - run_start);
+			run_start = run_end = at;
+		}
+		if (run_end == run_start) {
+			run_start = run_end = at;
+		}
+		run_end = at + it->size;
+	}
+	if (run_end > run_start) {
+		archive_->Source().Prefetch(data->offset + run_start, run_end - run_start);
+	}
 }
 
 VdbBlob PhysicalColumn::ReadVdbBlob(const BlobLoc &loc) const {

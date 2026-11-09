@@ -3,6 +3,7 @@
 #include "sra_column.hpp"
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace miint {
@@ -11,6 +12,23 @@ namespace sra {
 // Decoding of a physical column's blobs: the encodings public runs use on the columns the reader
 // reads (raw, zip_encoding, izip_encoding). Output is the column's stored elements in native
 // (little-endian) byte order.
+
+// Deflate's best case is about 1032 output bytes per input byte (zlib's technical notes), so a size
+// a stream claims beyond that is damage, refused before a buffer is sized from it.
+constexpr uint64_t MAX_DEFLATE_RATIO = 1032;
+
+// The most one blob may decode to. Stored blobs are a few MB; only an izip blob with no byte planes
+// (values from its header's offset and slope alone) can claim more than its bytes could hold.
+constexpr uint64_t MAX_DECODED_BLOB = uint64_t(2) << 30;
+
+// Inflates a raw deflate stream (no zlib header) into dst, which holds dsize bytes. Throws
+// SraFormatError naming `what` unless the stream ends within dsize, or when either size is over
+// 4 GiB (zlib counts in 32 bits; no real blob is that large).
+struct Inflated {
+	size_t used;     // input bytes the stream took
+	size_t produced; // bytes written to dst
+};
+Inflated InflateRaw(const uint8_t *src, size_t n, uint8_t *dst, size_t dsize, const char *what);
 
 // zip_encoding: raw deflate. Version 1 inflates to the frame's osize bytes; version 2 also pops
 // the count of meaningful bits in the last byte. Returns the inflated bytes; out_bits receives

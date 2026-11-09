@@ -6,8 +6,8 @@ require miint
 
 # Every read must match fasterq-dump's output for the same run (the committed oracles), as
 # read_fastx reads those FASTQ files: same reads, bases and qualities, in fasterq-dump's order,
-# with mates paired the way --split-3 writes them. Spot names (the comment column) are compared
-# once they are reconstructed.
+# with mates paired the way --split-3 writes them, and the same defline after the id (the comment
+# column: the spot name, as fasterq-dump rebuilds it, then read 1's length).
 
 # ---------------------------------------------------------------------------------------------
 # Arguments, checked when the query binds
@@ -23,12 +23,37 @@ SELECT * FROM read_sra('data/sra/no_such_run.sra');
 File not found: data/sra/no_such_run.sra
 
 statement error
+SELECT * FROM read_sra(['data/sra/SRR4424282.sra', NULL]);
+----
+read_sra: file path list cannot contain NULL
+
+statement error
+SELECT * FROM read_sra([]::VARCHAR[]);
+----
+read_sra: at least one file path must be provided
+
+statement error
+SELECT * FROM read_sra('data/sra/nomatch_*.sra');
+----
+No files matched pattern: data/sra/nomatch_*.sra
+
+statement error
+SELECT * FROM read_sra('/dev/stdin');
+----
+read_sra: stdin is not supported (an .sra file is read at random positions)
+
+statement error
+SELECT * FROM read_sra(42);
+----
+read_sra: the path must be VARCHAR or VARCHAR[]
+
+statement error
 SELECT * FROM read_sra('data/sra/SRR4424282.sra', split := 'files');
 ----
 read_sra: split must be 'split_3' or 'spot', not 'files'
 
-# split-3 always skips technical reads (fasterq-dump silently switches to split-files instead);
-# asking for both is refused rather than answered differently.
+# split-3 always skips technical reads (fasterq-dump switches to split-files instead, with a
+# notice); asking for both is refused rather than answered differently.
 statement error
 SELECT * FROM read_sra('data/sra/SRR4424282.sra', include_technical := true);
 ----
@@ -114,10 +139,10 @@ FROM read_sra(['data/sra/SRR32151205.sra', 'data/sra/SRR34459993.sra', 'data/sra
 # The oracle as read_fastx reads it: mates from _1/_2 paired by position, and the unpaired file.
 statement ok
 CREATE TABLE oracle AS
-SELECT read_id, sequence1, sequence2, qual1, qual2
+SELECT read_id, comment, sequence1, sequence2, qual1, qual2
 FROM read_fastx('data/sra/oracle/*/split_3/*_1.fastq.gz', sequence2 := 'data/sra/oracle/*/split_3/*_2.fastq.gz')
 UNION ALL
-SELECT read_id, sequence1, sequence2, qual1, qual2
+SELECT read_id, comment, sequence1, sequence2, qual1, qual2
 FROM read_fastx('data/sra/oracle/*/split_3/*.fastq.gz', include_filepath := true)
 WHERE NOT regexp_matches(filepath, '_[0-9]\.fastq\.gz$');
 
@@ -127,12 +152,12 @@ SELECT (SELECT count(*) FROM ours), (SELECT count(*) FROM oracle);
 8865	8865
 
 query I
-SELECT count(*) FROM (SELECT read_id, sequence1, sequence2, qual1, qual2 FROM ours EXCEPT ALL SELECT * FROM oracle);
+SELECT count(*) FROM (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM ours EXCEPT ALL SELECT * FROM oracle);
 ----
 0
 
 query I
-SELECT count(*) FROM (SELECT * FROM oracle EXCEPT ALL SELECT read_id, sequence1, sequence2, qual1, qual2 FROM ours);
+SELECT count(*) FROM (SELECT * FROM oracle EXCEPT ALL SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM ours);
 ----
 0
 
@@ -159,7 +184,8 @@ SELECT count(*), count(sequence2) FROM ours WHERE read_id LIKE 'ERR5009897.%';
 ----
 248	0
 
-# SRR24770212 has both kinds of spot.
+# SRR24770212 has both kinds of spot: the records in its oracle's unpaired file and in each of _1
+# and _2 (data/sra/oracle/oracle_md5.csv).
 query II
 SELECT count(*) FILTER (WHERE sequence2 IS NULL), count(*) FILTER (WHERE sequence2 IS NOT NULL) FROM ours WHERE read_id LIKE 'SRR24770212.%';
 ----
@@ -181,7 +207,7 @@ FROM read_sra(['data/sra/SRR32151205.sra', 'data/sra/SRR34459993.sra', 'data/sra
 
 statement ok
 CREATE TABLE oracle_spot AS
-SELECT read_id, sequence1, qual1 FROM read_fastx('data/sra/oracle/*/split_spot/*.fastq.gz');
+SELECT read_id, comment, sequence1, qual1 FROM read_fastx('data/sra/oracle/*/split_spot/*.fastq.gz');
 
 query II
 SELECT (SELECT count(*) FROM ours_spot), (SELECT count(*) FROM oracle_spot);
@@ -189,12 +215,12 @@ SELECT (SELECT count(*) FROM ours_spot), (SELECT count(*) FROM oracle_spot);
 12777	12777
 
 query I
-SELECT count(*) FROM (SELECT read_id, sequence1, qual1 FROM ours_spot EXCEPT ALL SELECT * FROM oracle_spot);
+SELECT count(*) FROM (SELECT read_id, comment, sequence1, qual1 FROM ours_spot EXCEPT ALL SELECT * FROM oracle_spot);
 ----
 0
 
 query I
-SELECT count(*) FROM (SELECT * FROM oracle_spot EXCEPT ALL SELECT read_id, sequence1, qual1 FROM ours_spot);
+SELECT count(*) FROM (SELECT * FROM oracle_spot EXCEPT ALL SELECT read_id, comment, sequence1, qual1 FROM ours_spot);
 ----
 0
 
@@ -293,7 +319,8 @@ SELECT DISTINCT filepath, count(*) OVER () FROM read_sra('data/sra/SRR4424282.sr
 ----
 data/sra/SRR4424282.sra	3
 
-# A glob reads every match; here the run is classified before a row is produced.
+# A glob reads every match; here the run is classified before a row is produced. SRR4424282 (3
+# spots) and SRR4439672 (2620) match, each one row per spot.
 query I
 SELECT count(*) FROM read_sra('data/sra/SRR44*.sra');
 ----

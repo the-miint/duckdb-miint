@@ -4,6 +4,7 @@
 #include "sra_archive.hpp"
 #include "sra_test_helpers.hpp"
 
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -147,4 +148,18 @@ TEST_CASE("SraTable reads a run whose every column is static", "[sra]") {
 	REQUIRE(t.Static("READ") != nullptr);
 	REQUIRE(t.Static("ORIGINAL_QUALITY") != nullptr);
 	CHECK(t.Static("READ")->row_count == 1);
+}
+
+TEST_CASE("An archive's table of contents is refused past a sane size", "[sra]") {
+	// Public archives' tables of contents are a few KB; a header placing the data 64 MiB in is not
+	// read whole into memory.
+	const size_t size = (size_t(64) << 20) + 64;
+	std::vector<uint8_t> bytes(size, 0);
+	std::memcpy(bytes.data(), "NCBI.sra", 8);
+	const uint32_t order = 0x05031988, version = 1;
+	std::memcpy(bytes.data() + 8, &order, 4);
+	std::memcpy(bytes.data() + 12, &version, 4);
+	const uint64_t data_offset = size - 8;
+	std::memcpy(bytes.data() + 16, &data_offset, 8);
+	CHECK(ThrowsTypeMentioning<SraUnsupportedError>([&] { SraArchiveFromBytes(bytes); }, "table of contents"));
 }

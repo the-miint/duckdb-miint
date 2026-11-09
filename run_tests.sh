@@ -363,6 +363,38 @@ if echo "$MZXML_EXPECTED_SHA  $MZXML_FILE" | sha256sum -c --quiet 2>/dev/null; t
     export MZXML_REAL_DATA="$MZXML_FILE"
 fi
 
+# Download and cache the two real SRA runs whose fasterq-dump md5s are committed in
+# data/sra/real_oracles.csv (which also records these sha256s). Each is downloaded to a .part file
+# and only renamed once whole, so an interrupted download is retried rather than kept.
+SRA_CACHE_DIR="$CACHE_DIR/sra"
+mkdir -p "$SRA_CACHE_DIR"
+SRA_REAL_OK=1
+for SRA_PIN in \
+    "DRR274142 b54d43727c153e1eb5ca96ab86b9795817e1f6a9c497f230510e6d192a062ea3" \
+    "SRR31286609 a71126033a5c68e6282c04e7a2d9fd6f71b6d506a342d189c4e5f1f056a19327"; do
+    SRA_RUN="${SRA_PIN%% *}"
+    SRA_SHA="${SRA_PIN##* }"
+    SRA_FILE="$SRA_CACHE_DIR/$SRA_RUN.sra"
+    if [ ! -f "$SRA_FILE" ]; then
+        echo "Downloading SRA run $SRA_RUN..."
+        if wget -q -O "$SRA_FILE.part" "https://sra-pub-run-odp.s3.amazonaws.com/sra/$SRA_RUN/$SRA_RUN"; then
+            mv "$SRA_FILE.part" "$SRA_FILE"
+        else
+            echo "Warning: SRA run $SRA_RUN download failed, skipping SRA real data tests"
+        fi
+    fi
+    # Compared directly: macOS's sha256sum -c does not read a checklist from stdin.
+    if [ "$(sha256sum "$SRA_FILE" 2>/dev/null | awk '{print $1}')" != "$SRA_SHA" ]; then
+        SRA_REAL_OK=0
+        if [ -f "$SRA_FILE" ]; then
+            echo "Warning: $SRA_FILE does not match its sha256; the SRA real data tests will skip until it is removed and downloaded again"
+        fi
+    fi
+done
+if [ "$SRA_REAL_OK" = 1 ]; then
+    export SRA_REAL_DATA="$SRA_CACHE_DIR"
+fi
+
 # Detect compile-time optional features by querying the built extension
 if echo "SELECT * FROM miint_versions() WHERE library = 'HDF5';" | ./build/release/duckdb -csv 2>/dev/null | grep -q HDF5; then
     export HDF5_AVAILABLE=1

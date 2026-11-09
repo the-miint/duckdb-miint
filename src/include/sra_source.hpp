@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <fstream>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -34,6 +35,10 @@ public:
 	virtual uint64_t Size() const = 0;
 	// Reads exactly n bytes at pos, or throws SraFormatError if the file is shorter.
 	virtual void ReadAt(uint64_t pos, uint8_t *buf, size_t n) const = 0;
+	// A hint that these bytes will be read soon. A source that fetches ahead starts on them; others
+	// ignore it.
+	virtual void Prefetch(uint64_t pos, uint64_t n) const {
+	}
 
 	std::vector<uint8_t> Read(uint64_t pos, size_t n) const;
 };
