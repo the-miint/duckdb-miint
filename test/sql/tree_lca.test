@@ -1,0 +1,671 @@
+# name: test/sql/tree_lca.test
+# description: tree_lca gives each pair of tips its lowest common ancestor and the length of the path between them
+# group: [sql]
+
+require miint
+
+# The lowest common ancestor of two tips is the clade they first share, and the path
+# between them runs through it. The distance must count every edge on that path, must be
+# the same double tree_nearest_tip reports for the same pair (or a join of the two would
+# disagree with itself), and must be unknown (NULL) when a length on the path is, never a
+# number computed as if that length were 0.
+
+# The tree, numbered A0 B1 C2 D3 E4 x5 F6 G7 H8 root9.
+statement ok
+COPY (SELECT '(((A:0.1,B:0.2)C:0.3,(D:0.4)E:0.5)x:0.1,(F:0.6,G:0.7)H:0.8)root;')
+TO '{TEST_DIR}/ex1.nwk' (FORMAT csv, HEADER false, DELIMITER E'\t');
+
+statement ok
+CREATE TABLE ex1 AS SELECT * FROM read_newick('{TEST_DIR}/ex1.nwk');
+
+statement ok
+CREATE TABLE ex1_pairs AS
+SELECT * FROM (VALUES ('B', 'A'), ('A', 'D'), ('F', 'G'), ('A', 'F'), ('G', 'A'), ('A', 'A')) AS v(a, b);
+
+# =============================================================================
+# Worked example
+# =============================================================================
+
+query TTTR
+SELECT r.a, r.b, l.name, round(r.distance, 12)
+FROM tree_lca('ex1', 'ex1_pairs') r JOIN ex1 l ON l.node_index = r.lca_index ORDER BY r.a, r.b;
+----
+A	A	A	0.0
+A	D	x	1.3
+A	F	root	1.9
+B	A	C	0.3
+F	G	H	1.3
+G	A	root	2.0
+
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM tree_lca('ex1', 'ex1_pairs'));
+----
+a	VARCHAR
+b	VARCHAR
+lca_index	BIGINT
+distance	DOUBLE
+
+# =============================================================================
+# The same pair, the same double, as tree_nearest_tip: on a tree with FastTree's
+# lengths, every ordered pair of tips. tree_nearest_tip scores each pair alone by giving
+# it a group of its own with a single target.
+# =============================================================================
+
+statement ok
+CREATE TABLE mod AS SELECT * FROM read_newick('data/fasttree/moderate.golden.nwk');
+
+statement ok
+CREATE TABLE mod_pairs AS
+SELECT row_number() OVER (ORDER BY ta.name, tb.name) AS id, ta.name AS a, tb.name AS b
+FROM (SELECT name FROM mod WHERE is_tip) ta, (SELECT name FROM mod WHERE is_tip) tb;
+
+statement ok
+CREATE TABLE mod_targets AS SELECT b AS name, id AS grp FROM mod_pairs;
+
+statement ok
+CREATE TABLE mod_queries AS SELECT a AS name, id AS grp FROM mod_pairs;
+
+statement ok
+CREATE TABLE mod_nearest AS SELECT * FROM tree_nearest_tip('mod', 'mod_targets', 'mod_queries', exclude_self := false);
+
+statement ok
+CREATE TABLE mod_lca AS SELECT * FROM tree_lca('mod', 'mod_pairs');
+
+# 24 tips, 576 ordered pairs; every distance and LCA equal (=, not rounded); the 24 pairs
+# of a tip with itself are the only ones at 0 (FastTree's shortest length is 5e-09).
+query IIII
+SELECT count(*),
+       count(*) FILTER (WHERE n.distance = l.distance AND n.lca_index = l.lca_index AND n.target = l.b),
+       count(*) FILTER (WHERE l.distance = 0),
+       count(*) FILTER (WHERE l.distance = 0 AND l.a = l.b)
+FROM mod_pairs p JOIN mod_nearest n ON n.grp = p.id JOIN mod_lca l ON l.a = p.a AND l.b = p.b;
+----
+576	576	24	24
+
+# Either order, the same double and the same ancestor.
+query I
+SELECT count(*) FROM mod_lca x JOIN mod_lca y ON x.a = y.b AND x.b = y.a
+WHERE x.distance <> y.distance OR x.lca_index <> y.lca_index;
+----
+0
+
+# =============================================================================
+# Branch lengths
+# =============================================================================
+
+# x's length is unknown. A and B, and A and D, meet below x, so their paths avoid it; A
+# and F meet at the root, so their path crosses it.
+statement ok
+CREATE TABLE ex1_x_null AS
+SELECT node_index, parent_index, name, CASE WHEN name = 'x' THEN NULL ELSE branch_length END AS branch_length FROM ex1;
+
+statement ok
+CREATE TABLE pairs_x AS SELECT * FROM (VALUES ('A', 'B'), ('A', 'D'), ('A', 'F'), ('F', 'G'), ('D', 'D')) AS v(a, b);
+
+query TTTR
+SELECT r.a, r.b, l.name, round(r.distance, 12)
+FROM tree_lca('ex1_x_null', 'pairs_x') r JOIN ex1 l ON l.node_index = r.lca_index ORDER BY r.a, r.b;
+----
+A	B	C	0.3
+A	D	x	1.3
+A	F	root	NULL
+D	D	D	0.0
+F	G	H	1.3
+
+# E's length is unknown: the path from D to anything but itself crosses it.
+statement ok
+CREATE TABLE ex1_e_nan AS
+SELECT node_index, parent_index, name, CASE WHEN name = 'E' THEN 'nan'::DOUBLE ELSE branch_length END AS branch_length
+FROM ex1;
+
+query TTR
+SELECT a, b, round(distance, 12) FROM tree_lca('ex1_e_nan', 'pairs_x') ORDER BY a, b;
+----
+A	B	0.3
+A	D	NULL
+A	F	1.9
+D	D	0.0
+F	G	1.3
+
+# A negative length is summed like any other.
+statement ok
+CREATE TABLE ex1_neg AS
+SELECT node_index, parent_index, name, CASE WHEN name = 'G' THEN -0.5 ELSE branch_length END AS branch_length FROM ex1;
+
+query TTR
+SELECT a, b, round(distance, 12) FROM tree_lca('ex1_neg', 'ex1_pairs') WHERE 'G' IN (a, b) ORDER BY a, b;
+----
+F	G	0.1
+G	A	0.8
+
+statement ok
+CREATE TABLE ex1_inf AS
+SELECT node_index, parent_index, name, CASE WHEN name = 'E' THEN 'inf'::DOUBLE ELSE branch_length END AS branch_length
+FROM ex1;
+
+statement error
+SELECT * FROM tree_lca('ex1_inf', 'ex1_pairs');
+----
+tree_lca: the tree 'ex1_inf' cannot be read: the branch length of node_index 4 is not finite
+
+# Two root distances can each be in DOUBLE's range while the path through the root,
+# their sum, is not. That is an error, not an infinite distance.
+statement ok
+CREATE TABLE far_apart AS
+SELECT * FROM (VALUES (0, NULL, 'root', NULL), (1, 0, 'P', 1e308), (2, 0, 'Q', 1e308), (3, 0, 'R', 1.0))
+AS v(node_index, parent_index, name, branch_length);
+
+statement ok
+CREATE TABLE pairs_far AS SELECT * FROM (VALUES ('P', 'R'), ('P', 'Q')) AS v(a, b);
+
+statement error
+SELECT * FROM tree_lca('far_apart', 'pairs_far');
+----
+tree_lca: the path between 'P' and 'Q' is outside DOUBLE's range
+
+statement ok
+CREATE TABLE pairs_near AS SELECT 'P' AS a, 'R' AS b;
+
+query TTR
+SELECT a, b, distance FROM tree_lca('far_apart', 'pairs_near');
+----
+P	R	1e+308
+
+# Without a branch_length column every length is unknown: the LCAs only, and a tip is 0
+# from itself.
+statement ok
+CREATE TABLE ex1_no_lengths AS SELECT node_index, parent_index, name FROM ex1;
+
+query TTIR
+SELECT a, b, lca_index, distance FROM tree_lca('ex1_no_lengths', 'ex1_pairs') ORDER BY a, b;
+----
+A	A	0	0.0
+A	D	5	NULL
+A	F	9	NULL
+B	A	2	NULL
+F	G	8	NULL
+G	A	9	NULL
+
+# =============================================================================
+# Tip names may be BIGINT or UUID; the output keeps the type
+# =============================================================================
+
+statement ok
+COPY (SELECT '((1:1,2:1)n:1,(9:1,10:1)m:1)r;') TO '{TEST_DIR}/bigint.nwk' (FORMAT csv, HEADER false, DELIMITER E'\t');
+
+statement ok
+CREATE TABLE big AS
+SELECT node_index, parent_index, branch_length, TRY_CAST(name AS BIGINT) AS name FROM read_newick('{TEST_DIR}/bigint.nwk');
+
+statement ok
+CREATE TABLE big_pairs AS SELECT * FROM (VALUES (1::BIGINT, 2::BIGINT), (1::BIGINT, 10::BIGINT)) AS v(a, b);
+
+query IITTR
+SELECT r.a, r.b, typeof(r.a), typeof(r.b), r.distance
+FROM tree_lca('big', 'big_pairs') r ORDER BY r.b;
+----
+1	2	BIGINT	BIGINT	2.0
+1	10	BIGINT	BIGINT	4.0
+
+statement ok
+COPY (SELECT '(00000000-0000-0000-0000-00000000000a:2,(80000000-0000-0000-0000-000000000000:1,7fffffff-ffff-ffff-ffff-ffffffffffff:1)n:1)r;')
+TO '{TEST_DIR}/uuid.nwk' (FORMAT csv, HEADER false, DELIMITER E'\t');
+
+statement ok
+CREATE TABLE uu AS
+SELECT node_index, parent_index, branch_length, TRY_CAST(name AS UUID) AS name FROM read_newick('{TEST_DIR}/uuid.nwk');
+
+statement ok
+CREATE TABLE uu_pairs AS
+SELECT '80000000-0000-0000-0000-000000000000'::UUID AS a, '00000000-0000-0000-0000-00000000000a'::UUID AS b;
+
+query TTTTR
+SELECT r.a = (SELECT a FROM uu_pairs), r.b = (SELECT b FROM uu_pairs), typeof(r.a), typeof(r.b), r.distance
+FROM tree_lca('uu', 'uu_pairs') r;
+----
+true	true	UUID	UUID	4.0
+
+# The names must have the tree's type, in both columns, and it must be an id type.
+statement error
+SELECT * FROM tree_lca('big', 'ex1_pairs');
+----
+tree_lca: tip names must have one type in the tree and the pairs
+
+statement ok
+CREATE TABLE mixed_pairs AS SELECT 'A' AS a, 2::BIGINT AS b;
+
+statement error
+SELECT * FROM tree_lca('ex1', 'mixed_pairs');
+----
+tree_lca: tip names must have one type in the tree and the pairs
+
+statement ok
+CREATE TABLE mixed_pairs_a AS SELECT 2::BIGINT AS a, 'A' AS b;
+
+statement error
+SELECT * FROM tree_lca('ex1', 'mixed_pairs_a');
+----
+tree_lca: tip names must have one type in the tree and the pairs
+
+statement ok
+CREATE TABLE small AS SELECT node_index, parent_index, branch_length, name::INTEGER AS name FROM big;
+
+statement ok
+CREATE TABLE small_pairs AS SELECT a::INTEGER AS a, b::INTEGER AS b FROM big_pairs;
+
+statement error
+SELECT * FROM tree_lca('small', 'small_pairs');
+----
+tree_lca: tip names must be VARCHAR, BIGINT, or UUID
+
+# =============================================================================
+# A name type that changes after the statement was prepared is refused, not emitted
+# under the old type (views over CSV files change type without a catalog change).
+# =============================================================================
+
+statement ok
+COPY (SELECT node_index, parent_index, name, branch_length FROM ex1) TO '{TEST_DIR}/prep_tree.csv';
+
+statement ok
+COPY (SELECT * FROM ex1_pairs) TO '{TEST_DIR}/prep_pairs.csv';
+
+statement ok
+CREATE VIEW prep_tree AS SELECT * FROM read_csv('{TEST_DIR}/prep_tree.csv');
+
+statement ok
+CREATE VIEW prep_pairs AS SELECT * FROM read_csv('{TEST_DIR}/prep_pairs.csv');
+
+statement ok
+PREPARE lca AS SELECT a, b, lca_index FROM tree_lca('prep_tree', 'prep_pairs') ORDER BY a, b;
+
+statement ok
+PREPARE lca_lenient AS
+SELECT a, b, lca_index FROM tree_lca('prep_tree', 'prep_pairs', ignore_missing := true) ORDER BY a, b;
+
+query TTI
+EXECUTE lca;
+----
+A	A	0
+A	D	5
+A	F	9
+B	A	2
+F	G	8
+G	A	9
+
+statement ok
+COPY (SELECT node_index, parent_index, name, branch_length FROM big) TO '{TEST_DIR}/prep_tree.csv';
+
+statement ok
+COPY (SELECT * FROM big_pairs) TO '{TEST_DIR}/prep_pairs.csv';
+
+statement error
+EXECUTE lca;
+----
+<REGEX>:.*tree_lca: column 'a' of 'prep_pairs' is BIGINT now but was VARCHAR when the statement was bound.*
+
+statement ok
+COPY (SELECT 'x' AS a, 7 AS b) TO '{TEST_DIR}/prep_pairs.csv';
+
+statement error
+EXECUTE lca;
+----
+<REGEX>:.*tree_lca: column 'b' of 'prep_pairs' is BIGINT now but was VARCHAR when the statement was bound.*
+
+# Only the tree's names change. They are matched as text, so its integer names would
+# otherwise match no pair: an error naming the wrong cause, or, under ignore_missing, no
+# rows and no error.
+statement ok
+COPY (SELECT * FROM ex1_pairs) TO '{TEST_DIR}/prep_pairs.csv';
+
+statement error
+EXECUTE lca;
+----
+<REGEX>:.*tree_lca: the tree 'prep_tree' cannot be read: column 'name' is BIGINT now but was VARCHAR when the statement was bound.*
+
+statement error
+EXECUTE lca_lenient;
+----
+<REGEX>:.*tree_lca: the tree 'prep_tree' cannot be read: column 'name' is BIGINT now but was VARCHAR when the statement was bound.*
+
+statement ok
+COPY (SELECT node_index, parent_index, name, branch_length FROM ex1) TO '{TEST_DIR}/prep_tree.csv';
+
+statement ok
+COPY (SELECT * FROM ex1_pairs) TO '{TEST_DIR}/prep_pairs.csv';
+
+query TTI
+EXECUTE lca;
+----
+A	A	0
+A	D	5
+A	F	9
+B	A	2
+F	G	8
+G	A	9
+
+query TTI
+EXECUTE lca_lenient;
+----
+A	A	0
+A	D	5
+A	F	9
+B	A	2
+F	G	8
+G	A	9
+
+# =============================================================================
+# Names that are not tips, or name more than one tip
+# =============================================================================
+
+# C is an internal node, not a tip, so it is missing too.
+statement ok
+CREATE TABLE pairs_missing AS SELECT * FROM (VALUES ('A', 'B'), ('A', 'nope'), ('C', 'B')) AS v(a, b);
+
+statement error
+SELECT * FROM tree_lca('ex1', 'pairs_missing');
+----
+<REGEX>:.*tree_lca: 2 name\(s\) in the pairs are not tips in the tree 'ex1': 'C', 'nope'; pass ignore_missing := true to drop their pairs.*
+
+query TT
+SELECT a, b FROM tree_lca('ex1', 'pairs_missing', ignore_missing := true);
+----
+A	B
+
+statement ok
+COPY (SELECT '((A:1,B:1)c:1,(A:1,D:1)e:1)r;') TO '{TEST_DIR}/dup.nwk' (FORMAT csv, HEADER false, DELIMITER E'\t');
+
+statement ok
+CREATE TABLE dup_tree AS SELECT * FROM read_newick('{TEST_DIR}/dup.nwk');
+
+statement ok
+CREATE TABLE pairs_ab AS SELECT 'A' AS a, 'B' AS b;
+
+statement error
+SELECT * FROM tree_lca('dup_tree', 'pairs_ab');
+----
+tree_lca: tip name 'A' names 2 tips in the tree 'dup_tree'; a name in a pair must name exactly one tip
+
+# ignore_missing drops pairs whose names are missing, not names that are ambiguous.
+statement error
+SELECT * FROM tree_lca('dup_tree', 'pairs_ab', ignore_missing := true);
+----
+tree_lca: tip name 'A' names 2 tips in the tree 'dup_tree'
+
+# A duplicate tip that no pair names is fine.
+statement ok
+CREATE TABLE pairs_bd AS SELECT 'B' AS a, 'D' AS b;
+
+query TTR
+SELECT a, b, distance FROM tree_lca('dup_tree', 'pairs_bd');
+----
+B	D	4.0
+
+# =============================================================================
+# Duplicate pairs, NULL names, no pairs
+# =============================================================================
+
+# One row per distinct pair; (B, A) is another pair. A pair with a NULL name has no row.
+statement ok
+CREATE TABLE pairs_dupes AS
+SELECT * FROM (VALUES ('A', 'B'), ('A', 'B'), ('B', 'A'), ('A', NULL), (NULL, 'B'), (NULL, NULL)) AS v(a, b);
+
+query TTR
+SELECT a, b, round(distance, 12) FROM tree_lca('ex1', 'pairs_dupes') ORDER BY a, b;
+----
+A	B	0.3
+B	A	0.3
+
+statement ok
+CREATE TABLE pairs_none (a VARCHAR, b VARCHAR);
+
+query I
+SELECT count(*) FROM tree_lca('ex1', 'pairs_none');
+----
+0
+
+# =============================================================================
+# The tree's rows: any order and any distinct node_index values give the same answers,
+# lca_index in the caller's numbering. Rows that do not form one tree are errors.
+# =============================================================================
+
+statement ok
+CREATE TABLE ex1_shuffled AS SELECT * FROM ex1 ORDER BY hash(node_index);
+
+query I
+SELECT list(node_index) <> list_sort(list(node_index)) FROM ex1_shuffled;
+----
+true
+
+query I
+WITH got AS MATERIALIZED (SELECT * FROM tree_lca('ex1_shuffled', 'ex1_pairs')),
+     want AS MATERIALIZED (SELECT * FROM tree_lca('ex1', 'ex1_pairs'))
+SELECT (SELECT count(*) FROM (FROM got EXCEPT ALL FROM want)) + (SELECT count(*) FROM (FROM want EXCEPT ALL FROM got));
+----
+0
+
+# Sparse, negative ids that run against the tree's postorder: A (0) is 30, C (2) is 16,
+# x (5) is -5, H (8) is -26 and the root (9) is -33.
+statement ok
+CREATE VIEW ex1_spread AS
+SELECT 30 - 7 * node_index AS node_index, 30 - 7 * parent_index AS parent_index, name, branch_length FROM ex1;
+
+query TTIR
+SELECT a, b, lca_index, round(distance, 12) FROM tree_lca('ex1_spread', 'ex1_pairs') ORDER BY a, b;
+----
+A	A	30	0.0
+A	D	-5	1.3
+A	F	-33	1.9
+B	A	16	0.3
+F	G	-26	1.3
+G	A	-33	2.0
+
+statement ok
+CREATE TABLE ex1_two_roots AS
+SELECT node_index, CASE WHEN name = 'H' THEN NULL ELSE parent_index END AS parent_index, name, branch_length FROM ex1;
+
+statement error
+SELECT * FROM tree_lca('ex1_two_roots', 'ex1_pairs');
+----
+tree_lca: the tree 'ex1_two_roots' cannot be read: the tree has 2 roots
+
+statement ok
+CREATE TABLE ex1_dangling AS
+SELECT node_index, CASE WHEN name = 'D' THEN 99 ELSE parent_index END AS parent_index, name, branch_length FROM ex1;
+
+statement error
+SELECT * FROM tree_lca('ex1_dangling', 'ex1_pairs');
+----
+tree_lca: the tree 'ex1_dangling' cannot be read: the parent_index of node_index 3 (99) is not the node_index of any row
+
+# =============================================================================
+# Schema errors
+# =============================================================================
+
+statement ok
+CREATE TABLE ex1_unnamed AS SELECT node_index, parent_index, branch_length FROM ex1;
+
+statement error
+SELECT * FROM tree_lca('ex1_unnamed', 'ex1_pairs');
+----
+tree_lca: tree table 'ex1_unnamed' has no 'name' column
+
+statement ok
+CREATE TABLE pairs_no_b AS SELECT 'A' AS a, 'B' AS c;
+
+statement error
+SELECT * FROM tree_lca('ex1', 'pairs_no_b');
+----
+tree_lca: pairs table 'pairs_no_b' has no 'b' column
+
+statement ok
+CREATE TABLE pairs_no_a AS SELECT 'A' AS x, 'B' AS b;
+
+statement error
+SELECT * FROM tree_lca('ex1', 'pairs_no_a');
+----
+tree_lca: pairs table 'pairs_no_a' has no 'a' column
+
+# The tree as its own pairs would be read twice. Identifiers are case-insensitive.
+statement error
+SELECT * FROM tree_lca('ex1', 'EX1');
+----
+tree_lca: 'EX1' is the tree table; pass the pairs as a relation of their own
+
+statement error
+SELECT * FROM tree_lca('nope', 'ex1_pairs');
+----
+does not exist
+
+statement error
+SELECT * FROM tree_lca('ex1', 'nope');
+----
+does not exist
+
+# =============================================================================
+# Each relation is read exactly once, at execution. The volatility sits in a column
+# the read must evaluate (docs/internals/reading-tables-views.md), and it is inert.
+# =============================================================================
+
+statement ok
+CREATE SEQUENCE tree_seq START 1;
+
+statement ok
+CREATE SEQUENCE pairs_seq START 1;
+
+statement ok
+CREATE VIEW ex1_volatile AS
+SELECT node_index, parent_index, name, branch_length + 0 * nextval('tree_seq') AS branch_length FROM ex1;
+
+statement ok
+CREATE VIEW pairs_volatile AS SELECT concat(a, repeat('x', 0 * nextval('pairs_seq'))) AS a, b FROM ex1_pairs;
+
+statement ok
+EXPLAIN SELECT * FROM tree_lca('ex1_volatile', 'pairs_volatile');
+
+query I
+WITH got AS MATERIALIZED (SELECT * FROM tree_lca('ex1_volatile', 'pairs_volatile')),
+     want AS MATERIALIZED (SELECT * FROM tree_lca('ex1', 'ex1_pairs'))
+SELECT (SELECT count(*) FROM (FROM got EXCEPT ALL FROM want)) + (SELECT count(*) FROM (FROM want EXCEPT ALL FROM got));
+----
+0
+
+query II
+SELECT currval('tree_seq'), currval('pairs_seq');
+----
+10	6
+
+# Planning reads no rows.
+statement ok
+CREATE VIEW boom AS SELECT CAST(error('read at planning') AS VARCHAR) AS a, b FROM ex1_pairs;
+
+statement ok
+EXPLAIN SELECT * FROM tree_lca('ex1', 'boom');
+
+statement error
+SELECT * FROM tree_lca('ex1', 'boom');
+----
+read at planning
+
+# =============================================================================
+# Enough pairs for several threads: every pair answered exactly once, whatever the
+# thread count. A caterpillar of 5000 tips, every edge of length 1: t_0 and t_1 are
+# siblings, and t_(i+1) (i >= 1) hangs off the parent of t_i's parent, so t_i and
+# t_(i+1) meet at t_(i+1)'s parent, 2 apart for i = 0 and 3 apart after.
+# =============================================================================
+
+statement ok
+CREATE TABLE cat_newick AS
+SELECT repeat('(', 4999) || 't0:1,t1:1' || string_agg('):1,t' || i || ':1', '' ORDER BY i) || ');' AS nwk
+FROM generate_series(2, 4999) AS s(i);
+
+statement ok
+COPY cat_newick TO '{TEST_DIR}/caterpillar.nwk' (FORMAT csv, HEADER false, DELIMITER E'\t');
+
+statement ok
+CREATE TABLE cat AS SELECT * FROM read_newick('{TEST_DIR}/caterpillar.nwk');
+
+statement ok
+CREATE TABLE cat_pairs AS SELECT 't' || i AS a, 't' || (i + 1) AS b FROM range(4999) AS s(i);
+
+statement ok
+SET threads = 8;
+
+statement ok
+CREATE TABLE cat_many AS SELECT * FROM tree_lca('cat', 'cat_pairs');
+
+statement ok
+SET threads = 1;
+
+statement ok
+CREATE TABLE cat_one AS SELECT * FROM tree_lca('cat', 'cat_pairs');
+
+statement ok
+RESET threads;
+
+query II
+SELECT count(*), count(DISTINCT (a, b)) FROM cat_many;
+----
+4999	4999
+
+query I
+SELECT (SELECT count(*) FROM (SELECT * FROM cat_many EXCEPT ALL SELECT * FROM cat_one))
+     + (SELECT count(*) FROM (SELECT * FROM cat_one EXCEPT ALL SELECT * FROM cat_many));
+----
+0
+
+query I
+SELECT count(*) FROM cat_many r JOIN cat c ON c.name = r.b
+WHERE r.lca_index IS DISTINCT FROM c.parent_index OR r.distance IS DISTINCT FROM CASE WHEN r.a = 't0' THEN 2 ELSE 3 END;
+----
+0
+
+# =============================================================================
+# Relation names are quoted where the SQL is built: a name that unquoted
+# concatenation (the first call's pairs) or a naive "-wrap (the second call's) would
+# turn into two statements reads the relation it names, and nothing else runs. Each
+# name starts with a relation that exists, so either mistake gives a valid first
+# statement. Reads are streamed, and a streamed read refuses a second statement, so
+# the call fails; a reader that ran it would drop the victim.
+# =============================================================================
+
+statement ok
+CREATE TABLE injection_victim AS SELECT 1 AS x;
+
+statement ok
+CREATE TABLE "ex1; DROP TABLE injection_victim; --" AS SELECT * FROM ex1;
+
+statement ok
+CREATE TABLE "ex1_pairs; DROP TABLE injection_victim; --" AS SELECT * FROM ex1_pairs;
+
+statement ok
+CREATE TABLE "ex1_pairs""; DROP TABLE injection_victim; --" AS SELECT * FROM ex1_pairs;
+
+query I
+SELECT count(*) FROM tree_lca('ex1; DROP TABLE injection_victim; --', 'ex1_pairs; DROP TABLE injection_victim; --');
+----
+6
+
+query I
+SELECT count(*) FROM tree_lca('ex1', 'ex1_pairs"; DROP TABLE injection_victim; --');
+----
+6
+
+query I
+SELECT count(*) FROM injection_victim;
+----
+1
+
+# TEMP relations resolve as permanent ones do
+# (docs/internals/reading-tables-views.md, "TEMP tables and views").
+statement ok
+CREATE TEMP TABLE tmp_tree AS SELECT * FROM ex1;
+
+statement ok
+CREATE TEMP VIEW tmp_pairs AS SELECT * FROM ex1_pairs;
+
+query I
+WITH got AS MATERIALIZED (SELECT * FROM tree_lca('tmp_tree', 'tmp_pairs')),
+     want AS MATERIALIZED (SELECT * FROM tree_lca('ex1', 'ex1_pairs'))
+SELECT (SELECT count(*) FROM (FROM got EXCEPT ALL FROM want)) + (SELECT count(*) FROM (FROM want EXCEPT ALL FROM got));
+----
+0

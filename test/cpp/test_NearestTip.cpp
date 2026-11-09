@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <stdexcept>
@@ -387,4 +388,43 @@ TEST_CASE("NearestTip: rejects malformed target sets", "[NearestTip]") {
 	REQUIRE_THROWS_WITH(NearestTipTargets(t.index, {a, b}, {0}), ContainsSubstring("size"));
 	REQUIRE_THROWS_WITH(NearestTipTargets(t.index, {a, a}, {0, 1}), ContainsSubstring("twice"));
 	REQUIRE_THROWS_WITH(NearestTipTargets(t.index, {a, 99}, {0, 1}), ContainsSubstring("out of range"));
+}
+
+TEST_CASE("NearestTip: a lone target's distance is TreeIndex::path_length, to the bit", "[NearestTip]") {
+	// tree_lca reports path_length and tree_nearest_tip reports this search's distance. For
+	// the same two tips they must be the same double, or a join of the two would disagree
+	// with itself. Lengths uniform in [0, 1) round, so the order of the sums shows.
+	std::mt19937 rng(20261108);
+	NearestTipOptions with_self;
+	with_self.exclude_self = false;
+	for (int trial = 0; trial < 30; ++trial) {
+		const uint32_t n = std::uniform_int_distribution<uint32_t>(2, 80)(rng);
+		auto t = random_tree(rng, n, false);
+		CAPTURE(trial, n);
+		auto index = TreeIndex::Build(t.parent, t.length);
+		for (uint32_t b = 0; b < n; ++b) {
+			NearestTipTargets lone(index, {b}, {0});
+			for (uint32_t a = 0; a < n; ++a) {
+				CAPTURE(a, b);
+				const auto found = lone.Search(a, with_self);
+				const uint32_t l = index.lca(a, b);
+				REQUIRE(found.target == b);
+				REQUIRE(found.lca == l);
+				REQUIRE(found.distance == *index.path_length(a, b, l));
+			}
+		}
+	}
+}
+
+TEST_CASE("NearestTip: refuses an index that allows unknown or negative lengths", "[NearestTip]") {
+	// The search prunes on root distances that only grow away from the root. An index
+	// built for unknown lengths counts an unknown length as 0 and accepts negative ones,
+	// so a search over it could return wrong answers without an error, whatever this
+	// tree's own lengths are.
+	const std::vector<uint32_t> parent = {TreeIndex::NO_PARENT, 0, 0};
+	const std::vector<double> length = {std::numeric_limits<double>::quiet_NaN(), 1.0, 2.0};
+	auto lenient = TreeIndex::Build(parent, length, nullptr, miint::LengthPolicy::UnknownAllowed);
+	REQUIRE_THROWS_WITH(NearestTipTargets(lenient, {1, 2}, {0, 1}), ContainsSubstring("LengthPolicy::Searchable"));
+	auto strict = TreeIndex::Build(parent, length);
+	REQUIRE_NOTHROW(NearestTipTargets(strict, {1, 2}, {0, 1}));
 }

@@ -1,0 +1,397 @@
+# name: test/sql/tree_node_depths.test
+# description: tree_node_depths gives every node's depth and distance from the root
+# group: [sql]
+
+require miint
+
+# Depth (edges from the root) and distance from the root are what tree logic in SQL
+# starts from: "the ancestor k edges up", "the clades within d of the root". Depth needs
+# no lengths. A distance does, and where a length on the way to the root is unknown
+# (NULL), the distance is unknown too: never a number computed as if the length were 0.
+
+# The tree, numbered A0 B1 C2 D3 E4 x5 F6 G7 H8 root9.
+statement ok
+COPY (SELECT '(((A:0.1,B:0.2)C:0.3,(D:0.4)E:0.5)x:0.1,(F:0.6,G:0.7)H:0.8)root;')
+TO '{TEST_DIR}/ex1.nwk' (FORMAT csv, HEADER false, DELIMITER E'\t');
+
+statement ok
+CREATE TABLE ex1 AS SELECT * FROM read_newick('{TEST_DIR}/ex1.nwk');
+
+# =============================================================================
+# Worked example
+# =============================================================================
+
+query TIIR
+SELECT l.name, d.node_index, d.depth, round(d.distance_to_root, 12)
+FROM tree_node_depths('ex1') d JOIN ex1 l USING (node_index) ORDER BY d.node_index;
+----
+A	0	3	0.5
+B	1	3	0.6
+C	2	2	0.4
+D	3	3	1.0
+E	4	2	0.6
+x	5	1	0.1
+F	6	2	1.4
+G	7	2	1.5
+H	8	1	0.8
+root	9	0	0.0
+
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM tree_node_depths('ex1'));
+----
+node_index	BIGINT
+depth	BIGINT
+distance_to_root	DOUBLE
+
+# =============================================================================
+# Branch lengths
+# =============================================================================
+
+# x's length is unknown: every node under x has an unknown distance from the root, and
+# the depths do not change. The nodes outside x keep their distances.
+statement ok
+CREATE TABLE ex1_x_null AS
+SELECT node_index, parent_index, name, CASE WHEN name = 'x' THEN NULL ELSE branch_length END AS branch_length FROM ex1;
+
+query TIR
+SELECT l.name, d.depth, round(d.distance_to_root, 12)
+FROM tree_node_depths('ex1_x_null') d JOIN ex1 l USING (node_index) ORDER BY d.node_index;
+----
+A	3	NULL
+B	3	NULL
+C	2	NULL
+D	3	NULL
+E	2	NULL
+x	1	NULL
+F	2	1.4
+G	2	1.5
+H	1	0.8
+root	0	0.0
+
+# A stored NaN is no length either.
+statement ok
+CREATE TABLE ex1_x_nan AS
+SELECT node_index, parent_index, name, CASE WHEN name = 'x' THEN 'nan'::DOUBLE ELSE branch_length END AS branch_length
+FROM ex1;
+
+query I
+WITH got AS MATERIALIZED (SELECT node_index, depth, distance_to_root FROM tree_node_depths('ex1_x_nan')),
+     want AS MATERIALIZED (SELECT node_index, depth, distance_to_root FROM tree_node_depths('ex1_x_null'))
+SELECT (SELECT count(*) FROM (FROM got EXCEPT ALL FROM want)) + (SELECT count(*) FROM (FROM want EXCEPT ALL FROM got));
+----
+0
+
+query I
+SELECT count(*) FROM tree_node_depths('ex1_x_nan') WHERE isnan(distance_to_root);
+----
+0
+
+# A negative length is summed like any other: G is 0.8 - 0.5 from the root.
+statement ok
+CREATE TABLE ex1_neg AS
+SELECT node_index, parent_index, name, CASE WHEN name = 'G' THEN -0.5 ELSE branch_length END AS branch_length FROM ex1;
+
+query R
+SELECT round(distance_to_root, 12) FROM tree_node_depths('ex1_neg') WHERE node_index = 7;
+----
+0.3
+
+# An infinite length has a value no distance can use, and neither does a sum past the
+# largest double.
+statement ok
+CREATE TABLE ex1_inf AS
+SELECT node_index, parent_index, name, CASE WHEN name = 'E' THEN 'inf'::DOUBLE ELSE branch_length END AS branch_length
+FROM ex1;
+
+statement error
+SELECT * FROM tree_node_depths('ex1_inf');
+----
+tree_node_depths: the tree 'ex1_inf' cannot be read: the branch length of node_index 4 is not finite
+
+statement ok
+CREATE TABLE ex1_overflow AS
+SELECT node_index, parent_index, name, CASE WHEN name IN ('E', 'D') THEN 1e308 ELSE branch_length END AS branch_length
+FROM ex1;
+
+statement error
+SELECT * FROM tree_node_depths('ex1_overflow');
+----
+tree_node_depths: the tree 'ex1_overflow' cannot be read: the root distance of node_index 3 is not finite
+
+# The root's length is ignored, whatever it is.
+statement ok
+CREATE TABLE ex1_root_len AS
+SELECT node_index, parent_index, name, CASE WHEN name = 'root' THEN -3.0 ELSE branch_length END AS branch_length FROM ex1;
+
+query I
+WITH got AS MATERIALIZED (SELECT * FROM tree_node_depths('ex1_root_len')),
+     want AS MATERIALIZED (SELECT * FROM tree_node_depths('ex1'))
+SELECT (SELECT count(*) FROM (FROM got EXCEPT ALL FROM want)) + (SELECT count(*) FROM (FROM want EXCEPT ALL FROM got));
+----
+0
+
+# Without a branch_length column every length is unknown: depths only, and the root is
+# 0 from itself.
+statement ok
+CREATE TABLE ex1_no_lengths AS SELECT node_index, parent_index, name FROM ex1;
+
+query IIR
+SELECT node_index, depth, distance_to_root FROM tree_node_depths('ex1_no_lengths') ORDER BY node_index;
+----
+0	3	NULL
+1	3	NULL
+2	2	NULL
+3	3	NULL
+4	2	NULL
+5	1	NULL
+6	2	NULL
+7	2	NULL
+8	1	NULL
+9	0	0.0
+
+# =============================================================================
+# Names play no part: a tree without them, or whose names cannot even be read, has the
+# same depths.
+# =============================================================================
+
+statement ok
+CREATE TABLE ex1_unnamed AS SELECT node_index, parent_index, branch_length FROM ex1;
+
+query I
+WITH got AS MATERIALIZED (SELECT * FROM tree_node_depths('ex1_unnamed')),
+     want AS MATERIALIZED (SELECT * FROM tree_node_depths('ex1'))
+SELECT (SELECT count(*) FROM (FROM got EXCEPT ALL FROM want)) + (SELECT count(*) FROM (FROM want EXCEPT ALL FROM got));
+----
+0
+
+statement ok
+CREATE VIEW ex1_names_unreadable AS
+SELECT node_index, parent_index, CAST(error('names read') AS VARCHAR) AS name, branch_length FROM ex1;
+
+query I
+WITH got AS MATERIALIZED (SELECT * FROM tree_node_depths('ex1_names_unreadable')),
+     want AS MATERIALIZED (SELECT * FROM tree_node_depths('ex1'))
+SELECT (SELECT count(*) FROM (FROM got EXCEPT ALL FROM want)) + (SELECT count(*) FROM (FROM want EXCEPT ALL FROM got));
+----
+0
+
+# =============================================================================
+# The tree's rows: any order and any distinct node_index values, reported in the
+# caller's numbering. Rows that do not form one tree are errors naming the tree.
+# =============================================================================
+
+statement ok
+CREATE TABLE ex1_shuffled AS SELECT * FROM ex1 ORDER BY hash(node_index);
+
+query I
+SELECT list(node_index) <> list_sort(list(node_index)) FROM ex1_shuffled;
+----
+true
+
+query I
+WITH got AS MATERIALIZED (SELECT * FROM tree_node_depths('ex1_shuffled')),
+     want AS MATERIALIZED (SELECT * FROM tree_node_depths('ex1'))
+SELECT (SELECT count(*) FROM (FROM got EXCEPT ALL FROM want)) + (SELECT count(*) FROM (FROM want EXCEPT ALL FROM got));
+----
+0
+
+# Sparse, negative ids that run against the tree's postorder: C (2) is 16, the root (9) is -33.
+statement ok
+CREATE VIEW ex1_spread AS
+SELECT 30 - 7 * node_index AS node_index, 30 - 7 * parent_index AS parent_index, name, branch_length FROM ex1;
+
+query IIR
+SELECT node_index, depth, round(distance_to_root, 12) FROM tree_node_depths('ex1_spread') WHERE node_index IN (16, -33)
+ORDER BY node_index;
+----
+-33	0	0.0
+16	2	0.4
+
+query I
+SELECT count(*) FROM tree_node_depths('ex1_spread') d JOIN ex1_spread s USING (node_index);
+----
+10
+
+statement ok
+CREATE TABLE ex1_two_roots AS
+SELECT node_index, CASE WHEN name = 'H' THEN NULL ELSE parent_index END AS parent_index, name, branch_length FROM ex1;
+
+statement error
+SELECT * FROM tree_node_depths('ex1_two_roots');
+----
+tree_node_depths: the tree 'ex1_two_roots' cannot be read: the tree has 2 roots
+
+statement ok
+CREATE TABLE ex1_cycle AS
+SELECT node_index, CASE WHEN name = 'x' THEN 2 ELSE parent_index END AS parent_index, name, branch_length FROM ex1;
+
+statement error
+SELECT * FROM tree_node_depths('ex1_cycle');
+----
+tree_node_depths: the tree 'ex1_cycle' cannot be read: node_index 0 is not connected to the root
+
+statement ok
+CREATE TABLE ex1_dup_index AS SELECT * FROM ex1 UNION ALL SELECT * FROM ex1 WHERE name = 'F';
+
+statement error
+SELECT * FROM tree_node_depths('ex1_dup_index');
+----
+tree_node_depths: the tree 'ex1_dup_index' cannot be read: node_index 6 appears more than once
+
+statement ok
+CREATE TABLE ex1_no_rows AS SELECT * FROM ex1 WHERE false;
+
+statement error
+SELECT * FROM tree_node_depths('ex1_no_rows');
+----
+tree_node_depths: the tree 'ex1_no_rows' cannot be read: the tree is empty
+
+# A tree whose rows fail as they are read reports that failure.
+statement ok
+CREATE VIEW ex1_read_fails AS
+SELECT node_index, parent_index, name, CASE WHEN name = 'H' THEN error('tree rows unreadable') ELSE branch_length END AS branch_length
+FROM ex1;
+
+statement error
+SELECT * FROM tree_node_depths('ex1_read_fails');
+----
+tree rows unreadable
+
+statement ok
+CREATE TABLE no_parent_col AS SELECT node_index, name FROM ex1;
+
+statement error
+SELECT * FROM tree_node_depths('no_parent_col');
+----
+missing required column 'parent_index'
+
+statement error
+SELECT * FROM tree_node_depths('nope');
+----
+does not exist
+
+# =============================================================================
+# The tree is read exactly once, at execution. The volatility sits in a column the read
+# must evaluate (docs/internals/reading-tables-views.md), and it is inert.
+# =============================================================================
+
+statement ok
+CREATE SEQUENCE tree_seq START 1;
+
+statement ok
+CREATE VIEW ex1_volatile AS
+SELECT node_index, parent_index, name, branch_length + 0 * nextval('tree_seq') AS branch_length FROM ex1;
+
+statement ok
+EXPLAIN SELECT * FROM tree_node_depths('ex1_volatile');
+
+query I
+SELECT count(*) FROM tree_node_depths('ex1_volatile');
+----
+10
+
+query I
+SELECT currval('tree_seq');
+----
+10
+
+# Planning reads no rows.
+statement ok
+CREATE VIEW boom AS SELECT node_index, parent_index, CAST(error('read at planning') AS DOUBLE) AS branch_length FROM ex1;
+
+statement ok
+EXPLAIN SELECT * FROM tree_node_depths('boom');
+
+statement error
+SELECT * FROM tree_node_depths('boom');
+----
+read at planning
+
+# =============================================================================
+# Enough nodes for several threads: every node exactly once, whatever the thread count.
+# A caterpillar of 5000 tips, every edge of length 1: t_i (i >= 2) hangs off the node
+# above t_(i-1)'s, so t_i is 5000 - i edges from the root, and t_0 and t_1 are 4999.
+# =============================================================================
+
+statement ok
+CREATE TABLE cat_newick AS
+SELECT repeat('(', 4999) || 't0:1,t1:1' || string_agg('):1,t' || i || ':1', '' ORDER BY i) || ');' AS nwk
+FROM generate_series(2, 4999) AS s(i);
+
+statement ok
+COPY cat_newick TO '{TEST_DIR}/caterpillar.nwk' (FORMAT csv, HEADER false, DELIMITER E'\t');
+
+statement ok
+CREATE TABLE cat AS SELECT * FROM read_newick('{TEST_DIR}/caterpillar.nwk');
+
+statement ok
+SET threads = 8;
+
+statement ok
+CREATE TABLE cat_many AS SELECT * FROM tree_node_depths('cat');
+
+statement ok
+SET threads = 1;
+
+statement ok
+CREATE TABLE cat_one AS SELECT * FROM tree_node_depths('cat');
+
+statement ok
+RESET threads;
+
+query III
+SELECT count(*), count(DISTINCT node_index), (SELECT count(*) FROM cat) FROM cat_many;
+----
+9999	9999	9999
+
+query I
+SELECT (SELECT count(*) FROM (SELECT * FROM cat_many EXCEPT ALL SELECT * FROM cat_one))
+     + (SELECT count(*) FROM (SELECT * FROM cat_one EXCEPT ALL SELECT * FROM cat_many));
+----
+0
+
+query I
+SELECT count(*) FROM cat_many d JOIN cat c USING (node_index)
+WHERE d.distance_to_root IS DISTINCT FROM d.depth
+   OR (c.name IN ('t0', 't1') AND d.depth IS DISTINCT FROM 4999)
+   OR (c.is_tip AND c.name NOT IN ('t0', 't1') AND d.depth IS DISTINCT FROM 5000 - CAST(substr(c.name, 2) AS BIGINT));
+----
+0
+
+query I
+SELECT max(depth) FROM cat_many;
+----
+4999
+
+# =============================================================================
+# The tree's name is quoted where the SQL is built: a name that unquoted concatenation
+# would turn into a second statement reads the relation it names.
+# =============================================================================
+
+statement ok
+CREATE TABLE injection_victim AS SELECT 1 AS x;
+
+statement ok
+CREATE TABLE "ex1; DROP TABLE injection_victim; --" AS SELECT * FROM ex1;
+
+query I
+SELECT count(*) FROM tree_node_depths('ex1; DROP TABLE injection_victim; --');
+----
+10
+
+query I
+SELECT count(*) FROM injection_victim;
+----
+1
+
+# A TEMP tree resolves as a permanent one does
+# (docs/internals/reading-tables-views.md, "TEMP tables and views").
+statement ok
+CREATE TEMP TABLE tmp_tree AS SELECT * FROM ex1;
+
+query I
+WITH got AS MATERIALIZED (SELECT * FROM tree_node_depths('tmp_tree')),
+     want AS MATERIALIZED (SELECT * FROM tree_node_depths('ex1'))
+SELECT (SELECT count(*) FROM (FROM got EXCEPT ALL FROM want)) + (SELECT count(*) FROM (FROM want EXCEPT ALL FROM got));
+----
+0

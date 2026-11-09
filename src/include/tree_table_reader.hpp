@@ -48,12 +48,14 @@ struct TreeTableArrays {
 // over: loading the Greengenes2 2024.09 tree (24.5M nodes) from Parquet that way was
 // killed at an 18 GB memory cap, and this way peaked at 2.6 GB resident. Names are matched
 // as text: VARCHAR names as they are, others cast with name::VARCHAR, as ReadTreeTable reads
-// them; a missing name or branch_length column reads as NULL.
+// them, and not read at all when `keep_names` is empty; a missing name or branch_length
+// column reads as NULL.
 //
-// `name_type` is the type Bind saw for the name column. A view can change type without a
-// catalog change (one over a file that is rewritten, under a prepared statement), and names
-// matched as text would then match the wrong rows or none, so a name column read with
-// another type is refused. The check uses the type of the read itself.
+// `name_type` is the type Bind saw for the name column; it is unused when no names are
+// read. A view can change type without a catalog change (one over a file that is
+// rewritten, under a prepared statement), and names matched as text would then match the
+// wrong rows or none, so a name column read with another type is refused. The check uses
+// the type of the read itself.
 //
 // Throws std::invalid_argument when the name column's type has changed, or the rows are not
 // a numbered tree (no rows, a NULL or repeated node_index, a parent_index that is no row's
