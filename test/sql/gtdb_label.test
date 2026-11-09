@@ -98,16 +98,49 @@ SELECT i, gtdb_species_label(name) FROM bad_species ORDER BY i;
 11	NULL
 12	NULL
 
+# Literal arguments take other paths through the executor than table rows: a literal
+# NULL never reaches the function, and a literal's one row comes back as a constant.
+query TTTT
+SELECT gtdb_label('Bacillota_A').suffix, gtdb_label(NULL) IS NULL, gtdb_species_label('Foo bar_A').epithet_suffix,
+       gtdb_species_label(NULL).epithet IS NULL;
+----
+A	true	A	true
+
+# Names that reach the functions through a selection vector rather than flat. A filter
+# operator that passes half of each vector hands its rows on with a selection. The LIMIT
+# keeps the filter out of the table scan, which would copy the rows it selects; a small
+# result, a few rows, is copied flat too, so neither would test this.
+statement ok
+CREATE TABLE many AS
+SELECT i, CASE WHEN i % 2 = 0 THEN 'Bacillota_A' ELSE 'Pseudomonas' END AS name,
+       CASE WHEN i % 2 = 0 THEN 'Pseudomonas_E fluorescens_B' ELSE 'Escherichia coli' END AS species
+FROM range(8192) t(i);
+
+query IIII
+SELECT count(*), count(*) FILTER (WHERE gtdb_label(name).suffix = 'A'),
+       count(*) FILTER (WHERE gtdb_species_label(species).genus_suffix = 'E'),
+       count(*) FILTER (WHERE gtdb_species_label(species).epithet_suffix = 'B')
+FROM (SELECT * FROM many LIMIT 100000) WHERE i % 2 = 0;
+----
+4096	4096	4096	4096
+
 query TT
 SELECT typeof(gtdb_label('Foo_A')), typeof(gtdb_species_label('Foo bar'));
 ----
 STRUCT(base VARCHAR, suffix VARCHAR)	STRUCT(genus_base VARCHAR, genus_suffix VARCHAR, epithet VARCHAR, epithet_suffix VARCHAR)
 
 # =============================================================================
-# Every string of up to six characters over a, B, 0, '-', '_', ' ' and '.' (137,256 of
-# them), split by each function and by a regular expression for the same rules. They
-# must agree on every string, and the expression must accept enough of them, with and
-# without suffixes, for the agreement to mean something.
+# The functions against a regular expression for the same rules, on two sets of strings:
+# - short: every string of up to six characters over a, B, 0, '-', '_', ' ' and '.'
+#   (137,256 of them);
+# - swept: every printable ASCII character, and two that are not ASCII, in each position
+#   the rules treat differently (1,934 distinct strings). This reaches the edges of each
+#   character class (Z, @, [, `, {, /, :) and the characters a name or an epithet must
+#   refuse, which the seven characters of the short set cannot.
+# They must agree on every string. The counts of strings the expression accepts were
+# computed twice, here with RE2 and separately with Python's re, and agree; they show
+# the agreement is not vacuous. Six characters cannot hold a species with both suffixes
+# (A_B c_D is seven), so those come from the swept set and the hand-written rows above.
 # =============================================================================
 
 statement ok
@@ -119,35 +152,49 @@ WITH RECURSIVE s(x) AS (
 )
 SELECT x FROM s;
 
-query I
-SELECT count(*) FROM strs;
+statement ok
+CREATE TABLE swept AS
+SELECT DISTINCT replace(t, '?', c) AS x
+FROM (SELECT chr(i::INTEGER) AS c FROM range(32, 127) r(i) UNION ALL SELECT 'é' UNION ALL SELECT 'ß') chars,
+     (SELECT unnest(['?', 'A?', '?A', 'A?A', 'A_?', 'A_B?', 'A_?B', 'A_B_?', 'A ?', 'A b?', 'A ?b', 'A? b', 'A_? b',
+                     'A_B? b', 'A b_?', 'A b ?', 'A b?c d', 'A b c?', 'A b c_?', 'A_B b_?']) AS t) templates;
+
+query II
+SELECT (SELECT count(*) FROM strs), (SELECT count(*) FROM swept);
 ----
-137256
+137256	1934
+
+statement ok
+CREATE TABLE cases AS SELECT 'short' AS strings, x FROM strs UNION ALL SELECT 'swept', x FROM swept;
 
 statement ok
 CREATE TABLE label_oracle AS
-SELECT x, CASE WHEN regexp_full_match(x, '[A-Za-z0-9-]+(?:_[A-Z0-9]+(?:_[A-Z0-9]+)*)?')
-               THEN {'base': r.base, 'suffix': NULLIF(r.suffix, '')} END AS want
-FROM (SELECT x, regexp_extract(x, '^([A-Za-z0-9-]+)(?:_([A-Z0-9]+(?:_[A-Z0-9]+)*))?$', ['base', 'suffix']) AS r
-      FROM strs);
+SELECT strings, x, CASE WHEN regexp_full_match(x, '[A-Za-z0-9-]+(?:_[A-Z0-9]+(?:_[A-Z0-9]+)*)?')
+                        THEN {'base': r.base, 'suffix': NULLIF(r.suffix, '')} END AS want
+FROM (SELECT strings, x, regexp_extract(x, '^([A-Za-z0-9-]+)(?:_([A-Z0-9]+(?:_[A-Z0-9]+)*))?$', ['base', 'suffix']) AS r
+      FROM cases);
 
-query III
-SELECT count(*) FILTER (WHERE gtdb_label(x) IS DISTINCT FROM want), count(want), count(want.suffix) FROM label_oracle;
+query TIII
+SELECT strings, count(*) FILTER (WHERE gtdb_label(x) IS DISTINCT FROM want), count(want), count(want.suffix)
+FROM label_oracle GROUP BY strings ORDER BY strings;
 ----
-0	6844	1384
+short	0	6844	1384
+swept	0	394	143
 
 statement ok
 CREATE TABLE species_oracle AS
-SELECT x, CASE WHEN regexp_full_match(x, '[A-Za-z0-9-]+(?:_[A-Z0-9]+(?:_[A-Z0-9]+)*)? [A-Za-z0-9.-]+(?: [A-Za-z0-9.-]+)*(?:_[A-Z0-9]+(?:_[A-Z0-9]+)*)?')
-               THEN {'genus_base': r.genus_base, 'genus_suffix': NULLIF(r.genus_suffix, ''),
-                     'epithet': r.epithet, 'epithet_suffix': NULLIF(r.epithet_suffix, '')} END AS want
-FROM (SELECT x, regexp_extract(x, '^([A-Za-z0-9-]+)(?:_([A-Z0-9]+(?:_[A-Z0-9]+)*))? ([A-Za-z0-9.-]+(?: [A-Za-z0-9.-]+)*)(?:_([A-Z0-9]+(?:_[A-Z0-9]+)*))?$',
-                              ['genus_base', 'genus_suffix', 'epithet', 'epithet_suffix']) AS r
-      FROM strs);
+SELECT strings, x, CASE WHEN regexp_full_match(x, '[A-Za-z0-9-]+(?:_[A-Z0-9]+(?:_[A-Z0-9]+)*)? [A-Za-z0-9.-]+(?: [A-Za-z0-9.-]+)*(?:_[A-Z0-9]+(?:_[A-Z0-9]+)*)?')
+                        THEN {'genus_base': r.genus_base, 'genus_suffix': NULLIF(r.genus_suffix, ''),
+                              'epithet': r.epithet, 'epithet_suffix': NULLIF(r.epithet_suffix, '')} END AS want
+FROM (SELECT strings, x, regexp_extract(x, '^([A-Za-z0-9-]+)(?:_([A-Z0-9]+(?:_[A-Z0-9]+)*))? ([A-Za-z0-9.-]+(?: [A-Za-z0-9.-]+)*)(?:_([A-Z0-9]+(?:_[A-Z0-9]+)*))?$',
+                                       ['genus_base', 'genus_suffix', 'epithet', 'epithet_suffix']) AS r
+      FROM cases);
 
-query IIII
-SELECT count(*) FILTER (WHERE gtdb_species_label(x) IS DISTINCT FROM want), count(want), count(want.genus_suffix),
-       count(want.epithet_suffix)
-FROM species_oracle;
+query TIIIII
+SELECT strings, count(*) FILTER (WHERE gtdb_species_label(x) IS DISTINCT FROM want), count(want),
+       count(want.genus_suffix), count(want.epithet_suffix),
+       count(*) FILTER (WHERE want.genus_suffix IS NOT NULL AND want.epithet_suffix IS NOT NULL)
+FROM species_oracle GROUP BY strings ORDER BY strings;
 ----
-0	11260	480	480
+short	0	11260	480	480	0
+swept	0	627	108	108	36

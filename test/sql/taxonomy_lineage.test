@@ -134,6 +134,13 @@ taxids list cannot contain NULL
 statement ok
 CREATE MACRO lineage_rank(r) AS 'phylum';
 
+# The bare name now resolves to the user's macro, so the row below is unchanged only
+# because the macro does not call it by that name.
+query T
+SELECT lineage_rank('genus');
+----
+phylum
+
 query ITTTTTTTTTTT
 SELECT * FROM taxonomy_lineage(taxids := [90], source := 'data/taxonomy/synthetic');
 ----

@@ -620,25 +620,25 @@ WHERE lineage IS NOT NULL AND TRY(parse_lineage(lineage)) IS NULL;
 
 Names the [shared lineage schema](#look-up-lineages-online-read_ncbi_lineage)'s column that
 an NCBI rank collapses into, the mapping `read_ncbi_lineage` and `taxonomy_lineage` use.
-NCBI is moving from the legacy rank `superkingdom` to `domain`, so a lookup that filters on
-the raw rank finds nothing in a taxdump written with the other one; `lineage_rank` gives
-`domain` for both.
+Older taxdumps write the rank `superkingdom` and newer ones `domain`, so a lookup that
+filters on the raw rank finds nothing in a taxdump written with the other one;
+`lineage_rank` gives `domain` for both.
 
 **Parameters:**
 - `ncbi_rank` (VARCHAR): an NCBI rank, as in `read_ncbi_taxdump`'s `rank` column.
 
 **Returns:** VARCHAR, one of `domain`, `phylum`, `class`, `order`, `family`, `genus`,
 `species` or `strain`:
-- `superkingdom` and `domain` give `domain`; the other seven standard ranks give their own name.
+- `superkingdom` and `domain` give `domain`; `phylum`, `class`, `order`, `family`, `genus`, `species` and `strain` give their own name.
 - Every other rank (`clade`, `kingdom`, `subspecies`, `no rank`, ...) gives NULL: the schema drops it, as the lineage functions do. So does a NULL `ncbi_rank`.
 - Ranks are matched exactly as NCBI writes them, in lower case: `Phylum` and `' phylum'` give NULL.
 
 **Examples:**
 ```sql
--- Every phylum in a taxdump, whichever rank string the domains carry.
-SELECT node_index, name
+-- The domains of a taxdump, whether it ranks them superkingdom or domain.
+SELECT node_index, name, rank
 FROM read_ncbi_taxdump()
-WHERE lineage_rank(rank) = 'phylum';
+WHERE lineage_rank(rank) = 'domain';
 
 -- How many nodes of each NCBI rank fall into each schema column.
 SELECT lineage_rank(rank) AS column_name, rank, count(*) AS nodes
@@ -649,10 +649,10 @@ ORDER BY column_name NULLS LAST, rank;
 
 ### Split GTDB labels (`gtdb_label`, `gtdb_species_label`)
 
-GTDB marks the parts of a taxon it has split with a suffix: `Bacillota_A`, `Pseudomonas_E`,
-and at species `Pseudomonas_E fluorescens_B`. These functions split a name into its base
-name, which the parts share, and its suffix, so a split (polyphyletic) taxon can be found by
-grouping on the base. [`parse_lineage`](#parse-lineage-strings-parse_lineage) keeps names
+When GTDB splits a taxon, the part that holds its type keeps the name and the other parts
+carry a suffix: `Bacillota_A`, `Pseudomonas_E`, and at species `Pseudomonas_E fluorescens_B`.
+These functions split a name into its base name, which the parts share, and its suffix, so a
+split taxon, polyphyletic ones included, can be found by grouping on the base. [`parse_lineage`](#parse-lineage-strings-parse_lineage) keeps names
 whole, as the shared schema does; split them afterwards. The functions only split: any
 grouping key is the caller's to build from the parts.
 
@@ -661,14 +661,14 @@ grouping key is the caller's to build from the parts.
 
 **Returns:** all fields VARCHAR.
 - `gtdb_label(name)`: `STRUCT(base, suffix)`, for the ranks above species.
-- `gtdb_species_label(name)`: `STRUCT(genus_base, genus_suffix, epithet, epithet_suffix)`.
+- `gtdb_species_label(name)`: `STRUCT(genus_base, genus_suffix, epithet, epithet_suffix)`. `epithet` is everything after the genus label and its space, without the epithet's suffix: the specific epithet, or for a name such as `Foo bar subsp. baz`, all of `bar subsp. baz`.
 
 A suffix is returned without its underscore (`Bacillota_A` gives `Bacillota` and `A`), and a
 name without one has a NULL suffix. A name that does not fit the rules below, or a NULL
 name, gives NULL rather than an error, and so do its fields.
 
 **Rules:**
-- A name is ASCII letters, digits and `-`: `CAG-41`, `UBA1234`.
+- A base name is ASCII letters, digits and `-`: `CAG-41`, `UBA1234`.
 - A suffix is `_` followed by runs of capital letters and digits joined by single underscores: `_A`, `_A1`, or `_Y_123`, which is one suffix, `Y_123`. `Foo_A_`, `Foo__A` and `Foo_a` do not fit.
 - A species is the genus label, one space, then the epithet, each with its own optional suffix. The epithet may hold single spaces and dots, as in `bar subsp. baz`, and its suffix may only sit at its very end: `bar subsp. baz_A` fits, `bar_A subsp. baz` does not.
 

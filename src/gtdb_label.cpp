@@ -2,6 +2,7 @@
 
 #include "table_function_common.hpp"
 
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
 #include "duckdb/common/vector/struct_vector.hpp"
@@ -14,9 +15,10 @@ namespace duckdb {
 
 namespace {
 
-// The characters of a GTDB name: ASCII letters, digits and '-'.
+// The characters of a GTDB name: ASCII letters, digits and '-'. StringUtil's character
+// tests are ASCII-only; <cctype>'s follow the locale.
 bool IsNameChar(char c) {
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-';
+	return StringUtil::CharacterIsAlphaNumeric(c) || c == '-';
 }
 
 bool IsName(std::string_view s) {
@@ -50,7 +52,9 @@ bool IsEpithet(std::string_view s) {
 }
 
 // A suffix, without its leading underscore: runs of capitals and digits joined by single
-// underscores, so "Y_123" is one suffix and "A_" and "_A" are none.
+// underscores, so "Y_123" is one suffix and "A_" and "_A" are none. Capitals are tested by
+// range: StringUtil has no single-character test for them, and std::isupper follows the
+// locale.
 bool IsSuffix(std::string_view s) {
 	if (s.empty() || s.front() == '_' || s.back() == '_') {
 		return false;
@@ -61,7 +65,7 @@ bool IsSuffix(std::string_view s) {
 			if (s[i - 1] == '_') {
 				return false;
 			}
-		} else if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))) {
+		} else if (!((c >= 'A' && c <= 'Z') || StringUtil::CharacterIsDigit(c))) {
 			return false;
 		}
 	}

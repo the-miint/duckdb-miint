@@ -2760,7 +2760,7 @@ const std::string INFER_TRIM = // NOLINT
 // both functions' schemas to the same columns. lineage_rank runs once per node, in `tree`,
 // not once per row of the walk, and is called as system.main.lineage_rank: a macro body
 // resolves its callees in the caller's catalog, so a bare name would let a user's own
-// lineage_rank replace the mapping (see "THE QUALIFICATION IS LOAD-BEARING" above).
+// lineage_rank replace the mapping.
 // Legacy 'superkingdom' and newer 'domain' both collapse to `domain`;
 // phylum/class/order/family/genus/species/strain map to like-named columns; every other
 // rank (clade, subspecies, no rank, ...) is dropped. The

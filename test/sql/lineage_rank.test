@@ -4,8 +4,8 @@
 
 require miint
 
-# Each standard rank names its own column. NCBI's legacy 'superkingdom' and its newer
-# 'domain' both name domain, so a lookup by rank finds the same column in either taxdump.
+# The schema's eight ranks name their own column, and NCBI's older 'superkingdom' names
+# domain too, so a lookup by rank finds the same column in either taxdump.
 query IT
 SELECT i, lineage_rank(r) FROM (VALUES (1, 'superkingdom'), (2, 'domain'), (3, 'phylum'), (4, 'class'), (5, 'order'),
 (6, 'family'), (7, 'genus'), (8, 'species'), (9, 'strain')) v(i, r) ORDER BY i;

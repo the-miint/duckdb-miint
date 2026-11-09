@@ -10,8 +10,8 @@
 
 namespace duckdb {
 
-// The mapping is FindRankColumn's, the one read_ncbi_lineage collapses with and the
-// taxonomy_lineage macro calls this function for, so the three cannot disagree.
+// The mapping is FindRankColumn's, the one read_ncbi_lineage collapses with; the
+// taxonomy_lineage macro calls this function, so none of them maps a rank differently.
 static optional<string_t> RankColumn(string_t ncbi_rank) {
 	const auto *column = miint::FindRankColumn(std::string_view(ncbi_rank.GetData(), ncbi_rank.GetSize()));
 	if (!column) {
