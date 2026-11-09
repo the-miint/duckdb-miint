@@ -69,7 +69,7 @@ Two constraints come with it:
 ## Public data repositories
 
 - [EBI/ENA](insdc_ena.md) - Interaction with EBI/ENA including submission and fetching of data.
-- [NCBI](insdc_ncbi.md) - Interaction with NCBI including fetching of data and the NCBI taxonomy (tree, name classes, lineages, retired/deleted-taxid handling), and parsing `d__…; p__…` lineage strings into the shared lineage schema.
+- [NCBI](insdc_ncbi.md) - Interaction with NCBI including fetching of data and the NCBI taxonomy (tree, name classes, lineages, retired/deleted-taxid handling), parsing `d__…; p__…` lineage strings into the shared lineage schema, and mapping NCBI ranks to its columns.
 
 ## Alignment
 

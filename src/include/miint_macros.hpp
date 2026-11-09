@@ -2754,11 +2754,12 @@ const std::string INFER_TRIM = // NOLINT
 // collapses every live node. `source`/`refresh` pass straight through to
 // read_ncbi_taxdump (NULL source => auto-download + cache the canonical NCBI dump).
 //
-// Rank -> column mapping mirrors FindRankColumn (src/include/taxonomy_lineage.hpp),
-// which read_ncbi_lineage uses; test/sql/taxonomy_lineage.test pins both functions'
-// schemas to the same columns. Legacy 'superkingdom' and newer 'domain' both collapse
-// to `domain`; phylum/class/order/family/genus/species/strain map to like-named
-// columns; every other rank (clade, subspecies, no rank, ...) is dropped. The
+// Each rank goes to the column lineage_rank names, the mapping read_ncbi_lineage uses
+// (FindRankColumn, src/include/taxonomy_lineage.hpp), so the two cannot drift;
+// test/sql/taxonomy_lineage.test pins both functions' schemas to the same columns.
+// Legacy 'superkingdom' and newer 'domain' both collapse to `domain`;
+// phylum/class/order/family/genus/species/strain map to like-named columns; every other
+// rank (clade, subspecies, no rank, ...) is dropped. The
 // formatted `lineage` renders d__;p__;c__;o__;f__;g__;s__ (empty where absent) and
 // appends ;t__<strain> only when a strain is present. Absent ranks are NULL in
 // their column but empty in the formatted string, matching read_ncbi_lineage.
@@ -2803,15 +2804,15 @@ const std::string TAXONOMY_LINEAGE = // NOLINT
     // NULL, not '', matching read_ncbi_lineage's SetRankCell (empty -> NULL column).
     // The formatted lineage below COALESCEs these back to '' so its segments are
     // unaffected.
-    "        NULLIF(MAX(CASE WHEN w_rank IN ('superkingdom', 'domain') THEN w_name END), '') AS domain, "
-    "        NULLIF(MAX(CASE WHEN w_rank = 'phylum'  THEN w_name END), '') AS phylum, "
-    "        NULLIF(MAX(CASE WHEN w_rank = 'class'   THEN w_name END), '') AS \"class\", "
-    "        NULLIF(MAX(CASE WHEN w_rank = 'order'   THEN w_name END), '') AS \"order\", "
-    "        NULLIF(MAX(CASE WHEN w_rank = 'family'  THEN w_name END), '') AS family, "
-    "        NULLIF(MAX(CASE WHEN w_rank = 'genus'   THEN w_name END), '') AS genus, "
-    "        NULLIF(MAX(CASE WHEN w_rank = 'species' THEN w_name END), '') AS species, "
-    "        NULLIF(MAX(CASE WHEN w_rank = 'strain'  THEN w_name END), '') AS strain "
-    "    FROM walk "
+    "        NULLIF(MAX(CASE WHEN w_column = 'domain'  THEN w_name END), '') AS domain, "
+    "        NULLIF(MAX(CASE WHEN w_column = 'phylum'  THEN w_name END), '') AS phylum, "
+    "        NULLIF(MAX(CASE WHEN w_column = 'class'   THEN w_name END), '') AS \"class\", "
+    "        NULLIF(MAX(CASE WHEN w_column = 'order'   THEN w_name END), '') AS \"order\", "
+    "        NULLIF(MAX(CASE WHEN w_column = 'family'  THEN w_name END), '') AS family, "
+    "        NULLIF(MAX(CASE WHEN w_column = 'genus'   THEN w_name END), '') AS genus, "
+    "        NULLIF(MAX(CASE WHEN w_column = 'species' THEN w_name END), '') AS species, "
+    "        NULLIF(MAX(CASE WHEN w_column = 'strain'  THEN w_name END), '') AS strain "
+    "    FROM (SELECT *, lineage_rank(w_rank) AS w_column FROM walk) "
     "    GROUP BY q_taxid "
     ") "
     "SELECT "

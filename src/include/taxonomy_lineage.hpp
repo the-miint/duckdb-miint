@@ -44,7 +44,8 @@ struct Lineage {
 // The eight rank columns of the shared lineage schema, shallowest first: each column's
 // name, the letter it carries in a prefixed lineage string ("d__", "p__", ...), and the
 // Lineage field that holds it. Everything in C++ that names, writes or formats the rank
-// columns goes through this table; the taxonomy_lineage SQL macro mirrors it by hand.
+// columns goes through this table. The taxonomy_lineage SQL macro maps ranks through it
+// with lineage_rank, but names the columns itself.
 struct LineageRank {
 	const char *column;
 	char letter;

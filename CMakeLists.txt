@@ -313,6 +313,7 @@ list(
   src/NewickTree.cpp
   src/paf_parser.cpp
   src/parse_lineage.cpp
+  src/lineage_rank.cpp
   src/per_run_reader.cpp
   src/per_sample_table_function.cpp
   src/phylo_ancestral_ml.cpp

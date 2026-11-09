@@ -17,6 +17,7 @@ MIINT provides integration with NCBI's GenBank and RefSeq.
   - [Look up lineages online (`read_ncbi_lineage`)](#look-up-lineages-online-read_ncbi_lineage) - Online/rate-limited: resolve a handful of taxids via E-utilities.
   - [Collapse the tree to lineages (`taxonomy_lineage`)](#collapse-the-tree-to-lineages-taxonomy_lineage) - Offline: rank-collapse a taxdump tree, identical schema to `read_ncbi_lineage`.
   - [Parse lineage strings (`parse_lineage`)](#parse-lineage-strings-parse_lineage) - Turn a `d__…; p__…` lineage string (GTDB, Greengenes2, tax2tree) into the shared schema's rank columns.
+  - [Map an NCBI rank to its column (`lineage_rank`)](#map-an-ncbi-rank-to-its-column-lineage_rank) - The shared schema's column an NCBI rank collapses into, so `superkingdom` and `domain` look up alike.
 
 ### Accessions are literals, not table names
 
@@ -532,7 +533,7 @@ online are drop-in interchangeable.
 **Output schema:** identical to [`read_ncbi_lineage`](#look-up-lineages-online-read_ncbi_lineage).
 
 **Behavior:**
-- Rank→column mapping (the single source of truth, mirrored from `read_ncbi_lineage`): `superkingdom` **or** `domain` → `domain`; `phylum`/`class`/`order`/`family`/`genus`/`species`/`strain` → their like-named columns; all other ranks (`clade`, `subspecies`, `no rank`, …) are dropped. Absent ranks are NULL in their column but rendered empty (e.g. `p__`) in the formatted `lineage`.
+- Rank→column mapping (the one [`lineage_rank`](#map-an-ncbi-rank-to-its-column-lineage_rank) gives, shared with `read_ncbi_lineage`): `superkingdom` **or** `domain` → `domain`; `phylum`/`class`/`order`/`family`/`genus`/`species`/`strain` → their like-named columns; all other ranks (`clade`, `subspecies`, `no rank`, …) are dropped. Absent ranks are NULL in their column but rendered empty (e.g. `p__`) in the formatted `lineage`.
 - A requested taxid that is not a live node produces no row (same omission semantics as `read_ncbi_lineage`; remap first with `read_ncbi_taxdump_merged` if a taxid may be retired).
 - The taxdump is parsed once per call, regardless of how many taxids are requested.
 
@@ -612,4 +613,35 @@ WHERE NOT is_tip AND name <> '';
 SELECT feature_id, lineage
 FROM raw_taxonomy
 WHERE lineage IS NOT NULL AND TRY(parse_lineage(lineage)) IS NULL;
+```
+
+### Map an NCBI rank to its column (`lineage_rank`)
+
+Names the [shared lineage schema](#look-up-lineages-online-read_ncbi_lineage)'s column that
+an NCBI rank collapses into, the mapping `read_ncbi_lineage` and `taxonomy_lineage` use.
+NCBI is moving from the legacy rank `superkingdom` to `domain`, so a lookup that filters on
+the raw rank finds nothing in a taxdump written with the other one; `lineage_rank` gives
+`domain` for both.
+
+**Parameters:**
+- `ncbi_rank` (VARCHAR): an NCBI rank, as in `read_ncbi_taxdump`'s `rank` column.
+
+**Returns:** VARCHAR, one of `domain`, `phylum`, `class`, `order`, `family`, `genus`,
+`species` or `strain`:
+- `superkingdom` and `domain` give `domain`; the other seven standard ranks give their own name.
+- Every other rank (`clade`, `kingdom`, `subspecies`, `no rank`, ...) gives NULL: the schema drops it, as the lineage functions do. So does a NULL `ncbi_rank`.
+- Ranks are matched exactly as NCBI writes them, in lower case: `Phylum` and `' phylum'` give NULL.
+
+**Examples:**
+```sql
+-- Every phylum in a taxdump, whichever rank string the domains carry.
+SELECT node_index, name
+FROM read_ncbi_taxdump()
+WHERE lineage_rank(rank) = 'phylum';
+
+-- How many nodes of each NCBI rank fall into each schema column.
+SELECT lineage_rank(rank) AS column_name, rank, count(*) AS nodes
+FROM read_ncbi_taxdump()
+GROUP BY ALL
+ORDER BY column_name NULLS LAST, rank;
 ```

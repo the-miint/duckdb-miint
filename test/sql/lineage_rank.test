@@ -1,0 +1,67 @@
+# name: test/sql/lineage_rank.test
+# description: lineage_rank names the shared lineage schema's column an NCBI rank collapses into
+# group: [sql]
+
+require miint
+
+# Each standard rank names its own column. NCBI's legacy 'superkingdom' and its newer
+# 'domain' both name domain, so a lookup by rank finds the same column in either taxdump.
+query IT
+SELECT i, lineage_rank(r) FROM (VALUES (1, 'superkingdom'), (2, 'domain'), (3, 'phylum'), (4, 'class'), (5, 'order'),
+(6, 'family'), (7, 'genus'), (8, 'species'), (9, 'strain')) v(i, r) ORDER BY i;
+----
+1	domain
+2	domain
+3	phylum
+4	class
+5	order
+6	family
+7	genus
+8	species
+9	strain
+
+# A rank the schema drops has no column: NULL, as the lineage functions drop it. Ranks
+# are matched exactly as NCBI writes them, so case or surrounding spaces do not match.
+query IT
+SELECT i, lineage_rank(r) FROM (VALUES (1, 'clade'), (2, 'no rank'), (3, 'kingdom'), (4, 'subspecies'),
+(5, 'superphylum'), (6, ''), (7, 'Phylum'), (8, ' phylum'), (9, 'phylum '), (10, NULL)) v(i, r) ORDER BY i;
+----
+1	NULL
+2	NULL
+3	NULL
+4	NULL
+5	NULL
+6	NULL
+7	NULL
+8	NULL
+9	NULL
+10	NULL
+
+# Constants, and the result type.
+query TTT
+SELECT lineage_rank('genus'), lineage_rank(NULL), typeof(lineage_rank('genus'));
+----
+genus	NULL	VARCHAR
+
+# Many rows, mapped and not, across several vectors.
+query III
+SELECT count(*), count(lineage_rank(r)), count(*) FILTER (WHERE lineage_rank(r) = 'genus')
+FROM (SELECT CASE i % 3 WHEN 0 THEN 'genus' WHEN 1 THEN 'clade' END AS r FROM range(10000) t(i));
+----
+10000	3334	3334
+
+# The ranks of a taxdump, collapsed: the mapping taxonomy_lineage and read_ncbi_lineage use.
+query TT
+SELECT rank, lineage_rank(rank) FROM (SELECT DISTINCT rank FROM read_ncbi_taxdump('data/taxonomy/synthetic'))
+ORDER BY rank;
+----
+class	class
+domain	domain
+family	family
+genus	genus
+no rank	NULL
+order	order
+phylum	phylum
+species	species
+strain	strain
+superkingdom	domain
