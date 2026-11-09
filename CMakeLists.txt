@@ -341,6 +341,7 @@ list(
   src/read_ena_sequences.cpp
   src/read_fastx.cpp
   src/read_gfa.cpp
+  src/read_gtdb.cpp
   src/read_jplace_newick.cpp
   src/read_mzml.cpp
   src/read_mzml_chromatograms.cpp

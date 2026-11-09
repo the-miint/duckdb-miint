@@ -1,0 +1,356 @@
+# name: test/sql/read_gtdb.test
+# description: read_gtdb_metadata and read_gtdb_qc_failed read GTDB's genome metadata and qc_failed list from local files
+# group: [sql]
+
+require miint
+
+# The fixtures (data/gtdb/README.md) are real GTDB files cut to a few rows, laid out as
+# GTDB serves them: release232/232.0/{bac120,ar53}_metadata_r232.tsv.gz, with qc_failed
+# under auxillary_files/; release 214.1 likewise.
+
+# --- The schema ---------------------------------------------------------------
+
+# A domain column, then every column of the file, named and ordered as in its header,
+# all VARCHAR. GTDB adds columns between releases (113 in r232, 110 in r214.1), so the
+# schema comes from the file's header rather than a list in the code.
+query II
+SELECT count(*), count(*) FILTER (WHERE column_type = 'VARCHAR')
+FROM (DESCRIBE SELECT * FROM read_gtdb_metadata(source := 'data/gtdb/releases/release232/232.0/bac120_metadata_r232.tsv.gz'));
+----
+114	114
+
+query T
+SELECT column_name FROM (DESCRIBE SELECT * FROM read_gtdb_metadata(source := 'data/gtdb/releases/release232/232.0/bac120_metadata_r232.tsv.gz')) LIMIT 4;
+----
+domain
+accession
+ambiguous_bases
+checkm2_completeness
+
+query II
+SELECT count(*), count(*) FILTER (WHERE column_type = 'VARCHAR')
+FROM (DESCRIBE SELECT * FROM read_gtdb_metadata(source := 'data/gtdb/releases/release214/214.1'));
+----
+111	111
+
+# r214.1 predates CheckM2: its third column is CheckM's.
+query T
+SELECT column_name FROM (DESCRIBE SELECT * FROM read_gtdb_metadata(source := 'data/gtdb/releases/release214/214.1')) LIMIT 4;
+----
+domain
+accession
+ambiguous_bases
+checkm_completeness
+
+# --- Rows ------------------------------------------------------------------------
+
+# A release's directory reads both domains. The domain comes from the file's name:
+# bac120 is GTDB's bacterial marker set, ar53 its archaeal one.
+query TTTT
+SELECT domain, accession, gtdb_type_designation_ncbi_taxa, ncbi_species_taxid
+FROM read_gtdb_metadata(source := 'data/gtdb/releases/release232/232.0') ORDER BY accession;
+----
+Archaea	GB_GCA_041569275.1	not type material	2202732
+Archaea	RS_GCF_000485535.1	type strain of species	413810
+Bacteria	RS_GCF_001697265.1	type strain of species	1423
+Bacteria	RS_GCF_026891715.1	not type material	1465
+Bacteria	RS_GCF_030769525.1	not type material	1423
+Bacteria	RS_GCF_035810195.1	not type material	1423
+
+query TT
+SELECT domain, accession FROM read_gtdb_metadata(source := 'data/gtdb/releases/release214/214.1') ORDER BY accession;
+----
+Archaea	RS_GCF_000246985.2
+Bacteria	RS_GCF_000381545.1
+Bacteria	RS_GCF_001206855.1
+
+# Every value is the file's, as read_csv reads it, except GTDB's missing-value marker
+# 'none', which is NULL. The file holds 54 of them, so the comparison is not vacuous; it
+# covers all 112 columns after accession of all 4 rows.
+query III
+WITH g AS (
+    FROM (SELECT * EXCLUDE domain FROM read_gtdb_metadata(source := 'data/gtdb/releases/release232/232.0/bac120_metadata_r232.tsv.gz'))
+    UNPIVOT INCLUDE NULLS (v FOR c IN (COLUMNS(* EXCLUDE accession)))
+), r AS (
+    FROM read_csv('data/gtdb/releases/release232/232.0/bac120_metadata_r232.tsv.gz', delim = '\t', header = true, all_varchar = true)
+    UNPIVOT INCLUDE NULLS (v FOR c IN (COLUMNS(* EXCLUDE accession)))
+)
+SELECT count(*), count(*) FILTER (WHERE g.v IS DISTINCT FROM nullif(r.v, 'none')), count(*) FILTER (WHERE g.v IS NULL)
+FROM g FULL JOIN r USING (accession, c);
+----
+448	0	54
+
+# GTDB writes a value holding a double quote CSV-style, quoted with the quote doubled
+# ("National Research Center ""Kurchatov Institute"""). It reads back as the value.
+query T
+SELECT ncbi_submitter FROM read_gtdb_metadata(source := 'data/gtdb/releases/release232/232.0/bac120_metadata_r232.tsv.gz')
+WHERE accession = 'RS_GCF_026891715.1';
+----
+National Research Center "Kurchatov Institute"
+
+# The link the downstream taxonomy build relies on: the genome GTDB records as the type
+# strain of an NCBI species, joined on the species' taxid. Of Bacillus subtilis's three
+# genomes here, one is its type strain; taxid 1465's only genome is not type material, so
+# it has no link.
+statement ok
+CREATE TABLE records AS SELECT * FROM (VALUES ('record_1', 1423), ('record_2', 1465)) v(record, species_taxid);
+
+query TT
+SELECT record, accession FROM records
+LEFT JOIN read_gtdb_metadata(source := 'data/gtdb/releases/release232/232.0') m
+    ON m.ncbi_species_taxid = records.species_taxid::VARCHAR
+    AND m.gtdb_type_designation_ncbi_taxa = 'type strain of species'
+ORDER BY record;
+----
+record_1	RS_GCF_001697265.1
+record_2	NULL
+
+# --- Plain and gzip files -------------------------------------------------------------
+
+# The same file uncompressed reads the same rows.
+statement ok
+COPY (FROM read_csv('data/gtdb/releases/release232/232.0/bac120_metadata_r232.tsv.gz', delim = '\t', header = true, all_varchar = true))
+TO '{TEST_DIR}/bac120_metadata_r232.tsv' (DELIMITER '\t', HEADER);
+
+query II
+SELECT (SELECT count(*) FROM read_gtdb_metadata(source := '{TEST_DIR}/bac120_metadata_r232.tsv')),
+       (SELECT count(*) FROM (
+           (FROM read_gtdb_metadata(source := '{TEST_DIR}/bac120_metadata_r232.tsv')
+            EXCEPT ALL FROM read_gtdb_metadata(source := 'data/gtdb/releases/release232/232.0/bac120_metadata_r232.tsv.gz'))
+           UNION ALL
+           (FROM read_gtdb_metadata(source := 'data/gtdb/releases/release232/232.0/bac120_metadata_r232.tsv.gz')
+            EXCEPT ALL FROM read_gtdb_metadata(source := '{TEST_DIR}/bac120_metadata_r232.tsv'))));
+----
+4	0
+
+# Compression is told by the bytes, not the name: a gzip file named .tsv reads too.
+statement ok
+COPY (FROM read_csv('data/gtdb/releases/release232/232.0/ar53_metadata_r232.tsv.gz', delim = '\t', header = true, all_varchar = true))
+TO '{TEST_DIR}/ar53_metadata_r232.tsv' (DELIMITER '\t', HEADER, COMPRESSION gzip);
+
+query TT
+SELECT domain, accession FROM read_gtdb_metadata(source := '{TEST_DIR}/ar53_metadata_r232.tsv') ORDER BY accession;
+----
+Archaea	GB_GCA_041569275.1
+Archaea	RS_GCF_000485535.1
+
+# Rows past one vector: the reader passes DuckDB's CSV reader's chunks on.
+statement ok
+COPY (SELECT 'RS_' || i AS accession, i::VARCHAR AS x, CASE WHEN i % 3 = 0 THEN 'none' ELSE 'v' END AS y FROM range(5000) t(i))
+TO '{TEST_DIR}/bac120_metadata_r1.tsv' (DELIMITER '\t', HEADER);
+
+query IIII
+SELECT count(*), count(DISTINCT accession), sum(x::BIGINT), count(y) FROM read_gtdb_metadata(source := '{TEST_DIR}/bac120_metadata_r1.tsv');
+----
+5000	5000	12497500	3333
+
+# --- qc_failed ----------------------------------------------------------------------
+
+# Its columns are named as GTDB writes them, spaces and "(%)" included, and its values
+# are kept as written: '-' and 's__' are GTDB's, not missing values.
+query II
+SELECT count(*), count(*) FILTER (WHERE column_type = 'VARCHAR')
+FROM (DESCRIBE SELECT * FROM read_gtdb_qc_failed(source := 'data/gtdb/releases/release232/232.0/auxillary_files/qc_failed_r232.tsv'));
+----
+26	26
+
+query TTTTT
+SELECT "Accession", "NCBI species", "GTDB taxonomy", "CM1 completeness (%)", "CM1 strain heterogeneity at 100%"
+FROM read_gtdb_qc_failed(source := 'data/gtdb/releases/release232/232.0/auxillary_files') ORDER BY "Accession";
+----
+GB_GCA_020721425.1	s__	d__Bacteria; p__; c__; o__; f__; g__; s__	75.27	-
+GB_GCA_051982785.1	s__	d__Bacteria; p__; c__; o__; f__; g__; s__	31.19	-
+GB_GCA_964614045.1	s__	d__Bacteria; p__; c__; o__; f__; g__; s__	61.59	-
+
+# r214.1's qc_failed has 20 columns, before CheckM2.
+query IIT
+SELECT (SELECT count(*) FROM (DESCRIBE SELECT * FROM read_gtdb_qc_failed(source := 'data/gtdb/releases/release214/214.1/auxillary_files'))),
+       count(*), string_agg("NCBI species", ',' ORDER BY "Accession")
+FROM read_gtdb_qc_failed(source := 'data/gtdb/releases/release214/214.1/auxillary_files/qc_failed_r214.tsv');
+----
+20	2	s__Listeria monocytogenes,s__
+
+# --- Parameters -----------------------------------------------------------------------
+
+# Exactly one of source and release: a release is downloaded, a source is read as it is.
+statement error
+SELECT * FROM read_gtdb_metadata(source := 'data/gtdb/releases/release232/232.0', release := '232');
+----
+read_gtdb_metadata: pass exactly one of source and release
+
+statement error
+SELECT * FROM read_gtdb_metadata();
+----
+read_gtdb_metadata: pass exactly one of source and release
+
+statement error
+SELECT * FROM read_gtdb_qc_failed(source := NULL, release := NULL);
+----
+read_gtdb_qc_failed: pass exactly one of source and release
+
+statement error
+SELECT * FROM read_gtdb_metadata(release := 'r232');
+----
+read_gtdb_metadata: release must be a GTDB release number such as '232' or '214.1', not 'r232'
+
+statement error
+SELECT * FROM read_gtdb_metadata(source := '');
+----
+read_gtdb_metadata: source must not be empty
+
+# --- Sources that do not fit ------------------------------------------------------
+
+statement error
+SELECT * FROM read_gtdb_metadata(source := 'data/gtdb/no_such_file.tsv');
+----
+read_gtdb_metadata: source not found: data/gtdb/no_such_file.tsv
+
+# The domain comes from the name, so a metadata file named for neither domain is refused.
+statement ok
+COPY (FROM read_csv('data/gtdb/releases/release232/232.0/ar53_metadata_r232.tsv.gz', delim = '\t', header = true, all_varchar = true))
+TO '{TEST_DIR}/metadata_r232.tsv' (DELIMITER '\t', HEADER);
+
+statement error
+SELECT * FROM read_gtdb_metadata(source := '{TEST_DIR}/metadata_r232.tsv');
+----
+read_gtdb_metadata: cannot tell the domain of 'metadata_r232.tsv': a metadata file's name starts with bac120_ or ar53_
+
+statement error
+SELECT * FROM read_gtdb_metadata(source := 'data/taxonomy/synthetic');
+----
+read_gtdb_metadata: data/taxonomy/synthetic: no GTDB metadata file
+
+# The release directory as GTDB serves it keeps qc_failed one level down.
+statement error
+SELECT * FROM read_gtdb_qc_failed(source := 'data/gtdb/releases/release232/232.0');
+----
+read_gtdb_qc_failed: data/gtdb/releases/release232/232.0: no GTDB qc_failed file
+
+# A directory holding two bacterial files would read their genomes twice. (COPY with
+# PER_THREAD_OUTPUT is how a test makes a directory.)
+statement ok
+COPY (SELECT 1 AS x) TO '{TEST_DIR}/two_bacterial' (FORMAT csv, PER_THREAD_OUTPUT);
+
+statement ok
+COPY (SELECT * FROM (VALUES ('accession'), ('A'))) TO '{TEST_DIR}/two_bacterial/bac120_metadata_r226.tsv' (HEADER false, QUOTE '');
+
+statement ok
+COPY (SELECT * FROM (VALUES ('accession'), ('B'))) TO '{TEST_DIR}/two_bacterial/bac120_metadata_r232.tsv' (HEADER false, QUOTE '');
+
+statement error
+SELECT * FROM read_gtdb_metadata(source := '{TEST_DIR}/two_bacterial');
+----
+more than one bacterial metadata file: bac120_metadata_r226.tsv, bac120_metadata_r232.tsv
+
+# Read together, the two domains' files must have the same columns: one release's do.
+statement ok
+COPY (SELECT 1 AS x) TO '{TEST_DIR}/headers_differ' (FORMAT csv, PER_THREAD_OUTPUT);
+
+statement ok
+COPY (FROM read_csv('data/gtdb/releases/release232/232.0/bac120_metadata_r232.tsv.gz', delim = '\t', header = true, all_varchar = true))
+TO '{TEST_DIR}/headers_differ/bac120_metadata_r232.tsv' (DELIMITER '\t', HEADER);
+
+statement ok
+COPY (FROM read_csv('data/gtdb/releases/release214/214.1/ar53_metadata_r214.tsv.gz', delim = '\t', header = true, all_varchar = true))
+TO '{TEST_DIR}/headers_differ/ar53_metadata_r232.tsv' (DELIMITER '\t', HEADER);
+
+statement error
+SELECT * FROM read_gtdb_metadata(source := '{TEST_DIR}/headers_differ');
+----
+read_gtdb_metadata: bac120_metadata_r232.tsv and ar53_metadata_r232.tsv have different columns: 113 and 110
+
+# The reader adds domain, so a file with its own column of that name is refused.
+statement ok
+COPY (SELECT * FROM (VALUES ('accession' || chr(9) || 'Domain'), ('A' || chr(9) || 'x'))) TO '{TEST_DIR}/bac120_metadata_r2.tsv' (HEADER false, QUOTE '');
+
+statement error
+SELECT * FROM read_gtdb_metadata(source := '{TEST_DIR}/bac120_metadata_r2.tsv');
+----
+read_gtdb_metadata: bac120_metadata_r2.tsv already has a column named 'Domain'
+
+# A file without a header line has no columns to bind.
+statement ok
+COPY (SELECT 'x' WHERE false) TO '{TEST_DIR}/qc_failed_r7.tsv' (HEADER false);
+
+statement error
+SELECT * FROM read_gtdb_qc_failed(source := '{TEST_DIR}/qc_failed_r7.tsv');
+----
+qc_failed_r7.tsv: no first line: the file ends before its first newline
+
+# --- Rows that do not fit -----------------------------------------------------------
+
+# A row with more or fewer fields than the header is an error, not padded or cut.
+statement ok
+COPY (SELECT * FROM (VALUES ('accession' || chr(9) || 'x'), ('A' || chr(9) || '1'), ('B' || chr(9) || '1' || chr(9) || '2')))
+TO '{TEST_DIR}/bac120_metadata_r3.tsv' (HEADER false, QUOTE '');
+
+statement error
+SELECT * FROM read_gtdb_metadata(source := '{TEST_DIR}/bac120_metadata_r3.tsv');
+----
+Expected Number of Columns: 2 Found: 3
+
+statement ok
+COPY (SELECT * FROM (VALUES ('accession' || chr(9) || 'x'), ('A' || chr(9) || '1'), ('B'))) TO '{TEST_DIR}/bac120_metadata_r4.tsv' (HEADER false, QUOTE '');
+
+statement error
+SELECT * FROM read_gtdb_metadata(source := '{TEST_DIR}/bac120_metadata_r4.tsv');
+----
+Expected Number of Columns: 2 Found: 1
+
+# Binding reads only the header: EXPLAIN of a file with a bad row succeeds.
+statement ok
+EXPLAIN SELECT * FROM read_gtdb_metadata(source := '{TEST_DIR}/bac120_metadata_r3.tsv');
+
+# --- Names and paths that need quoting ------------------------------------------------
+
+statement ok
+COPY (SELECT * FROM (VALUES ('accession' || chr(9) || 'it''s (%)'), ('A' || chr(9) || 'x'))) TO '{TEST_DIR}/bac120_metadata_r5''s.tsv' (HEADER false, QUOTE '');
+
+query TTT
+SELECT domain, accession, "it's (%)" FROM read_gtdb_metadata(source := '{TEST_DIR}/bac120_metadata_r5''s.tsv');
+----
+Bacteria	A	x
+
+# GTDB never quotes a column name, and the header is not read as CSV, so a name holding
+# a double quote is refused rather than read two ways.
+statement ok
+COPY (SELECT * FROM (VALUES ('accession' || chr(9) || '"x"'), ('A' || chr(9) || 'x'))) TO '{TEST_DIR}/bac120_metadata_r8.tsv' (HEADER false, QUOTE '');
+
+statement error
+SELECT * FROM read_gtdb_metadata(source := '{TEST_DIR}/bac120_metadata_r8.tsv');
+----
+bac120_metadata_r8.tsv: column 2 of the header holds a double quote
+
+# --- A file changed after binding ---------------------------------------------------
+
+# A prepared statement keeps the header it was bound with. A file rewritten since with
+# other column names, here as many, would otherwise be read under the old names.
+statement ok
+COPY (SELECT * FROM (VALUES ('accession' || chr(9) || 'x'), ('A' || chr(9) || '1'))) TO '{TEST_DIR}/ar53_metadata_r6.tsv' (HEADER false, QUOTE '');
+
+statement ok
+PREPARE read_r6 AS SELECT * FROM read_gtdb_metadata(source := '{TEST_DIR}/ar53_metadata_r6.tsv');
+
+query TTT
+EXECUTE read_r6;
+----
+Archaea	A	1
+
+statement ok
+COPY (SELECT * FROM (VALUES ('accession' || chr(9) || 'y'), ('A' || chr(9) || '1'))) TO '{TEST_DIR}/ar53_metadata_r6.tsv' (HEADER false, QUOTE '');
+
+statement error
+EXECUTE read_r6;
+----
+ar53_metadata_r6.tsv' changed after the query was bound; run or prepare it again
+
+statement ok
+DEALLOCATE read_r6;
+
+statement ok
+PREPARE read_r6 AS SELECT y FROM read_gtdb_metadata(source := '{TEST_DIR}/ar53_metadata_r6.tsv');
+
+query T
+EXECUTE read_r6;
+----
+1

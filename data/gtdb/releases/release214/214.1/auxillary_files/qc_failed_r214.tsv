@@ -1,0 +1,3 @@
+Accession	NCBI species	GTDB taxonomy	Completeness (%)	Contamination (%)	Quality	Strain heterogeneity at 100%	Markers (%)	No. contigs	N50 contigs	Ambiguous bases	Failed completeness	Failed contamination	Failed quality	Failed marker percentage	Failed no. contigs	Failed N50 contigs	Failed ambiguous bases	NCBI exclude from RefSeq	Marked in GTDB ledger
+GB_GCA_000168375.1	s__Listeria monocytogenes	d__Bacteria; p__; c__; o__; f__; g__; s__	51.52	3.11	35.97	-	54.17	1730	1138	531	0	0	1	0	0	1	0	fragmented assembly; genome length too small	False
+GB_GCA_000170675.1	s__	d__Bacteria; p__; c__; o__; f__; g__; s__	29.44	1.39	22.49	-	35.83	129	8055	0	1	0	1	1	0	0	0	derived from environmental source; derived from single cell; genus undefined	False

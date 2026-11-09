@@ -65,8 +65,9 @@ std::vector<std::string> MatchMetadataFiles(const std::vector<std::string> &name
 std::string MatchQcFailedFile(const std::vector<std::string> &names);
 
 // Splits a header line on tabs into column names, exactly as written. Throws for an
-// empty name, or a name that repeats another ignoring ASCII case, as DuckDB's column
-// names do.
+// empty name, a name that repeats another ignoring ASCII case, as DuckDB's column names
+// do, or a name holding '"': the rows are read as CSV, where it quotes, and GTDB never
+// writes one in a name.
 std::vector<std::string> SplitHeader(std::string_view line);
 
 // Reads a file's first line from its bytes as they arrive, so a caller can stop reading

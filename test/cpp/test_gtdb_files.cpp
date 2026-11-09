@@ -263,6 +263,15 @@ TEST_CASE("SplitHeader refuses empty and repeated names", "[gtdb]") {
 	                  ContainsSubstring("'accession'") && ContainsSubstring("column 2"));
 }
 
+// The header is split on tabs, not read as CSV, while the rows are read as CSV, where a
+// '"' quotes. GTDB never quotes a name, so a name holding one is refused rather than read
+// one way here and another by the row reader.
+TEST_CASE("SplitHeader refuses names holding a double quote", "[gtdb]") {
+	CHECK_THROWS_WITH(SplitHeader("accession\t\"x\""),
+	                  ContainsSubstring("column 2") && ContainsSubstring("double quote"));
+	CHECK_THROWS_WITH(SplitHeader("say \"hi\""), ContainsSubstring("column 1") && ContainsSubstring("double quote"));
+}
+
 // The reader must agree with reading the whole input and cutting at the first newline,
 // however the bytes arrive: all at once, a byte at a time (gzip's magic split across
 // calls), or in odd-sized pieces.

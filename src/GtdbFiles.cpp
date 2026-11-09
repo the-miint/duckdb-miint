@@ -178,6 +178,10 @@ std::vector<std::string> SplitHeader(std::string_view line) {
 		if (name.empty()) {
 			throw std::runtime_error("column " + std::to_string(column) + " of the header has no name");
 		}
+		if (name.find('"') != std::string::npos) {
+			throw std::runtime_error("column " + std::to_string(column) + " of the header holds a double quote, '" +
+			                         name + "': GTDB's column names never do, and the header is not read as CSV");
+		}
 		std::string folded = name;
 		std::transform(folded.begin(), folded.end(), folded.begin(),
 		               [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c; });
