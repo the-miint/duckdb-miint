@@ -709,11 +709,12 @@ const std::string READ_MYLOASM_MAPPINGS = // NOLINT
 // d1-d3 are the GFA's DP, DP2 and DP3: the median, over the contig's reads, of each read's
 // minimum depth counting reads at >= 99%, 99.75% and 100% SNPmer identity. MEDIAN_DP1 reads as
 // the 99% tier (DP1), but is the median of the reads' median depths at the 100% tier.
-// mult= is kmer_multiplicity() (polishing_mod.rs): 0 under 1000 bp, else the summed counts of
-// the sorted slice [n/10, n*9/10) of the contig's n distinct FracMinHash 21-mers (1 in 15,
-// whatever the run's k and c) over n*8/10, bounds and divisor rounded down. With n < 2 that is
-// 0/0, written NaN, which reads as NULL so aggregates skip it. NaN fails both flag thresholds,
-// so myloasm writes it only with duplicated-yes; NaN with another flag is not myloasm's.
+// mult= is kmer_multiplicity() (polishing_mod.rs): 0 under 1000 bp, else, with the counts of
+// the contig's n distinct canonical FracMinHash 21-mers (1 in 15, whatever the run's k and c)
+// sorted ascending, the sum of the slice [n/10, n*9/10) over n*8/10, bounds and divisor rounded
+// down. With n < 2 that is 0/0, written NaN, which reads as NULL so aggregates skip it. NaN
+// fails both flag thresholds, so myloasm writes it only with duplicated-yes; NaN with another
+// flag is not myloasm's.
 // myloasm writes all three FASTAs whether or not it has contigs for them, hence allow_empty.
 const std::string READ_MYLOASM_CONTIGS = // NOLINT
     "CREATE OR REPLACE MACRO read_myloasm_contigs(dir) AS TABLE "
