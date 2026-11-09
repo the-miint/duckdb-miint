@@ -1,11 +1,9 @@
 #include "read_ncbi_taxdump.hpp"
 
-#include "ensure_httpfs.hpp"
 #include "http_client_common.hpp"
 #include "miint_cache.hpp"
 #include "remote_file_helper.hpp"
 #include "taxdump_archive.hpp"
-#include "duckdb/common/exception/http_exception.hpp"
 #include "duckdb/common/file_open_flags.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/http_util.hpp"
@@ -16,7 +14,6 @@
 #include "duckdb/common/vector/string_vector.hpp"
 
 #include <algorithm>
-#include <chrono>
 #include <cstdlib>
 #include "miint_named_parameter.hpp"
 
@@ -49,41 +46,17 @@ bool IsHttpUrl(const std::string &path) {
 	return path.rfind("http://", 0) == 0 || path.rfind("https://", 0) == 0;
 }
 
-// Download `url` into memory via DuckDB's core HTTP client (HTTPUtil), the same
-// mechanism read_ncbi uses. This deliberately avoids the httpfs filesystem
-// extension, which the extension does not auto-load, so read_ncbi_taxdump() works
-// out of the box. Retries transient failures with exponential backoff, which Ctrl-C
-// and max_execution_time end.
+// Download `url` into memory through DuckDB's HTTP client (HTTPUtil), the same
+// mechanism read_ncbi uses, with its retries (HttpGetStreaming).
 std::string HttpGetToString(ClientContext &context, const std::string &url) {
-	miint::EnsureHttpfsLoaded(context);
-	DatabaseInstance &db = *context.db;
-	HTTPHeaders headers(db);
-	auto &http_util = HTTPUtil::Get(db);
-	auto params = http_util.InitializeParameters(db, url);
-	GetRequestInfo get_request(url, headers, *params, nullptr, nullptr);
-	get_request.try_request = true;
-
-	constexpr int MAX_RETRIES = 3;
-	int retry_delay_ms = 1000;
-	for (int attempt = 0; attempt <= MAX_RETRIES; ++attempt) {
-		auto response = http_util.Request(get_request);
-		if (response->Success()) {
-			return response->body;
-		}
-		bool retryable = !response->HasRequestError() &&
-		                 (int(response->status) >= 500 || int(response->status) == 429 || int(response->status) == 408);
-		if (attempt < MAX_RETRIES && retryable) {
-			miint::SleepUnlessInterrupted(context, std::chrono::milliseconds(retry_delay_ms));
-			retry_delay_ms *= 2;
-			continue;
-		}
-		if (response->HasRequestError()) {
-			throw IOException("read_ncbi_taxdump: download failed: %s (URL: %s)", response->GetRequestError(), url);
-		}
-		throw HTTPException(*response, "read_ncbi_taxdump: download failed with HTTP %d (URL: %s)",
-		                    int(response->status), url);
-	}
-	throw IOException("read_ncbi_taxdump: download failed after retries (URL: %s)", url);
+	std::string body;
+	miint::HttpGetStreaming(
+	    context, url, "read_ncbi_taxdump", [&](const HTTPResponse &) { body.clear(); },
+	    [&](const char *data, size_t size) {
+		    body.append(data, size);
+		    return true;
+	    });
+	return body;
 }
 
 // Read a taxdump archive's raw bytes from `source`: HTTP(S) URLs go through the
