@@ -56,14 +56,6 @@ std::unordered_set<std::string> ReadTipNames(ClientContext &context, const std::
 	return names;
 }
 
-bool GetBoolParam(TableFunctionBindInput &input, const std::string &key, bool default_value) {
-	auto it = input.named_parameters.find(Identifier(key));
-	if (it == input.named_parameters.end() || it->second.IsNull()) {
-		return default_value;
-	}
-	return BooleanValue::Get(it->second);
-}
-
 } // namespace
 
 ShearTreeTableFunction::Data::Data(std::string tree_table, std::string tips_table, bool collapse_, bool ignore_missing_)

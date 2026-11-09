@@ -963,7 +963,7 @@ For `read_jplace`, the output schema is:
 
 For `read_jplace_newick`, the output schema is consistent with `read_newick`:
 
-- `node_index` (BIGINT): 0-based index of node in tree
+- `node_index` (BIGINT): 0-based index of node in tree, in the same postorder numbering as `read_newick` (see [Newick](#newick), "Node numbering")
 - `name` (VARCHAR): Node label (empty string for unlabeled internal nodes)
 - `branch_length` (DOUBLE, nullable): Branch length
 - `edge_id` (BIGINT, nullable): Edge identifier from `{n}` syntax
@@ -1086,7 +1086,7 @@ SELECT * FROM read_newick('some_file.newick');
 - `include_filepath` (BOOLEAN, optional, default false): Add filepath column to output
 
 **Output schema:**
-- `node_index` (BIGINT): 0-based index of node in tree (internal representation)
+- `node_index` (BIGINT): 0-based index of node in tree, in postorder (see "Node numbering" below)
 - `name` (VARCHAR): Node label (empty string for unlabeled internal nodes)
 - `branch_length` (DOUBLE, nullable): Branch length (NULL if not specified in file)
 - `edge_id` (BIGINT, nullable): Edge identifier from jplace format `{n}` syntax (NULL if not specified)
@@ -1103,6 +1103,17 @@ SELECT * FROM read_newick('some_file.newick');
 - Supports stdin input using `-` or `/dev/stdin` (single file only)
 - Returns exactly one row per node in the tree
 - Root node has `parent_index = NULL`
+
+**Node numbering:** `node_index` is a postorder numbering, and code may rely on it:
+- every node's children come before it, and every subtree occupies a contiguous range of indices ending at its
+  root, so a node with `d` descendants has exactly the indices `node_index - d` to `node_index - 1` below it;
+- siblings are numbered in their Newick (left-to-right) order;
+- the root is last, so indices run from 0 to the node count minus 1;
+- with several files, each tree is numbered from 0 on its own.
+
+For `((A,B)C,(D,E)F)G;` the indices are A 0, B 1, C 2, D 3, E 4, F 5, G 6. [`shear_tree`](phylogeny.md#shear-subset-to-tips)
+keeps this order; `tree_resolve_multifurcations` and `tree_resolve_placement` append the nodes they create, so their
+output is not postorder.
 
 **Examples:**
 ```sql
