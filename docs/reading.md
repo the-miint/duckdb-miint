@@ -1,6 +1,6 @@
 # Reading files
 
-MIINT supports reading FASTA, FASTQ, SAM, BAM, PAF, GFA, SFF, BIOM, mzML, mzXML, GFF, jplace and Newick, and the output directory of the myloasm assembler.  
+MIINT supports reading FASTA, FASTQ, SAM, BAM, PAF, GFA, SFF, SRA, BIOM, mzML, mzXML, GFF, jplace and Newick, and the output directory of the myloasm assembler.  
 
 A reader expands each path it is given as DuckDB's own readers do: a `file:` URI names the local path it spells (`file:///p`, `file://localhost/p` and `file:/p` name `/p`; on Windows, `file:///C:/p` names `C:/p`), and a leading `~` names the directory of DuckDB's `home_directory` setting (by default your home directory). This holds for a single path, for each path in a list (a list's paths are literal paths, never globs), and for the files a glob matches. Index and database paths given to aligners and classifiers are passed to their libraries as given, so give those as plain paths.
 
@@ -22,6 +22,7 @@ A reader expands each path it is given as DuckDB's own readers do: a `file:` URI
   - [`read_myloasm_splits(dir)`](#read_myloasm_splitsdir) - Where chimeric reads were split.
   - [`read_myloasm_run(dir)`](#read_myloasm_rundir) - Each invocation's version, command, k and c.
 - [SFF](#sff) - SFF sequence files.
+- [SRA](#sra) - NCBI SRA archives (`.sra`), read as fasterq-dump reads them.
 - [mzML / mzXML](#mzml-and-mzxml) - mzML and mzXML files.
 - [BIOM](#biom) - BIOM-Format v2.1 files.
 - [jplace](#jplace) - jplace formatted files.
@@ -714,6 +715,72 @@ WHERE list_avg(qual1) >= 30;
 - The `comment`, `sequence2`, and `qual2` columns are always NULL for SFF files
 - The `sequence_index` resets to 1 for each file. Use `include_filepath=true` to distinguish sequences from different files
 - Stdin is not supported because SFF is a binary format that requires file seeking
+
+### SRA
+
+Read NCBI SRA archives (`.sra` files) with `read_sra`. The SRA stores a run as *spots*: one spot is one sequenced fragment, with all its reads (both mates of a pair, plus any barcode or index reads). The rows are exactly what `fasterq-dump` writes for the same file: the same reads, bases, qualities, spot names and order. Rendering them back to FASTQ gives `fasterq-dump`'s files byte for byte. miint decodes the archive itself; it does not use or need the SRA Toolkit.
+
+**Basic example:**
+
+```sql
+SELECT * FROM read_sra('SRR4424282.sra');
+```
+
+**Parameters:**
+- `path` (VARCHAR or VARCHAR[]): Path to `.sra` file(s) or a glob pattern
+  - **Glob patterns**: a single VARCHAR containing `*`, `?` or `[` is expanded and sorted alphabetically
+  - **Arrays**: VARCHAR[] elements are literal paths (no glob expansion)
+  - Remote paths (`https://`, `s3://`) are read by byte range through `httpfs`
+  - **Stdin not supported**: an `.sra` file is read at random positions
+- `split` (VARCHAR, optional, default `'split_3'`): How reads are laid out, matching `fasterq-dump`'s modes
+  - `'split_3'` (`--split-3`): one row per spot. A spot with two biological reads fills `sequence1`/`qual1` and `sequence2`/`qual2`; a spot with fewer (what `fasterq-dump` writes to its unpaired file) fills `sequence1` only. Technical reads (barcodes, indexes) are always skipped.
+  - `'spot'` (`--split-spot`): one row per read, with its position in the spot in `read_number`
+- `include_technical` (BOOLEAN, optional, default false): With `split => 'spot'`, also return technical reads (`--include-technical`). Combined with `'split_3'` it is an error: `fasterq-dump` switches to another layout in that case, with only a notice on stderr.
+- `include_filepath` (BOOLEAN, optional, default false): Add a `filepath` column
+
+**Output schema (matches `read_fastx`):**
+- `sequence_index` (BIGINT): The spot number within its run (`fasterq-dump`'s `$si`). Under `'spot'` a spot's reads share it.
+- `read_id` (VARCHAR): `<run>.<spot>`, the run taken from the file name with `.sra`/`.sralite` removed
+- `comment` (VARCHAR): The rest of `fasterq-dump`'s defline: the spot name, then `length=` and read 1's length (e.g. `M00763:72:000000000-KK57D:1:1101:15586:1335 length=251`). Just `length=<n>` for runs that store no names.
+- `sequence1` (VARCHAR): Read 1's bases
+- `sequence2` (VARCHAR, nullable): Read 2's bases under `'split_3'`; NULL for an unpaired spot and always under `'spot'`
+- `qual1` (UTINYINT[]): Read 1's phred qualities, capped at 93 as `fasterq-dump` prints them
+- `qual2` (UTINYINT[], nullable): Read 2's qualities, NULL when `sequence2` is
+- `read_number` (UTINYINT, `'spot'` only): The read's position in its spot, 1-based, counting technical reads (`fasterq-dump`'s `/N` suffix)
+- `filepath` (VARCHAR, optional): The file each row came from, when `include_filepath => true`
+
+**Behavior:**
+- Runs are returned in the order given (globs sorted), spots in ascending order, decoded in parallel across threads. The unit of parallel work is a range of spots, 131072 by default; `SET miint_sra_spots_per_unit = n` changes it (0 restores the default)
+- Every stored checksum is verified, and the archive's structure is checked as it is read; a damaged file raises an `IOException` naming the run
+- `read_fastx` over `fasterq-dump`'s output returns the same rows: for split-3, `read_fastx('x_1.fastq', sequence2 => 'x_2.fastq')` plus the unpaired `x.fastq`
+
+**What is read and what is refused:**
+
+Supported are runs submitted as reads, without alignments: Illumina runs, runs loaded from FASTQ on any platform (PacBio and Nanopore included), and runs loaded from unaligned BAM. These cover nearly all public runs. Each other kind fails with an `InvalidInputException` saying what the run is, whether or not other files are being read:
+- cSRA: reads stored against alignments (a `PRIMARY_ALIGNMENT` table, or reads compressed against a reference)
+- SRA Lite (`.sralite`, or a run converted to it): original qualities removed
+- PacBio or Nanopore databases with a `CONSENSUS`, `ZMW_METRICS` or `PASSES` table
+- Runs from older loaders (e.g. 454, Ion Torrent, Helicos), and storage features not seen in current public runs
+- Under `'split_3'`, a spot with more than two biological reads, which a paired row cannot hold: use `split => 'spot'`
+
+**Examples:**
+```sql
+-- Paired reads of a local run
+SELECT read_id, sequence1, sequence2 FROM read_sra('SRR4424282.sra');
+
+-- Every read on its own, technical reads included
+SELECT read_id, read_number, sequence1
+FROM read_sra('SRR6016450.sra', split => 'spot', include_technical => true);
+
+-- Several runs
+SELECT * FROM read_sra(['SRR4424282.sra', 'DRR501055.sra'], include_filepath => true);
+
+-- Write the pairs back out as FASTQ, one file per mate
+COPY (SELECT * FROM read_sra('SRR4424282.sra')) TO 'SRR4424282_{ORIENTATION}.fastq' (FORMAT FASTQ);
+```
+
+**Notes:**
+- Cite the SRA as: Leinonen R, Sugawara H, Shumway M. The Sequence Read Archive. *Nucleic Acids Res.* 2011;39:D19–D21. doi:10.1093/nar/gkq1019
 
 ### mzML and mzXML
 

@@ -1577,16 +1577,30 @@ doi: 10.1038/nmeth.1499
 ### SRA Toolkit (sra-tools / fasterq-dump) and ncbi-vdb
 
 miint reads NCBI SRA archives (`.sra`) with its own reader, written from the
-format. No NCBI code is copied, compiled, vendored or linked. ncbi-vdb's sources
-were read as the reference for the archive format, column encodings and spot-name
-reconstruction, and fasterq-dump's for which reads it writes, in what order and
-under which deflines.
+format. ncbi-vdb's sources were read as the reference for the archive format,
+column encodings and spot-name reconstruction, and fasterq-dump's for which reads
+it writes, in what order and under which deflines. Two functions are ports of
+ncbi-vdb code, each marked where it is defined:
+
+- `IrzipReconstruct` (`src/sra_codecs.cpp`): the `DECODE` reconstruction of
+  ncbi-vdb's `libs/vxf/irzip.impl.h`, the izip decoder.
+- `FormatSpotName` and `FormatSpotNameNoCoord` (`src/sra_name.cpp`): ncbi-vdb's
+  `libs/sraxf/format-spot-name.c`, the `format_spot_name` and
+  `format_spot_name_no_coord` functions.
+
+Nothing else is copied, and no NCBI code is compiled, vendored or linked.
 
 fasterq-dump generated the committed oracles in `data/sra/oracle/`, which the SRA
 parity tests require miint to reproduce byte for byte. It was run once, outside
 this repository, from a throwaway conda environment; nothing here packages or runs
 it. `data/sra/README.md` and each `data/sra/oracle/<RUN>/README.md` record the
 exact commands.
+
+The committed fixtures in `data/sra/` are public SRA runs, copied unchanged from
+NCBI's `sra-pub-run-odp` bucket. NCBI distributes SRA data without restriction,
+but the submitters may hold rights in it (NCBI's data policies:
+https://www.ncbi.nlm.nih.gov/home/about/policies/). `data/sra/README.md` lists
+each run with its source.
 
 - Repositories: https://github.com/ncbi/sra-tools, https://github.com/ncbi/ncbi-vdb
 - Version that generated the oracles: sra-tools 3.4.1 (bioconda build

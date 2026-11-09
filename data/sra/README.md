@@ -55,7 +55,7 @@ file. All are public, and none is human: the organism and BioSample are in the t
 
 fasterq-dump decodes these through the same path as the runs above, because their databases hold no CONSENSUS,
 ZMW_METRICS or PASSES table. miint accepts them for the same reason: a run is classified by the tables present, never
-by platform (decided 2026-11-04).
+by platform.
 
 | Run | Bytes | md5 | Spots | Loader | SEQUENCE table type | Platform | Organism | Exercises |
 |---|---:|---|---:|---|---|---|---|---|
@@ -78,7 +78,7 @@ oracle. What it wrote is recorded so that the refusal is a decision, not an acci
 ## Real runs (downloaded, not committed)
 
 DRR274142 (latf-load, 42,008 spots, 233 of them unpaired under split-3) and SRR31286609 (sharq, 76,368 spots) are
-the runs the format was first worked out on. At 15 MB and 30 MB, with 100–200 MB of FASTQ each, they are too large to
+whole runs: they cross many blobs of every column and, for SRR31286609, many skey keys. At 15 MB and 30 MB, with 100–200 MB of FASTQ each, they are too large to
 commit. `real_oracles.csv` records each object's md5, sha256 and size and the md5, size and record count of every
 oracle file, generated the same way as the committed oracles. The tests that use them download the objects into
 `data/cache` and are guarded on that download (`run_tests.sh`).
