@@ -18,7 +18,7 @@ MIINT provides integration with NCBI's GenBank and RefSeq.
   - [Collapse the tree to lineages (`taxonomy_lineage`)](#collapse-the-tree-to-lineages-taxonomy_lineage) - Offline: rank-collapse a taxdump tree, identical schema to `read_ncbi_lineage`.
   - [Parse lineage strings (`parse_lineage`)](#parse-lineage-strings-parse_lineage) - Turn a `d__…; p__…` lineage string (GTDB, Greengenes2, tax2tree) into the shared schema's rank columns.
   - [Map an NCBI rank to its column (`lineage_rank`)](#map-an-ncbi-rank-to-its-column-lineage_rank) - The shared schema's column an NCBI rank collapses into, so `superkingdom` and `domain` look up alike.
-  - [Split GTDB labels (`gtdb_label`, `gtdb_species_label`)](#split-gtdb-labels-gtdb_label-gtdb_species_label) - A GTDB name's base and the suffix that marks a split taxon (`Bacillota_A`), to find polyphyly.
+  - [Split GTDB labels (`gtdb_label`, `gtdb_species_label`)](#split-gtdb-labels-gtdb_label-gtdb_species_label) - A GTDB name's base and the suffix GTDB gives the parts of a split taxon (`Bacillota_A`), to find split and polyphyletic taxa.
 
 ### Accessions are literals, not table names
 
