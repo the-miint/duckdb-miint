@@ -222,7 +222,7 @@ statement ok
 COPY (SELECT 1 AS x) TO '{TEST_DIR}/contigs_nan/alternate_assemblies' (FORMAT csv, PER_THREAD_OUTPUT true, OVERWRITE_OR_IGNORE true);
 
 statement ok
-COPY (SELECT if(read_id LIKE 'u912ctg_%', replace(read_id, 'duplicated-no', 'duplicated-yes'), read_id) AS read_id,
+COPY (SELECT if(read_id LIKE 'u912ctg_%', regexp_replace(read_id, '_duplicated-[a-z]+$', '_duplicated-yes'), read_id) AS read_id,
              if(read_id LIKE 'u912ctg_%', 'mult=NaN', comment) AS comment, sequence1
       FROM read_fastx('{TEST_DIR}/ecoli_sim/assembly_primary.fa'))
 TO '{TEST_DIR}/contigs_nan/assembly_primary.fa' (FORMAT FASTA, INCLUDE_COMMENT true);
@@ -232,8 +232,8 @@ COPY (SELECT * FROM read_fastx('{TEST_DIR}/ecoli_sim/alternate_assemblies/assemb
 TO '{TEST_DIR}/contigs_nan/alternate_assemblies/assembly_alternate.fa' (FORMAT FASTA, INCLUDE_COMMENT true);
 
 statement ok
-COPY (SELECT replace(read_id, 'duplicated-no', 'duplicated-yes') AS read_id,
-             regexp_replace(comment, '^mult=1[.]00 ', 'mult=NaN ') AS comment, sequence1
+COPY (SELECT regexp_replace(read_id, '_duplicated-[a-z]+$', '_duplicated-yes') AS read_id,
+             regexp_replace(comment, '^mult=[0-9.]+ ', 'mult=NaN ') AS comment, sequence1
       FROM read_fastx('{TEST_DIR}/ecoli_sim/alternate_assemblies/duplicated_contigs.fa'))
 TO '{TEST_DIR}/contigs_nan/alternate_assemblies/duplicated_contigs.fa' (FORMAT FASTA, INCLUDE_COMMENT true);
 
@@ -258,17 +258,33 @@ FROM read_myloasm_contigs('{TEST_DIR}/contigs_nan');
 ----
 1.0	3	0
 
-# NaN is the only non-number myloasm writes for mult= (Rust prints it as "NaN"; 0/0 is the only
-# way to get one). Other values a DOUBLE cast accepts are not myloasm's.
+# myloasm writes NaN only with duplicated-yes, and only as "NaN" (Rust's spelling; 0/0 is its
+# only way to get one). Each case below gives u912ctg a header myloasm cannot write.
 statement ok
-COPY (SELECT read_id, if(read_id LIKE 'u912ctg_%', 'mult=inf', comment) AS comment, sequence1
+COPY (SELECT read_id, if(read_id LIKE 'u912ctg_%', 'mult=NaN', comment) AS comment, sequence1
       FROM read_fastx('{TEST_DIR}/ecoli_sim/assembly_primary.fa'))
 TO '{TEST_DIR}/contigs_nan/assembly_primary.fa' (FORMAT FASTA, INCLUDE_COMMENT true);
 
 statement error
 SELECT contig_id FROM read_myloasm_contigs('{TEST_DIR}/contigs_nan');
 ----
-read_myloasm_contigs: primary contig header is not myloasm's: 'u912ctg_len-55646_circular-no_depth-2-2-2_duplicated-no mult=inf'
+read_myloasm_contigs: primary contig header is not myloasm's: 'u912ctg_len-55646_circular-no_depth-2-2-2_duplicated-no mult=NaN'
+
+# Other spellings a DOUBLE cast accepts would read as NaN or infinity rather than NULL.
+foreach mult nan inf
+
+statement ok
+COPY (SELECT if(read_id LIKE 'u912ctg_%', regexp_replace(read_id, '_duplicated-[a-z]+$', '_duplicated-yes'), read_id) AS read_id,
+             if(read_id LIKE 'u912ctg_%', 'mult={mult}', comment) AS comment, sequence1
+      FROM read_fastx('{TEST_DIR}/ecoli_sim/assembly_primary.fa'))
+TO '{TEST_DIR}/contigs_nan/assembly_primary.fa' (FORMAT FASTA, INCLUDE_COMMENT true);
+
+statement error
+SELECT contig_id FROM read_myloasm_contigs('{TEST_DIR}/contigs_nan');
+----
+read_myloasm_contigs: primary contig header is not myloasm's: 'u912ctg_len-55646_circular-no_depth-2-2-2_duplicated-yes mult=
+
+endloop
 
 # --- Errors ---
 

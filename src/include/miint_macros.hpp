@@ -710,7 +710,8 @@ const std::string READ_MYLOASM_MAPPINGS = // NOLINT
 // minimum depth counting reads at >= 99%, 99.75% and 100% SNPmer identity. MEDIAN_DP1 reads as
 // the 99% tier (DP1), but is the median of the reads' median depths at the 100% tier.
 // mult=NaN is myloasm's 0/0 for a contig with fewer than two distinct sampled k-mers; it reads
-// as NULL so aggregates skip it. NaN fails both flag thresholds, so its flag is always "yes".
+// as NULL so aggregates skip it. NaN fails both flag thresholds, so its flag is always "yes";
+// a NaN with another flag is not myloasm's.
 // myloasm writes all three FASTAs whether or not it has contigs for them, hence allow_empty.
 const std::string READ_MYLOASM_CONTIGS = // NOLINT
     "CREATE OR REPLACE MACRO read_myloasm_contigs(dir) AS TABLE "
@@ -756,6 +757,7 @@ const std::string READ_MYLOASM_CONTIGS = // NOLINT
     "WHERE CASE "
     "        WHEN h.fasta_id IS NOT NULL "
     "         AND (h.hdr.contig_id = '' OR h.cmt.mult = '' "
+    "              OR (h.cmt.mult = 'NaN' AND h.hdr.flag <> 'yes') "
     "              OR (h.dereplication_status = 'primary') <> (h.cmt.secondary = '')) "
     "        THEN error(printf('read_myloasm_contigs: %s contig header is not myloasm''s: ''%s''', "
     "                          h.dereplication_status, concat_ws(' ', h.fasta_id, nullif(h.comment, '')))) "
