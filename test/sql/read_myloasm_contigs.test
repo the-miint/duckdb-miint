@@ -210,11 +210,9 @@ u982ctg	primary
 
 # --- An undefined k-mer multiplicity, constructed from the real run ---
 
-# myloasm divides its k-mer count sum by 8/10 of the number of distinct sampled k-mers. A
-# contig of 1000 bp or more with fewer than two, such as a short tandem repeat, gives 0/0 and
-# a header that says mult=NaN. NaN fails both of myloasm's threshold comparisons, so that header
-# always says duplicated-yes (polishing_mod.rs in 0.6.0 and 0.7.0). This copies the run with
-# that header on a primary contig and on a duplicated one.
+# myloasm writes mult=NaN, always with duplicated-yes, for a contig whose k-mer multiplicity is
+# undefined (derived at READ_MYLOASM_CONTIGS in src/include/miint_macros.hpp). This copies the
+# run with such a header on a primary contig and on a duplicated one.
 statement ok
 COPY (SELECT 1 AS x) TO '{TEST_DIR}/contigs_nan' (FORMAT csv, PER_THREAD_OUTPUT true, OVERWRITE_OR_IGNORE true);
 
@@ -241,40 +239,29 @@ statement ok
 COPY real_gfa TO '{TEST_DIR}/contigs_nan/final_contig_graph.gfa'
 (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
 
-# The scan reads the run. The multiplicity is NULL, and the flag is the duplicated-yes myloasm
-# wrote; every other column is as the real run gives it.
+# The scan reads the run. Those two contigs have a NULL multiplicity and their header's 'yes'
+# flag; every column but fasta_id and the two multiplicity columns is as the real run gives it.
 query TTTIITRRRRRTTRR
 SELECT * FROM read_myloasm_contigs('{TEST_DIR}/contigs_nan') WHERE kmer_multiplicity IS NULL ORDER BY contig_id;
 ----
 u840ctg	duplicated	u840ctg_len-40000_circular-yes_depth-32-32-18_duplicated-yes	40000	51274	yes	32.0	32.0	18.0	21.0	NULL	yes	u982ctg	99.99	99.91
 u912ctg	primary	u912ctg_len-55646_circular-no_depth-2-2-2_duplicated-yes	55646	55666	no	2.0	2.0	2.0	3.0	NULL	yes	NULL	NULL	NULL
 
-# NULL, not NaN: a NaN would turn avg() and sum() over the column into NaN, and DuckDB sorts NaN
-# above every number, so kmer_multiplicity > 1.5 would select it. Aggregates and filters see
-# only the contigs that have a multiplicity.
+# NULL, not NaN: avg() over a NaN is NaN, and DuckDB compares NaN as greater than every number,
+# so kmer_multiplicity > 1.5 would select it. Aggregates and filters see only the contigs that
+# have a multiplicity.
 query RII
 SELECT avg(kmer_multiplicity), count(kmer_multiplicity), count(*) FILTER (kmer_multiplicity > 1.5)
 FROM read_myloasm_contigs('{TEST_DIR}/contigs_nan');
 ----
 1.0	3	0
 
-# myloasm writes NaN only with duplicated-yes, and only as "NaN" (Rust's spelling; 0/0 is its
-# only way to get one). Each case below gives u912ctg a header myloasm cannot write.
-statement ok
-COPY (SELECT read_id, if(read_id LIKE 'u912ctg_%', 'mult=NaN', comment) AS comment, sequence1
-      FROM read_fastx('{TEST_DIR}/ecoli_sim/assembly_primary.fa'))
-TO '{TEST_DIR}/contigs_nan/assembly_primary.fa' (FORMAT FASTA, INCLUDE_COMMENT true);
-
-statement error
-SELECT contig_id FROM read_myloasm_contigs('{TEST_DIR}/contigs_nan');
-----
-read_myloasm_contigs: primary contig header is not myloasm's: 'u912ctg_len-55646_circular-no_depth-2-2-2_duplicated-no mult=NaN'
-
-# Other spellings a DOUBLE cast accepts would read as NaN or infinity rather than NULL.
-foreach mult nan inf
+# Each case gives u912ctg a header myloasm cannot write: NaN with a flag other than yes, or a
+# spelling other than NaN that a DOUBLE cast accepts, which would read as NaN or infinity.
+foreach flag,mult no,NaN possibly,NaN yes,nan yes,inf
 
 statement ok
-COPY (SELECT if(read_id LIKE 'u912ctg_%', regexp_replace(read_id, '_duplicated-[a-z]+$', '_duplicated-yes'), read_id) AS read_id,
+COPY (SELECT if(read_id LIKE 'u912ctg_%', regexp_replace(read_id, '_duplicated-[a-z]+$', '_duplicated-{flag}'), read_id) AS read_id,
              if(read_id LIKE 'u912ctg_%', 'mult={mult}', comment) AS comment, sequence1
       FROM read_fastx('{TEST_DIR}/ecoli_sim/assembly_primary.fa'))
 TO '{TEST_DIR}/contigs_nan/assembly_primary.fa' (FORMAT FASTA, INCLUDE_COMMENT true);
@@ -282,7 +269,7 @@ TO '{TEST_DIR}/contigs_nan/assembly_primary.fa' (FORMAT FASTA, INCLUDE_COMMENT t
 statement error
 SELECT contig_id FROM read_myloasm_contigs('{TEST_DIR}/contigs_nan');
 ----
-read_myloasm_contigs: primary contig header is not myloasm's: 'u912ctg_len-55646_circular-no_depth-2-2-2_duplicated-yes mult=
+read_myloasm_contigs: primary contig header is not myloasm's: 'u912ctg_len-55646_circular-no_depth-2-2-2_duplicated-
 
 endloop
 
