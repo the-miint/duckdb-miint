@@ -270,3 +270,38 @@ TEST_CASE("A column stored without encoding refuses a blob that carries one", "[
 	    },
 	    "without encoding"));
 }
+
+TEST_CASE("The deflate bound admits the most compressible stream", "[sra]") {
+	// MAX_DEFLATE_RATIO refuses a size no deflate stream can reach. Zeros at level 9 are deflate's
+	// best case; a bound below their ratio would refuse real, highly compressed blobs as damage.
+	const size_t size = size_t(64) << 20;
+	std::vector<uint8_t> zeros(size, 0);
+	z_stream zs {};
+	REQUIRE(deflateInit2(&zs, 9, Z_DEFLATED, -15, 9, Z_DEFAULT_STRATEGY) == Z_OK);
+	std::vector<uint8_t> z(deflateBound(&zs, uLong(size)));
+	zs.next_in = zeros.data();
+	zs.avail_in = uInt(size);
+	zs.next_out = z.data();
+	zs.avail_out = uInt(z.size());
+	REQUIRE(deflate(&zs, Z_FINISH) == Z_STREAM_END);
+	z.resize(zs.total_out);
+	deflateEnd(&zs);
+	INFO("ratio " << double(size) / double(z.size()));
+	CHECK(uint64_t(z.size()) * MAX_DEFLATE_RATIO >= size);
+	HeaderFrame f;
+	f.version = 1;
+	f.osize = int64_t(size);
+	uint64_t bits = 0;
+	CHECK(Unzip(f, z.data(), z.size(), bits).size() == size);
+}
+
+TEST_CASE("Iunzip refuses widths it cannot decode before dividing by them", "[sra]") {
+	// DecodeBlob refuses izip on sub-byte columns first, but Iunzip is public: a 2-bit type must be
+	// refused, not divided by zero.
+	std::vector<uint8_t> src(16, 0);
+	CHECK(ThrowsTypeMentioning<SraUnsupportedError>(
+	    [&] {
+		    Iunzip(IzipFrame(2, 1, {0, 0}), src.data(), src.size(), ElementType {2, false}, 4);
+	    },
+	    "2-bit"));
+}

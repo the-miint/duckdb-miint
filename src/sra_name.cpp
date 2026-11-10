@@ -422,7 +422,8 @@ std::string FormatSpotNameNoCoord(const std::string &fmt, int64_t row_id, const 
 }
 
 void CheckSpotName(const std::string &name, int64_t row_id) {
-	// RFC 3629: no overlong forms, no surrogates, nothing past U+10FFFF.
+	// RFC 3629: no overlong forms, no surrogates, nothing past U+10FFFF. Written here rather than
+	// with DuckDB's Utf8Proc because src/sra_*.cpp stays free of DuckDB (docs/internals/sra-reader.md).
 	const auto *p = reinterpret_cast<const unsigned char *>(name.data());
 	const size_t n = name.size();
 	for (size_t i = 0; i < n;) {
@@ -450,8 +451,9 @@ void CheckSpotName(const std::string &name, int64_t row_id) {
 			valid = p[i + k] >= 0x80 && p[i + k] <= 0xbf;
 		}
 		if (!valid) {
-			throw SraFormatError("spot " + std::to_string(row_id) + ": its name is not valid UTF-8 (byte " +
-			                     std::to_string(i + 1) + ")");
+			// A run that stores Latin-1 names is well formed, but its names are not text DuckDB holds.
+			throw SraUnsupportedError("spot " + std::to_string(row_id) + ": its name is not valid UTF-8 (byte " +
+			                          std::to_string(i + 1) + ")");
 		}
 		i += len;
 	}

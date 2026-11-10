@@ -381,6 +381,12 @@ PageMap ParsePageMap(const uint8_t *src, size_t len, uint64_t row_count) {
 		data_recs = ReadVlenU(src, len, pos, what);
 		break;
 	}
+	// Each count is bounded before they are summed, so the sum cannot wrap past the bound.
+	// The row count adds to them only for a random-access map, which stores an offset per row.
+	if (leng_recs > (uint64_t(1) << 32) || data_recs > (uint64_t(1) << 32) ||
+	    (random_access && row_count > (uint64_t(1) << 32))) {
+		throw SraFormatError("a page map declares too many values");
+	}
 	uint64_t values = (variant >= 2 ? 2 * leng_recs : 0) + (variant == 1 || variant == 3 ? data_recs : 0) +
 	                  (random_access && variant != 1 && variant != 3 ? row_count : 0);
 	if (values > (uint64_t(1) << 32)) {

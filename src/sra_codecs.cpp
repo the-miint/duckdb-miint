@@ -18,13 +18,19 @@ std::vector<uint8_t> InflateRawGrowing(const uint8_t *src, size_t n, uint64_t li
 	if (inflateInit2(&zs, -15) != Z_OK) {
 		throw SraFormatError(std::string("cannot start inflating ") + what);
 	}
+	// Ends the stream on every way out, a failed allocation included.
+	struct EndStream {
+		z_stream &zs;
+		~EndStream() {
+			inflateEnd(&zs);
+		}
+	} end_stream {zs};
 	zs.next_in = const_cast<Bytef *>(src);
 	zs.avail_in = uInt(n);
 	std::vector<uint8_t> out;
 	int rc = Z_OK;
 	while (rc != Z_STREAM_END) {
 		if (out.size() >= limit) {
-			inflateEnd(&zs);
 			throw SraFormatError(std::string(what) + " inflates past the " + std::to_string(limit) +
 			                     " bytes it can need");
 		}
@@ -34,16 +40,14 @@ std::vector<uint8_t> InflateRawGrowing(const uint8_t *src, size_t n, uint64_t li
 		zs.avail_out = uInt(std::min<size_t>(out.size() - have, UINT32_MAX));
 		rc = inflate(&zs, Z_NO_FLUSH);
 		if (rc != Z_OK && rc != Z_STREAM_END && !(rc == Z_BUF_ERROR && zs.avail_out == 0)) {
-			inflateEnd(&zs);
 			throw SraFormatError(std::string(what) + " does not inflate");
 		}
 		if (rc == Z_OK && zs.avail_in == 0 && zs.avail_out != 0) {
-			inflateEnd(&zs); // input used up before the stream ended: truncated
+			// The input ran out before the stream ended: truncated.
 			throw SraFormatError(std::string(what) + " does not inflate");
 		}
 	}
 	out.resize(size_t(zs.total_out));
-	inflateEnd(&zs);
 	return out;
 }
 
@@ -170,7 +174,7 @@ std::vector<uint8_t> IrzipDecode(const HeaderFrame &frame, const uint8_t *src, s
 		series_count = 2;
 	}
 	std::vector<U> Y(count, 0);
-	std::vector<uint8_t> plane(count);
+	std::vector<uint8_t> plane(planes != 0 ? count : 0); // only a blob with planes reads any
 	size_t used = 0;
 	for (unsigned p = 0; p < 8; p++) {
 		if (!(planes & (1u << p))) {
@@ -256,6 +260,9 @@ std::vector<uint8_t> Iunzip(const HeaderFrame &frame, const uint8_t *src, size_t
 	}
 	if (frame.version > 3) {
 		throw SraUnsupportedError("izip blob header version " + std::to_string(frame.version));
+	}
+	if (type.bits != 8 && type.bits != 16 && type.bits != 32 && type.bits != 64) {
+		throw SraUnsupportedError("izip on " + std::to_string(type.bits) + "-bit elements");
 	}
 	// Each byte plane inflates to elem_count bytes from at most n. A blob with no planes is all
 	// offset and slope (a constant column), so only the size cap bounds it.

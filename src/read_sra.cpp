@@ -13,7 +13,6 @@
 #include "duckdb/common/vector/string_vector.hpp"
 #include "duckdb/execution/partition_info.hpp"
 #include "duckdb/main/client_context.hpp"
-#include "duckdb/parallel/task_scheduler.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -211,7 +210,7 @@ void SetQualityList(Vector &vec, const std::vector<const std::vector<uint8_t> *>
 	}
 }
 
-// The options both functions take, and the schema they imply.
+// The options read_sra takes, and the schema they imply.
 void BindOptions(SraScanData &data, named_argument_map_t &params, vector<LogicalType> &return_types,
                  vector<Identifier> &names) {
 	const std::string &fn = data.function;
