@@ -362,6 +362,15 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                                 LogicalType::VARCHAR, Value(miint::NCBIClient::EUTILS_BASE));
 	ena_db_config.AddExtensionOption("miint_blast_url", "URL of the NCBI BLAST URL API, which blast calls.",
 	                                 LogicalType::VARCHAR, Value(miint::BlastClient::BLAST_BASE));
+	// Where the GTDB readers download a release from, and keep it.
+	ena_db_config.AddExtensionOption("miint_gtdb_url",
+	                                 "Base URL of GTDB's releases, from which read_gtdb_metadata and "
+	                                 "read_gtdb_qc_failed download a release's files.",
+	                                 LogicalType::VARCHAR, Value(ReadGtdbFunctions::DEFAULT_URL));
+	ena_db_config.AddExtensionOption("miint_gtdb_cache_dir",
+	                                 "Where read_gtdb_metadata and read_gtdb_qc_failed keep the releases they "
+	                                 "download. Empty (the default) means ${XDG_CACHE_HOME:-~/.cache}/miint/gtdb.",
+	                                 LogicalType::VARCHAR, Value(""));
 
 	ScalarFunction version_func("miint_version", {}, LogicalType::VARCHAR, MiintVersionFunction);
 	loader.RegisterFunction(version_func);

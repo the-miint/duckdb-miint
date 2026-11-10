@@ -2,10 +2,16 @@
 
 #include "GtdbFiles.hpp"
 #include "catalog_utils.hpp"
+#include "http_client_common.hpp"
+#include "miint_cache.hpp"
 #include "miint_named_parameter.hpp"
 #include "miint_streaming_query.hpp"
+#include "duckdb/common/error_data.hpp"
+#include "duckdb/common/exception/http_exception.hpp"
 #include "duckdb/common/file_open_flags.hpp"
 #include "duckdb/common/file_system.hpp"
+#include "duckdb/common/http_util.hpp"
+#include "duckdb/common/types/uuid.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/parser/keyword_helper.hpp"
 
@@ -22,10 +28,12 @@ const char *FunctionName(GtdbTable table) {
 	return table == GtdbTable::METADATA ? "read_gtdb_metadata" : "read_gtdb_qc_failed";
 }
 
-// One file the reader reads: its path, whether its bytes are gzip, and for metadata, the
-// domain its name implies.
+// One file the reader reads: where the rows are read from (a local file, a URL, or the
+// cache's copy of a release's file), for a release's file the URL it is downloaded from,
+// whether its bytes are gzip, and for metadata, the domain its name implies.
 struct GtdbInput {
 	string path;
+	string url;
 	string domain;
 	bool gzip = false;
 };
@@ -33,6 +41,9 @@ struct GtdbInput {
 struct ReadGtdbData : public TableFunctionData {
 	GtdbTable table = GtdbTable::METADATA;
 	vector<GtdbInput> inputs;
+	// For a release: its name ("232.0"), and whether to download its files though cached.
+	string release;
+	bool refresh = false;
 	// Every input's header line, which binding found equal, and its column names.
 	string header_line;
 	vector<string> columns;
@@ -82,9 +93,22 @@ struct Header {
 	bool gzip;
 };
 
+// A URL's header is read by a GET stopped once the line is in, so binding does not fetch
+// the file (GTDB's bacterial metadata is hundreds of MB).
+Header ReadUrlHeader(ClientContext &context, const char *fn_name, const string &url) {
+	miint::gtdb::HeaderLineReader reader;
+	return ApplyRule(fn_name, url, [&] {
+		miint::HttpGetStreaming(
+		    context, url, fn_name, [&](const HTTPResponse &) { reader = miint::gtdb::HeaderLineReader(); },
+		    [&](const char *data, size_t size) { return !reader.Feed(data, size); });
+		auto line = reader.Finish();
+		return Header {std::move(line), reader.IsGzip()};
+	});
+}
+
 Header ReadHeader(ClientContext &context, const char *fn_name, const string &path) {
 	if (IsHttpUrl(path)) {
-		throw NotImplementedException("%s: reading %s", fn_name, path);
+		return ReadUrlHeader(context, fn_name, path);
 	}
 	auto &fs = FileSystem::GetFileSystem(context);
 	auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
@@ -148,6 +172,102 @@ vector<GtdbInput> ResolveSource(ClientContext &context, GtdbTable table, const s
 	return inputs;
 }
 
+// Where downloaded releases are kept: the miint_gtdb_cache_dir setting, or by default
+// ${XDG_CACHE_HOME:-~/.cache}/miint/gtdb.
+string GtdbCacheDir(ClientContext &context, const char *fn_name) {
+	Value value;
+	string dir;
+	if (context.TryGetCurrentSetting("miint_gtdb_cache_dir", value) && !value.IsNull()) {
+		dir = value.ToString();
+	}
+	if (dir.empty()) {
+		dir = miint::MiintCacheDir("gtdb");
+	}
+	if (dir.empty()) {
+		throw InvalidInputException("%s: cannot tell where to cache GTDB releases: set miint_gtdb_cache_dir, or HOME "
+		                            "or XDG_CACHE_HOME",
+		                            fn_name);
+	}
+	return dir;
+}
+
+// The files a release needs, each read from its cached copy, which is downloaded from
+// GTDB (the miint_gtdb_url setting) when absent.
+vector<GtdbInput> ResolveRelease(ClientContext &context, GtdbTable table, const miint::gtdb::Release &release) {
+	using miint::gtdb::ReleaseFile;
+	const auto base_url = miint::UrlSetting(context, "miint_gtdb_url");
+	const auto cache_dir = GtdbCacheDir(context, FunctionName(table));
+	const auto files = table == GtdbTable::METADATA
+	                       ? vector<ReleaseFile> {ReleaseFile::BAC120_METADATA, ReleaseFile::AR53_METADATA}
+	                       : vector<ReleaseFile> {ReleaseFile::QC_FAILED};
+	vector<GtdbInput> inputs;
+	for (const auto file : files) {
+		GtdbInput input;
+		input.path = miint::gtdb::ReleaseCachePath(cache_dir, file, release);
+		input.url = miint::gtdb::ReleaseFileUrl(base_url, file, release);
+		if (table == GtdbTable::METADATA) {
+			input.domain = *miint::gtdb::MetadataDomain(miint::gtdb::ReleaseFileName(file, release));
+		}
+		inputs.push_back(std::move(input));
+	}
+	return inputs;
+}
+
+// Runs `fn`, which reads a file from `url`; for a release's file, a 404 says why GTDB
+// may not have it.
+template <class FN>
+auto WithReleaseHint(const char *fn_name, const string &release, const string &url, FN &&fn) -> decltype(fn()) {
+	try {
+		return fn();
+	} catch (const HTTPException &e) {
+		ErrorData error(e);
+		auto status = error.ExtraInfo().find("status_code");
+		if (release.empty() || status == error.ExtraInfo().end() || status->second != "404") {
+			throw;
+		}
+		throw IOException("%s: release %s has no file at %s (HTTP 404): releases before 214.1 ship .tar.gz archives; "
+		                  "extract the .tsv and pass it as source",
+		                  fn_name, release, url);
+	}
+}
+
+// Whether a release's file must be fetched: it is not cached, or refresh asked for it.
+bool NeedsDownload(ClientContext &context, const ReadGtdbData &data, const GtdbInput &input) {
+	return !input.url.empty() && (data.refresh || !FileSystem::GetFileSystem(context).FileExists(input.path));
+}
+
+// Downloads `url` to `path`. The body streams to a file of its own beside `path`, which is
+// renamed to `path` only once it is complete, so a file at its final name is always
+// whole, and processes downloading at once each write their own. A failed or interrupted
+// download removes its file.
+void DownloadToCache(ClientContext &context, const char *fn_name, const string &url, const string &path) {
+	auto &fs = FileSystem::GetFileSystem(context);
+	fs.CreateDirectoriesRecursive(path.substr(0, path.find_last_of('/')));
+	const auto part = path + "." + UUID::ToString(UUID::GenerateRandomUUID()) + ".part";
+	unique_ptr<FileHandle> out;
+	try {
+		miint::HttpGetStreaming(
+		    context, url, fn_name,
+		    // A retried body starts over, so the file does too.
+		    [&](const HTTPResponse &) {
+			    out.reset();
+			    out = fs.OpenFile(part, FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW);
+		    },
+		    [&](const char *data, size_t size) {
+			    out->Write(const_cast<char *>(data), static_cast<int64_t>(size));
+			    return true;
+		    });
+		out->Sync();
+		out->Close();
+		out.reset();
+		fs.MoveFile(part, path);
+	} catch (...) {
+		out.reset();
+		fs.TryRemoveFile(part);
+		throw;
+	}
+}
+
 unique_ptr<FunctionData> ReadGtdbBind(ClientContext &context, TableFunctionBindInput &input,
                                       vector<LogicalType> &return_types, vector<Identifier> &names, GtdbTable table) {
 	const auto fn_name = FunctionName(table);
@@ -159,24 +279,35 @@ unique_ptr<FunctionData> ReadGtdbBind(ClientContext &context, TableFunctionBindI
 
 	auto data = make_uniq<ReadGtdbData>();
 	data->table = table;
+	data->refresh = GetBoolParam(input, "refresh", false);
 	if (source) {
 		if (source->empty()) {
 			throw InvalidInputException("%s: source must not be empty", fn_name);
 		}
+		if (data->refresh) {
+			throw InvalidInputException("%s: refresh applies to release; a source is read as it is, never cached",
+			                            fn_name);
+		}
 		data->inputs = ResolveSource(context, table, *source);
 	} else {
+		miint::gtdb::Release parsed;
 		try {
-			miint::gtdb::ParseRelease(*release);
+			parsed = miint::gtdb::ParseRelease(*release);
 		} catch (const std::invalid_argument &e) {
 			throw InvalidInputException("%s: %s", fn_name, e.what());
 		}
-		throw NotImplementedException("%s: release", fn_name);
+		data->release = parsed.ToString();
+		data->inputs = ResolveRelease(context, table, parsed);
 	}
 
 	// The header names the columns. Read together, the two domains' files must agree on
-	// them, as one release's do.
+	// them, as one release's do. A release's file not yet cached (or to be fetched again)
+	// has its header read from GTDB.
 	for (auto &in : data->inputs) {
-		auto header = ReadHeader(context, fn_name, in.path);
+		const auto header_from_url = NeedsDownload(context, *data, in);
+		const auto &from = header_from_url ? in.url : in.path;
+		auto header =
+		    WithReleaseHint(fn_name, data->release, in.url, [&] { return ReadHeader(context, fn_name, from); });
 		in.gzip = header.gzip;
 		auto columns = ApplyRule(fn_name, in.path, [&] { return miint::gtdb::SplitHeader(header.line); });
 		if (&in == &data->inputs.front()) {
@@ -261,10 +392,14 @@ unique_ptr<GlobalTableFunctionState> ReadGtdbInitGlobal(ClientContext &context, 
 	auto &data = input.bind_data->Cast<ReadGtdbData>();
 	const auto fn_name = FunctionName(data.table);
 
-	// The rows are read under the bound column names, so a file whose header changed since
-	// (rewritten under a prepared statement, say) would be read under the wrong ones.
+	// A release's files are downloaded now, when the query runs, never while binding.
+	// Then the rows are read under the bound column names, so a file whose header changed
+	// since (rewritten under a prepared statement, say) would be read under the wrong ones.
 	auto inputs = data.inputs;
 	for (auto &in : inputs) {
+		if (NeedsDownload(context, data, in)) {
+			WithReleaseHint(fn_name, data.release, in.url, [&] { DownloadToCache(context, fn_name, in.url, in.path); });
+		}
 		auto header = ReadHeader(context, fn_name, in.path);
 		if (header.line != data.header_line) {
 			throw InvalidInputException(

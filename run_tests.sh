@@ -213,6 +213,16 @@ if [ "${MIINT_BLAST_LIVE_TEST:-0}" = "1" ] &&
     export BLAST_LIVE_AVAILABLE=1
 fi
 
+# Live GTDB test, opt-in: `MIINT_GTDB_LIVE_TEST=1 bash run_tests.sh`. It downloads about
+# 37 MB from GTDB, release 232's archaeal metadata and its qc_failed list, which it caches
+# in data/cache/gtdb so a rerun reads it from there. With the opt-in set, the probe still
+# skips it when GTDB does not answer.
+if [ "${MIINT_GTDB_LIVE_TEST:-0}" = "1" ] &&
+    curl -sSf --max-time 10 -I -o /dev/null \
+        "https://data.gtdb.ecogenomic.org/releases/release232/232.0/ar53_metadata_r232.tsv.gz" 2>/dev/null; then
+    export GTDB_AVAILABLE=1
+fi
+
 # Live ENA tests, opt-in: `MIINT_ENA_LIVE_TEST=1 bash run_tests.sh` (why: docs/testing.md,
 # "Guards and skipped tests"). They run under with_live_ena: without the mock's URLs, which
 # this script exports below, and with ENA_AVAILABLE, which is set nowhere else. With the
@@ -717,7 +727,7 @@ fi
 # Which skips are allowed: docs/testing.md, "Guards and skipped tests". A skip does not
 # change unittest's exit status, so a disallowed one, such as a skip for the mock server's
 # URL that this script exports, is caught here.
-HTTPFS_ALLOWED_SKIPS='ENA_AVAILABLE|NCBI_AVAILABLE|BLAST_LIVE_AVAILABLE|MIINT_TAXDUMP_REMOTE|ENA_WEBIN_TEST_(USER|PASSWORD|AVAILABLE)|ASPERA_AVAILABLE|HDF5_AVAILABLE'
+HTTPFS_ALLOWED_SKIPS='ENA_AVAILABLE|NCBI_AVAILABLE|BLAST_LIVE_AVAILABLE|GTDB_AVAILABLE|MIINT_TAXDUMP_REMOTE|ENA_WEBIN_TEST_(USER|PASSWORD|AVAILABLE)|ASPERA_AVAILABLE|HDF5_AVAILABLE'
 
 # run_httpfs_files <comma-separated files> <log>: run them as the httpfs pass does, and
 # exit the script when one fails or skips for a reason this run should have provided.

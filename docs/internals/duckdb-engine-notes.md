@@ -458,3 +458,35 @@ through unchanged, except `std::bad_alloc`'s, which becomes "Allocation failure"
 ("IO Error: ...") and, for an internal error, DuckDB's assertion notice and stack trace. A
 catch of `std::exception` or `std::runtime_error` can receive a DuckDB exception; a catch of
 `std::invalid_argument` or another `std::logic_error` cannot.
+
+## HTTP
+
+### A GET that streams its body (DuckDB 2.0, httpfs)
+
+Given a `response_handler` and a `content_handler`, `GetRequestInfo` hands a GET's body over in
+chunks instead of holding it in `response->body`
+(`duckdb/src/include/duckdb/main/http/http_util.hpp`). Verified against httpfs `77392a7`
+(`src/http/httpfs_curl_client.cpp`, `src/http/httpfs_httplib_client.cpp`), three things are
+easy to miss:
+
+- **A retry sends the body again from its first byte.** `HTTPUtil::RunRequestWithRetry` retries a
+  GET whose transfer fails partway, since a dropped connection is a request error, and the
+  content handler then receives the new attempt's body from the start. The response handler
+  runs once per attempt: before a 2xx's body, and after the body of an error status, which
+  httpfs keeps in `response->body`. A sink starts over there.
+- **Stopping a transfer reads differently by client.** A content handler returns false to stop.
+  The curl client, httpfs's default, returns the response as the 200 it was. The httplib client
+  (deprecated) reports "Canceled", a request error, which `RunRequestWithRetry` retries up to
+  `http_retries` times and `try_request` then returns as failed.
+- **A handler must not throw.** The curl client holds an exception from a handler and rethrows
+  it after the transfer; the httplib clients do not catch it. Hold it in a
+  `std::exception_ptr`, return false, and rethrow once the request returns.
+
+The curl client sets no limit on a transfer's total time, but aborts one that stays below 1 KB/s
+for `http_timeout` seconds (`CURLOPT_LOW_SPEED_LIMIT`, `CURLOPT_LOW_SPEED_TIME`), as "Timeout was
+reached".
+
+`miint::HttpGetStreaming` (`src/http_client_common.cpp`) handles all three, and checks for an
+interrupt on every chunk. `read_ncbi_taxdump` downloads through it, and the GTDB readers
+(`src/read_gtdb.cpp`) read a header line with it, stopping once the line is in, and download a
+release into their cache.
