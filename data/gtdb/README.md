@@ -4,10 +4,26 @@ Real GTDB release files cut to a few rows, for `read_gtdb_metadata` and `read_gt
 paths GTDB serves them from, under `releases/`, so a test can read a release's directory or point the readers at
 this tree in place of `https://data.gtdb.ecogenomic.org/releases`.
 
-GTDB's data are released under the [Creative Commons Attribution-ShareAlike 4.0 International
-licence](https://creativecommons.org/licenses/by-sa/4.0/) (CC BY-SA 4.0). These files are adapted from them, by
-removing rows, and are shared under the same licence. Source: the Genome Taxonomy Database,
-<https://gtdb.ecogenomic.org/>.
+## Licence and attribution
+
+These files are adapted from the Genome Taxonomy Database (GTDB), <https://gtdb.ecogenomic.org/>, whose data are
+released under the [Creative Commons Attribution-ShareAlike 4.0 International
+licence](https://creativecommons.org/licenses/by-sa/4.0/) (CC BY-SA 4.0; <https://gtdb.ecogenomic.org/licenses>).
+GTDB's release files carry no copyright notice of their own.
+
+- **Licence of these files:** CC BY-SA 4.0, as the licence's ShareAlike term requires. The Modified BSD licence
+  that covers the rest of duckdb-miint does not apply to anything under `data/gtdb/`.
+- **Changes:** rows were removed and the metadata files gzipped again. Every value kept is as GTDB wrote it ("How
+  they were cut" below).
+- **Sources:** each file was cut from the file at the same path under `https://data.gtdb.ecogenomic.org/releases/`,
+  such as
+  <https://data.gtdb.ecogenomic.org/releases/release232/232.0/bac120_metadata_r232.tsv.gz> for
+  `releases/release232/232.0/bac120_metadata_r232.tsv.gz`.
+- **No warranties:** they are provided as is, as sections 5 and 6 of the licence set out.
+- **Citation:** GTDB asks that work using it cite the papers under "Cite GTDB" at
+  <https://gtdb.ecogenomic.org/about>, the latest being Parks, D.H., et al. (2025), "GTDB release 10: a complete
+  and systematic taxonomy for 715 230 bacterial and 17 245 archaeal genomes", *Nucleic Acids Research*,
+  doi:10.1093/nar/gkaf1040.
 
 ## How they were cut
 

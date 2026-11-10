@@ -658,7 +658,9 @@ carry a suffix: `Bacillota_A`, `Pseudomonas_E`, and at species `Pseudomonas_E fl
 These functions split a name into its base name, which the parts share, and its suffix, so a
 split taxon, polyphyletic ones included, can be found by grouping on the base. [`parse_lineage`](#parse-lineage-strings-parse_lineage) keeps names
 whole, as the shared schema does; split them afterwards. The functions only split: any
-grouping key is the caller's to build from the parts.
+grouping key is the caller's to build from the parts. GTDB's lineages come in its taxonomy
+files, as in the examples below, and in the `gtdb_taxonomy` column of
+[`read_gtdb_metadata`](#read-gtdbs-genome-metadata-read_gtdb_metadata-read_gtdb_qc_failed).
 
 **Parameters:**
 - `name` (VARCHAR): one name, without its rank prefix, as `parse_lineage` returns it (`Bacillota_A`, not `p__Bacillota_A`).
@@ -708,7 +710,14 @@ With each release, GTDB (the Genome Taxonomy Database) publishes a table of ever
 it places: its GTDB and NCBI taxonomies, its quality estimates, and whether it is type
 material. `read_gtdb_metadata` reads it, from GTDB's `bac120` (bacterial) and `ar53`
 (archaeal) files. `read_gtdb_qc_failed` reads the list of genomes that failed GTDB's
-quality checks and were left out.
+quality checks and were left out. The `gtdb_taxonomy` column is a lineage string, which
+[`parse_lineage`](#parse-lineage-strings-parse_lineage) turns into the shared schema's ranks
+and [`gtdb_label`](#split-gtdb-labels-gtdb_label-gtdb_species_label) splits further.
+
+GTDB's data are released under the [CC BY-SA 4.0 licence](https://gtdb.ecogenomic.org/licenses).
+GTDB asks that work using them cite the papers on its [about page](https://gtdb.ecogenomic.org/about),
+and the licence requires that data adapted from them and shared credit GTDB and carry the
+same licence.
 
 **Requirements:**
 - Requires the `httpfs` extension (automatically loaded) only to download a release or read a URL
