@@ -709,6 +709,12 @@ const std::string READ_MYLOASM_MAPPINGS = // NOLINT
 // d1-d3 are the GFA's DP, DP2 and DP3: the median, over the contig's reads, of each read's
 // minimum depth counting reads at >= 99%, 99.75% and 100% SNPmer identity. MEDIAN_DP1 reads as
 // the 99% tier (DP1), but is the median of the reads' median depths at the 100% tier.
+// mult= is kmer_multiplicity() (polishing_mod.rs): 0 under 1000 bp, else, with the counts of
+// the contig's n distinct canonical FracMinHash 21-mers (1 in 15, whatever the run's k and c)
+// sorted ascending, the sum of the slice [n/10, n*9/10) over n*8/10, bounds and divisor rounded
+// down. With n < 2 that is 0/0, written NaN, which reads as NULL so aggregates skip it. NaN
+// fails both flag thresholds, so myloasm writes it only with duplicated-yes; NaN with another
+// flag is not myloasm's.
 // myloasm writes all three FASTAs whether or not it has contigs for them, hence allow_empty.
 const std::string READ_MYLOASM_CONTIGS = // NOLINT
     "CREATE OR REPLACE MACRO read_myloasm_contigs(dir) AS TABLE "
@@ -726,7 +732,7 @@ const std::string READ_MYLOASM_CONTIGS = // NOLINT
     "         regexp_extract(read_id, '^(u[0-9]+ctg)_len-([0-9]+)_circular-(yes|possibly|no)"
     "_depth-[0-9.]+-[0-9.]+-[0-9.]+_duplicated-(no|possibly|yes)$', "
     "                        ['contig_id', 'len', 'circular', 'flag']) AS hdr, "
-    "         regexp_extract(coalesce(comment, ''), '^mult=([0-9.]+)(?: secondary_to:[|](u[0-9]+ctg)_[^|]*[|]"
+    "         regexp_extract(coalesce(comment, ''), '^mult=([0-9.]+|NaN)(?: secondary_to:[|](u[0-9]+ctg)_[^|]*[|]"
     " aligned_frac:([0-9.]+) ani:([0-9.]+))?$', "
     "                        ['mult', 'secondary', 'aligned', 'ani']) AS cmt "
     "  FROM fasta "
@@ -744,7 +750,7 @@ const std::string READ_MYLOASM_CONTIGS = // NOLINT
     "       g.tags['DP2']::DOUBLE AS depth_identity_99_75, "
     "       g.tags['DP3']::DOUBLE AS depth_identity_100, "
     "       g.tags['MEDIAN_DP1']::DOUBLE AS median_depth_identity_100, "
-    "       h.cmt.mult::DOUBLE AS kmer_multiplicity, "
+    "       nullif(h.cmt.mult, 'NaN')::DOUBLE AS kmer_multiplicity, "
     "       h.hdr.flag AS kmer_multiplicity_flag, "
     "       nullif(h.cmt.secondary, '') AS secondary_to_contig_id, "
     "       nullif(h.cmt.aligned, '')::DOUBLE AS secondary_aligned_percent, "
@@ -754,6 +760,7 @@ const std::string READ_MYLOASM_CONTIGS = // NOLINT
     "WHERE CASE "
     "        WHEN h.fasta_id IS NOT NULL "
     "         AND (h.hdr.contig_id = '' OR h.cmt.mult = '' "
+    "              OR (h.cmt.mult = 'NaN' AND h.hdr.flag <> 'yes') "
     "              OR (h.dereplication_status = 'primary') <> (h.cmt.secondary = '')) "
     "        THEN error(printf('read_myloasm_contigs: %s contig header is not myloasm''s: ''%s''', "
     "                          h.dereplication_status, concat_ws(' ', h.fasta_id, nullif(h.comment, '')))) "
