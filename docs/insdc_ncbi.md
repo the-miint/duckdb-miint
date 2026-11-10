@@ -19,7 +19,7 @@ MIINT provides integration with NCBI's GenBank and RefSeq.
   - [Parse lineage strings (`parse_lineage`)](#parse-lineage-strings-parse_lineage) - Turn a `d__…; p__…` lineage string (GTDB, Greengenes2, tax2tree) into the shared schema's rank columns.
   - [Map an NCBI rank to its column (`lineage_rank`)](#map-an-ncbi-rank-to-its-column-lineage_rank) - The shared schema's column an NCBI rank collapses into, so `superkingdom` and `domain` look up alike.
   - [Split GTDB labels (`gtdb_label`, `gtdb_species_label`)](#split-gtdb-labels-gtdb_label-gtdb_species_label) - A GTDB name's base and the suffix GTDB gives the parts of a split taxon (`Bacillota_A`), to find split and polyphyletic taxa.
-  - [Read GTDB's genome metadata (`read_gtdb_metadata`, `read_gtdb_qc_failed`)](#read-gtdbs-genome-metadata-read_gtdb_metadata-read_gtdb_qc_failed) - Download and cache a GTDB release's genome metadata and qc_failed list, or read the files; link an NCBI species to its type strain's genome.
+  - [Read GTDB's genome metadata (`read_gtdb_metadata`, `read_gtdb_qc_failed`)](#read-gtdbs-genome-metadata-read_gtdb_metadata-read_gtdb_qc_failed) - Download and cache a GTDB release's genome metadata and its list of genomes that failed GTDB's quality checks, or read the files; link an NCBI species to its type strain's genome.
 
 ### Accessions are literals, not table names
 
@@ -59,7 +59,8 @@ The functions here that go online, and `blast`, which searches NCBI BLAST, wait 
 and for NCBI:
 
 - `read_ncbi`, `read_ncbi_fasta`, `read_ncbi_annotation` and `read_ncbi_lineage` retry a transient
-  failure after 1, 2, 4, 8, 16 and 32 s. `read_ncbi_taxdump` retries its download after 1, 2 and 4 s.
+  failure after 1, 2, 4, 8, 16 and 32 s. `read_ncbi_taxdump`, `read_gtdb_metadata` and
+  `read_gtdb_qc_failed` retry a download after 1, 2 and 4 s.
 - `blast` backs off between attempts as the readers do. It also waits for NCBI's estimate of how
   long a search takes, at most an hour, then polls every 15 s for up to another hour, after which
   it fails.
@@ -71,7 +72,7 @@ takes about a minute, and Ctrl-C does not end it
 ([#414](https://github.com/the-miint/duckdb-miint/issues/414)). A session `SET` of those three
 does not reach miint's requests; use `SET GLOBAL`.
 
-Two settings send the requests elsewhere, such as to a mirror, and a session `SET` changes them.
+These settings send the requests elsewhere, such as to a mirror, and a session `SET` changes them.
 A trailing slash is dropped, and a query that would use an empty URL fails.
 
 - `miint_ncbi_eutils_url`, the base URL of E-utilities (default
@@ -79,6 +80,8 @@ A trailing slash is dropped, and a query that would use an empty URL fails.
   for assemblies, keeps its own URL.
 - `miint_blast_url`, the URL of BLAST's URL API (default
   `https://blast.ncbi.nlm.nih.gov/blast/Blast.cgi`).
+- `miint_gtdb_url`, where the GTDB readers download a release from (default
+  `https://data.gtdb.ecogenomic.org/releases`).
 
 ```sql
 SET miint_ncbi_eutils_url = 'https://eutils.example.org/entrez/eutils';
@@ -719,24 +722,25 @@ quality checks and were left out.
 - `refresh` (BOOLEAN, default false): with `release`, download its files again though they are cached. With `source` it is an error.
 
 **Output:**
-- `read_gtdb_metadata`: `domain` (VARCHAR), then every column of the file, named and ordered as in its header, all VARCHAR, with GTDB's missing-value marker `none` read as NULL.
+- `read_gtdb_metadata`: `domain` (VARCHAR), then every column of the file, named and ordered as in its header, all VARCHAR, with GTDB's missing-value marker `none` read as NULL. NCBI's own `na`, which GTDB passes through in some `ncbi_` columns, is kept as written.
   - `domain` is `'Bacteria'` for a `bac120_` file and `'Archaea'` for an `ar53_` or `ar122_` one, matching `parse_lineage`'s domain and GTDB's `d__` names, so the two join.
   - The columns change between releases: release 232 has 113, and 214.1 has 110, without CheckM2's.
   - Cast what you need, for example `TRY_CAST(checkm2_completeness AS DOUBLE)`. GTDB writes booleans as `t` and `f`.
-- `read_gtdb_qc_failed`: every column of the file, named as GTDB names them (`"Accession"`, `"NCBI species"`, `"CM1 completeness (%)"`; quote them in SQL), all VARCHAR, values as written (`-` and `s__` included).
+- `read_gtdb_qc_failed`: every column of the file, named as GTDB names them (`"Accession"`, `"NCBI species"`, `"CM1 completeness (%)"`; quote them in SQL), all VARCHAR, values as written (`-`, `s__` and `none` included). Its columns change between releases too: 232 has 26, and 214.1 has 20, before CheckM2.
 - In both, an empty field is NULL, and the order of the rows is not promised.
 
 **Linking an NCBI species to its type strain's genome:** `gtdb_type_designation_ncbi_taxa`
-says whether a genome is type material in NCBI's taxonomy (`type strain of species`,
-`type strain of heterotypic synonym`, `not type material`, ...), and `ncbi_species_taxid` is
-the NCBI species it belongs to. Together they take a species' NCBI taxid to the genome of
-its type strain, and so to GTDB's placement of that strain, without matching names. The
-examples below show the join.
+is GTDB's designation of the genome against NCBI's taxonomy (`type strain of species`,
+`type strain of heterotypic synonym`, `not type material`, ...), not NCBI's own
+`ncbi_type_material_designation`, and `ncbi_species_taxid` is the NCBI species the genome
+belongs to. Together they take a species' NCBI taxid to the genomes of its type strain, and
+so to GTDB's placement of that strain, without matching names. The examples below show the
+join, which gives a row for each such genome.
 
 **Behavior:**
 - **The cache.** A release's files are kept, compressed as served, at `<cache>/<release>/<file name>`, such as `~/.cache/miint/gtdb/232.0/bac120_metadata_r232.tsv.gz`. `<cache>` is the `miint_gtdb_cache_dir` setting, or `${XDG_CACHE_HOME:-~/.cache}/miint/gtdb` when that is empty (the default). Every file sits in the release's directory, `qc_failed` included, so the directory is a `source` for either function. Only the files a call reads are downloaded: `read_gtdb_qc_failed` does not fetch the metadata.
 - **Downloads.** A file is downloaded to a file of its own beside its final name, which is renamed into place once complete. So a file at its final name is complete, and it is trusted: nothing checks it against GTDB again until `refresh := true`. A failed or interrupted download removes its file. A killed process leaves `<name>.<id>.part`, which is never read and can be deleted.
-- **Binding reads only header lines**, which name the columns: from the cache, or for a file not yet cached, from GTDB by a request stopped once the line has arrived. So `DESCRIBE` or `EXPLAIN` of a release not yet cached makes one small request per file and downloads nothing. The download happens when the query runs.
+- **Binding reads only header lines**, which name the columns: from the file, or by a request stopped once the line has arrived for a URL `source`, a release's file not yet cached, and every file with `refresh := true`. So `DESCRIBE` or `EXPLAIN` then makes one small request per file and downloads nothing; the download happens when the query runs.
 - **Each file's header is read again when the query runs.** A file whose header changed after binding, rewritten under a prepared statement, say, fails the query: prepare it again.
 - **Rows are read by DuckDB's CSV reader** in GTDB's dialect: tab-separated, with a value holding `"` quoted and the quote doubled. A row with more or fewer fields than the header is an error.
 - **Retries.** A download that fails with HTTP 5xx, 429 or 408 is tried again after 1, 2 and 4 s, and DuckDB's own HTTP retries (`http_retries`) run within each attempt. Ctrl-C and `max_execution_time` end a download or a wait ([Requests: waits and where they go](#requests-waits-and-where-they-go)).
@@ -746,12 +750,13 @@ examples below show the join.
 - `miint_gtdb_cache_dir` (default empty): where the cache is kept; see above.
 
 **Errors:**
-- both or neither of `release` and `source`, a `release` that is not digits with at most one dot, an empty `source`, or `refresh` with `source`
+- both or neither of `release` and `source`, a `release` other than a number, or two joined by a dot, each without a leading zero, an empty `source`, or `refresh` with `source`
+- an empty `miint_gtdb_url`, or no cache directory: `miint_gtdb_cache_dir` empty with neither `XDG_CACHE_HOME` nor `HOME` set
 - a `source` that does not exist, or a directory that does not hold one release's files
 - a metadata file named for neither domain
 - `bac120` and `ar53` files whose headers differ (one release's never do)
 - a header with an empty column name, a name that repeats another ignoring case, a name holding `"`, or, for `read_gtdb_metadata`, a column named `domain`
-- a file with no header line
+- a file with no header line, a header line over 1 MiB, or a gzip file that is not valid gzip
 - a release GTDB does not serve these files for, which fails with HTTP 404 and the hint to pass the extracted `.tsv` as `source`
 
 **Examples:**
@@ -764,7 +769,7 @@ SELECT accession, unnest(parse_lineage(gtdb_taxonomy))
 FROM read_gtdb_metadata(release := '232')
 WHERE gtdb_representative = 't';
 
--- The genome of each NCBI species' type strain, for records that carry a species taxid
+-- The genomes of each NCBI species' type strain, for records that carry a species taxid
 SELECT r.record_id, m.accession, m.gtdb_taxonomy
 FROM records r
 JOIN read_gtdb_metadata(release := '232') m

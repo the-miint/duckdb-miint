@@ -13,7 +13,7 @@
 #include "duckdb/common/http_util.hpp"
 #include "duckdb/common/types/uuid.hpp"
 #include "duckdb/function/table_function.hpp"
-#include "duckdb/parser/keyword_helper.hpp"
+#include "duckdb/common/sql_identifier.hpp"
 
 #include <optional>
 #include <stdexcept>
@@ -123,9 +123,12 @@ Header ReadHeader(ClientContext &context, const char *fn_name, const string &pat
 }
 
 // The files a source names: the file itself, or the one release's files in a directory.
-vector<GtdbInput> ResolveSource(ClientContext &context, GtdbTable table, const string &source) {
+vector<GtdbInput> ResolveSource(ClientContext &context, GtdbTable table, const string &given) {
 	const auto fn_name = FunctionName(table);
 	auto &fs = FileSystem::GetFileSystem(context);
+	// '~' is expanded here, in the caller's context: the rows are read on a helper
+	// connection, which would expand it by its own settings.
+	const auto source = miint::IsHttpUrl(given) ? given : fs.ExpandPath(given);
 	vector<string> paths;
 	if (miint::IsHttpUrl(source)) {
 		paths.push_back(source);
@@ -178,6 +181,8 @@ string GtdbCacheDir(ClientContext &context, const char *fn_name) {
 	}
 	if (dir.empty()) {
 		dir = miint::MiintCacheDir("gtdb");
+	} else {
+		dir = FileSystem::GetFileSystem(context).ExpandPath(dir);
 	}
 	if (dir.empty()) {
 		throw InvalidInputException("%s: cannot tell where to cache GTDB releases: set miint_gtdb_cache_dir, or HOME "
@@ -202,7 +207,7 @@ vector<GtdbInput> ResolveRelease(ClientContext &context, GtdbTable table, const 
 		input.path = miint::gtdb::ReleaseCachePath(cache_dir, file, release);
 		input.url = miint::gtdb::ReleaseFileUrl(base_url, file, release);
 		if (table == GtdbTable::METADATA) {
-			input.domain = *miint::gtdb::MetadataDomain(miint::gtdb::ReleaseFileName(file, release));
+			input.domain = miint::gtdb::MetadataDomain(miint::gtdb::ReleaseFileName(file, release)).value();
 		}
 		inputs.push_back(std::move(input));
 	}
@@ -241,6 +246,7 @@ void DownloadToCache(ClientContext &context, const char *fn_name, const string &
 	fs.CreateDirectoriesRecursive(path.substr(0, path.find_last_of('/')));
 	const auto part = path + "." + UUID::ToString(UUID::GenerateRandomUUID()) + ".part";
 	unique_ptr<FileHandle> out;
+	idx_t written = 0;
 	try {
 		miint::HttpGetStreaming(
 		    context, url, fn_name,
@@ -248,14 +254,16 @@ void DownloadToCache(ClientContext &context, const char *fn_name, const string &
 		    [&](const HTTPResponse &) {
 			    out.reset();
 			    out = fs.OpenFile(part, FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW);
+			    written = 0;
 		    },
 		    [&](const char *data, size_t size) {
 			    out->Write(const_cast<char *>(data), static_cast<int64_t>(size));
+			    written += size;
 			    return true;
 		    });
-		if (!out) {
-			// A success the client never reported the start of (a 204, say) has no body.
-			throw IOException("%s: %s answered without a body", fn_name, url);
+		// No GTDB file is empty, and an empty one cached would be trusted until refresh.
+		if (written == 0) {
+			throw IOException("%s: %s answered with an empty body", fn_name, url);
 		}
 		out->Sync();
 		out->Close();
@@ -308,8 +316,7 @@ unique_ptr<FunctionData> ReadGtdbBind(ClientContext &context, TableFunctionBindI
 		const auto &from = header_from_url ? in.url : in.path;
 		auto header =
 		    WithReleaseHint(fn_name, data->release, in.url, [&] { return ReadHeader(context, fn_name, from); });
-		in.gzip = header.gzip;
-		auto columns = ApplyRule(fn_name, in.path, [&] { return miint::gtdb::SplitHeader(header.line); });
+		auto columns = ApplyRule(fn_name, from, [&] { return miint::gtdb::SplitHeader(header.line); });
 		if (&in == &data->inputs.front()) {
 			data->header_line = std::move(header.line);
 			data->columns = std::move(columns);
@@ -360,7 +367,7 @@ unique_ptr<FunctionData> ReadGtdbQcFailedBind(ClientContext &context, TableFunct
 }
 
 string Quoted(const string &text) {
-	return KeywordHelper::WriteQuoted(text, '\'');
+	return SQLString::ToString(text);
 }
 
 // The query that reads the rows: DuckDB's CSV reader on each file, in GTDB's dialect (tab

@@ -117,11 +117,12 @@ TEST_CASE("ParseRelease gives a bare major number its .0", "[gtdb]") {
 	CHECK(r.minor == "1");
 }
 
-// The release becomes part of a URL and a cache path, so anything but digits and one dot
-// is refused rather than passed on.
+// The release becomes part of a URL and a cache path, so anything but GTDB's numbers (no
+// leading zero) and one dot is refused rather than passed on: '0232' would be looked for
+// where GTDB serves nothing.
 TEST_CASE("ParseRelease refuses anything but digits and one dot", "[gtdb]") {
 	for (const char *bad : {"", "r232", "release232", "232.0.1", "-1", "+232", "232.", ".1", " 232", "232 ", "1e3",
-	                        "23 2", "232/../x", "232.a"}) {
+	                        "23 2", "232/../x", "232.a", "0232", "232.01", "00"}) {
 		INFO("release: '" << bad << "'");
 		CHECK_THROWS_AS(ParseRelease(bad), std::invalid_argument);
 		CHECK_THROWS_WITH(ParseRelease(bad), ContainsSubstring("'" + std::string(bad) + "'") &&

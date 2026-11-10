@@ -88,10 +88,10 @@ WHERE accession = 'RS_GCF_026891715.1';
 ----
 National Research Center "Kurchatov Institute"
 
-# The link the downstream taxonomy build relies on: the genome GTDB records as the type
-# strain of an NCBI species, joined on the species' taxid. Of Bacillus subtilis's three
-# genomes here, one is its type strain; taxid 1465's only genome is not type material, so
-# it has no link.
+# An NCBI species links to the genome of its type strain through its taxid, with no name
+# matched: the genome GTDB designates "type strain of species" for that species. Of
+# Bacillus subtilis's three genomes here, one is its type strain's; taxid 1465's only
+# genome is not type material, so it has no link.
 statement ok
 CREATE TABLE records AS SELECT * FROM (VALUES ('record_1', 1423), ('record_2', 1465)) v(record, species_taxid);
 
@@ -134,15 +134,21 @@ SELECT domain, accession FROM read_gtdb_metadata(source := '{TEST_DIR}/ar53_meta
 Archaea	GB_GCA_041569275.1
 Archaea	RS_GCF_000485535.1
 
-# Rows past one vector: the reader passes DuckDB's CSV reader's chunks on.
+# Rows past one vector: the reader passes DuckDB's CSV reader's chunks on. A third of
+# the y fields are GTDB's 'none' and a third are empty, both NULL; the rest are 'v'.
 statement ok
-COPY (SELECT 'RS_' || i AS accession, i::VARCHAR AS x, CASE WHEN i % 3 = 0 THEN 'none' ELSE 'v' END AS y FROM range(5000) t(i))
-TO '{TEST_DIR}/bac120_metadata_r1.tsv' (DELIMITER '\t', HEADER);
+COPY (SELECT l FROM (
+    SELECT -1 AS i, 'accession' || chr(9) || 'x' || chr(9) || 'y' AS l
+    UNION ALL
+    SELECT i, 'RS_' || i || chr(9) || i || chr(9) || CASE i % 3 WHEN 0 THEN 'none' WHEN 1 THEN '' ELSE 'v' END
+    FROM range(5000) t(i)) ORDER BY i)
+TO '{TEST_DIR}/bac120_metadata_r1.tsv' (HEADER false, QUOTE '');
 
-query IIII
-SELECT count(*), count(DISTINCT accession), sum(x::BIGINT), count(y) FROM read_gtdb_metadata(source := '{TEST_DIR}/bac120_metadata_r1.tsv');
+query IIIII
+SELECT count(*), count(DISTINCT accession), sum(x::BIGINT), count(y), count(*) FILTER (WHERE y = 'v')
+FROM read_gtdb_metadata(source := '{TEST_DIR}/bac120_metadata_r1.tsv');
 ----
-5000	5000	12497500	3333
+5000	5000	12497500	1666	1666
 
 # --- qc_failed ----------------------------------------------------------------------
 
@@ -169,6 +175,19 @@ SELECT (SELECT count(*) FROM (DESCRIBE SELECT * FROM read_gtdb_qc_failed(source 
 FROM read_gtdb_qc_failed(source := 'data/gtdb/releases/release214/214.1/auxillary_files/qc_failed_r214.tsv');
 ----
 20	2	s__Listeria monocytogenes,s__
+
+# An empty field is NULL, as read_csv reads one; qc_failed keeps 'none', which only the
+# metadata uses as its missing-value marker.
+statement ok
+COPY (SELECT * FROM (VALUES ('Accession' || chr(9) || 'Note'), ('A' || chr(9)), ('B' || chr(9) || 'none'), ('C' || chr(9) || '-')))
+TO '{TEST_DIR}/qc_failed_r9.tsv' (HEADER false, QUOTE '');
+
+query TT
+SELECT "Accession", "Note" FROM read_gtdb_qc_failed(source := '{TEST_DIR}/qc_failed_r9.tsv') ORDER BY "Accession";
+----
+A	NULL
+B	none
+C	-
 
 # --- Parameters -----------------------------------------------------------------------
 
@@ -197,6 +216,44 @@ statement error
 SELECT * FROM read_gtdb_metadata(source := '');
 ----
 read_gtdb_metadata: source must not be empty
+
+# A release's numbers carry no leading zero, as GTDB names them: '0232' would be looked
+# for at a URL GTDB never serves.
+statement error
+SELECT * FROM read_gtdb_metadata(release := '0232');
+----
+not '0232'
+
+# refresh only means something for a release: a source is read as it is.
+statement error
+SELECT * FROM read_gtdb_metadata(source := 'data/gtdb/releases/release232/232.0', refresh := true);
+----
+read_gtdb_metadata: refresh applies to release; a source is read as it is, never cached
+
+# The URL setting is checked before any request.
+statement ok
+SET miint_gtdb_url = '';
+
+statement error
+SELECT * FROM read_gtdb_metadata(release := '214.1');
+----
+miint_gtdb_url cannot be empty; RESET it to use the default
+
+statement ok
+RESET miint_gtdb_url;
+
+# '~' in a source is the home directory of the query's own settings, read the same way
+# when binding and when reading the rows.
+statement ok
+SET home_directory = 'data/gtdb/releases/release232/232.0/auxillary_files';
+
+query I
+SELECT count(*) FROM read_gtdb_qc_failed(source := '~/qc_failed_r232.tsv');
+----
+3
+
+statement ok
+RESET home_directory;
 
 # --- Sources that do not fit ------------------------------------------------------
 

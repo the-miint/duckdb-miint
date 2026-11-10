@@ -22,6 +22,18 @@ SET miint_gtdb_cache_dir = '{TEST_DIR}/gtdb_cache';
 
 # --- Downloading a release ----------------------------------------------------------
 
+# Binding reads only header lines: DESCRIBE of a release not yet cached downloads
+# nothing.
+query I
+SELECT count(*) FROM (DESCRIBE SELECT * FROM read_gtdb_metadata(release := '232'));
+----
+114
+
+query I
+SELECT count(*) FROM glob('{TEST_DIR}/gtdb_cache/*/*');
+----
+0
+
 # Nothing is cached: binding reads each file's header line from the server, and the
 # query downloads the release's two metadata files.
 query TT
@@ -116,26 +128,6 @@ SELECT count(*) FROM glob('{TEST_DIR}/gtdb_cache/207.0/*');
 ----
 0
 
-# refresh only means something for a release: a source is read as it is.
-statement error
-SELECT * FROM read_gtdb_metadata(source := 'data/gtdb/releases/release232/232.0', refresh := true);
-----
-read_gtdb_metadata: refresh applies to release; a source is read as it is, never cached
-
-statement ok
-SET miint_gtdb_url = '';
-
-statement error
-SELECT * FROM read_gtdb_metadata(release := '214.1');
-----
-miint_gtdb_url cannot be empty; RESET it to use the default
-
-statement ok
-RESET miint_gtdb_url;
-
-statement ok
-SET miint_gtdb_url = '{MIINT_HTTPS_TEST_URL}/gtdb/releases';
-
 # --- URL sources ----------------------------------------------------------------------
 
 # A URL is read where it is, not cached.
@@ -159,7 +151,7 @@ SELECT count(*) FROM glob('{TEST_DIR}/gtdb_cache/214.1/*');
 statement error
 SELECT * FROM read_gtdb_metadata(source := '{MIINT_HTTPS_TEST_URL}/gtdb/releases/release232/232.0/bac120_metadata_r999.tsv.gz');
 ----
-HTTP 404
+download failed with HTTP 404
 
 # --- Downloads that fail --------------------------------------------------------------
 
@@ -185,6 +177,43 @@ FROM read_blob('{TEST_DIR}/gtdb_cache_cut/232.0/*') c
 JOIN read_blob('data/gtdb/releases/release232/232.0/*.gz') s ON parse_filename(c.filename) = parse_filename(s.filename);
 ----
 true
+
+query I
+SELECT count(*) FROM glob('{TEST_DIR}/gtdb_cache_cut/*/*');
+----
+2
+
+# The server's /fail/K/ paths answer a file's K-th GET with HTTP 500 and an HTML page,
+# which DuckDB's HTTP retries try again. The page reaches neither the header, when the
+# first GET (binding's) fails, nor the cache, when the second (the download) does.
+statement ok
+SET miint_gtdb_url = '{MIINT_HTTPS_TEST_URL}/fail/1/gtdb/releases';
+
+statement ok
+SET miint_gtdb_cache_dir = '{TEST_DIR}/gtdb_cache_fail1';
+
+query IT
+SELECT count(*), min("Accession") FROM read_gtdb_qc_failed(release := '232');
+----
+3	GB_GCA_020721425.1
+
+statement ok
+SET miint_gtdb_url = '{MIINT_HTTPS_TEST_URL}/fail/2/gtdb/releases';
+
+statement ok
+SET miint_gtdb_cache_dir = '{TEST_DIR}/gtdb_cache_fail2';
+
+query IT
+SELECT count(*), min("Accession") FROM read_gtdb_qc_failed(release := '232');
+----
+3	GB_GCA_020721425.1
+
+query TI
+SELECT parse_filename(c.filename), md5(c.content) = md5(s.content)
+FROM read_blob('{TEST_DIR}/gtdb_cache_fail2/*/*') c,
+     read_blob('data/gtdb/releases/release232/232.0/auxillary_files/qc_failed_r232.tsv') s;
+----
+qc_failed_r232.tsv	true
 
 # A download that never completes fails, and leaves nothing in the cache: no file at
 # its final name, and no partial one.
@@ -251,6 +280,18 @@ query I
 SELECT count(*) FROM read_gtdb_qc_failed(release := '232');
 ----
 3
+
+# qc_failed downloads its own file, not the metadata.
+query T
+SELECT parse_filename(file) FROM glob('{TEST_DIR}/gtdb_cache_httplib/*/*');
+----
+qc_failed_r232.tsv
+
+# An error status reaches the reader as one under this client too.
+statement error
+SELECT * FROM read_gtdb_metadata(release := '207');
+----
+/gtdb/releases/release207/207.0/bac120_metadata_r207.tsv.gz (HTTP 404): releases before 214.1 ship .tar.gz archives
 
 statement ok
 RESET GLOBAL http_retries;

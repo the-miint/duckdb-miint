@@ -31,10 +31,10 @@ Under `releases/`:
 
 Why these rows:
 - **Release 232's bacteria** are the three genomes of *Bacillus subtilis* (NCBI taxid 1423) in the fetched rows,
-  of which `RS_GCF_001697265.1` is the type strain (`gtdb_type_designation_ncbi_taxa` is
+  of which `RS_GCF_001697265.1` is the genome of its type strain (`gtdb_type_designation_ncbi_taxa` is
   `type strain of species`). They show the link from an NCBI species to its type strain's genome. The fourth,
   `RS_GCF_026891715.1`, has an `ncbi_submitter` GTDB writes CSV-quoted:
   `"National Research Center ""Kurchatov Institute"""`.
-- **Release 232's archaea** are a type strain and a genome that is not type material.
+- **Release 232's archaea** are the genome of a species' type strain and a genome that is not type material.
 - **Release 214.1** is the last release before CheckM2's columns, so its files have 110 columns to 232's 113.
 - **Every metadata row** holds GTDB's missing-value marker `none`: 54 times in all in release 232's bacterial file.

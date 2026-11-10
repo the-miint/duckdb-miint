@@ -213,9 +213,9 @@ if [ "${MIINT_BLAST_LIVE_TEST:-0}" = "1" ] &&
     export BLAST_LIVE_AVAILABLE=1
 fi
 
-# Live GTDB test, opt-in: `MIINT_GTDB_LIVE_TEST=1 bash run_tests.sh`. Every run downloads
-# about 37 MB from GTDB: release 232's archaeal metadata and its qc_failed list. With the
-# opt-in set, the probe still skips it when GTDB does not answer.
+# Live GTDB test, opt-in: `MIINT_GTDB_LIVE_TEST=1 bash run_tests.sh` (why: docs/testing.md,
+# "Guards and skipped tests"). With the opt-in set, the probe still skips it when GTDB does
+# not answer.
 if [ "${MIINT_GTDB_LIVE_TEST:-0}" = "1" ] &&
     curl -sSf --max-time 10 -I -o /dev/null \
         "https://data.gtdb.ecogenomic.org/releases/release232/232.0/ar53_metadata_r232.tsv.gz" 2>/dev/null; then

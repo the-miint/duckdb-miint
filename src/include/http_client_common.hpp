@@ -1,5 +1,6 @@
 #pragma once
 
+#include "http_url.hpp"
 #include "interruptible_sleep.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -31,12 +32,6 @@ inline std::string UrlSetting(duckdb::ClientContext &context, const char *name) 
 	return url;
 }
 
-// Whether `path` is an http(s) URL, which the clients fetch through DuckDB's HTTP client.
-// Other remote schemes (s3://, ...) go through DuckDB's file system instead.
-inline bool IsHttpUrl(const std::string &path) {
-	return duckdb::StringUtil::StartsWith(path, "http://") || duckdb::StringUtil::StartsWith(path, "https://");
-}
-
 // Sleeps `duration`, unless Ctrl-C or max_execution_time ends the query first. Every
 // wait in the HTTP clients goes through here. Not DuckDB's ThreadUtil::SleepMs, which
 // slices the same way but checks only IsInterrupted, which does not see the deadline.
@@ -46,9 +41,10 @@ inline void SleepUnlessInterrupted(duckdb::ClientContext &context, std::chrono::
 
 // GETs `url` and hands its body to `write` as it arrives, rather than holding it, so a
 // file of any size can be saved, or only its start read: `write` returns false to stop
-// the transfer once it has what it needs. `begin` is called, with the response, before
-// each attempt's body, which starts over from its first byte: whatever an earlier
-// attempt delivered is to be dropped. Ctrl-C and max_execution_time stop the transfer.
+// the transfer once it has what it needs. `begin` is called with each successful
+// attempt's response before its body, which starts over from its first byte: whatever an
+// earlier attempt delivered is to be dropped. Only a 2xx's body reaches `write`. Ctrl-C
+// and max_execution_time stop the transfer.
 //
 // Transient failures (5xx, 429, 408) are tried again after 1, 2 and 4 s, waits that
 // Ctrl-C and max_execution_time end. DuckDB's own retries (http_retries) run inside each

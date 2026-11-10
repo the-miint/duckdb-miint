@@ -9,10 +9,14 @@ servers (S3, ENA, NCBI) put httpfs on is never exercised. This server answers
 `Range: bytes=FIRST-LAST`, the one form httpfs sends, with 206 Partial
 Content as those servers do. Anything else is served as http.server serves it.
 
-Two path prefixes make a GET of a file fail as downloads do:
+Three path prefixes make a GET of a file fail as downloads do:
 - /cut/N/<path>: the first N GETs of <path> send three quarters of the body, then
   reset the connection, as a dropped download does.
+- /fail/K/<path>: the K-th GET of <path> answers HTTP 500 with an HTML page; the others
+  get the file.
 - /slow/<path>: sends the first 600 bytes of the body, then a byte every 100 ms.
+The GETs are counted for as long as the server runs, so a test that counts them needs a
+server of its own run, as run_tests.sh starts one.
 
 Usage: range_http_server.py PORT DIRECTORY   (listens on 127.0.0.1 only)
 """
@@ -32,12 +36,20 @@ from http import HTTPStatus
 
 RANGE = re.compile(r"bytes=(\d+)-(\d+)")
 CUT = re.compile(r"/cut/(\d+)(/.*)")
+FAIL = re.compile(r"/fail/(\d+)(/.*)")
+FAIL_PAGE = b"<!DOCTYPE HTML>\n<html><body>Internal Server Error</body></html>\n"
 SLOW = "/slow"
 SLOW_FIRST_BYTES = 600
 SLOW_INTERVAL_SECONDS = 0.1
 
-_cut_gets = collections.Counter()
-_cut_lock = threading.Lock()
+_gets = collections.Counter()
+_gets_lock = threading.Lock()
+
+
+def _count_get(path):
+    with _gets_lock:
+        _gets[path] += 1
+        return _gets[path]
 
 
 class RangeRequestHandler(http.server.SimpleHTTPRequestHandler):
@@ -45,13 +57,22 @@ class RangeRequestHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         cut = CUT.fullmatch(self.path)
+        fail = FAIL.fullmatch(self.path)
         if cut:
-            with _cut_lock:
-                _cut_gets[self.path] += 1
-                due = _cut_gets[self.path] <= int(cut[1])
+            due = _count_get(self.path) <= int(cut[1])
             self.path = cut[2]
             if due:
                 self._send_cut()
+                return
+        elif fail:
+            due = _count_get(self.path) == int(fail[1])
+            self.path = fail[2]
+            if due:
+                self.send_response(HTTPStatus.INTERNAL_SERVER_ERROR)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(FAIL_PAGE)))
+                self.end_headers()
+                self.wfile.write(FAIL_PAGE)
                 return
         elif self.path.startswith(SLOW + "/"):
             self.path = self.path[len(SLOW) :]

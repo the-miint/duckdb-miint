@@ -1,5 +1,7 @@
 #include "GtdbFiles.hpp"
 
+#include "http_url.hpp"
+
 #include <zlib.h>
 
 #include <algorithm>
@@ -13,16 +15,14 @@ namespace gtdb {
 
 namespace {
 
+// ASCII digits only: std::isdigit follows the locale.
 bool IsDigits(std::string_view s) {
 	return !s.empty() && std::all_of(s.begin(), s.end(), [](char c) { return c >= '0' && c <= '9'; });
 }
 
-bool StartsWith(std::string_view s, std::string_view prefix) {
-	return s.substr(0, prefix.size()) == prefix;
-}
-
-bool EndsWith(std::string_view s, std::string_view suffix) {
-	return s.size() >= suffix.size() && s.substr(s.size() - suffix.size()) == suffix;
+// A number as GTDB writes one in a release's name: digits, without a leading zero.
+bool IsReleaseNumber(std::string_view s) {
+	return IsDigits(s) && (s.size() == 1 || s.front() != '0');
 }
 
 std::string JoinPath(std::string_view dir, std::string_view name) {
@@ -41,12 +41,12 @@ struct NamedFile {
 // Reads a name of the form <prefix>_r<digits>.tsv or .tsv.gz, for one of `prefixes`.
 std::optional<NamedFile> ParseReleaseFileName(std::string_view name, std::initializer_list<std::string_view> prefixes) {
 	for (const auto prefix : prefixes) {
-		if (!StartsWith(name, prefix) || name.substr(prefix.size(), 2) != "_r") {
+		if (!name.starts_with(prefix) || name.substr(prefix.size(), 2) != "_r") {
 			continue;
 		}
 		auto rest = name.substr(prefix.size() + 2);
 		for (const std::string_view extension : {".tsv", ".tsv.gz"}) {
-			if (EndsWith(rest, extension) && IsDigits(rest.substr(0, rest.size() - extension.size()))) {
+			if (rest.ends_with(extension) && IsDigits(rest.substr(0, rest.size() - extension.size()))) {
 				return NamedFile {prefix, rest.substr(0, rest.size() - extension.size())};
 			}
 		}
@@ -75,7 +75,7 @@ Release ParseRelease(std::string_view release) {
 	const auto dot = release.find('.');
 	const auto major = release.substr(0, dot);
 	const auto minor = dot == std::string_view::npos ? std::string_view("0") : release.substr(dot + 1);
-	if (!IsDigits(major) || !IsDigits(minor)) {
+	if (!IsReleaseNumber(major) || !IsReleaseNumber(minor)) {
 		throw std::invalid_argument("release must be a GTDB release number such as '232' or '214.1', not '" +
 		                            std::string(release) + "'");
 	}
@@ -107,7 +107,7 @@ std::string ReleaseCachePath(std::string_view cache_dir, ReleaseFile file, const
 }
 
 std::string_view FileName(std::string_view path) {
-	if (StartsWith(path, "http://") || StartsWith(path, "https://")) {
+	if (IsHttpUrl(path)) {
 		path = path.substr(0, path.find_first_of("?#"));
 	}
 	const auto slash = path.find_last_of("/\\");
@@ -115,10 +115,10 @@ std::string_view FileName(std::string_view path) {
 }
 
 std::optional<std::string> MetadataDomain(std::string_view file_name) {
-	if (StartsWith(file_name, "bac120_")) {
+	if (file_name.starts_with("bac120_")) {
 		return "Bacteria";
 	}
-	if (StartsWith(file_name, "ar53_") || StartsWith(file_name, "ar122_")) {
+	if (file_name.starts_with("ar53_") || file_name.starts_with("ar122_")) {
 		return "Archaea";
 	}
 	return std::nullopt;
@@ -133,7 +133,7 @@ std::vector<std::string> MatchMetadataFiles(const std::vector<std::string> &name
 		if (!parsed) {
 			continue;
 		}
-		(parsed->prefix == "bac120_metadata" ? bacterial : archaeal).push_back(name);
+		(MetadataDomain(name) == "Bacteria" ? bacterial : archaeal).push_back(name);
 		releases.push_back(parsed->release);
 	}
 	if (bacterial.empty() && archaeal.empty()) {

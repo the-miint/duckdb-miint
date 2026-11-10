@@ -230,7 +230,8 @@ times (default 3), and one answered 429 or 503 five times more, sleeping up to 2
 query for 44 to 88 s, by the jittered schedule (68 s measured, #414), before the client sees the
 status, whatever Ctrl-C does. A POST is never retried there. The clients take their HTTP
 parameters from the database (`InitializeParameters(db, url)`), so `SET GLOBAL http_retries`
-changes theirs and a session `SET` does not.
+changes theirs and a session `SET` does not. A GET whose body streams to a handler has more to it:
+[A GET that streams its body](#a-get-that-streams-its-body-duckdb-20-httpfs).
 
 ### Waiting and background work (DuckDB 2.0)
 
@@ -469,7 +470,8 @@ chunks instead of holding it in `response->body`
 (`src/http/httpfs_curl_client.cpp`, `src/http/httpfs_httplib_client.cpp`), three things are
 easy to miss:
 
-- **A retry sends the body again from its first byte.** `HTTPUtil::RunRequestWithRetry` retries a
+- **A retry sends the body again from its first byte.** `HTTPUtil::RunRequestWithRetry`
+  ([Interrupts and `max_execution_time`](#interrupts-and-max_execution_time-duckdb-20)) retries a
   GET whose transfer fails partway, since a dropped connection is a request error, and the
   content handler then receives the new attempt's body from the start. The response handler
   runs once per attempt: before a 2xx's body, and after the body of an error status, which
@@ -486,7 +488,7 @@ The curl client sets no limit on a transfer's total time, but aborts one that st
 for `http_timeout` seconds (`CURLOPT_LOW_SPEED_LIMIT`, `CURLOPT_LOW_SPEED_TIME`), as "Timeout was
 reached".
 
-`miint::HttpGetStreaming` (`src/http_client_common.cpp`) handles all three, and checks for an
-interrupt on every chunk. `read_ncbi_taxdump` downloads through it, and the GTDB readers
-(`src/read_gtdb.cpp`) read a header line with it, stopping once the line is in, and download a
-release into their cache.
+`miint::HttpGetStreaming` (`src/http_client_common.cpp`) handles all three, passes only a 2xx's
+body on, and checks for an interrupt on every chunk. Use it for any GET whose body is large, or
+of which only the start is wanted. Its retries wrap `RunRequestWithRetry`'s
+([Interrupts and `max_execution_time`](#interrupts-and-max_execution_time-duckdb-20)).

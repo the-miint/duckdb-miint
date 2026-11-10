@@ -25,8 +25,9 @@ struct Release {
 	}
 };
 
-// Parses a release as a user writes it: digits, optionally a dot and more digits. A bare
-// major number is that release's first, ".0". Throws std::invalid_argument otherwise.
+// Parses a release as a user writes it: a number, optionally a dot and another, each
+// without a leading zero ("232", "214.1"). A bare major number is that release's first,
+// ".0". Throws std::invalid_argument otherwise.
 Release ParseRelease(std::string_view release);
 
 // The files of a release the readers use.

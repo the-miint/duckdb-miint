@@ -18,15 +18,19 @@ void HttpGetStreaming(duckdb::ClientContext &context, const std::string &url, co
 	auto &http_util = duckdb::HTTPUtil::Get(db);
 	auto params = http_util.InitializeParameters(db, url);
 
-	// The handlers run inside the HTTP client, which may be C (curl): an exception must not
-	// unwind through it, so it is held and rethrown once the request returns.
+	// How httpfs's clients call the handlers: docs/internals/duckdb-engine-notes.md, "A GET
+	// that streams its body". An exception must not unwind through a client, which may not
+	// catch it, so it is held and rethrown once the request returns. Only a body that
+	// `begin` has started reaches `write`, so an error page never does, whatever the client.
 	std::exception_ptr error;
+	bool body_started = false;
 	bool stopped = false;
 	duckdb::GetRequestInfo get_request(
 	    url, headers, *params,
-	    // Called once per attempt, for the status of its response: a 2xx's before its body,
-	    // which then starts over, an error's after it.
+	    // Called once per attempt with its response's status: a 2xx's before its body,
+	    // which then starts over.
 	    [&](const duckdb::HTTPResponse &response) {
+		    body_started = false;
 		    stopped = false;
 		    if (error) {
 			    return false;
@@ -41,11 +45,15 @@ void HttpGetStreaming(duckdb::ClientContext &context, const std::string &url, co
 			    error = std::current_exception();
 			    return false;
 		    }
+		    body_started = true;
 		    return true;
 	    },
 	    [&](duckdb::const_data_ptr_t data, duckdb::idx_t size) {
 		    if (error) {
 			    return false;
+		    }
+		    if (!body_started) {
+			    return true;
 		    }
 		    try {
 			    context.BlockingInterruptCheck();
@@ -71,7 +79,16 @@ void HttpGetStreaming(duckdb::ClientContext &context, const std::string &url, co
 			std::rethrow_exception(error);
 		}
 		// A transfer the caller stopped is done, though a client may report it as cancelled.
-		if (stopped || response->Success()) {
+		if (stopped) {
+			return;
+		}
+		if (response->Success()) {
+			// A client that does not stream (duckdb-wasm's, for one) leaves the body in
+			// response->body and calls neither handler.
+			if (!body_started && !response->body.empty()) {
+				begin(*response);
+				write(response->body.data(), response->body.size());
+			}
 			return;
 		}
 		const auto status = static_cast<int>(response->status);

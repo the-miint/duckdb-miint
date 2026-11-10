@@ -10,10 +10,7 @@ namespace duckdb {
 // read_gtdb_qc_failed(...) reads GTDB's list of genomes that failed its quality checks,
 // every column VARCHAR, values as written.
 //
-// Pass exactly one of source (a file, a URL, or a directory holding one release's files)
-// and release ('232', '214.1'). A release's files are downloaded into a cache when the
-// query runs, and read from there after. Binding reads only the files' header lines,
-// from GTDB for a release not yet cached; the rows are read by DuckDB's CSV reader.
+// The user-facing contract is docs/insdc_ncbi.md, "Read GTDB's genome metadata".
 class ReadGtdbFunctions {
 public:
 	// Where GTDB serves its releases: the default of the miint_gtdb_url setting.
