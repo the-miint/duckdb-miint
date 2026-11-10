@@ -1,11 +1,9 @@
 #include "GtdbFiles.hpp"
 
-#include "http_url.hpp"
-
-#include <zlib.h>
+#include "remote_file_helper.hpp"
+#include "duckdb/common/string_util.hpp"
 
 #include <algorithm>
-#include <cstring>
 #include <initializer_list>
 #include <stdexcept>
 #include <unordered_map>
@@ -15,21 +13,14 @@ namespace gtdb {
 
 namespace {
 
-// ASCII digits. std::isdigit is undefined for a negative char.
+// ASCII digits, by DuckDB's test (std::isdigit is undefined for a negative char).
 bool IsDigits(std::string_view s) {
-	return !s.empty() && std::all_of(s.begin(), s.end(), [](char c) { return c >= '0' && c <= '9'; });
+	return !s.empty() && std::all_of(s.begin(), s.end(), duckdb::StringUtil::CharacterIsDigit);
 }
 
 // A number as GTDB writes one in a release's name: digits, without a leading zero.
 bool IsReleaseNumber(std::string_view s) {
 	return IsDigits(s) && (s.size() == 1 || s.front() != '0');
-}
-
-std::string JoinPath(std::string_view dir, std::string_view name) {
-	while (!dir.empty() && dir.back() == '/') {
-		dir.remove_suffix(1);
-	}
-	return std::string(dir) + "/" + std::string(name);
 }
 
 // GTDB's name for a file of a release: <prefix>_r<major>.tsv[.gz].
@@ -94,20 +85,17 @@ std::string ReleaseFileName(ReleaseFile file, const Release &release) {
 	throw std::logic_error("unknown GTDB release file");
 }
 
-std::string ReleaseFileUrl(std::string_view base_url, ReleaseFile file, const Release &release) {
-	auto dir = JoinPath(JoinPath(base_url, "release" + release.major), release.ToString());
-	if (file == ReleaseFile::QC_FAILED) {
-		dir = JoinPath(dir, "auxillary_files");
-	}
-	return JoinPath(dir, ReleaseFileName(file, release));
+std::string ServedPath(ReleaseFile file, const Release &release) {
+	const auto dir = "release" + release.major + "/" + release.ToString() + "/";
+	return dir + (file == ReleaseFile::QC_FAILED ? "auxillary_files/" : "") + ReleaseFileName(file, release);
 }
 
-std::string ReleaseCachePath(std::string_view cache_dir, ReleaseFile file, const Release &release) {
-	return JoinPath(JoinPath(cache_dir, release.ToString()), ReleaseFileName(file, release));
+std::string CachedPath(ReleaseFile file, const Release &release) {
+	return release.ToString() + "/" + ReleaseFileName(file, release);
 }
 
 std::string_view FileName(std::string_view path) {
-	if (IsHttpUrl(path)) {
+	if (RemoteFileHelper::IsRemotePath(std::string(path))) {
 		path = path.substr(0, path.find_first_of("?#"));
 	}
 	const auto slash = path.find_last_of("/\\");
@@ -183,8 +171,7 @@ std::vector<std::string> SplitHeader(std::string_view line) {
 			                         name + "': GTDB's column names never do, and the header is not read as CSV");
 		}
 		std::string folded = name;
-		std::transform(folded.begin(), folded.end(), folded.begin(),
-		               [](char c) { return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c; });
+		std::transform(folded.begin(), folded.end(), folded.begin(), duckdb::StringUtil::CharacterToLower);
 		const auto inserted = seen.emplace(folded, column);
 		if (!inserted.second) {
 			const auto first = inserted.first->second;
@@ -198,142 +185,6 @@ std::vector<std::string> SplitHeader(std::string_view line) {
 		}
 		start = tab + 1;
 	}
-}
-
-// ---------------------------------------------------------------------------
-// HeaderLineReader
-// ---------------------------------------------------------------------------
-
-struct HeaderLineReader::Inflater {
-	z_stream zs;
-	bool ended = false;
-
-	Inflater() {
-		std::memset(&zs, 0, sizeof(zs));
-		// 16 + MAX_WBITS: gzip framing.
-		if (inflateInit2(&zs, 16 + MAX_WBITS) != Z_OK) {
-			throw std::runtime_error("cannot start a gzip decompressor");
-		}
-	}
-	~Inflater() {
-		inflateEnd(&zs);
-	}
-	Inflater(const Inflater &) = delete;
-	Inflater &operator=(const Inflater &) = delete;
-};
-
-namespace {
-constexpr size_t GZIP_MAGIC_SIZE = 2;
-constexpr char GZIP_MAGIC[GZIP_MAGIC_SIZE] = {'\x1f', '\x8b'};
-constexpr size_t INFLATE_WINDOW = 65536;
-
-std::runtime_error NoFirstLine(const char *why) {
-	return std::runtime_error(std::string("no first line: ") + why);
-}
-} // namespace
-
-HeaderLineReader::HeaderLineReader(size_t max_line) : max_line_(max_line) {
-}
-HeaderLineReader::~HeaderLineReader() = default;
-HeaderLineReader::HeaderLineReader(HeaderLineReader &&) noexcept = default;
-HeaderLineReader &HeaderLineReader::operator=(HeaderLineReader &&) noexcept = default;
-
-bool HeaderLineReader::Feed(const char *data, size_t size) {
-	if (done_) {
-		return true;
-	}
-	if (!decided_) {
-		const auto take = std::min(size, GZIP_MAGIC_SIZE - pending_.size());
-		pending_.append(data, take);
-		data += take;
-		size -= take;
-		if (pending_.size() < GZIP_MAGIC_SIZE) {
-			return false;
-		}
-		if (Decide()) {
-			return true;
-		}
-	}
-	return gzip_ ? Inflate(data, size) : Append(data, size);
-}
-
-// Settles plain or gzip from the bytes held so far, and hands them on.
-bool HeaderLineReader::Decide() {
-	decided_ = true;
-	gzip_ = pending_.size() == GZIP_MAGIC_SIZE && std::memcmp(pending_.data(), GZIP_MAGIC, GZIP_MAGIC_SIZE) == 0;
-	if (gzip_) {
-		inflater_ = std::make_unique<Inflater>();
-	}
-	std::string held;
-	held.swap(pending_);
-	return gzip_ ? Inflate(held.data(), held.size()) : Append(held.data(), held.size());
-}
-
-// Adds decoded bytes to the line. Returns true once it holds the whole line.
-bool HeaderLineReader::Append(const char *data, size_t size) {
-	const auto newline = static_cast<const char *>(std::memchr(data, '\n', size));
-	line_.append(data, newline ? static_cast<size_t>(newline - data) : size);
-	if (newline) {
-		if (!line_.empty() && line_.back() == '\r') {
-			line_.pop_back();
-		}
-		done_ = true;
-	}
-	// A '\r' that may yet turn out to end the line does not count against the cap.
-	const auto length = !done_ && !line_.empty() && line_.back() == '\r' ? line_.size() - 1 : line_.size();
-	if (length > max_line_) {
-		throw std::runtime_error("the first line is longer than " + std::to_string(max_line_) + " bytes");
-	}
-	return done_;
-}
-
-// A gzip file may hold several members, one after another (bgzip writes them): when one
-// ends, the bytes that follow start the next.
-bool HeaderLineReader::Inflate(const char *data, size_t size) {
-	auto &zs = inflater_->zs;
-	char window[INFLATE_WINDOW];
-	while (size > 0) {
-		if (inflater_->ended) {
-			if (inflateReset(&zs) != Z_OK) {
-				throw std::runtime_error("cannot restart the gzip decompressor");
-			}
-			inflater_->ended = false;
-		}
-		// avail_in is a uInt: hand a large buffer over in slices.
-		const auto slice = static_cast<uInt>(std::min<size_t>(size, 1u << 30));
-		zs.next_in = reinterpret_cast<Bytef *>(const_cast<char *>(data));
-		zs.avail_in = slice;
-		do {
-			zs.next_out = reinterpret_cast<Bytef *>(window);
-			zs.avail_out = sizeof(window);
-			const int ret = inflate(&zs, Z_NO_FLUSH);
-			if (ret == Z_STREAM_END) {
-				inflater_->ended = true;
-			} else if (ret != Z_OK && ret != Z_BUF_ERROR) {
-				throw std::runtime_error(std::string("corrupt gzip stream: ") + (zs.msg ? zs.msg : "inflate failed"));
-			}
-			if (Append(window, sizeof(window) - zs.avail_out)) {
-				return true;
-			}
-		} while (!inflater_->ended && (zs.avail_in > 0 || zs.avail_out == 0));
-		data += slice - zs.avail_in;
-		size -= slice - zs.avail_in;
-	}
-	return false;
-}
-
-std::string HeaderLineReader::Finish() {
-	if (!decided_) {
-		Decide();
-	}
-	if (!done_) {
-		if (!gzip_) {
-			throw NoFirstLine("the file ends before its first newline");
-		}
-		throw NoFirstLine(inflater_ && inflater_->ended ? "the gzip stream ends before its first newline"
-		                                                : "the gzip stream is cut short before its first newline");
-	}
-	return line_;
 }
 
 } // namespace gtdb

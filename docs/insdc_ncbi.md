@@ -726,7 +726,7 @@ same licence.
 **Parameters** (named only; pass exactly one of `release` and `source`):
 - `release` (VARCHAR): a GTDB release, such as `'232'` or `'214.1'`. A bare number is the release's first, `.0`. Its files are downloaded into a cache when the query runs, and read from there after. Releases from 214.1 serve the files these functions read. Earlier ones ship `.tar.gz` archives: extract the `.tsv` and pass it as `source`.
 - `source` (VARCHAR): what to read, as it is, never cached:
-  - a `.tsv` or `.tsv.gz` file, local or `http(s)://`. Gzip is told by the file's bytes, not its name.
+  - a `.tsv` or `.tsv.gz` file, local or remote: `http(s)://`, or any scheme a loaded DuckDB file system reads, such as `s3://`. Gzip is told by the `.gz` name, as `read_csv` tells it.
   - a directory holding one release's files, such as a release's cache directory. For `read_gtdb_metadata`, at most one `bac120_metadata_r<N>.tsv[.gz]` and one `ar53_metadata_r<N>.tsv[.gz]` (`ar122_` before release 207), at least one of the two, of the same release. For `read_gtdb_qc_failed`, exactly one `qc_failed_r<N>.tsv[.gz]`. Other files are ignored.
 - `refresh` (BOOLEAN, default false): with `release`, download its files again though they are cached. With `source` it is an error.
 
@@ -749,7 +749,7 @@ join, which gives a row for each such genome.
 **Behavior:**
 - **The cache.** A release's files are kept, compressed as served, at `<cache>/<release>/<file name>`, such as `~/.cache/miint/gtdb/232.0/bac120_metadata_r232.tsv.gz`. `<cache>` is the `miint_gtdb_cache_dir` setting, or `${XDG_CACHE_HOME:-~/.cache}/miint/gtdb` when that is empty (the default). Every file sits in the release's directory, `qc_failed` included, so the directory is a `source` for either function. Only the files a call reads are downloaded: `read_gtdb_qc_failed` does not fetch the metadata.
 - **Downloads.** A file is downloaded to a file of its own beside its final name, which is renamed into place once complete. So a file at its final name is complete, and it is trusted: nothing checks it against GTDB again until `refresh := true`. A failed or interrupted download removes its file. A killed process leaves `<name>.<id>.part`, which is never read and can be deleted.
-- **Binding reads only header lines**, which name the columns: from the file, or by a request stopped once the line has arrived for a URL `source`, a release's file not yet cached, and every file with `refresh := true`. So `DESCRIBE` or `EXPLAIN` then makes one small request per file and downloads nothing; the download happens when the query runs.
+- **Binding reads only header lines**, which name the columns, through DuckDB's file systems: from the file, or from GTDB for a release's file not yet cached and every file with `refresh := true`. For a remote file, httpfs fetches only the start: 64 KB of a plain file, and of a gzip file 16 MiB or the whole file if smaller, the piece DuckDB reads a remote compressed file in. So `DESCRIBE` or `EXPLAIN` of release 232 not yet cached fetches about 23 MB (16 MiB of `bac120`, all 7 MB of `ar53`) and caches nothing; the download happens when the query runs.
 - **Each file's header is read again when the query runs.** A file whose header changed after binding, rewritten under a prepared statement, say, fails the query: prepare it again.
 - **Rows are read by DuckDB's CSV reader** in GTDB's dialect: tab-separated, with a value holding `"` quoted and the quote doubled. A row with more or fewer fields than the header is an error.
 - **Retries.** A download that fails with HTTP 5xx, 429 or 408 is tried again after 1, 2 and 4 s, and DuckDB's own HTTP retries (`http_retries`) run within each attempt. Ctrl-C and `max_execution_time` end a download or a wait ([Requests: waits and where they go](#requests-waits-and-where-they-go)).
@@ -765,7 +765,7 @@ join, which gives a row for each such genome.
 - a metadata file named for neither domain
 - `bac120` and `ar53` files whose headers differ (one release's never do)
 - a header with an empty column name, a name that repeats another ignoring case, a name holding `"`, or, for `read_gtdb_metadata`, a column named `domain`
-- a file with no header line, a header line over 1 MiB, or a gzip file that is not valid gzip
+- a file with no header line, a header line over 1 MiB, or a file named `.gz` that is not valid gzip
 - a release GTDB does not serve these files for, which fails with HTTP 404 and the hint to pass the extracted `.tsv` as `source`
 
 **Examples:**

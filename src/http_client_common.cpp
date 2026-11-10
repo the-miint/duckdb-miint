@@ -11,7 +11,7 @@ namespace miint {
 
 void HttpGetStreaming(duckdb::ClientContext &context, const std::string &url, const char *fn_name,
                       const std::function<void(const duckdb::HTTPResponse &)> &begin,
-                      const std::function<bool(const char *, size_t)> &write) {
+                      const std::function<void(const char *, size_t)> &write) {
 	EnsureHttpfsLoaded(context);
 	duckdb::DatabaseInstance &db = *context.db;
 	duckdb::HTTPHeaders headers(db);
@@ -26,14 +26,12 @@ void HttpGetStreaming(duckdb::ClientContext &context, const std::string &url, co
 	// calls the response handler.
 	std::exception_ptr error;
 	bool body_started = false;
-	bool stopped = false;
 	duckdb::GetRequestInfo get_request(
 	    url, headers, *params,
 	    // Called once per attempt with its response's status: a 2xx's before its body,
 	    // which then starts over.
 	    [&](const duckdb::HTTPResponse &response) {
 		    body_started = false;
-		    stopped = false;
 		    if (error) {
 			    return false;
 		    }
@@ -59,10 +57,7 @@ void HttpGetStreaming(duckdb::ClientContext &context, const std::string &url, co
 		    }
 		    try {
 			    context.BlockingInterruptCheck();
-			    if (!write(duckdb::const_char_ptr_cast(data), size)) {
-				    stopped = true;
-				    return false;
-			    }
+			    write(duckdb::const_char_ptr_cast(data), size);
 		    } catch (...) {
 			    error = std::current_exception();
 			    return false;
@@ -75,14 +70,9 @@ void HttpGetStreaming(duckdb::ClientContext &context, const std::string &url, co
 	int retry_delay_ms = 1000;
 	for (int attempt = 0; attempt <= MAX_RETRIES; ++attempt) {
 		error = nullptr;
-		stopped = false;
 		auto response = http_util.Request(get_request);
 		if (error) {
 			std::rethrow_exception(error);
-		}
-		// A transfer the caller stopped is done, though a client may report it as cancelled.
-		if (stopped) {
-			return;
 		}
 		if (response->Success()) {
 			// A client that never calls the response handler (duckdb-wasm's) leaves the body

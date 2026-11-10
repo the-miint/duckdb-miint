@@ -6,15 +6,18 @@
 #include "miint_cache.hpp"
 #include "miint_named_parameter.hpp"
 #include "miint_streaming_query.hpp"
+#include "remote_file_helper.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/exception/http_exception.hpp"
 #include "duckdb/common/file_open_flags.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/http_util.hpp"
+#include "duckdb/common/path.hpp"
 #include "duckdb/common/types/uuid.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/common/sql_identifier.hpp"
 
+#include <cstring>
 #include <optional>
 #include <stdexcept>
 
@@ -30,13 +33,11 @@ const char *FunctionName(GtdbTable table) {
 
 // One file the reader reads: where the rows are read from (a local file, a URL, or the
 // cache's copy of a release's file), for a release's file the URL it is downloaded from,
-// for metadata the domain its name implies, and whether its bytes are gzip, which is
-// read from them when the query runs.
+// and for metadata the domain its name implies.
 struct GtdbInput {
 	string path;
 	string url;
 	string domain;
-	bool gzip = false;
 };
 
 struct ReadGtdbData : public TableFunctionData {
@@ -84,42 +85,37 @@ std::optional<string> OptionalString(TableFunctionBindInput &input, const char *
 	return it->second.ToString();
 }
 
-// The first line of a file and whether it is gzip, reading no further than the line.
-struct Header {
-	string line;
-	bool gzip;
-};
+// No GTDB header comes near this; a first line longer is not read on.
+constexpr idx_t MAX_HEADER_LINE = idx_t(1) << 20;
 
-// A URL's header is read by a GET stopped once the line is in, so binding does not fetch
-// the file (GTDB's bacterial metadata is hundreds of MB).
-Header ReadUrlHeader(ClientContext &context, const char *fn_name, const string &url) {
-	miint::gtdb::HeaderLineReader reader;
-	return ApplyRule(fn_name, url, [&] {
-		miint::HttpGetStreaming(
-		    context, url, fn_name, [&](const HTTPResponse &) { reader = miint::gtdb::HeaderLineReader(); },
-		    [&](const char *data, size_t size) { return !reader.Feed(data, size); });
-		auto line = reader.Finish();
-		return Header {std::move(line), reader.IsGzip()};
-	});
-}
-
-Header ReadHeader(ClientContext &context, const char *fn_name, const string &path) {
-	if (miint::IsHttpUrl(path)) {
-		return ReadUrlHeader(context, fn_name, path);
-	}
+// A file's first line, without its "\n" or "\r\n", read through DuckDB's file systems as
+// read_csv reads the rows: a local path or a URL of any scheme they open, and gzip told by
+// its .gz name. Reading stops at the newline, so binding fetches no more of a URL than
+// the first ranges httpfs asks for (GTDB's bacterial metadata is hundreds of MB).
+string ReadHeader(ClientContext &context, const char *fn_name, const string &path) {
 	auto &fs = FileSystem::GetFileSystem(context);
-	auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
-	miint::gtdb::HeaderLineReader reader;
-	vector<char> buffer(65536);
+	auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ | FileCompressionType::AUTO_DETECT);
 	return ApplyRule(fn_name, path, [&] {
+		string line;
+		char buffer[65536];
 		while (true) {
-			const auto n = handle->Read(buffer.data(), buffer.size());
-			if (n <= 0 || reader.Feed(buffer.data(), static_cast<size_t>(n))) {
+			const auto n = handle->Read(buffer, sizeof(buffer));
+			if (n <= 0) {
+				throw std::runtime_error("no first line: the file ends before its first newline");
+			}
+			const auto newline = static_cast<const char *>(std::memchr(buffer, '\n', static_cast<size_t>(n)));
+			line.append(buffer, newline ? static_cast<size_t>(newline - buffer) : static_cast<size_t>(n));
+			if (line.size() > MAX_HEADER_LINE) {
+				throw std::runtime_error("the first line is longer than " + std::to_string(MAX_HEADER_LINE) + " bytes");
+			}
+			if (newline) {
 				break;
 			}
 		}
-		auto line = reader.Finish();
-		return Header {std::move(line), reader.IsGzip()};
+		if (!line.empty() && line.back() == '\r') {
+			line.pop_back();
+		}
+		return line;
 	});
 }
 
@@ -128,10 +124,11 @@ vector<GtdbInput> ResolveSource(ClientContext &context, GtdbTable table, const s
 	const auto fn_name = FunctionName(table);
 	auto &fs = FileSystem::GetFileSystem(context);
 	// '~' is expanded here, in the caller's context: the rows are read on a helper
-	// connection, which would expand it by its own settings.
-	const auto source = miint::IsHttpUrl(given) ? given : fs.ExpandPath(given);
+	// connection, which would expand it by its own settings. A URL is read where it is.
+	const auto remote = miint::RemoteFileHelper::IsRemotePath(given);
+	const auto source = remote ? given : fs.ExpandPath(given);
 	vector<string> paths;
-	if (miint::IsHttpUrl(source)) {
+	if (remote) {
 		paths.push_back(source);
 	} else if (fs.DirectoryExists(source)) {
 		vector<string> names;
@@ -203,10 +200,11 @@ vector<GtdbInput> ResolveRelease(ClientContext &context, GtdbTable table, const 
 	                       ? vector<ReleaseFile> {ReleaseFile::BAC120_METADATA, ReleaseFile::AR53_METADATA}
 	                       : vector<ReleaseFile> {ReleaseFile::QC_FAILED};
 	vector<GtdbInput> inputs;
+	auto &fs = FileSystem::GetFileSystem(context);
 	for (const auto file : files) {
 		GtdbInput input;
-		input.path = miint::gtdb::ReleaseCachePath(cache_dir, file, release);
-		input.url = miint::gtdb::ReleaseFileUrl(base_url, file, release);
+		input.path = fs.JoinPath(cache_dir, miint::gtdb::CachedPath(file, release));
+		input.url = fs.JoinPath(base_url, miint::gtdb::ServedPath(file, release));
 		if (table == GtdbTable::METADATA) {
 			input.domain = miint::gtdb::MetadataDomain(miint::gtdb::ReleaseFileName(file, release)).value();
 		}
@@ -244,7 +242,7 @@ bool NeedsDownload(ClientContext &context, const ReadGtdbData &data, const GtdbI
 // download removes its file.
 void DownloadToCache(ClientContext &context, const char *fn_name, const string &url, const string &path) {
 	auto &fs = FileSystem::GetFileSystem(context);
-	fs.CreateDirectoriesRecursive(path.substr(0, path.find_last_of('/')));
+	fs.CreateDirectoriesRecursive(Path::FromString(path).Parent().ToString());
 	const auto part = path + "." + UUID::ToString(UUID::GenerateRandomUUID()) + ".part";
 	unique_ptr<FileHandle> out;
 	idx_t written = 0;
@@ -260,7 +258,6 @@ void DownloadToCache(ClientContext &context, const char *fn_name, const string &
 		    [&](const char *data, size_t size) {
 			    out->Write(const_cast<char *>(data), static_cast<int64_t>(size));
 			    written += size;
-			    return true;
 		    });
 		// No GTDB file is empty, and an empty one cached would be trusted until refresh.
 		if (written == 0) {
@@ -317,13 +314,13 @@ unique_ptr<FunctionData> ReadGtdbBind(ClientContext &context, TableFunctionBindI
 		const auto &from = header_from_url ? in.url : in.path;
 		auto header =
 		    WithReleaseHint(fn_name, data->release, in.url, [&] { return ReadHeader(context, fn_name, from); });
-		auto columns = ApplyRule(fn_name, from, [&] { return miint::gtdb::SplitHeader(header.line); });
+		auto columns = ApplyRule(fn_name, from, [&] { return miint::gtdb::SplitHeader(header); });
 		if (&in == &data->inputs.front()) {
-			data->header_line = std::move(header.line);
+			data->header_line = std::move(header);
 			data->columns = std::move(columns);
 			continue;
 		}
-		if (header.line == data->header_line) {
+		if (header == data->header_line) {
 			continue;
 		}
 		const auto first = string(miint::gtdb::FileName(data->inputs.front().path));
@@ -373,21 +370,22 @@ string Quoted(const string &text) {
 
 // The query that reads the rows: DuckDB's CSV reader on each file, in GTDB's dialect (tab
 // separated, a value holding '"' quoted with the quote doubled), with the bound columns,
-// all VARCHAR. Metadata adds the domain, and reads GTDB's 'none' as NULL.
-string RowsQuery(const ReadGtdbData &data, const vector<GtdbInput> &inputs) {
+// all VARCHAR, and compression told by the name as ReadHeader tells it. Metadata adds the
+// domain, and reads GTDB's 'none' as NULL.
+string RowsQuery(const ReadGtdbData &data) {
 	string columns;
 	for (const auto &column : data.columns) {
 		columns += (columns.empty() ? "" : ", ") + Quoted(column) + ": 'VARCHAR'";
 	}
 	string query;
-	for (const auto &in : inputs) {
+	for (const auto &in : data.inputs) {
 		query += query.empty() ? "SELECT " : " UNION ALL SELECT ";
 		if (data.table == GtdbTable::METADATA) {
 			query += Quoted(in.domain) + " AS domain, ";
 		}
 		query += "* FROM read_csv(" + Quoted(in.path) +
 		         ", delim = '\\t', quote = '\"', escape = '\"', header = true, auto_detect = false, columns = {" +
-		         columns + "}, compression = " + (in.gzip ? "'gzip'" : "'none'");
+		         columns + "}, compression = 'auto'";
 		if (data.table == GtdbTable::METADATA) {
 			query += ", nullstr = ['none', '']";
 		}
@@ -403,22 +401,19 @@ unique_ptr<GlobalTableFunctionState> ReadGtdbInitGlobal(ClientContext &context, 
 	// A release's files are downloaded now, when the query runs, never while binding.
 	// Then the rows are read under the bound column names, so a file whose header changed
 	// since (rewritten under a prepared statement, say) would be read under the wrong ones.
-	auto inputs = data.inputs;
-	for (auto &in : inputs) {
+	for (const auto &in : data.inputs) {
 		if (NeedsDownload(context, data, in)) {
 			WithReleaseHint(fn_name, data.release, in.url, [&] { DownloadToCache(context, fn_name, in.url, in.path); });
 		}
-		auto header = ReadHeader(context, fn_name, in.path);
-		if (header.line != data.header_line) {
+		if (ReadHeader(context, fn_name, in.path) != data.header_line) {
 			throw InvalidInputException(
 			    "%s: the header of '%s' changed after the query was bound; run or prepare it again", fn_name, in.path);
 		}
-		in.gzip = header.gzip;
 	}
 
 	auto gstate = make_uniq<ReadGtdbGlobalState>();
 	gstate->conn = make_uniq<Connection>(MakeReadOnlyHelperConnection(context));
-	gstate->stream = SubmitStream(*gstate->conn, RowsQuery(data, inputs));
+	gstate->stream = SubmitStream(*gstate->conn, RowsQuery(data));
 	if (gstate->stream->HasError()) {
 		gstate->stream->GetErrorObject().Throw(string(fn_name) + ": ");
 	}

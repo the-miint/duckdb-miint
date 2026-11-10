@@ -9,15 +9,19 @@ servers (S3, ENA, NCBI) put httpfs on is never exercised. This server answers
 `Range: bytes=FIRST-LAST`, the one form httpfs sends, with 206 Partial
 Content as those servers do. Anything else is served as http.server serves it.
 
-Three path prefixes make a GET of a file fail as downloads do:
-- /cut/N/<path>: the first N GETs of <path> send three quarters of the body, then
+Path prefixes make a download of a file fail as downloads do. A download is a GET of the
+whole file, without a Range header, as miint's readers download; the prefixes leave
+HEADs and range GETs, which httpfs sends to read part of a file such as its header,
+served as usual, and count only downloads:
+- /cut/N/<path>: the first N downloads of <path> send three quarters of the body, then
   reset the connection, as a dropped download does.
-- /fail/K/<path>: the K-th GET of <path> answers HTTP 500 with an HTML page; the others
-  get the file.
-- /empty/K/<path>: the K-th GET of <path> answers HTTP 200 with an empty body.
-- /slow/<path>: sends the first 600 bytes of the body, then a byte every 100 ms.
-The GETs are counted for as long as the server runs, so a test that counts them needs a
-server of its own run, as run_tests.sh starts one.
+- /fail/K/<path>: the K-th download of <path> answers HTTP 500 with an HTML page; the
+  others get the file.
+- /empty/K/<path>: the K-th download of <path> answers HTTP 200 with an empty body.
+- /slow/<path>: a download sends the first 600 bytes of the body, then a byte every
+  100 ms.
+The downloads are counted for as long as the server runs, so a test that counts them
+needs a server of its own run, as run_tests.sh starts one.
 
 Usage: range_http_server.py PORT DIRECTORY   (listens on 127.0.0.1 only)
 """
@@ -38,6 +42,7 @@ from http import HTTPStatus
 RANGE = re.compile(r"bytes=(\d+)-(\d+)")
 CUT = re.compile(r"/cut/(\d+)(/.*)")
 FAIL = re.compile(r"/fail/(\d+)(/.*)")
+FAULT = re.compile(r"/(?:(?:cut|fail|empty)/\d+|slow)(/.*)")
 EMPTY = re.compile(r"/empty/(\d+)(/.*)")
 FAIL_PAGE = b"<!DOCTYPE HTML>\n<html><body>Internal Server Error</body></html>\n"
 SLOW = "/slow"
@@ -57,7 +62,20 @@ def _count_get(path):
 class RangeRequestHandler(http.server.SimpleHTTPRequestHandler):
     _was_reset = False
 
+    def _drop_fault_prefix(self):
+        fault = FAULT.fullmatch(self.path)
+        if fault:
+            self.path = fault[1]
+
+    def do_HEAD(self):
+        self._drop_fault_prefix()
+        super().do_HEAD()
+
     def do_GET(self):
+        if "Range" in self.headers:
+            self._drop_fault_prefix()
+            super().do_GET()
+            return
         cut = CUT.fullmatch(self.path)
         fail = FAIL.fullmatch(self.path)
         empty = EMPTY.fullmatch(self.path)

@@ -1,7 +1,7 @@
 #pragma once
 
-#include "http_url.hpp"
 #include "interruptible_sleep.hpp"
+#include "duckdb/common/path.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
 
@@ -15,6 +15,14 @@ struct HTTPResponse;
 } // namespace duckdb
 
 namespace miint {
+
+// Whether `path` is an http(s) URL, which a reader fetches with an HTTP GET, rather than a
+// path any of DuckDB's file systems opens. The scheme is DuckDB's parse of it, which
+// lower-cases it, as URL schemes ignore case.
+inline bool IsHttpUrl(const std::string &path) {
+	const auto &scheme = duckdb::Path::FromString(path).GetScheme();
+	return scheme == "http://" || scheme == "https://";
+}
 
 // The URL a setting names, without a trailing slash, since the clients append paths to
 // it. The setting is registered at load (src/miint_extension.cpp).
@@ -40,11 +48,10 @@ inline void SleepUnlessInterrupted(duckdb::ClientContext &context, std::chrono::
 }
 
 // GETs `url` and hands its body to `write` as it arrives, rather than holding it, so a
-// file of any size can be saved, or only its start read: `write` returns false to stop
-// the transfer once it has what it needs. `begin` is called with each successful
-// attempt's response before its body, which starts over from its first byte: whatever an
-// earlier attempt delivered is to be dropped. Only a 2xx's body reaches `write`. Ctrl-C
-// and max_execution_time stop the transfer.
+// file of any size can be saved. `begin` is called with each successful attempt's
+// response before its body, which starts over from its first byte: whatever an earlier
+// attempt delivered is to be dropped. Only a 2xx's body reaches `write`. Ctrl-C and
+// max_execution_time stop the transfer.
 //
 // Transient failures (5xx, 429, 408) are tried again after 1, 2 and 4 s, waits that
 // Ctrl-C and max_execution_time end. DuckDB's own retries (http_retries) run inside each
@@ -52,6 +59,6 @@ inline void SleepUnlessInterrupted(duckdb::ClientContext &context, std::chrono::
 // `fn_name` and the URL; an exception from `begin` or `write` is rethrown as it is.
 void HttpGetStreaming(duckdb::ClientContext &context, const std::string &url, const char *fn_name,
                       const std::function<void(const duckdb::HTTPResponse &)> &begin,
-                      const std::function<bool(const char *, size_t)> &write);
+                      const std::function<void(const char *, size_t)> &write);
 
 } // namespace miint

@@ -131,16 +131,17 @@ SELECT (SELECT count(*) FROM read_gtdb_metadata(source := '{TEST_DIR}/bac120_met
 ----
 4	0
 
-# Compression is told by the bytes, not the name: a gzip file named .tsv reads too.
+# Compression is told by the name, as read_csv tells it, for the header and the rows
+# alike: a file named .gz is read as gzip, so a plain one so named is DuckDB's gzip error,
+# not read as text.
 statement ok
 COPY (FROM read_csv('data/gtdb/releases/release232/232.0/ar53_metadata_r232.tsv.gz', delim = '\t', header = true, all_varchar = true))
-TO '{TEST_DIR}/ar53_metadata_r232.tsv' (DELIMITER '\t', HEADER, COMPRESSION gzip);
+TO '{TEST_DIR}/ar53_metadata_r232.tsv.gz' (DELIMITER '\t', HEADER, COMPRESSION none);
 
-query TT
-SELECT domain, accession FROM read_gtdb_metadata(source := '{TEST_DIR}/ar53_metadata_r232.tsv') ORDER BY accession;
+statement error
+SELECT * FROM read_gtdb_metadata(source := '{TEST_DIR}/ar53_metadata_r232.tsv.gz');
 ----
-Archaea	GB_GCA_041569275.1
-Archaea	RS_GCF_000485535.1
+Input is not a GZIP stream
 
 # Rows past one vector: the reader passes DuckDB's CSV reader's chunks on. A third of
 # the y fields are GTDB's 'none' and a third are empty, both NULL; the rest are 'v'.
@@ -359,6 +360,45 @@ SELECT * FROM read_gtdb_qc_failed(source := '{TEST_DIR}/qc_failed_r7.tsv');
 ----
 qc_failed_r7.tsv: no first line: the file ends before its first newline
 
+# A header ending in CRLF names the same columns, without the CR, and the rows read too.
+statement ok
+COPY (SELECT * FROM (VALUES ('accession' || chr(9) || 'x' || chr(13)), ('A' || chr(9) || '1' || chr(13))))
+TO '{TEST_DIR}/bac120_metadata_r10.tsv' (HEADER false, QUOTE '');
+
+query TTT
+SELECT domain, accession, x FROM read_gtdb_metadata(source := '{TEST_DIR}/bac120_metadata_r10.tsv');
+----
+Bacteria	A	1
+
+# The header is read in pieces until its newline: one of about 100 KB, longer than a
+# piece, names every column.
+statement ok
+COPY (SELECT l FROM (
+    SELECT 0 AS o, (SELECT string_agg('c' || i, chr(9) ORDER BY i) FROM range(15000) t(i)) AS l
+    UNION ALL
+    SELECT 1, (SELECT string_agg('v' || i, chr(9) ORDER BY i) FROM range(15000) t(i))) ORDER BY o)
+TO '{TEST_DIR}/qc_failed_r11.tsv' (HEADER false, QUOTE '');
+
+query IT
+SELECT count(*), max(column_name) FILTER (WHERE column_name = 'c14999')
+FROM (DESCRIBE SELECT * FROM read_gtdb_qc_failed(source := '{TEST_DIR}/qc_failed_r11.tsv'));
+----
+15000	c14999
+
+query T
+SELECT c14999 FROM read_gtdb_qc_failed(source := '{TEST_DIR}/qc_failed_r11.tsv');
+----
+v14999
+
+# A first line without an end in sight is not read on: no GTDB header comes near 1 MiB.
+statement ok
+COPY (SELECT repeat('x', 1100000) || chr(10) || 'A') TO '{TEST_DIR}/qc_failed_r12.tsv' (HEADER false, QUOTE '');
+
+statement error
+SELECT * FROM read_gtdb_qc_failed(source := '{TEST_DIR}/qc_failed_r12.tsv');
+----
+qc_failed_r12.tsv: the first line is longer than 1048576 bytes
+
 # --- Rows that do not fit -----------------------------------------------------------
 
 # A row with more or fewer fields than the header is an error, not padded or cut.
@@ -393,8 +433,8 @@ SELECT domain, accession, "it's (%)" FROM read_gtdb_metadata(source := '{TEST_DI
 ----
 Bacteria	A	x
 
-# GTDB never quotes a column name, and the header is not read as CSV, so a name holding
-# a double quote is refused rather than read two ways.
+# GTDB never quotes a column name, and the header is split on tabs, not read as CSV, so a
+# name holding a double quote is refused rather than read two ways.
 statement ok
 COPY (SELECT * FROM (VALUES ('accession' || chr(9) || '"x"'), ('A' || chr(9) || 'x'))) TO '{TEST_DIR}/bac120_metadata_r8.tsv' (HEADER false, QUOTE '');
 

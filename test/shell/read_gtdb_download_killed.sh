@@ -5,8 +5,8 @@
 # refresh := true. A download streams to a file of its own and is renamed into place
 # only once complete; this kills the process mid-download and checks that.
 #
-# Requires MIINT_HTTPS_TEST_URL (run_tests.sh sets it): its /slow/ paths send a file's
-# first 600 bytes, then a byte every 100 ms (test/scripts/range_http_server.py).
+# Requires MIINT_HTTPS_TEST_URL (run_tests.sh sets it): its /slow/ paths send a
+# download's first 600 bytes, then a byte every 100 ms (test/scripts/range_http_server.py).
 
 set -u
 

@@ -1,5 +1,5 @@
 # name: test/sql/read_gtdb_remote.test
-# description: The GTDB readers against GTDB itself (opt-in: downloads about 37 MB)
+# description: The GTDB readers against GTDB itself (opt-in: downloads up to about 60 MB)
 # group: [sql]
 
 require miint
@@ -15,7 +15,9 @@ statement ok
 SET miint_gtdb_cache_dir = '{TEST_DIR}/gtdb_cache';
 
 # Release 232's archaeal metadata (7 MB) by URL: read where it is, not cached. It has the
-# 113 columns, after the domain, that the fixtures have.
+# 113 columns, after the domain, that the fixtures have. A remote gzip file is read in
+# 16 MiB pieces, so its header alone fetches all of this one, each time it is read
+# (docs/internals/duckdb-engine-notes.md, "A GET that streams its body").
 query I
 SELECT count(*) FROM (DESCRIBE SELECT * FROM read_gtdb_metadata(
     source := 'https://data.gtdb.ecogenomic.org/releases/release232/232.0/ar53_metadata_r232.tsv.gz'));

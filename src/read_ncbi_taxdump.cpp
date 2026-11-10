@@ -48,10 +48,7 @@ std::string HttpGetToString(ClientContext &context, const std::string &url) {
 	std::string body;
 	miint::HttpGetStreaming(
 	    context, url, "read_ncbi_taxdump", [&](const HTTPResponse &) { body.clear(); },
-	    [&](const char *data, size_t size) {
-		    body.append(data, size);
-		    return true;
-	    });
+	    [&](const char *data, size_t size) { body.append(data, size); });
 	return body;
 }
 

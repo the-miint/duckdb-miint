@@ -59,3 +59,18 @@ TEST_CASE("SleepUnlessInterrupted ends at Ctrl-C", "[http_client]") {
 	// One slice, not the minute; the bound is loose so a loaded machine cannot fail it.
 	CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(10));
 }
+
+// read_ncbi_taxdump fetches an http(s) source with an HTTP GET and opens any other through
+// DuckDB's file systems. The scheme is DuckDB's parse of it, and schemes ignore case
+// (RFC 3986, section 3.1).
+TEST_CASE("IsHttpUrl tells http(s) URLs by their scheme", "[http_client]") {
+	for (const char *url : {"http://h/x", "https://h/taxdump.tar.gz", "HTTPS://h/x", "Http://h:8080/a/b?q=1"}) {
+		INFO(url);
+		CHECK(miint::IsHttpUrl(url));
+	}
+	for (const char *other : {"s3://bucket/x", "file:///a/b", "/data/http://x", "data/taxdump", "httpx://h/x",
+	                          "http:/h/x", "C:\\taxdump", ""}) {
+		INFO(other);
+		CHECK_FALSE(miint::IsHttpUrl(other));
+	}
+}
