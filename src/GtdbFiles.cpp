@@ -15,7 +15,7 @@ namespace gtdb {
 
 namespace {
 
-// ASCII digits only: std::isdigit follows the locale.
+// ASCII digits. std::isdigit is undefined for a negative char.
 bool IsDigits(std::string_view s) {
 	return !s.empty() && std::all_of(s.begin(), s.end(), [](char c) { return c >= '0' && c <= '9'; });
 }

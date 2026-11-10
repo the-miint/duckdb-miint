@@ -215,6 +215,25 @@ FROM read_blob('{TEST_DIR}/gtdb_cache_fail2/*/*') c,
 ----
 qc_failed_r232.tsv	true
 
+# No GTDB file is empty, and a cached file is trusted, so an empty download (the server's
+# /empty/2/ path answers the download, the second GET, with an empty 200) fails and
+# leaves nothing in the cache.
+statement ok
+SET miint_gtdb_url = '{MIINT_HTTPS_TEST_URL}/empty/2/gtdb/releases';
+
+statement ok
+SET miint_gtdb_cache_dir = '{TEST_DIR}/gtdb_cache_empty';
+
+statement error
+SELECT * FROM read_gtdb_qc_failed(release := '232');
+----
+answered with an empty body
+
+query I
+SELECT count(*) FROM glob('{TEST_DIR}/gtdb_cache_empty/*/*');
+----
+0
+
 # A download that never completes fails, and leaves nothing in the cache: no file at
 # its final name, and no partial one.
 statement ok

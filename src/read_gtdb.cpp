@@ -30,7 +30,8 @@ const char *FunctionName(GtdbTable table) {
 
 // One file the reader reads: where the rows are read from (a local file, a URL, or the
 // cache's copy of a release's file), for a release's file the URL it is downloaded from,
-// whether its bytes are gzip, and for metadata, the domain its name implies.
+// for metadata the domain its name implies, and whether its bytes are gzip, which is
+// read from them when the query runs.
 struct GtdbInput {
 	string path;
 	string url;

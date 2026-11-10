@@ -80,6 +80,14 @@ FROM g FULL JOIN r USING (accession, c);
 ----
 448	0	54
 
+# Only GTDB's own marker is NULL: NCBI's 'na', which GTDB passes through in some ncbi_
+# columns, is kept as written.
+query II
+SELECT count(*), count(*) FILTER (WHERE ncbi_refseq_category = 'na')
+FROM read_gtdb_metadata(source := 'data/gtdb/releases/release232/232.0/bac120_metadata_r232.tsv.gz');
+----
+4	4
+
 # GTDB writes a value holding a double quote CSV-style, quoted with the quote doubled
 # ("National Research Center ""Kurchatov Institute"""). It reads back as the value.
 query T
@@ -251,6 +259,23 @@ query I
 SELECT count(*) FROM read_gtdb_qc_failed(source := '~/qc_failed_r232.tsv');
 ----
 3
+
+# '~' in the cache directory setting is expanded the same way. Here the cache is the
+# fixtures' release232 directory, which holds 232.0/ as the cache lays a release out, so
+# the release is read as cached, without a request.
+statement ok
+SET home_directory = 'data/gtdb/releases/release232';
+
+statement ok
+SET miint_gtdb_cache_dir = '~';
+
+query I
+SELECT count(*) FROM read_gtdb_metadata(release := '232');
+----
+6
+
+statement ok
+RESET miint_gtdb_cache_dir;
 
 statement ok
 RESET home_directory;

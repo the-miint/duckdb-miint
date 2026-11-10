@@ -14,6 +14,7 @@ Three path prefixes make a GET of a file fail as downloads do:
   reset the connection, as a dropped download does.
 - /fail/K/<path>: the K-th GET of <path> answers HTTP 500 with an HTML page; the others
   get the file.
+- /empty/K/<path>: the K-th GET of <path> answers HTTP 200 with an empty body.
 - /slow/<path>: sends the first 600 bytes of the body, then a byte every 100 ms.
 The GETs are counted for as long as the server runs, so a test that counts them needs a
 server of its own run, as run_tests.sh starts one.
@@ -37,6 +38,7 @@ from http import HTTPStatus
 RANGE = re.compile(r"bytes=(\d+)-(\d+)")
 CUT = re.compile(r"/cut/(\d+)(/.*)")
 FAIL = re.compile(r"/fail/(\d+)(/.*)")
+EMPTY = re.compile(r"/empty/(\d+)(/.*)")
 FAIL_PAGE = b"<!DOCTYPE HTML>\n<html><body>Internal Server Error</body></html>\n"
 SLOW = "/slow"
 SLOW_FIRST_BYTES = 600
@@ -58,6 +60,7 @@ class RangeRequestHandler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         cut = CUT.fullmatch(self.path)
         fail = FAIL.fullmatch(self.path)
+        empty = EMPTY.fullmatch(self.path)
         if cut:
             due = _count_get(self.path) <= int(cut[1])
             self.path = cut[2]
@@ -73,6 +76,14 @@ class RangeRequestHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_header("Content-Length", str(len(FAIL_PAGE)))
                 self.end_headers()
                 self.wfile.write(FAIL_PAGE)
+                return
+        elif empty:
+            due = _count_get(self.path) == int(empty[1])
+            self.path = empty[2]
+            if due:
+                self.send_response(HTTPStatus.OK)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
                 return
         elif self.path.startswith(SLOW + "/"):
             self.path = self.path[len(SLOW) :]

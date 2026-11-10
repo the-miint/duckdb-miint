@@ -21,7 +21,9 @@ void HttpGetStreaming(duckdb::ClientContext &context, const std::string &url, co
 	// How httpfs's clients call the handlers: docs/internals/duckdb-engine-notes.md, "A GET
 	// that streams its body". An exception must not unwind through a client, which may not
 	// catch it, so it is held and rethrown once the request returns. Only a body that
-	// `begin` has started reaches `write`, so an error page never does, whatever the client.
+	// `begin` has started reaches `write`. httpfs's clients never hand an error page to the
+	// content handler; duckdb-wasm's hands it every body, error pages included, and never
+	// calls the response handler.
 	std::exception_ptr error;
 	bool body_started = false;
 	bool stopped = false;
@@ -83,8 +85,8 @@ void HttpGetStreaming(duckdb::ClientContext &context, const std::string &url, co
 			return;
 		}
 		if (response->Success()) {
-			// A client that does not stream (duckdb-wasm's, for one) leaves the body in
-			// response->body and calls neither handler.
+			// A client that never calls the response handler (duckdb-wasm's) leaves the body
+			// in response->body, and what it handed the content handler was dropped above.
 			if (!body_started && !response->body.empty()) {
 				begin(*response);
 				write(response->body.data(), response->body.size());
