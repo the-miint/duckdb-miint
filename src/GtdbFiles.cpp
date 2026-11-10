@@ -287,10 +287,18 @@ bool HeaderLineReader::Append(const char *data, size_t size) {
 	return done_;
 }
 
+// A gzip file may hold several members, one after another (bgzip writes them): when one
+// ends, the bytes that follow start the next.
 bool HeaderLineReader::Inflate(const char *data, size_t size) {
 	auto &zs = inflater_->zs;
 	char window[INFLATE_WINDOW];
-	while (size > 0 && !inflater_->ended) {
+	while (size > 0) {
+		if (inflater_->ended) {
+			if (inflateReset(&zs) != Z_OK) {
+				throw std::runtime_error("cannot restart the gzip decompressor");
+			}
+			inflater_->ended = false;
+		}
 		// avail_in is a uInt: hand a large buffer over in slices.
 		const auto slice = static_cast<uInt>(std::min<size_t>(size, 1u << 30));
 		zs.next_in = reinterpret_cast<Bytef *>(const_cast<char *>(data));
@@ -310,12 +318,6 @@ bool HeaderLineReader::Inflate(const char *data, size_t size) {
 		} while (!inflater_->ended && (zs.avail_in > 0 || zs.avail_out == 0));
 		data += slice - zs.avail_in;
 		size -= slice - zs.avail_in;
-		if (inflater_->ended) {
-			break;
-		}
-	}
-	if (inflater_->ended) {
-		throw NoFirstLine("the gzip stream ends before its first newline");
 	}
 	return false;
 }
@@ -325,8 +327,11 @@ std::string HeaderLineReader::Finish() {
 		Decide();
 	}
 	if (!done_) {
-		throw NoFirstLine(gzip_ ? "the gzip stream is cut short before its first newline"
-		                        : "the file ends before its first newline");
+		if (!gzip_) {
+			throw NoFirstLine("the file ends before its first newline");
+		}
+		throw NoFirstLine(inflater_ && inflater_->ended ? "the gzip stream ends before its first newline"
+		                                                : "the gzip stream is cut short before its first newline");
 	}
 	return line_;
 }

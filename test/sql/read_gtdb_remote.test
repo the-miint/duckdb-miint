@@ -9,10 +9,10 @@ require httpfs
 # run_tests.sh exports this when MIINT_GTDB_LIVE_TEST=1 and GTDB answers.
 require-env GTDB_AVAILABLE
 
-# Release 232's qc_failed list (30 MB) is downloaded into a cache inside the repository,
-# not the user's, so a rerun reads it from there.
+# Release 232's qc_failed list (30 MB) is downloaded into the test's own directory, never
+# the user's cache, so every run downloads it.
 statement ok
-SET miint_gtdb_cache_dir = 'data/cache/gtdb';
+SET miint_gtdb_cache_dir = '{TEST_DIR}/gtdb_cache';
 
 # Release 232's archaeal metadata (7 MB) by URL: read where it is, not cached. It has the
 # 113 columns, after the domain, that the fixtures have.
@@ -38,6 +38,6 @@ FROM read_gtdb_qc_failed(release := '232');
 true	1
 
 query T
-SELECT parse_filename(file) FROM glob('data/cache/gtdb/232.0/*');
+SELECT parse_filename(file) FROM glob('{TEST_DIR}/gtdb_cache/232.0/*');
 ----
 qc_failed_r232.tsv

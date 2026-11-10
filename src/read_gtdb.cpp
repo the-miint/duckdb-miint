@@ -83,10 +83,6 @@ std::optional<string> OptionalString(TableFunctionBindInput &input, const char *
 	return it->second.ToString();
 }
 
-bool IsHttpUrl(const string &path) {
-	return StringUtil::StartsWith(path, "http://") || StringUtil::StartsWith(path, "https://");
-}
-
 // The first line of a file and whether it is gzip, reading no further than the line.
 struct Header {
 	string line;
@@ -107,7 +103,7 @@ Header ReadUrlHeader(ClientContext &context, const char *fn_name, const string &
 }
 
 Header ReadHeader(ClientContext &context, const char *fn_name, const string &path) {
-	if (IsHttpUrl(path)) {
+	if (miint::IsHttpUrl(path)) {
 		return ReadUrlHeader(context, fn_name, path);
 	}
 	auto &fs = FileSystem::GetFileSystem(context);
@@ -131,7 +127,7 @@ vector<GtdbInput> ResolveSource(ClientContext &context, GtdbTable table, const s
 	const auto fn_name = FunctionName(table);
 	auto &fs = FileSystem::GetFileSystem(context);
 	vector<string> paths;
-	if (IsHttpUrl(source)) {
+	if (miint::IsHttpUrl(source)) {
 		paths.push_back(source);
 	} else if (fs.DirectoryExists(source)) {
 		vector<string> names;
@@ -257,6 +253,10 @@ void DownloadToCache(ClientContext &context, const char *fn_name, const string &
 			    out->Write(const_cast<char *>(data), static_cast<int64_t>(size));
 			    return true;
 		    });
+		if (!out) {
+			// A success the client never reported the start of (a 204, say) has no body.
+			throw IOException("%s: %s answered without a body", fn_name, url);
+		}
 		out->Sync();
 		out->Close();
 		out.reset();

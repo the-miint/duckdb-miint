@@ -332,21 +332,27 @@ TEST_CASE("HeaderLineReader refuses input that ends before the line", "[gtdb]") 
 	CHECK_THROWS_WITH(ReadFirstLine("\x1f", 1), ContainsSubstring("first line"));
 }
 
-// A whole gzip stream with no newline in it is refused as soon as the stream ends, not
-// when the input does: what follows it (here, bytes a stopped download would never
-// fetch) is not read for a line.
+// A gzip file may hold several members one after another, as bgzip writes it, and
+// DuckDB's CSV reader reads the rows across them: so a header line that spans members
+// is read whole, however the bytes arrive.
+TEST_CASE("HeaderLineReader reads a line across gzip members", "[gtdb]") {
+	const auto bytes = Gzip("a\tb") + Gzip("\tc") + Gzip("\nrow\n");
+	for (const size_t chunk : {size_t(1), size_t(7), bytes.size()}) {
+		INFO("chunk " << chunk);
+		const auto read = ReadFirstLine(bytes, chunk);
+		CHECK(read.line == "a\tb\tc");
+		CHECK(read.gzip);
+	}
+}
+
+// A whole gzip stream with no newline in it is refused, saying it ended rather than was
+// cut short; and what follows a member must be another member.
 TEST_CASE("HeaderLineReader refuses a gzip stream that ends before the line", "[gtdb]") {
-	const auto bytes = Gzip("a\tb") + Repeat("\n", 1000);
-	HeaderLineReader reader;
-	size_t fed = 0;
-	CHECK_THROWS_WITH(
-	    [&] {
-		    for (; fed < bytes.size(); ++fed) {
-			    reader.Feed(bytes.data() + fed, 1);
-		    }
-	    }(),
-	    ContainsSubstring("first line") && ContainsSubstring("ends before"));
-	CHECK(fed < bytes.size() - 1000);
+	CHECK_THROWS_WITH(ReadFirstLine(Gzip("a\tb"), 1),
+	                  ContainsSubstring("first line") && ContainsSubstring("ends before"));
+	CHECK_THROWS_WITH(ReadFirstLine(Gzip("a\tb") + Gzip("\tc"), 5),
+	                  ContainsSubstring("first line") && ContainsSubstring("ends before"));
+	CHECK_THROWS_WITH(ReadFirstLine(Gzip("a\tb") + Repeat("\n", 1000), 64), ContainsSubstring("corrupt gzip"));
 }
 
 TEST_CASE("HeaderLineReader refuses a corrupt gzip stream", "[gtdb]") {

@@ -83,13 +83,13 @@ public:
 	HeaderLineReader &operator=(HeaderLineReader &&) noexcept;
 
 	// Hands over the next bytes. Returns true once the first line is complete; bytes after
-	// that are ignored. Throws std::runtime_error for a line longer than max_line, a corrupt
-	// gzip stream, or a gzip stream that ends before its first newline.
+	// that are ignored. Throws std::runtime_error for a line longer than max_line or a
+	// corrupt gzip stream. A gzip file of several members is read across them.
 	bool Feed(const char *data, size_t size);
 
 	// Ends the input and returns the first line without its "\n" or "\r\n". Throws
 	// std::runtime_error when the input ended before the line did: no newline, or a gzip
-	// stream cut short.
+	// stream that ends, or is cut short, before one.
 	std::string Finish();
 
 	// Whether the bytes were gzip. Known once Feed returned true or Finish returned.

@@ -42,10 +42,6 @@ std::string ReadWholeFile(FileSystem &fs, const std::string &path) {
 // explicit source — nobody remembers this URL offhand, so it is the default.
 constexpr const char *DEFAULT_TAXDUMP_URL = "https://ftp.ncbi.nlm.nih.gov/pub/taxonomy/taxdump.tar.gz";
 
-bool IsHttpUrl(const std::string &path) {
-	return path.rfind("http://", 0) == 0 || path.rfind("https://", 0) == 0;
-}
-
 // Download `url` into memory through DuckDB's HTTP client (HTTPUtil), the same
 // mechanism read_ncbi uses, with its retries (HttpGetStreaming).
 std::string HttpGetToString(ClientContext &context, const std::string &url) {
@@ -63,7 +59,7 @@ std::string HttpGetToString(ClientContext &context, const std::string &url) {
 // core HTTP client; anything else is read through the DuckDB FileSystem (local
 // paths, or other schemes if the user has the relevant extension loaded).
 std::string ReadArchiveBytes(ClientContext &context, FileSystem &fs, const std::string &source) {
-	if (IsHttpUrl(source)) {
+	if (miint::IsHttpUrl(source)) {
 		return HttpGetToString(context, source);
 	}
 	return ReadWholeFile(fs, source);
@@ -177,7 +173,7 @@ miint::TaxdumpFiles LoadTaxdumpFiles(ClientContext &context, const std::string &
 	// path (the default source caches the extracted members), so it is the branch that
 	// matters most for skipping members the caller does not read. An http(s) URL never
 	// names one, and httpfs, which answers for it, throws instead of saying no.
-	if (!IsHttpUrl(source) && fs.DirectoryExists(source)) {
+	if (!miint::IsHttpUrl(source) && fs.DirectoryExists(source)) {
 		auto read_member = [&](const char *name, bool wanted) -> std::string {
 			if (!wanted) {
 				return {};

@@ -31,6 +31,12 @@ inline std::string UrlSetting(duckdb::ClientContext &context, const char *name) 
 	return url;
 }
 
+// Whether `path` is an http(s) URL, which the clients fetch through DuckDB's HTTP client.
+// Other remote schemes (s3://, ...) go through DuckDB's file system instead.
+inline bool IsHttpUrl(const std::string &path) {
+	return duckdb::StringUtil::StartsWith(path, "http://") || duckdb::StringUtil::StartsWith(path, "https://");
+}
+
 // Sleeps `duration`, unless Ctrl-C or max_execution_time ends the query first. Every
 // wait in the HTTP clients goes through here. Not DuckDB's ThreadUtil::SleepMs, which
 // slices the same way but checks only IsInterrupted, which does not see the deadline.
