@@ -279,7 +279,9 @@ list(
   src/formula_parser.cpp
   src/gfa_parser.cpp
   src/gtdb_label.cpp
+  src/GtdbFiles.cpp
   src/hfile_duckdb.cpp
+  src/http_client_common.cpp
   src/id_column_codec.cpp
   src/IntervalCompressor.cpp
   src/ks_2samp.cpp
@@ -339,6 +341,7 @@ list(
   src/read_ena_sequences.cpp
   src/read_fastx.cpp
   src/read_gfa.cpp
+  src/read_gtdb.cpp
   src/read_jplace_newick.cpp
   src/read_mzml.cpp
   src/read_mzml_chromatograms.cpp
@@ -450,6 +453,7 @@ list(
   src/fastq_encoder.cpp
   src/formula_parser.cpp
   src/gfa_parser.cpp
+  src/GtdbFiles.cpp
   src/id_column_codec.cpp
   src/IntervalCompressor.cpp
   src/KsTwoSample.cpp
@@ -529,6 +533,7 @@ list(
   test/cpp/test_ENAResolverCache.cpp
   test/cpp/test_fastq_encoder.cpp
   test/cpp/test_gfa_parser.cpp
+  test/cpp/test_gtdb_files.cpp
   test/cpp/test_hfile_duckdb.cpp
   test/cpp/test_id_column_codec.cpp
   test/cpp/test_IndependentContrasts.cpp

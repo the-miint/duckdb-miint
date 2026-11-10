@@ -1,0 +1,45 @@
+# name: test/sql/read_gtdb_remote.test
+# description: The GTDB readers against GTDB itself (opt-in: downloads up to about 60 MB)
+# group: [sql]
+
+require miint
+
+require httpfs
+
+# run_tests.sh exports this when MIINT_GTDB_LIVE_TEST=1 and GTDB answers.
+require-env GTDB_AVAILABLE
+
+# Release 232's qc_failed list (30 MB) is downloaded into the test's own directory, never
+# the user's cache, so every run downloads it.
+statement ok
+SET miint_gtdb_cache_dir = '{TEST_DIR}/gtdb_cache';
+
+# Release 232's archaeal metadata (7 MB) by URL: read where it is, not cached. It has the
+# 113 columns, after the domain, that the fixtures have. A remote gzip file is read in
+# 16 MiB pieces, so its header alone fetches all of this one, each time it is read
+# (docs/internals/duckdb-engine-notes.md, "A GET that streams its body").
+query I
+SELECT count(*) FROM (DESCRIBE SELECT * FROM read_gtdb_metadata(
+    source := 'https://data.gtdb.ecogenomic.org/releases/release232/232.0/ar53_metadata_r232.tsv.gz'));
+----
+114
+
+query IITTT
+SELECT count(*) > 1000, count(DISTINCT accession) = count(*),
+       any_value(domain), any_value(gtdb_type_designation_ncbi_taxa) FILTER (WHERE accession = 'RS_GCF_000485535.1'),
+       any_value(ncbi_species_taxid) FILTER (WHERE accession = 'RS_GCF_000485535.1')
+FROM read_gtdb_metadata(source := 'https://data.gtdb.ecogenomic.org/releases/release232/232.0/ar53_metadata_r232.tsv.gz');
+----
+true	true	Archaea	type strain of species	413810
+
+# The qc_failed list by release, downloaded into the cache from GTDB's auxillary_files/.
+query II
+SELECT count(*) > 1000, count(*) FILTER (WHERE "Accession" = 'GB_GCA_020721425.1')
+FROM read_gtdb_qc_failed(release := '232');
+----
+true	1
+
+query T
+SELECT parse_filename(file) FROM glob('{TEST_DIR}/gtdb_cache/232.0/*');
+----
+qc_failed_r232.tsv

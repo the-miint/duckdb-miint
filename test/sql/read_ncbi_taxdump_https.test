@@ -42,3 +42,11 @@ query I
 SELECT taxid FROM read_ncbi_taxdump_deleted('{MIINT_HTTPS_TEST_URL}/taxonomy/synthetic.tar.gz');
 ----
 888
+
+# The test server's /fail/1/ path answers the first GET with HTTP 500 and an HTML page
+# (test/scripts/range_http_server.py). DuckDB's HTTP retries try again, and the archive
+# is read whole, without the page.
+query I
+SELECT COUNT(*) FROM read_ncbi_taxdump('{MIINT_HTTPS_TEST_URL}/fail/1/taxonomy/synthetic.tar.gz');
+----
+12

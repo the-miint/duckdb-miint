@@ -20,7 +20,7 @@ void EnsureHttpfsLoaded(duckdb::ClientContext &context) {
 		con.Query("LOAD httpfs;");
 	}
 	if (!instance.ExtensionIsLoaded("httpfs")) {
-		throw duckdb::IOException("remote NCBI access requires the httpfs extension, which could not be loaded "
+		throw duckdb::IOException("HTTP downloads need the httpfs extension, which could not be loaded "
 		                          "automatically; run INSTALL httpfs; LOAD httpfs; first");
 	}
 }

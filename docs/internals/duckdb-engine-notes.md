@@ -230,7 +230,8 @@ times (default 3), and one answered 429 or 503 five times more, sleeping up to 2
 query for 44 to 88 s, by the jittered schedule (68 s measured, #414), before the client sees the
 status, whatever Ctrl-C does. A POST is never retried there. The clients take their HTTP
 parameters from the database (`InitializeParameters(db, url)`), so `SET GLOBAL http_retries`
-changes theirs and a session `SET` does not.
+changes theirs and a session `SET` does not. A GET whose body streams to a handler has more to it:
+[A GET that streams its body](#a-get-that-streams-its-body-duckdb-20-httpfs).
 
 ### Waiting and background work (DuckDB 2.0)
 
@@ -458,3 +459,45 @@ through unchanged, except `std::bad_alloc`'s, which becomes "Allocation failure"
 ("IO Error: ...") and, for an internal error, DuckDB's assertion notice and stack trace. A
 catch of `std::exception` or `std::runtime_error` can receive a DuckDB exception; a catch of
 `std::invalid_argument` or another `std::logic_error` cannot.
+
+## HTTP
+
+### A GET that streams its body (DuckDB 2.0, httpfs)
+
+Given a `response_handler` and a `content_handler`, `GetRequestInfo` hands a GET's body over in
+chunks instead of holding it in `response->body`
+(`duckdb/src/include/duckdb/main/http/http_util.hpp`). Verified against httpfs `77392a7`
+(`src/http/httpfs_curl_client.cpp`, `src/http/httpfs_httplib_client.cpp`), two things are
+easy to miss:
+
+- **A retry sends the body again from its first byte.** `HTTPUtil::RunRequestWithRetry`
+  ([Interrupts and `max_execution_time`](#interrupts-and-max_execution_time-duckdb-20)) retries a
+  GET whose transfer fails partway, since a dropped connection is a request error, and the
+  content handler then receives the new attempt's body from the start. The response handler
+  runs once per attempt: before a 2xx's body, and after the body of an error status, which
+  httpfs keeps in `response->body`. A sink starts over there.
+- **A handler must not throw.** The curl client holds an exception from a handler and rethrows
+  it after the transfer; the httplib clients do not catch it. Hold it in a
+  `std::exception_ptr`, return false, and rethrow once the request returns.
+
+The curl client sets no limit on a transfer's total time, but aborts one that stays below 1 KB/s
+for `http_timeout` seconds (`CURLOPT_LOW_SPEED_LIMIT`, `CURLOPT_LOW_SPEED_TIME`), as "Timeout was
+reached".
+
+`miint::HttpGetStreaming` (`src/http_client_common.cpp`) handles both, passes only a 2xx's body
+on, and checks for an interrupt on every chunk. Use it for any GET whose body is large, such as a
+download to a file. Its retries wrap `RunRequestWithRetry`'s
+([Interrupts and `max_execution_time`](#interrupts-and-max_execution_time-duckdb-20)).
+
+**To read only the start of a remote file, open it through `FileSystem`, not a GET.** httpfs then
+asks for ranges: a plain file's first `Read` of 64 KB fetched 64 KB. A compressed one is read in
+pieces of `REMOTE_READ_IN_BUF_SIZE`, 16 MiB, or the whole file if smaller
+(`duckdb/src/common/compressed_file_system.cpp`), whatever the reader asks for, and no setting
+changes it. `read_csv` fetches more: for the header alone, `LIMIT 1`, `DESCRIBE` and `sniff_csv`
+each fetched 32 to 40 MB of a 54 MB gzip file and all of a 29 MB plain one, with `sample_size`,
+`buffer_size`, `threads` and the external file cache making no difference (measured 2026-11-10,
+counting response bytes with `enable_logging('HTTP')`). Stopping a streamed GET early is no
+substitute: a content handler returns false to stop, and the curl client returns the response as
+the 200 it was, but the httplib client (deprecated) reports "Canceled", a request error, which
+`RunRequestWithRetry` retries up to `http_retries` times. The GTDB readers read headers through
+`FileSystem` (`ReadHeader`, `src/read_gtdb.cpp`).

@@ -1,7 +1,7 @@
 # Third-Party Licenses
 
 This file contains licenses for third-party software referenced or used
-by this project.
+by this project, and for third-party data committed to it.
 
 **Policy.** Full license text is inlined below for permissively licensed
 dependencies (MIT / BSD / Apache 2.0) whose source is embedded in this
@@ -1275,6 +1275,32 @@ miint's own Modified-BSD code.
 
 RocksDB — also sourced via vcpkg — is documented separately above (it is
 dual `GPL-2.0-only OR Apache-2.0`, used under Apache-2.0).
+
+---
+
+## GTDB (Genome Taxonomy Database): test fixtures
+
+`data/gtdb/` holds files adapted from GTDB's genome metadata
+(`bac120_metadata`, `ar53_metadata`) and `qc_failed` lists for releases 232.0
+and 214.1, cut to a few rows, for the tests of `read_gtdb_metadata` and
+`read_gtdb_qc_failed`. They are data, not code. The built extension contains
+none of them; its readers download GTDB's files from GTDB when a query asks
+for a release.
+
+- Source: https://gtdb.ecogenomic.org/ (files from https://data.gtdb.ecogenomic.org/releases/)
+- License: `CC-BY-SA-4.0` (https://creativecommons.org/licenses/by-sa/4.0/), as
+  GTDB states at https://gtdb.ecogenomic.org/licenses
+- Changes: rows removed and the metadata files gzipped again; values unchanged.
+  `data/gtdb/README.md` lists the rows kept, the file each was cut from, and how.
+- The adapted files are shared under the same license, as its ShareAlike term
+  requires. This project's Modified BSD license does not cover them.
+
+### Citation
+
+Parks, D.H., et al. (2025) "GTDB release 10: a complete and systematic taxonomy
+for 715 230 bacterial and 17 245 archaeal genomes", Nucleic Acids Research.
+doi: 10.1093/nar/gkaf1040. GTDB lists its other papers to cite at
+https://gtdb.ecogenomic.org/about.
 
 ---
 
