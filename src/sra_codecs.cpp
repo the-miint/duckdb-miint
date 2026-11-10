@@ -1,11 +1,10 @@
 #include "sra_codecs.hpp"
 
 #include <cstdint>
-
-#include <zlib.h>
-
 #include <cstring>
+#include <stdexcept>
 #include <type_traits>
+#include <zlib.h>
 
 namespace miint {
 namespace sra {
@@ -285,7 +284,7 @@ std::vector<uint8_t> Iunzip(const HeaderFrame &frame, const uint8_t *src, size_t
 	case 64:
 		return IrzipDecode<uint64_t>(frame, src, n, elem_count);
 	default:
-		throw SraUnsupportedError("izip on " + std::to_string(type.bits) + "-bit elements");
+		throw std::logic_error("Iunzip: width checked above"); // unreachable
 	}
 }
 
