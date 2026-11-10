@@ -1,6 +1,6 @@
 # SRA fixtures and fasterq-dump oracles
 
-Fixtures for `read_sra` and `read_ncbi_sra_sequences`. The output of both functions must be byte for byte what
+Fixtures for `read_sra`. Its output must be byte for byte what
 NCBI's `fasterq-dump` writes for the same run, reconstructed spot names included. The oracles in `oracle/` are that
 output. They were generated once, outside this repository, and are never regenerated: a change that makes a parity
 test fail is a bug in miint, not a stale oracle. miint does not package fasterq-dump, and nothing in this

@@ -137,9 +137,11 @@ TEST_CASE("Spot names must be valid UTF-8", "[sra]") {
 	CHECK_NOTHROW(CheckSpotName("M00763:72:1:1101:9430:1976", 7));
 	CHECK_NOTHROW(CheckSpotName("caf\xc3\xa9", 7));      // two-byte sequence
 	CHECK_NOTHROW(CheckSpotName("\xf0\x9f\xa7\xac", 7)); // four-byte sequence
-	CHECK(ThrowsTypeMentioning<SraFormatError>([] { CheckSpotName("a\xffz", 7); }, "spot 7"));
-	CHECK(ThrowsTypeMentioning<SraFormatError>([] { CheckSpotName("\xc3", 7); }, "UTF-8"));             // truncated
-	CHECK(ThrowsTypeMentioning<SraFormatError>([] { CheckSpotName("\xc0\xaf", 7); }, "UTF-8"));         // overlong
-	CHECK(ThrowsTypeMentioning<SraFormatError>([] { CheckSpotName("\xed\xa0\x80", 7); }, "UTF-8"));     // surrogate
-	CHECK(ThrowsTypeMentioning<SraFormatError>([] { CheckSpotName("\xf4\x90\x80\x80", 7); }, "UTF-8")); // > U+10FFFF
+	// A run storing Latin-1 names is well formed, just not readable as text: refused, not damaged.
+	CHECK(ThrowsTypeMentioning<SraUnsupportedError>([] { CheckSpotName("a\xffz", 7); }, "spot 7"));
+	CHECK(ThrowsTypeMentioning<SraUnsupportedError>([] { CheckSpotName("\xc3", 7); }, "UTF-8"));         // truncated
+	CHECK(ThrowsTypeMentioning<SraUnsupportedError>([] { CheckSpotName("\xc0\xaf", 7); }, "UTF-8"));     // overlong
+	CHECK(ThrowsTypeMentioning<SraUnsupportedError>([] { CheckSpotName("\xed\xa0\x80", 7); }, "UTF-8")); // surrogate
+	CHECK(
+	    ThrowsTypeMentioning<SraUnsupportedError>([] { CheckSpotName("\xf4\x90\x80\x80", 7); }, "UTF-8")); // > U+10FFFF
 }

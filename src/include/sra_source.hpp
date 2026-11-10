@@ -28,7 +28,7 @@ public:
 };
 
 // Random access to the bytes of one .sra file. ReadAt must be safe to call from several threads
-// at once: the table functions decode different row ranges of one run in parallel.
+// at once: read_sra decodes different row ranges of one run in parallel.
 class SraByteSource {
 public:
 	virtual ~SraByteSource() = default;
@@ -43,7 +43,7 @@ public:
 	std::vector<uint8_t> Read(uint64_t pos, size_t n) const;
 };
 
-// A local file. Used by the C++ tests; the table functions read through DuckDB's file system.
+// A local file. Used by the C++ tests; read_sra reads through DuckDB's file system.
 class SraFileSource : public SraByteSource {
 public:
 	explicit SraFileSource(const std::string &path);

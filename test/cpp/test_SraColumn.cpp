@@ -393,7 +393,44 @@ TEST_CASE("A page map's counts are bounded by its bytes", "[sra]") {
 	PutVlenU(pm, uint64_t(1) << 31);
 	auto deflated = RawDeflate({1, 1});
 	pm.insert(pm.end(), deflated.begin(), deflated.end());
-	CHECK(ThrowsTypeMentioning<SraFormatError>([&] { ParseVdbBlob(V2Blob(pm, {}), 1, 8); }, "page map"));
+	CHECK(ThrowsTypeMentioning<SraFormatError>([&] { ParseVdbBlob(V2Blob(pm, {}), 1, 8); }, "claims"));
+}
+
+TEST_CASE("A page map's counts cannot wrap past the bound", "[sra]") {
+	// 2^63 length runs: doubled for lengths and run counts, the total wraps to 0 and would pass a
+	// bound applied to the sum. Each count is bounded before they are added.
+	std::vector<uint8_t> pm {uint8_t((0 << 2) | 2)}; // version 0, variant 2
+	PutVlenU(pm, uint64_t(1) << 63);
+	CHECK(ThrowsTypeMentioning<SraFormatError>([&] { ParseVdbBlob(V2Blob(pm, {}), 1, 8); }, "too many values"));
+}
+
+TEST_CASE("A page map larger than the first inflate buffer is read whole", "[sra]") {
+	// Random-access offsets that repeat deflate to back-references; 5,000 of them inflate past the
+	// first 4 KiB buffer, so the buffer grows mid-stream and must keep what it already holds.
+	const uint64_t rows = 5000;
+	std::vector<uint8_t> body;
+	std::vector<uint64_t> expected;
+	for (uint64_t r = 0; r < rows; r++) {
+		uint64_t off = (r % 7) * 300;
+		expected.push_back(off);
+		PutVlenU(body, off);
+	}
+	REQUIRE(body.size() > 4096);
+	std::vector<uint8_t> pm {uint8_t((2 << 2) | 0)}; // version 2 (random access), variant 0
+	PutVlenU(pm, 2);                                 // row length 2
+	auto deflated = RawDeflate(body);
+	pm.insert(pm.end(), deflated.begin(), deflated.end());
+	std::vector<uint8_t> blob {0x80, 0, 0, 0, 0}; // v2, variant 2 header: 4-byte map size
+	blob[0] = 0x80 | (2 << 4);
+	const uint32_t map_size = uint32_t(pm.size());
+	blob[2] = uint8_t(map_size);
+	blob[3] = uint8_t(map_size >> 8);
+	blob[4] = uint8_t(map_size >> 16);
+	blob.push_back(uint8_t(map_size >> 24));
+	blob.insert(blob.end(), pm.begin(), pm.end());
+	blob.resize(blob.size() + 6 * 300 + 2, 0);
+	VdbBlob parsed = ParseVdbBlob(blob, rows, 8);
+	CHECK(RowOffsets(parsed.page_map) == expected);
 }
 
 TEST_CASE("An index block cannot hold more blobs than rows", "[sra]") {

@@ -61,7 +61,7 @@ private:
 std::string FormatSpotName(const std::string &fmt, std::optional<int32_t> x, std::optional<int32_t> y, int64_t row_id,
                            const std::string &spot_name);
 
-// Throws SraFormatError, naming the spot, unless the name is valid UTF-8: names become VARCHAR
+// Throws SraUnsupportedError, naming the spot, unless the name is valid UTF-8: names become VARCHAR
 // values, which must be.
 void CheckSpotName(const std::string &name, int64_t row_id);
 

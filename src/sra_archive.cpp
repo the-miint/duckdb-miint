@@ -94,8 +94,9 @@ KarArchive::KarArchive(std::shared_ptr<const SraByteSource> source) : source_(st
 		                     ", outside the file");
 	}
 
-	// Public archives' tables of contents are a few KB. The header's offset is read only up to a
-	// bound, so a damaged one cannot make the reader take the whole file into memory.
+	// Public archives' tables of contents are a few KB. One past the bound is refused rather than
+	// read whole, so a header placing it far into the file cannot make the reader take the file
+	// into memory.
 	constexpr uint64_t MAX_TOC = uint64_t(64) << 20;
 	if (data_offset_ - HEADER > MAX_TOC) {
 		throw SraUnsupportedError("a table of contents of " + std::to_string(data_offset_ - HEADER) +

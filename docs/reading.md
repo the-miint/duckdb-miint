@@ -761,6 +761,8 @@ Supported are runs submitted as reads, without alignments: Illumina runs, runs l
 - SRA Lite (`.sralite`, or a run converted to it): original qualities removed
 - PacBio or Nanopore databases with a `CONSENSUS`, `ZMW_METRICS` or `PASSES` table
 - Runs from older loaders (e.g. 454, Ion Torrent, Helicos), and storage features not seen in current public runs
+- Archives with storage far outside what public runs use: a table of contents over 64 MiB, or a block of values that would decode to more than 2 GiB
+- Spot names that are not valid UTF-8 (a run storing Latin-1 names, for example)
 - Under `'split_3'`, a spot with more than two biological reads, which a paired row cannot hold: use `split => 'spot'`
 
 **Examples:**
