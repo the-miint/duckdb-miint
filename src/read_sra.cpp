@@ -31,6 +31,9 @@ namespace {
 // miint_sra_spots_per_unit overrides it.
 constexpr uint64_t DEFAULT_SPOTS_PER_UNIT = 128 * 1024;
 
+// The most threads one scan decodes on (GlobalState::MaxThreads).
+constexpr idx_t MAX_SCAN_THREADS = 16;
+
 // Random access to a .sra through DuckDB's file system, so local paths and (with httpfs) remote
 // URLs are read the same way. FileHandle::Read at a position is safe from several threads when
 // the handle is opened for parallel access.
@@ -110,8 +113,8 @@ struct GlobalState : public GlobalTableFunctionState {
 
 	idx_t MaxThreads() const override {
 		// A run is split into many units, so even one run uses several threads, up to DuckDB's
-		// threads setting. Each thread adds read-ahead cache (OpenTable), so 16 bounds that too.
-		return 16;
+		// threads setting.
+		return MAX_SCAN_THREADS;
 	}
 
 	// Hands out the next unit, in run and spot order, opening the next run when the current one

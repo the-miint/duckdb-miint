@@ -398,8 +398,10 @@ PageMap ParsePageMap(const uint8_t *src, size_t len, uint64_t row_count) {
 	}
 	std::vector<uint8_t> inflated;
 	if (version >= 1 && values > 0) {
-		inflated.resize(size_t(values) * 10 + 16);
-		inflated.resize(InflateRaw(body, body_len, inflated.data(), inflated.size(), "a page map").produced);
+		// Ten bytes hold any vlen value, so the stream never needs more; the buffer grows with what
+		// it actually produces rather than being sized from the claim.
+		inflated =
+		    InflateRawGrowing(body, body_len, std::min<uint64_t>(values * 10 + 16, MAX_DECODED_BLOB), "a page map");
 		body = inflated.data();
 		body_len = inflated.size();
 	}
@@ -453,22 +455,13 @@ PageMap ParsePageMap(const uint8_t *src, size_t len, uint64_t row_count) {
 	}
 
 	if (random_access && (variant == 0 || variant == 2)) {
-		// One stored offset per row: as many runs as offsets, so bounded by the map's bytes.
-		auto offsets = take(row_count);
-		uint64_t row = 0;
-		auto per_row = [&](uint64_t rows, uint32_t len) {
-			if (rows > row_count - row) {
-				throw SraFormatError(not_covered);
-			}
-			for (uint64_t r = 0; r < rows; r++, row++) {
-				add(1, len, offsets[row], len);
-			}
-		};
+		// One stored offset per row, kept as stored; the runs give only the lengths.
+		pm.row_offset = take(row_count);
 		if (variant == 0) {
-			per_row(row_count, length_of(row_len));
+			add(row_count, length_of(row_len), 0, 0);
 		} else {
 			for (uint64_t i = 0; i < leng_recs; i++) {
-				per_row(leng_run[i], length_of(length[i]));
+				add(leng_run[i], length_of(length[i]), 0, 0);
 			}
 		}
 	} else if (variant == 0) {
@@ -541,6 +534,17 @@ PageMap ParsePageMap(const uint8_t *src, size_t len, uint64_t row_count) {
 
 uint64_t PageMap::ElementsSpanned() const {
 	uint64_t end = 0;
+	if (!row_offset.empty()) {
+		for (const Run &r : runs) {
+			for (uint64_t i = r.first_row; i < r.first_row + r.rows; i++) {
+				if (r.length > UINT64_MAX - row_offset[i]) {
+					return UINT64_MAX;
+				}
+				end = std::max(end, row_offset[i] + r.length);
+			}
+		}
+		return end;
+	}
 	for (const Run &r : runs) {
 		// offset + step * (rows - 1) + length, saturating: a wrapped sum must not pass a bound.
 		uint64_t last = r.rows - 1;
@@ -574,6 +578,10 @@ void PageMap::Row(uint64_t i, uint32_t &length, uint64_t &offset, size_t &hint) 
 	}
 	const Run &r = runs[hint];
 	length = r.length;
+	if (!row_offset.empty()) {
+		offset = row_offset[i];
+		return;
+	}
 	offset = r.offset + r.step * (i - r.first_row);
 }
 

@@ -404,3 +404,14 @@ TEST_CASE("An index block cannot hold more blobs than rows", "[sra]") {
 	CHECK(ThrowsTypeMentioning<SraFormatError>(
 	    [&] { ColumnIndex::Parse(ColumnHeader(1 << 30, 12, 0, 1, 0), {}, idx1, idx2); }, "more blobs"));
 }
+
+TEST_CASE("A page map that inflates past what its values can need is damage", "[sra]") {
+	// One random-access offset needs at most ten bytes, yet the stream holds a hundred: the reader
+	// stops at what the map's own counts allow instead of following the stream.
+	std::vector<uint8_t> pm {uint8_t((2 << 2) | 0)}; // version 2 (random access), variant 0
+	PutVlenU(pm, 1);                                 // row length 1
+	auto deflated = RawDeflate(std::vector<uint8_t>(100, 0));
+	pm.insert(pm.end(), deflated.begin(), deflated.end());
+	CHECK(ThrowsTypeMentioning<SraFormatError>([&] { ParseVdbBlob(V2Blob(pm, std::vector<uint8_t>(4)), 1, 8); },
+	                                           "inflates past"));
+}

@@ -10,6 +10,43 @@
 namespace miint {
 namespace sra {
 
+std::vector<uint8_t> InflateRawGrowing(const uint8_t *src, size_t n, uint64_t limit, const char *what) {
+	if (n > UINT32_MAX) {
+		throw SraFormatError(std::string(what) + " is larger than 4 GiB");
+	}
+	z_stream zs {};
+	if (inflateInit2(&zs, -15) != Z_OK) {
+		throw SraFormatError(std::string("cannot start inflating ") + what);
+	}
+	zs.next_in = const_cast<Bytef *>(src);
+	zs.avail_in = uInt(n);
+	std::vector<uint8_t> out;
+	int rc = Z_OK;
+	while (rc != Z_STREAM_END) {
+		if (out.size() >= limit) {
+			inflateEnd(&zs);
+			throw SraFormatError(std::string(what) + " inflates past the " + std::to_string(limit) +
+			                     " bytes it can need");
+		}
+		size_t have = size_t(zs.total_out);
+		out.resize(size_t(std::min<uint64_t>(limit, std::max<uint64_t>(4096, uint64_t(out.size()) * 2))));
+		zs.next_out = out.data() + have;
+		zs.avail_out = uInt(std::min<size_t>(out.size() - have, UINT32_MAX));
+		rc = inflate(&zs, Z_NO_FLUSH);
+		if (rc != Z_OK && rc != Z_STREAM_END && !(rc == Z_BUF_ERROR && zs.avail_out == 0)) {
+			inflateEnd(&zs);
+			throw SraFormatError(std::string(what) + " does not inflate");
+		}
+		if (rc == Z_OK && zs.avail_in == 0 && zs.avail_out != 0) {
+			inflateEnd(&zs); // input used up before the stream ended: truncated
+			throw SraFormatError(std::string(what) + " does not inflate");
+		}
+	}
+	out.resize(size_t(zs.total_out));
+	inflateEnd(&zs);
+	return out;
+}
+
 Inflated InflateRaw(const uint8_t *src, size_t n, uint8_t *dst, size_t dsize, const char *what) {
 	if (n > UINT32_MAX || dsize > UINT32_MAX) {
 		throw SraFormatError(std::string(what) + " is larger than 4 GiB");

@@ -30,6 +30,10 @@ struct Inflated {
 };
 Inflated InflateRaw(const uint8_t *src, size_t n, uint8_t *dst, size_t dsize, const char *what);
 
+// Inflates a raw deflate stream whose size is not known up front, into a buffer that grows with the
+// output, up to `limit` bytes. Throws SraFormatError naming `what` unless the stream ends within it.
+std::vector<uint8_t> InflateRawGrowing(const uint8_t *src, size_t n, uint64_t limit, const char *what);
+
 // zip_encoding: raw deflate. Version 1 inflates to the frame's osize bytes; version 2 also pops
 // the count of meaningful bits in the last byte. Returns the inflated bytes; out_bits receives
 // their length in bits.

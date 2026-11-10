@@ -68,6 +68,9 @@ struct PageMap {
 	};
 	std::vector<Run> runs; // in row order, covering rows [0, row_count)
 	uint64_t row_count = 0;
+	// A random-access map's own offset for each row, in place of the runs' offsets; empty for
+	// every other map. One per row, as the map stores them.
+	std::vector<uint64_t> row_offset;
 
 	// Row i's length and first element; i < row_count. `hint` is the run a caller found last:
 	// rows are read in order, so it usually holds the next one too and saves the search.
