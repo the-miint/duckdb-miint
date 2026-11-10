@@ -2761,11 +2761,16 @@ const std::string INFER_TRIM = // NOLINT
 // collapses every live node. `source`/`refresh` pass straight through to
 // read_ncbi_taxdump (NULL source => auto-download + cache the canonical NCBI dump).
 //
-// Rank -> column mapping mirrors FindRankColumn (src/include/taxonomy_lineage.hpp),
-// which read_ncbi_lineage uses; test/sql/taxonomy_lineage.test pins both functions'
-// schemas to the same columns. Legacy 'superkingdom' and newer 'domain' both collapse
-// to `domain`; phylum/class/order/family/genus/species/strain map to like-named
-// columns; every other rank (clade, subspecies, no rank, ...) is dropped. The
+// Each rank goes to the column lineage_rank names, the mapping read_ncbi_lineage uses
+// (FindRankColumn, src/include/taxonomy_lineage.hpp), so the two cannot map a rank
+// differently. The column names are written out below; test/sql/taxonomy_lineage.test pins
+// both functions' schemas to the same columns. lineage_rank runs once per node, in `tree`,
+// not once per row of the walk, and is called as system.main.lineage_rank: a macro body
+// resolves its callees in the caller's catalog, so a bare name would let a user's own
+// lineage_rank replace the mapping.
+// Legacy 'superkingdom' and newer 'domain' both collapse to `domain`;
+// phylum/class/order/family/genus/species/strain map to like-named columns; every other
+// rank (clade, subspecies, no rank, ...) is dropped. The
 // formatted `lineage` renders d__;p__;c__;o__;f__;g__;s__ (empty where absent) and
 // appends ;t__<strain> only when a strain is present. Absent ranks are NULL in
 // their column but empty in the formatted string, matching read_ncbi_lineage.
@@ -2776,7 +2781,7 @@ const std::string INFER_TRIM = // NOLINT
 const std::string TAXONOMY_LINEAGE = // NOLINT
     "CREATE OR REPLACE MACRO taxonomy_lineage(taxids := NULL, source := NULL, refresh := false) AS TABLE "
     "WITH RECURSIVE tree AS MATERIALIZED ( "
-    "    SELECT node_index, parent_index, name, rank "
+    "    SELECT node_index, parent_index, name, rank, system.main.lineage_rank(rank) AS rank_column "
     "    FROM read_ncbi_taxdump(source, refresh := refresh) "
     "), "
     "seeds(q_taxid) AS ( "
@@ -2792,11 +2797,11 @@ const std::string TAXONOMY_LINEAGE = // NOLINT
     "                         ELSE v END "
     "    FROM (SELECT UNNEST(taxids)::BIGINT AS v) "
     "), "
-    "walk(q_taxid, cur, w_name, w_rank, w_parent) AS ( "
-    "    SELECT s.q_taxid, t.node_index, t.name, t.rank, t.parent_index "
+    "walk(q_taxid, cur, w_name, w_rank, w_column, w_parent) AS ( "
+    "    SELECT s.q_taxid, t.node_index, t.name, t.rank, t.rank_column, t.parent_index "
     "    FROM seeds s JOIN tree t ON t.node_index = s.q_taxid "
     "    UNION ALL "
-    "    SELECT w.q_taxid, t.node_index, t.name, t.rank, t.parent_index "
+    "    SELECT w.q_taxid, t.node_index, t.name, t.rank, t.rank_column, t.parent_index "
     "    FROM walk w JOIN tree t ON t.node_index = w.w_parent "
     "), "
     "collapsed AS ( "
@@ -2810,14 +2815,14 @@ const std::string TAXONOMY_LINEAGE = // NOLINT
     // NULL, not '', matching read_ncbi_lineage's SetRankCell (empty -> NULL column).
     // The formatted lineage below COALESCEs these back to '' so its segments are
     // unaffected.
-    "        NULLIF(MAX(CASE WHEN w_rank IN ('superkingdom', 'domain') THEN w_name END), '') AS domain, "
-    "        NULLIF(MAX(CASE WHEN w_rank = 'phylum'  THEN w_name END), '') AS phylum, "
-    "        NULLIF(MAX(CASE WHEN w_rank = 'class'   THEN w_name END), '') AS \"class\", "
-    "        NULLIF(MAX(CASE WHEN w_rank = 'order'   THEN w_name END), '') AS \"order\", "
-    "        NULLIF(MAX(CASE WHEN w_rank = 'family'  THEN w_name END), '') AS family, "
-    "        NULLIF(MAX(CASE WHEN w_rank = 'genus'   THEN w_name END), '') AS genus, "
-    "        NULLIF(MAX(CASE WHEN w_rank = 'species' THEN w_name END), '') AS species, "
-    "        NULLIF(MAX(CASE WHEN w_rank = 'strain'  THEN w_name END), '') AS strain "
+    "        NULLIF(MAX(CASE WHEN w_column = 'domain'  THEN w_name END), '') AS domain, "
+    "        NULLIF(MAX(CASE WHEN w_column = 'phylum'  THEN w_name END), '') AS phylum, "
+    "        NULLIF(MAX(CASE WHEN w_column = 'class'   THEN w_name END), '') AS \"class\", "
+    "        NULLIF(MAX(CASE WHEN w_column = 'order'   THEN w_name END), '') AS \"order\", "
+    "        NULLIF(MAX(CASE WHEN w_column = 'family'  THEN w_name END), '') AS family, "
+    "        NULLIF(MAX(CASE WHEN w_column = 'genus'   THEN w_name END), '') AS genus, "
+    "        NULLIF(MAX(CASE WHEN w_column = 'species' THEN w_name END), '') AS species, "
+    "        NULLIF(MAX(CASE WHEN w_column = 'strain'  THEN w_name END), '') AS strain "
     "    FROM walk "
     "    GROUP BY q_taxid "
     ") "

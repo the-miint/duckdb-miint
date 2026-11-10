@@ -47,6 +47,8 @@
 #include <read_ncbi_taxdump.hpp>
 #include <read_ncbi_lineage.hpp>
 #include <parse_lineage.hpp>
+#include <lineage_rank.hpp>
+#include <gtdb_label.hpp>
 #include <blast_search.hpp>
 #include <read_ena.hpp>
 #include <read_ena_attributes.hpp>
@@ -417,6 +419,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ReadNCBITaxdumpDeletedTableFunction::Register(loader);
 	ReadNCBILineageTableFunction::Register(loader);
 	ParseLineageFunction::Register(loader);
+	LineageRankFunction::Register(loader);
+	GtdbLabelFunctions::Register(loader);
 	BlastSearchTableFunction::Register(loader);
 	ReadENATableFunction::Register(loader);
 	ReadENAAttributesTableFunction::Register(loader);

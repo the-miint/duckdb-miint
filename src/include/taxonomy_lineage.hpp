@@ -44,7 +44,8 @@ struct Lineage {
 // The eight rank columns of the shared lineage schema, shallowest first: each column's
 // name, the letter it carries in a prefixed lineage string ("d__", "p__", ...), and the
 // Lineage field that holds it. Everything in C++ that names, writes or formats the rank
-// columns goes through this table; the taxonomy_lineage SQL macro mirrors it by hand.
+// columns goes through this table. The taxonomy_lineage SQL macro maps ranks through it
+// with lineage_rank, but names the columns itself.
 struct LineageRank {
 	const char *column;
 	char letter;
@@ -77,7 +78,7 @@ LineageRanks ParseLineageString(std::string_view lineage, char domain_letter = '
 // newer "domain" collapse into domain; the other seven standard ranks into their
 // like-named column. Everything else (clade, subspecies, no rank, ...) returns nullptr
 // and is not collapsed.
-const LineageRank *FindRankColumn(const std::string &ncbi_rank);
+const LineageRank *FindRankColumn(std::string_view ncbi_rank);
 
 // Collapse a set of ancestors plus the query taxon into the standard ranks and the
 // formatted lineage string.

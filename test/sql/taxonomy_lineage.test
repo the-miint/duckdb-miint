@@ -125,3 +125,26 @@ statement error
 SELECT * FROM taxonomy_lineage(taxids := [90, NULL], source := 'data/taxonomy/synthetic');
 ----
 taxids list cannot contain NULL
+
+# --- a user's own lineage_rank does not change the collapse ----------------
+# A macro body resolves its callees in the caller's catalog. The macro calls the
+# extension's lineage_rank by its qualified name, so a user macro of the same name, here
+# one that would put every node in phylum, leaves the taxid-90 row above unchanged.
+
+statement ok
+CREATE MACRO lineage_rank(r) AS 'phylum';
+
+# The bare name now resolves to the user's macro, so the row below is unchanged only
+# because the macro does not call it by that name.
+query T
+SELECT lineage_rank('genus');
+----
+phylum
+
+query ITTTTTTTTTTT
+SELECT * FROM taxonomy_lineage(taxids := [90], source := 'data/taxonomy/synthetic');
+----
+90	Escherichia coli K-12	strain	Bacteria	Pseudomonadota	Gammaproteobacteria	Enterobacterales	Enterobacteriaceae	Escherichia	Escherichia coli	Escherichia coli K-12	d__Bacteria;p__Pseudomonadota;c__Gammaproteobacteria;o__Enterobacterales;f__Enterobacteriaceae;g__Escherichia;s__Escherichia coli;t__Escherichia coli K-12
+
+statement ok
+DROP MACRO lineage_rank;
