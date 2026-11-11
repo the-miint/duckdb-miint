@@ -142,6 +142,11 @@ Only rules whose trigger appears in the diff can fire.
 | A MAP or key-value column holding a format's optional fields; a parser of typed fields | R2 |
 | A `switch` or comparison on a format's code letters; a hand-written character-class, case or number helper | R6 |
 | Two structurally similar code paths; a repeated literal or error message; a helper in a feature-named file | R6, R8 |
+| A reader of a binary format: header offsets, record sizes, bit masks or shifts, version or type checks | R6 |
+| A table function's `Bind` declaring its output columns or expanding a path argument | R6 |
+| A vector or map filled in a loop, or sized from a count read from input | R3 |
+| A download pinned by a checksum in `run_tests.sh`; a checksum list or manifest under `data/**` | R4, R1 |
+| Code ported from or written against another project's source; `THIRD_PARTY_LICENSES.md` | R5 |
 | Any new or changed doc, docstring or comment; a test header comment; a `data/**/README*` | R7 |
 | A user-facing string: an exception message, a `docs/` page, a parameter description | R7, R9 |
 | A new file, moved code, feature- or platform-specific naming, a one-shot script, a fixture generator under `test/scripts/**`, a benchmark tree | R8 |
@@ -216,6 +221,7 @@ Safety must not rest on convention or a comment; and a guard must be real, so do
 - **htslib return codes.** `sam_read1` returning `-3` means a rejected format or, once the format is readable, a corrupt record; leniency is gated on `fp->format.format`, and treating every negative return as end of stream resumes the scan after a bad record (`docs/internals/embedded-tools.md`, HTSlib). A fixture puts the bad record mid-file and asserts the count. `read_alignments` returns `''` for an on-disk `*` CIGAR, so logic about a missing CIGAR keys on the unmapped flag (0x4).
 - **Arrow streams handed to C or Rust.** A stream whose ownership transfers "once the callee begins consuming" stays owned by miint (`docs/internals/arrow-zero-copy.md`, "Handing a stream to a C library"). An Arrow array built by hand for a Rust consumer reports its true `null_count` [soft]; arrow-rs drops the validity bitmap when the count is 0 (`docs/internals/embedded-tools.md`, rype subsystem).
 - **Numerics** [soft]: finiteness is tested with `std::isfinite`, not `!std::isnan`; a range or overflow guard checks the computed value, not the inputs.
+- **Size what is known** [soft]: a vector filled in a loop whose count is known before it starts is reserved first, and a container sized from a count read from input is bounded by the bytes behind it before it is reserved.
 - **Dead state** [soft]: a member written once and never read, or work redone per iteration that the constructor already validated, adds a throw site and a misleading reading.
 
 ### R4 — Tests verify intent [strong]
@@ -232,6 +238,8 @@ Safety must not rest on convention or a comment; and a guard must be real, so do
 - **Warnings accumulate.** `miint_warnings()` accumulates within a session, so a test asserts `count(*) >= 1` for a warning it expects.
 - **Catch2:** a size check followed by indexing uses `REQUIRE`; `CHECK` continues after failure and the index can crash the binary.
 - **Ports.** An oracle proves outputs on the inputs it contains; paths of a port no fixture reaches are checked by reading the reference against the port, and the PR says which paths those are [soft].
+- **Downloaded data that fails its checksum fails the run.** A test file `run_tests.sh` downloads skips only when the download fails; a downloaded file that does not match its pinned checksum is an error, since the committed expected values no longer apply to it. The pin lives in one committed manifest that the script reads, not in a copy in the script.
+- **One manifest per fact.** A checksum list or provenance file that repeats what another committed manifest or an assertion already pins is dropped, not kept in step by hand.
 - **Fixtures are fixed.** A fixture's inputs are committed with it, so a test never depends on regenerating them. A large text fixture (sequences, an assembly graph, a log) is committed compressed, and a test that needs the file as a tool writes it decompresses a copy into the test directory (sqllogictest's `unzip`).
 - **An external tool's fixture comes from the build the repository vendors**, when it vendors one, so the version matches what miint embeds. When miint's own function for the tool cannot produce the fixture, the README says why.
 - **Remote services.** A mock accepts URL shapes, result types and authentication modes the real server rejects, so the test plan says whether a live run happened (PR-level check 7).
@@ -245,6 +253,7 @@ Safety must not rest on convention or a comment; and a guard must be real, so do
 - **An include sits under no more conditions than its uses.** A use guarded by fewer preprocessor conditions than its include builds only where the condition holds, and with libcurl off on macOS and WASM a Linux build cannot see the error. Probe: the file's command from `compile_commands.json`, minus the condition's `-D`, with `-fsyntax-only`.
 - **`MIINT_HAS_AVX2` / `MIINT_HAS_AVX512` say the build contains a variant, not that the CPU can run it** (`docs/internals/embedded-tools.md`, "Per-instruction-set compilation").
 - **Docs mirror CMake.** A change to `ExternalProject_Add`, `find_package` or a `MIINT_ENABLE_*` option changes `docs/internals/embedded-tools.md` in the same PR.
+- **Code taken from another project is attributed where it is defined and in `THIRD_PARTY_LICENSES.md`**: a line-by-line port, and also code that follows the source's structure closely enough to count as copied with modification (the same steps in the same order, the same quirks, a verbatim lookup table). A PR whose reader was written against a reference implementation says which parts are which, after comparing function by function.
 - **GPL code stays out of process** (`docs/internals/architecture.md`, "GPL/BSD License Boundary"); a GPL tool's numeric output may be committed as a fixture, its code may not.
 - **Interpreting a file by its name** [soft]: reading sniffs content; a writer's format comes from an explicit parameter, with the suffix as the default only.
 
@@ -254,7 +263,9 @@ When two similar code paths solve the same problem differently, factor out the s
 
 - **Existing primitives first.** PR-level check 1 owns the procedure. A hand-rolled reverse complement, interval merge, COO builder, id codec or format writer beside an existing one is the finding, in tests as in `src/`.
 - **A copy-pasted sibling is parameterized**, not maintained twice. Same for near-duplicate blocks in one file and an error message or constant repeated across sites.
-- **A literal with format meaning is named when it recurs.** A record's marker byte, a record or tag type letter, or a field separator compared at several sites becomes a named constant or enum, so each comparison says what it tests; error messages and comments keep the literal.
+- **A binary format's layout is named, not spelled out.** Header and record offsets, field sizes, bit masks and shifts, version numbers, tags and type codes in a reader are named constants or enums, with the layout described where they are defined, even when used once; byte-to-bit and width conversions use `sizeof` and one shared bits-per-byte constant. One enum or constant style throughout the reader, and a constant two files need is shared, not defined twice.
+- **Reader boilerplate comes from `table_function_common.hpp`.** A reader's shared columns, path-argument expansion and file-exists check use the helpers there, not a copy of them.
+- **Elsewhere, a literal with format meaning is named when it recurs.** A record's marker byte, a record or tag type letter, or a field separator compared at several sites becomes a named constant or enum, so each comparison says what it tests; error messages and comments keep the literal.
 - **Character classes and number parsing come from the standard library or DuckDB** where one matches the grammar. A hand-written one says why the library's does not fit: a locale dependence, or a header the code cannot include.
 - **Never compute through spec-invalid input.** A result is not computed by building input the format's specification forbids and passing it to a parser that accepts it, such as concatenating CIGAR strings so clipping operations land in the interior. Correctness would rest on the parser's laxity. Combine the components the parser already computes; if nothing exposes them, add an accessor.
 - **Underusing a tool is reinventing it** [soft]: check whether DuckDB or the embedded tool already does the expensive part (parallelism, list inputs, a documented pivot) before building around it.
