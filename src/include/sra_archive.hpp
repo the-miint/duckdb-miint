@@ -12,6 +12,27 @@
 namespace miint {
 namespace sra {
 
+// Names in a KDB directory tree, as paths inside the archive spell them.
+constexpr char KDB_TABLES[] = "tbl";      // a database's tables
+constexpr char KDB_DATABASES[] = "db";    // a database's nested databases
+constexpr char KDB_COLUMNS[] = "col";     // a table's columns, and a table metadata node of static columns
+constexpr char KDB_METADATA[] = "md/cur"; // the metadata file of a database, table or column
+constexpr char SEQUENCE_TABLE[] = "SEQUENCE";
+
+// VDB numbers a table's rows from 1.
+constexpr int64_t VDB_FIRST_ROW_ID = 1;
+
+// Every KDB file (the archive, a metadata file, a column's index files) starts with a byte-order
+// tag and a version, 4 bytes each.
+constexpr size_t KDB_FILE_HEADER_SIZE = 8;
+// A persisted binary search tree (KDB's PBSTree) starts with a node count, then, when there are
+// nodes, the payload size, 4 bytes each.
+constexpr size_t PBST_COUNT_SIZE = 4;
+constexpr size_t PBST_HEADER_SIZE = 8;
+
+// Throws SraUnsupportedError for a big-endian tag, SraFormatError for any other than native.
+void CheckByteOrder(uint32_t tag, const std::string &what);
+
 // One entry of a KAR archive's table of contents. `path` is the full path inside the archive
 // ("tbl/SEQUENCE/col/READ/data"). For a file, `offset` is absolute in the .sra file.
 struct KarEntry {
@@ -79,7 +100,7 @@ MetadataNode ParseMetadata(const std::vector<uint8_t> &bytes);
 struct StaticColumn {
 	std::string type; // the column's stored type, e.g. "INSDC:coord:len"
 	std::string row;  // the cell's bytes, the same for every row
-	int64_t start_id = 1;
+	int64_t start_id = VDB_FIRST_ROW_ID;
 	uint64_t row_count = 0;
 	// The cell's length in bits, when its bytes do not say it: a 2na cell of 574 bases fills
 	// 144 bytes but holds 1148 bits.
@@ -105,6 +126,10 @@ public:
 	// Where the table's files live in the archive: "tbl/SEQUENCE/" or "".
 	const std::string &Prefix() const {
 		return prefix_;
+	}
+	// The archive path of a column's directory.
+	std::string ColumnDir(const std::string &name) const {
+		return prefix_ + KDB_COLUMNS + "/" + name;
 	}
 	const MetadataNode &Metadata() const {
 		return metadata_;

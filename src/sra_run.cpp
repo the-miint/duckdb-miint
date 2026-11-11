@@ -73,7 +73,7 @@ RunFacts GatherRunFacts(const SraTable &table) {
 	           (table.DatabaseMetadata() && table.DatabaseMetadata()->Find("SOFTWARE/delite") != nullptr);
 	for (const auto &name : table.PhysicalColumns()) {
 		f.physical_columns.insert(name);
-		std::string md_path = table.Prefix() + "col/" + name + "/md/cur";
+		std::string md_path = table.ColumnDir(name) + "/" + KDB_METADATA;
 		std::string expr = "(no schema)";
 		if (table.Archive().Find(md_path) != nullptr) {
 			MetadataNode md = ParseMetadata(table.Archive().ReadFile(md_path));
@@ -155,8 +155,9 @@ public:
 		}
 		type_ = ElementTypeOf(type);
 		if (static_) {
-			uint64_t bits = static_->size_bits ? *static_->size_bits : uint64_t(static_->row.size()) * 8;
-			if (bits % type_.bits != 0 || bits > uint64_t(static_->row.size()) * 8) {
+			const uint64_t row_bits = uint64_t(static_->row.size()) * BITS_PER_BYTE;
+			uint64_t bits = static_->size_bits ? *static_->size_bits : row_bits;
+			if (bits % type_.bits != 0 || bits > row_bits) {
 				throw SraFormatError("static column '" + name + "' has a cell of " + std::to_string(bits) + " bits");
 			}
 			static_count_ = bits / type_.bits;
@@ -235,7 +236,7 @@ public:
 			return std::nullopt;
 		}
 		int32_t v;
-		std::memcpy(&v, data + offset * 4, 4);
+		std::memcpy(&v, data + offset * sizeof(v), sizeof(v));
 		return v;
 	}
 
@@ -262,7 +263,13 @@ private:
 };
 
 // INSDC 4na: each bit a base (A=1, C=2, G=4, T=8), so an ambiguity code is the OR of its bases.
-const char FOUR_NA_TEXT[17] = ".ACMGRSVTWYHKDBN";
+// The text of each code is INSDC_dna_4na_map_CHARSET from ncbi-vdb's interfaces/insdc/insdc.h.
+constexpr char FOUR_NA_TEXT[] = ".ACMGRSVTWYHKDBN";
+constexpr uint8_t FOUR_NA_MASK = 0xf; // four bits, one per base
+static_assert(sizeof(FOUR_NA_TEXT) - 1 == FOUR_NA_MASK + 1, "a character for every 4na code");
+// 2na: two bits a base, packed most significant first.
+constexpr int TWO_NA_BITS = 2;
+constexpr uint8_t TWO_NA_MASK = 3;
 
 } // namespace
 
@@ -420,8 +427,9 @@ void SpotReader::Read(int64_t row_id, Spot &out) {
 	m.read->Cell(row_id, data, offset, n);
 	m.bases4na.resize(n);
 	for (uint64_t i = 0; i < n; i++) {
-		uint64_t bit = (offset + i) * 2;
-		uint8_t two_na = (data[bit >> 3] >> (6 - (bit & 7))) & 3;
+		uint64_t bit = (offset + i) * TWO_NA_BITS;
+		const int from_top = BITS_PER_BYTE - TWO_NA_BITS - int(bit % BITS_PER_BYTE);
+		uint8_t two_na = (data[bit / BITS_PER_BYTE] >> from_top) & TWO_NA_MASK;
 		m.bases4na[i] = uint8_t(1u << two_na);
 	}
 	if (m.altread) {
@@ -437,7 +445,7 @@ void SpotReader::Read(int64_t row_id, Spot &out) {
 	}
 	out.bases.resize(n);
 	for (uint64_t i = 0; i < n; i++) {
-		out.bases[i] = FOUR_NA_TEXT[m.bases4na[i] & 15];
+		out.bases[i] = FOUR_NA_TEXT[m.bases4na[i] & FOUR_NA_MASK];
 	}
 
 	m.quality->Values(row_id, out.quality);
@@ -541,7 +549,7 @@ void RouteSpot(const Spot &spot, SplitMode mode, bool include_technical, std::ve
 		if (use_types && !spot.read_type.empty() && !Biological(spot, 0)) {
 			return;
 		}
-		Emit(spot, 1, 0, 0, spot.bases.size(), out);
+		Emit(spot, 1, UNPAIRED_FILE, 0, spot.bases.size(), out);
 		return;
 	}
 
@@ -551,13 +559,15 @@ void RouteSpot(const Spot &spot, SplitMode mode, bool include_technical, std::ve
 			if (spot.read_len[i] == 0 || (use_types && !Biological(spot, i))) {
 				continue;
 			}
-			Emit(spot, uint32_t(i + 1), 0, size_t(spot.read_start[i]), spot.read_len[i], out);
+			Emit(spot, uint32_t(i + 1), UNPAIRED_FILE, size_t(spot.read_start[i]), spot.read_len[i], out);
 		}
 		return;
 	}
 
-	// print_fastq_n_reads_split_3: mates are numbered by the reads written, and a spot with
-	// fewer than two non-empty biological reads goes to the unpaired file.
+	// print_fastq_n_reads_split_3, the routing of sra-tools' fasterq-dump (tools/external/fasterq-dump/
+	// tbl_join.c; public domain, THIRD_PARTY_LICENSES.md), as is the one-read filter1 path above:
+	// mates are numbered by the reads written, and a spot with fewer than two non-empty biological
+	// reads goes to the unpaired file.
 	if (!spot.has_read_type) {
 		throw SraUnsupportedError("split-3 needs READ_TYPE, which this table lacks");
 	}
@@ -573,16 +583,16 @@ void RouteSpot(const Spot &spot, SplitMode mode, bool include_technical, std::ve
 	if (valid_reads == 0) {
 		return;
 	}
-	uint32_t write_id = 1;
+	uint32_t write_id = MATE_1_FILE;
 	for (size_t i = 0; i < reads; i++) {
 		if (spot.read_len[i] == 0 || !Biological(spot, i)) {
 			continue;
 		}
 		if (valid_bio_reads < 2) {
-			write_id = 0;
+			write_id = UNPAIRED_FILE;
 		}
 		Emit(spot, uint32_t(i + 1), write_id, size_t(spot.read_start[i]), spot.read_len[i], out);
-		if (write_id > 0) {
+		if (write_id != UNPAIRED_FILE) {
 			write_id++;
 		}
 	}
@@ -608,20 +618,20 @@ void RowsForSpot(std::vector<SraRead> &reads, SplitMode mode, std::vector<SraRow
 	row.spot = reads[0].spot;
 	row.read_number = reads[0].read_number;
 	for (auto &r : reads) {
-		if (r.destination > 2) {
+		if (r.destination > MATE_2_FILE) {
 			throw SraUnsupportedError("spot " + std::to_string(r.spot) +
 			                          " has a third biological read, which a split_3 row cannot hold; "
 			                          "use split => 'spot'");
 		}
 	}
-	if (reads[0].destination == 0) {
+	if (reads[0].destination == UNPAIRED_FILE) {
 		if (reads.size() != 1) {
 			throw SraFormatError("spot " + std::to_string(row.spot) + " routes " + std::to_string(reads.size()) +
 			                     " reads to the unpaired file");
 		}
 		row.read1 = std::move(reads[0]);
 	} else {
-		if (reads.size() != 2 || reads[0].destination != 1 || reads[1].destination != 2) {
+		if (reads.size() != 2 || reads[0].destination != MATE_1_FILE || reads[1].destination != MATE_2_FILE) {
 			throw SraFormatError("spot " + std::to_string(row.spot) + " does not route to mates 1 and 2");
 		}
 		row.read1 = std::move(reads[0]);

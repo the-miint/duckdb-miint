@@ -9,12 +9,19 @@
 namespace miint {
 namespace sra {
 
+namespace {
+// zlib's windowBits for a raw deflate stream (no zlib or gzip wrapper) with a 32 KiB window.
+constexpr int RAW_DEFLATE_WINDOW_BITS = -15;
+// The first buffer InflateRawGrowing tries; it doubles from there.
+constexpr uint64_t INFLATE_FIRST_BUFFER = 4096;
+} // namespace
+
 std::vector<uint8_t> InflateRawGrowing(const uint8_t *src, size_t n, uint64_t limit, const char *what) {
 	if (n > UINT32_MAX) {
 		throw SraFormatError(std::string(what) + " is larger than 4 GiB");
 	}
 	z_stream zs {};
-	if (inflateInit2(&zs, -15) != Z_OK) {
+	if (inflateInit2(&zs, RAW_DEFLATE_WINDOW_BITS) != Z_OK) {
 		throw SraFormatError(std::string("cannot start inflating ") + what);
 	}
 	// Ends the stream on every way out, a failed allocation included.
@@ -34,7 +41,8 @@ std::vector<uint8_t> InflateRawGrowing(const uint8_t *src, size_t n, uint64_t li
 			                     " bytes it can need");
 		}
 		size_t have = size_t(zs.total_out);
-		out.resize(size_t(std::min<uint64_t>(limit, std::max<uint64_t>(4096, uint64_t(out.size()) * 2))));
+		out.resize(
+		    size_t(std::min<uint64_t>(limit, std::max<uint64_t>(INFLATE_FIRST_BUFFER, uint64_t(out.size()) * 2))));
 		zs.next_out = out.data() + have;
 		zs.avail_out = uInt(std::min<size_t>(out.size() - have, UINT32_MAX));
 		rc = inflate(&zs, Z_NO_FLUSH);
@@ -55,7 +63,7 @@ Inflated InflateRaw(const uint8_t *src, size_t n, uint8_t *dst, size_t dsize, co
 		throw SraFormatError(std::string(what) + " is larger than 4 GiB");
 	}
 	z_stream zs {};
-	if (inflateInit2(&zs, -15) != Z_OK) {
+	if (inflateInit2(&zs, RAW_DEFLATE_WINDOW_BITS) != Z_OK) {
 		throw SraFormatError(std::string("cannot start inflating ") + what);
 	}
 	zs.next_in = const_cast<Bytef *>(src);
@@ -158,24 +166,31 @@ void IrzipReconstruct(U *Y, size_t N, const int64_t *min, const int64_t *slope, 
 	}
 }
 
+// An izip header's arguments: the main series' minimum and slope, then, for two series, the
+// secondary's. Its first op byte has a bit per byte plane stored, least significant plane first.
+enum IzipArg : size_t { MIN_0 = 0, SLOPE_0 = 1, MIN_1 = 2, SLOPE_1 = 3, TWO_SERIES_ARGS = 4 };
+
+// The plane loop and argument unpacking follow the first half of ncbi-vdb's DECODE in
+// libs/vxf/irzip.impl.h and its caller iunzip in libs/vxf/irzip.c (public domain;
+// THIRD_PARTY_LICENSES.md).
 template <typename U>
 std::vector<uint8_t> IrzipDecode(const HeaderFrame &frame, const uint8_t *src, size_t n, uint64_t count) {
 	if (frame.ops.empty() || frame.args.empty()) {
 		throw SraFormatError("an izip blob header lacks its parameters");
 	}
 	uint8_t planes = frame.ops[0];
-	int64_t min[2] = {frame.args[0], 0};
-	int64_t slope[2] = {frame.args.size() > 1 ? frame.args[1] : 0, 0};
+	int64_t min[2] = {frame.args[MIN_0], 0};
+	int64_t slope[2] = {frame.args.size() > SLOPE_0 ? frame.args[SLOPE_0] : 0, 0};
 	int series_count = 1;
-	if (frame.args.size() >= 4) {
-		min[1] = frame.args[2];
-		slope[1] = frame.args[3];
+	if (frame.args.size() >= TWO_SERIES_ARGS) {
+		min[1] = frame.args[MIN_1];
+		slope[1] = frame.args[SLOPE_1];
 		series_count = 2;
 	}
 	std::vector<U> Y(count, 0);
 	std::vector<uint8_t> plane(planes != 0 ? count : 0); // only a blob with planes reads any
 	size_t used = 0;
-	for (unsigned p = 0; p < 8; p++) {
+	for (unsigned p = 0; p < sizeof(planes) * BITS_PER_BYTE; p++) {
 		if (!(planes & (1u << p))) {
 			continue;
 		}
@@ -184,7 +199,7 @@ std::vector<uint8_t> IrzipDecode(const HeaderFrame &frame, const uint8_t *src, s
 		}
 		used += InflateExact(src + used, n - used, plane.data(), count, "an izip byte plane");
 		for (size_t i = 0; i < count; i++) {
-			Y[i] = U(Y[i] | (U(plane[i]) << (8 * p)));
+			Y[i] = U(Y[i] | (U(plane[i]) << (BITS_PER_BYTE * p)));
 		}
 	}
 	IrzipReconstruct(Y.data(), count, min, slope, series_count);
@@ -202,6 +217,10 @@ void ByteSwap(std::vector<uint8_t> &data, uint32_t width) {
 }
 
 enum class Encoding { Raw, Zip, Izip };
+// The physical encodings read, as a column's expression names them. zip_encoding may carry
+// template arguments after its name.
+constexpr char IZIP_ENCODING[] = "izip_encoding#1";
+constexpr char ZIP_ENCODING[] = "zip_encoding#1";
 
 Encoding EncodingOf(const std::string &expr) {
 	if (expr.empty()) {
@@ -215,10 +234,10 @@ Encoding EncodingOf(const std::string &expr) {
 	}
 	auto close = e.find('>');
 	std::string name = e[0] == '<' && close != std::string::npos ? e.substr(close + 1) : e;
-	if (name == "izip_encoding#1") {
+	if (name == IZIP_ENCODING) {
 		return Encoding::Izip;
 	}
-	if (name.compare(0, 14, "zip_encoding#1") == 0) {
+	if (name.compare(0, sizeof(ZIP_ENCODING) - 1, ZIP_ENCODING) == 0) {
 		return Encoding::Zip;
 	}
 	throw SraUnsupportedError("encoding '" + expr + "'");
@@ -226,8 +245,20 @@ Encoding EncodingOf(const std::string &expr) {
 
 } // namespace
 
+namespace {
+// A zip header's version: 1 decodes to whole bytes, 2 records the significant bits of the last.
+constexpr uint8_t ZIP_WHOLE_BYTES = 1;
+constexpr uint8_t ZIP_TRAILING_BITS = 2;
+// izip header versions: 0 is a legacy layout, 1 to 3 the current one.
+constexpr uint8_t IZIP_LEGACY = 0;
+constexpr uint8_t IZIP_MAX_VERSION = 3;
+// A header frame whose flags have this bit passes its data through unchanged.
+constexpr uint8_t HEADER_FLAG_SKIPPED = 1;
+constexpr int GIB_SHIFT = 30;
+} // namespace
+
 std::vector<uint8_t> Unzip(const HeaderFrame &frame, const uint8_t *src, size_t n, uint64_t &out_bits) {
-	if (frame.version != 1 && frame.version != 2) {
+	if (frame.version != ZIP_WHOLE_BYTES && frame.version != ZIP_TRAILING_BITS) {
 		throw SraUnsupportedError("zip blob header version " + std::to_string(frame.version));
 	}
 	if (frame.osize < 0 || uint64_t(frame.osize) > uint64_t(n) * MAX_DEFLATE_RATIO) {
@@ -236,17 +267,18 @@ std::vector<uint8_t> Unzip(const HeaderFrame &frame, const uint8_t *src, size_t 
 	}
 	std::vector<uint8_t> out(size_t(frame.osize));
 	InflateExact(src, n, out.data(), out.size(), "a zip blob");
-	out_bits = uint64_t(out.size()) * 8;
-	if (frame.version == 2) {
+	out_bits = uint64_t(out.size()) * BITS_PER_BYTE;
+	if (frame.version == ZIP_TRAILING_BITS) {
 		if (frame.args.empty()) {
 			throw SraFormatError("a zip blob header lacks its trailing-bit count");
 		}
+		// The last byte's significant bits, 0 meaning all of them.
 		int64_t trailing = frame.args[0];
-		if (trailing < 0 || trailing > 7 || (trailing != 0 && out.empty())) {
+		if (trailing < 0 || trailing >= BITS_PER_BYTE || (trailing != 0 && out.empty())) {
 			throw SraFormatError("a zip blob header records " + std::to_string(trailing) + " trailing bits");
 		}
 		if (trailing != 0) {
-			out_bits -= uint64_t(8 - trailing);
+			out_bits -= uint64_t(BITS_PER_BYTE - trailing);
 		}
 	}
 	return out;
@@ -254,13 +286,15 @@ std::vector<uint8_t> Unzip(const HeaderFrame &frame, const uint8_t *src, size_t 
 
 std::vector<uint8_t> Iunzip(const HeaderFrame &frame, const uint8_t *src, size_t n, ElementType type,
                             uint64_t elem_count) {
-	if (frame.version == 0) {
+	if (frame.version == IZIP_LEGACY) {
 		throw SraUnsupportedError("legacy izip (blob header version 0), which no public run surveyed used");
 	}
-	if (frame.version > 3) {
+	if (frame.version > IZIP_MAX_VERSION) {
 		throw SraUnsupportedError("izip blob header version " + std::to_string(frame.version));
 	}
-	if (type.bits != 8 && type.bits != 16 && type.bits != 32 && type.bits != 64) {
+	constexpr uint32_t U8_BITS = sizeof(uint8_t) * BITS_PER_BYTE, U16_BITS = sizeof(uint16_t) * BITS_PER_BYTE,
+	                   U32_BITS = sizeof(uint32_t) * BITS_PER_BYTE, U64_BITS = sizeof(uint64_t) * BITS_PER_BYTE;
+	if (type.bits != U8_BITS && type.bits != U16_BITS && type.bits != U32_BITS && type.bits != U64_BITS) {
 		throw SraUnsupportedError("izip on " + std::to_string(type.bits) + "-bit elements");
 	}
 	// Each byte plane inflates to elem_count bytes from at most n. A blob with no planes is all
@@ -270,18 +304,18 @@ std::vector<uint8_t> Iunzip(const HeaderFrame &frame, const uint8_t *src, size_t
 		throw SraFormatError("an izip blob claims " + std::to_string(elem_count) + " elements from " +
 		                     std::to_string(n) + " bytes, more than deflate can inflate");
 	}
-	if (elem_count > MAX_DECODED_BLOB / (type.bits / 8)) {
+	if (elem_count > MAX_DECODED_BLOB / (type.bits / BITS_PER_BYTE)) {
 		throw SraUnsupportedError("an izip blob that decodes to " + std::to_string(elem_count) +
-		                          " elements, more than " + std::to_string(MAX_DECODED_BLOB >> 30) + " GiB");
+		                          " elements, more than " + std::to_string(MAX_DECODED_BLOB >> GIB_SHIFT) + " GiB");
 	}
 	switch (type.bits) {
-	case 8:
+	case U8_BITS:
 		return IrzipDecode<uint8_t>(frame, src, n, elem_count);
-	case 16:
+	case U16_BITS:
 		return IrzipDecode<uint16_t>(frame, src, n, elem_count);
-	case 32:
+	case U32_BITS:
 		return IrzipDecode<uint32_t>(frame, src, n, elem_count);
-	case 64:
+	case U64_BITS:
 		return IrzipDecode<uint64_t>(frame, src, n, elem_count);
 	default:
 		throw std::logic_error("Iunzip: width checked above"); // unreachable
@@ -293,7 +327,7 @@ std::vector<uint8_t> Iunzip(const HeaderFrame &frame, const uint8_t *src, size_t
 DecodedBlob DecodeBlob(VdbBlob blob, const std::string &encoding, ElementType type) {
 	DecodedBlob out;
 	Encoding enc = EncodingOf(encoding);
-	const bool skipped = !blob.frames.empty() && (blob.frames[0].flags & 1);
+	const bool skipped = !blob.frames.empty() && (blob.frames[0].flags & HEADER_FLAG_SKIPPED);
 	if (enc == Encoding::Raw && !blob.frames.empty() && !skipped) {
 		// The column records no encoding, so an encoded blob cannot be decoded as what it says it
 		// is; reading its bytes as elements would return garbage.
@@ -307,8 +341,8 @@ DecodedBlob DecodeBlob(VdbBlob blob, const std::string &encoding, ElementType ty
 		}
 		out.data.assign(blob.Payload(), blob.Payload() + blob.PayloadSize());
 		bits = blob.payload_bits;
-		if (blob.big_endian && type.bits >= 16) {
-			ByteSwap(out.data, type.bits / 8);
+		if (blob.big_endian && type.bits > BITS_PER_BYTE) {
+			ByteSwap(out.data, type.bits / BITS_PER_BYTE);
 		}
 	} else {
 		if (blob.frames.size() != 1) {
@@ -317,18 +351,18 @@ DecodedBlob DecodeBlob(VdbBlob blob, const std::string &encoding, ElementType ty
 		const HeaderFrame &frame = blob.frames[0];
 		if (enc == Encoding::Zip) {
 			out.data = Unzip(frame, blob.Payload(), blob.PayloadSize(), bits);
-			if (blob.big_endian && type.bits >= 16) {
-				ByteSwap(out.data, type.bits / 8);
+			if (blob.big_endian && type.bits > BITS_PER_BYTE) {
+				ByteSwap(out.data, type.bits / BITS_PER_BYTE);
 			}
 		} else {
-			if (type.bits < 8) {
+			if (type.bits < BITS_PER_BYTE) {
 				throw SraUnsupportedError("izip_encoding on a column of " + std::to_string(type.bits) +
 				                          "-bit elements");
 			}
-			if (frame.osize % (type.bits / 8) != 0) {
+			if (frame.osize % (type.bits / BITS_PER_BYTE) != 0) {
 				throw SraFormatError("an izip blob's size is not a whole number of elements");
 			}
-			uint64_t count = uint64_t(frame.osize) / (type.bits / 8);
+			uint64_t count = uint64_t(frame.osize) / (type.bits / BITS_PER_BYTE);
 			out.data = Iunzip(frame, blob.Payload(), blob.PayloadSize(), type, count);
 			bits = count * type.bits;
 		}

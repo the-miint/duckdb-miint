@@ -61,16 +61,27 @@ void SraMemorySource::ReadAt(uint64_t pos, uint8_t *buf, size_t n) const {
 	}
 }
 
+namespace {
+template <typename T>
+T LoadLittleEndian(const uint8_t *p) {
+	T v = 0;
+	for (size_t i = 0; i < sizeof(T); i++) {
+		v = T(v | (T(p[i]) << (BITS_PER_BYTE * i)));
+	}
+	return v;
+}
+} // namespace
+
 uint16_t LoadU16(const uint8_t *p) {
-	return uint16_t(p[0] | (p[1] << 8));
+	return LoadLittleEndian<uint16_t>(p);
 }
 
 uint32_t LoadU32(const uint8_t *p) {
-	return uint32_t(p[0]) | (uint32_t(p[1]) << 8) | (uint32_t(p[2]) << 16) | (uint32_t(p[3]) << 24);
+	return LoadLittleEndian<uint32_t>(p);
 }
 
 uint64_t LoadU64(const uint8_t *p) {
-	return uint64_t(LoadU32(p)) | (uint64_t(LoadU32(p + 4)) << 32);
+	return LoadLittleEndian<uint64_t>(p);
 }
 
 } // namespace sra
