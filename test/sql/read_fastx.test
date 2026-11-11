@@ -280,6 +280,12 @@ SELECT * FROM read_fastx('-', sequence2='data/fastq/small_a_r2.fq');
 ----
 Invalid Input Error: stdin cannot be used with sequence2
 
+# '-' as sequence2 is a file name, not stdin, and no such file exists: refused when the query binds
+statement error
+SELECT * FROM read_fastx('data/fastq/small_a.fq', sequence2='-');
+----
+File not found: -
+
 # Error: stdin with VARCHAR[]
 statement error
 SELECT * FROM read_fastx(['-', 'data/fastq/small_a.fq']);
