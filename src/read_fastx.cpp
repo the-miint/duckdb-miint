@@ -19,28 +19,9 @@ unique_ptr<FunctionData> ReadFastxTableFunction::Bind(ClientContext &context, Ta
                                                       vector<Identifier> &names) {
 	FileSystem &fs = FileSystem::GetFileSystem(context);
 
-	std::vector<std::string> sequence1_paths;
-	bool sequence1_is_glob = false;
-
-	// Helper to detect stdin paths
-	auto is_stdin = [](const std::string &path) {
-		return path == "-" || path == "/dev/stdin" || path == "/dev/fd/0" || path == "/proc/self/fd/0";
-	};
-
-	if (input.inputs[0].IsNull()) {
-		throw InvalidInputException("read_fastx: first argument cannot be NULL");
-	}
-	// Handle VARCHAR (single path, potentially a glob) or VARCHAR[] (array of literal paths)
-	if (input.inputs[0].type().id() == LogicalTypeId::VARCHAR) {
-		// Single string - could be a glob pattern
-		auto result = ExpandGlobPatternWithInfo(fs, context, input.inputs[0].ToString());
-		sequence1_paths = std::move(result.paths);
-		sequence1_is_glob = result.is_glob;
-	} else if (input.inputs[0].type().id() == LogicalTypeId::LIST) {
-		sequence1_paths = ExpandPathList(fs, input.inputs[0], "read_fastx");
-	} else {
-		throw InvalidInputException("read_fastx: first argument must be VARCHAR or VARCHAR[]");
-	}
+	auto sequence1 = ExpandPathArgument(fs, context, input.inputs[0], "read_fastx");
+	std::vector<std::string> sequence1_paths = std::move(sequence1.paths);
+	const bool sequence1_is_glob = sequence1.is_glob;
 
 	// Detect stdin usage
 	// Note: We detect common stdin paths, but cannot catch all cases (e.g., symlinks to stdin,
@@ -48,7 +29,7 @@ unique_ptr<FunctionData> ReadFastxTableFunction::Bind(ClientContext &context, Ta
 	// the behavior is undefined and may result in data corruption or crashes.
 	bool uses_stdin = false;
 
-	if (sequence1_paths.size() == 1 && is_stdin(sequence1_paths[0])) {
+	if (sequence1_paths.size() == 1 && IsStdinPath(sequence1_paths[0])) {
 		uses_stdin = true;
 		// Normalize stdin to /dev/stdin for kseq++
 		if (sequence1_paths[0] == "-") {
@@ -57,19 +38,14 @@ unique_ptr<FunctionData> ReadFastxTableFunction::Bind(ClientContext &context, Ta
 	} else if (sequence1_paths.size() > 1) {
 		// Check if stdin is in an array (not allowed)
 		for (const auto &path : sequence1_paths) {
-			if (is_stdin(path)) {
+			if (IsStdinPath(path)) {
 				throw InvalidInputException(
 				    "stdin ('-' or '/dev/stdin') must be a single file path, not part of an array");
 			}
 		}
 	}
 
-	// Validate all sequence1 files exist (skip stdin and remote paths)
-	for (const auto &path : sequence1_paths) {
-		if (!is_stdin(path) && !miint::RemoteFileHelper::IsRemotePath(path) && !fs.FileExists(path)) {
-			throw IOException("File not found: " + path);
-		}
-	}
+	RequireLocalFilesExist(fs, sequence1_paths);
 
 	// Parse sequence2 parameter (optional)
 	std::optional<std::vector<std::string>> sequence2_paths;
@@ -115,7 +91,7 @@ unique_ptr<FunctionData> ReadFastxTableFunction::Bind(ClientContext &context, Ta
 			}
 		}
 
-		// Validate all sequence2 files exist (skip remote paths)
+		// Not RequireLocalFilesExist, which exempts stdin paths: sequence2 does not take stdin.
 		for (const auto &path : seq2_paths) {
 			if (!miint::RemoteFileHelper::IsRemotePath(path) && !fs.FileExists(path)) {
 				throw IOException("File not found: " + path);

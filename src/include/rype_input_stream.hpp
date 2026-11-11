@@ -101,11 +101,6 @@ constexpr idx_t RYPE_ARROW_BATCH_BYTES = 256ULL * 1024 * 1024;
 //! DuckDB parses and range-checks the value for us.
 idx_t GetRypeArrowBatchBytes(ClientContext &context);
 
-//! A BIGINT extension option, registered in LoadInternal, that must not be
-//! negative: `if_null` when it is NULL. `zero_means` says, in the error for a
-//! negative value, what 0 does.
-idx_t GetNonNegativeOption(ClientContext &context, const char *name, idx_t if_null, const char *zero_means);
-
 //! Everything the stream needs that is not derivable from the connection.
 struct RypeInputStreamOptions {
 	//! The caller's relation, already SQL-quoted.

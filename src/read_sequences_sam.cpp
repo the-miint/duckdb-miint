@@ -1,6 +1,5 @@
 #include "SAMReader.hpp"
 #include "SAMRecord.hpp"
-#include "remote_file_helper.hpp"
 #include "table_function_common.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/vector_size.hpp"
@@ -21,20 +20,7 @@ unique_ptr<FunctionData> ReadSequencesSamTableFunction::Bind(ClientContext &cont
                                                              vector<Identifier> &names) {
 	FileSystem &fs = FileSystem::GetFileSystem(context);
 
-	std::vector<std::string> file_paths;
-
-	if (input.inputs[0].IsNull()) {
-		throw InvalidInputException("read_sequences_sam: first argument cannot be NULL");
-	}
-	// Handle VARCHAR (single path, potentially a glob) or VARCHAR[] (array of literal paths)
-	if (input.inputs[0].type().id() == LogicalTypeId::VARCHAR) {
-		auto result = ExpandGlobPatternWithInfo(fs, context, input.inputs[0].ToString());
-		file_paths = std::move(result.paths);
-	} else if (input.inputs[0].type().id() == LogicalTypeId::LIST) {
-		file_paths = ExpandPathList(fs, input.inputs[0], "read_sequences_sam");
-	} else {
-		throw InvalidInputException("read_sequences_sam: first argument must be VARCHAR or VARCHAR[]");
-	}
+	std::vector<std::string> file_paths = ExpandPathArgument(fs, context, input.inputs[0], "read_sequences_sam").paths;
 
 	// Detect stdin usage
 	bool uses_stdin = false;
@@ -52,12 +38,7 @@ unique_ptr<FunctionData> ReadSequencesSamTableFunction::Bind(ClientContext &cont
 		}
 	}
 
-	// Validate all files exist (skip stdin and remote paths)
-	for (const auto &path : file_paths) {
-		if (!IsStdinPath(path) && !miint::RemoteFileHelper::IsRemotePath(path) && !fs.FileExists(path)) {
-			throw IOException("File not found: " + path);
-		}
-	}
+	RequireLocalFilesExist(fs, file_paths);
 
 	bool include_filepath = ParseIncludeFilepathParameter(input.named_parameters);
 

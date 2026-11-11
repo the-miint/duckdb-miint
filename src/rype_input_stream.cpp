@@ -1,5 +1,6 @@
 #include "rype_input_stream.hpp"
 #include "rype_common.hpp"
+#include "table_function_common.hpp"
 
 #include "duckdb/common/arrow/arrow_converter.hpp"
 #include "duckdb/common/optional_idx.hpp"
@@ -30,24 +31,6 @@ unique_ptr<StreamingQuery> SubmitScan(Connection &conn, const std::string &selec
 }
 
 } // namespace
-
-idx_t GetNonNegativeOption(ClientContext &context, const char *name, idx_t if_null, const char *zero_means) {
-	Value v;
-	// Registered at extension load (LoadInternal in src/miint_extension.cpp).
-	// Missing means the option was never registered, which is a load-order
-	// programmer error rather than a user mistake.
-	if (!context.TryGetCurrentSetting(name, v)) {
-		throw InternalException("miint extension option '%s' is not registered — was LoadInternal completed?", name);
-	}
-	if (v.IsNull()) {
-		return if_null;
-	}
-	const auto value = v.GetValue<int64_t>();
-	if (value < 0) {
-		throw InvalidInputException("%s must be >= 0 (%s)", name, zero_means);
-	}
-	return NumericCast<idx_t>(value);
-}
 
 idx_t GetRypeArrowBatchBytes(ClientContext &context) {
 	return GetNonNegativeOption(context, "miint_rype_arrow_batch_bytes", RYPE_ARROW_BATCH_BYTES,

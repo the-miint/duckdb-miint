@@ -2,7 +2,6 @@
 
 #include "miint_named_parameter.hpp"
 #include "remote_file_helper.hpp"
-#include "rype_input_stream.hpp"
 #include "table_function_common.hpp"
 
 #include "duckdb/common/error_data.hpp"
@@ -235,14 +234,8 @@ void BindOptions(SraScanData &data, named_argument_map_t &params, vector<Logical
 	}
 	data.include_filepath = ParseIncludeFilepathParameter(params);
 
-	data.names = {"sequence_index", "read_id", "comment", "sequence1", "sequence2", "qual1", "qual2"};
-	data.types = {LogicalType::BIGINT,
-	              LogicalType::VARCHAR,
-	              LogicalType::VARCHAR,
-	              LogicalType::VARCHAR,
-	              LogicalType::VARCHAR,
-	              LogicalType::LIST(LogicalType::UTINYINT),
-	              LogicalType::LIST(LogicalType::UTINYINT)};
+	data.names = SequenceColumnNames();
+	data.types = SequenceColumnTypes();
 	if (data.split == SplitMode::Spot) {
 		data.names.emplace_back("read_number");
 		data.types.emplace_back(LogicalType::UTINYINT);
@@ -262,25 +255,14 @@ unique_ptr<FunctionData> ReadSraBind(ClientContext &context, TableFunctionBindIn
 	auto data = make_uniq<SraScanData>();
 	data->function = "read_sra";
 	auto &fs = FileSystem::GetFileSystem(context);
-	const Value &arg = input.inputs[0];
-	if (arg.IsNull()) {
-		throw InvalidInputException("read_sra: the path cannot be NULL");
-	}
-	std::vector<std::string> paths;
-	if (arg.type().id() == LogicalTypeId::VARCHAR) {
-		paths = ExpandGlobPatternWithInfo(fs, context, arg.ToString()).paths;
-	} else if (arg.type().id() == LogicalTypeId::LIST) {
-		paths = ExpandPathList(fs, arg, "read_sra");
-	} else {
-		throw InvalidInputException("read_sra: the path must be VARCHAR or VARCHAR[]");
-	}
+	auto paths = ExpandPathArgument(fs, context, input.inputs[0], "read_sra").paths;
 	for (const auto &path : paths) {
 		if (IsStdinPath(path)) {
 			throw InvalidInputException("read_sra: stdin is not supported (an .sra file is read at random positions)");
 		}
-		if (!miint::RemoteFileHelper::IsRemotePath(path) && !fs.FileExists(path)) {
-			throw IOException("File not found: " + path);
-		}
+	}
+	RequireLocalFilesExist(fs, paths);
+	for (const auto &path : paths) {
 		data->runs.push_back({path, ReadSraTableFunction::AccessionFromPath(path)});
 	}
 	BindOptions(*data, input.named_parameters, return_types, names);

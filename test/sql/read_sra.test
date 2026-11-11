@@ -15,7 +15,7 @@ require miint
 statement error
 SELECT * FROM read_sra(NULL);
 ----
-read_sra: the path cannot be NULL
+read_sra: first argument cannot be NULL
 
 statement error
 SELECT * FROM read_sra('data/sra/no_such_run.sra');
@@ -45,7 +45,7 @@ read_sra: stdin is not supported (an .sra file is read at random positions)
 statement error
 SELECT * FROM read_sra(42);
 ----
-read_sra: the path must be VARCHAR or VARCHAR[]
+read_sra: first argument must be VARCHAR or VARCHAR[]
 
 statement error
 SELECT * FROM read_sra('data/sra/SRR4424282.sra', split := 'files');
