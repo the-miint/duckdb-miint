@@ -17,7 +17,6 @@ repository runs it.
 | `oracle/<RUN>/README.md` | Provenance for that run's oracles: tool version, exact commands, md5s |
 | `oracle/oracle_md5.csv` | Per oracle file: run, mode, file, md5, size and record count of the **uncompressed** FASTQ |
 | `real_oracles.csv` | The same for DRR274142 and SRR31286609, whose `.sra` and oracles are not committed (see below) |
-| `SHA256SUMS` | sha256 of every other file in this directory; `test/sql/sra_fixtures.test` asserts it |
 
 The oracles are gzipped (`gzip -9 -n`) to keep the repository small: about 3 MB rather than 14 MB. The gzip stream
 is not part of the contract. The bytes it decompresses to are, and their md5 is in `oracle_md5.csv`.
@@ -80,8 +79,9 @@ oracle. What it wrote is recorded so that the refusal is a decision, not an acci
 DRR274142 (latf-load, 42,008 spots, 233 of them unpaired under split-3) and SRR31286609 (sharq, 76,368 spots) are
 whole runs: they cross many blobs of every column and, for SRR31286609, many skey keys. At 15 MB and 30 MB, with 100–200 MB of FASTQ each, they are too large to
 commit. `real_oracles.csv` records each object's md5, sha256 and size and the md5, size and record count of every
-oracle file, generated the same way as the committed oracles. The tests that use them download the objects into
-`data/cache` and are guarded on that download (`run_tests.sh`).
+oracle file, generated the same way as the committed oracles. `run_tests.sh` downloads the objects into
+`data/cache/sra` and checks them against the sha256s recorded there: the tests that use them skip when a download
+fails, and the run fails when an object does not match, since the oracles would no longer apply to it.
 
 ## How the oracles were generated
 

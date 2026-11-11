@@ -1,40 +1,52 @@
 # name: test/sql/sra_fixtures.test
-# description: The SRA fixtures and fasterq-dump oracles in data/sra are present and unchanged (data/sra/README.md)
+# description: The SRA fixtures and fasterq-dump oracles in data/sra are present and match oracle_md5.csv (data/sra/README.md)
 # group: [sql]
 
 require miint
 
 # The oracles were generated once by fasterq-dump and are never regenerated, so a
-# changed or missing file is a failure, not a skip. Every file SHA256SUMS lists is
-# present and matches its recorded sha256.
-query III
-SELECT count(*), count(b.filename), count(*) FILTER (WHERE sha256(b.content) <> m.hash)
-FROM read_csv('data/sra/SHA256SUMS', delim = ' ', header = false,
-              columns = {'hash': 'VARCHAR', 'pad': 'VARCHAR', 'file': 'VARCHAR'}) m
-LEFT JOIN read_blob('data/sra/**') b ON replace(b.filename, '\', '/') = 'data/sra/' || m.file;
-----
-68	68	0
+# changed or missing file is a failure, not a skip. oracle_md5.csv records the md5 of
+# the FASTQ each oracle file decompresses to; the queries below check every oracle
+# against it. The .sra fixtures with oracles are checked by the reader's parity tests,
+# which must reproduce those md5s from them.
 
-# Nothing in data/sra apart from the READMEs and SHA256SUMS itself escapes the pin.
+# The fixtures without oracles are each refused for what they hold, and another archive
+# of the same kind would be refused the same way, so their bytes are pinned here: these
+# are NCBI's md5s, as data/sra/README.md records them.
 query I
 SELECT count(*)
-FROM read_blob('data/sra/**') b
-WHERE parse_filename(b.filename) NOT IN ('README.md', 'SHA256SUMS')
-  AND replace(b.filename, '\', '/') NOT IN (
-      SELECT 'data/sra/' || file
-      FROM read_csv('data/sra/SHA256SUMS', delim = ' ', header = false,
-                    columns = {'hash': 'VARCHAR', 'pad': 'VARCHAR', 'file': 'VARCHAR'}));
+FROM (VALUES ('SRR26779001.sra', '631d6aebf5ded903029d757bf0a7075d'),
+             ('SRR2513321.sra', 'ed285e33ed614c616b58c1b15272a446'),
+             ('SRR882123.sra', 'f55ddde79a98ec4730940e0bee288195'),
+             ('SRR4424282.sralite', '0599bb7936ad57889bb597e5e13d99bb')) pin(file, md5)
+LEFT JOIN read_blob('data/sra/*') b ON replace(b.filename, '\', '/') = 'data/sra/' || pin.file
+WHERE b.filename IS NULL OR md5(b.content) <> pin.md5;
 ----
 0
 
-# The oracle manifest covers 18 runs in three modes, and every file it names is pinned.
-query III
-SELECT count(*), count(DISTINCT run), count(*) FILTER (WHERE 'oracle/' || run || '/' || file NOT IN (
-           SELECT file FROM read_csv('data/sra/SHA256SUMS', delim = ' ', header = false,
-                                     columns = {'hash': 'VARCHAR', 'pad': 'VARCHAR', 'file': 'VARCHAR'})))
+# Every archive in data/sra is either one of those or has oracles.
+query I
+SELECT count(*)
+FROM read_blob('data/sra/*.sra*') b
+WHERE parse_filename(b.filename) NOT IN ('SRR26779001.sra', 'SRR2513321.sra', 'SRR882123.sra', 'SRR4424282.sralite')
+  AND parse_filename(b.filename, true) NOT IN (SELECT DISTINCT run FROM read_csv('data/sra/oracle/oracle_md5.csv'));
+----
+0
+
+# The oracle manifest covers 18 runs in three modes, and each run's .sra is present.
+query II
+SELECT count(*), count(DISTINCT run)
 FROM read_csv('data/sra/oracle/oracle_md5.csv');
 ----
-62	18	0
+62	18
+
+query I
+SELECT count(*)
+FROM (SELECT DISTINCT run FROM read_csv('data/sra/oracle/oracle_md5.csv')) m
+LEFT JOIN read_blob('data/sra/*.sra') b ON replace(b.filename, '\', '/') = 'data/sra/' || m.run || '.sra'
+WHERE b.filename IS NULL;
+----
+0
 
 statement ok
 CREATE TABLE manifest AS
