@@ -1576,17 +1576,40 @@ doi: 10.1038/nmeth.1499
 
 ### SRA Toolkit (sra-tools / fasterq-dump) and ncbi-vdb
 
-miint reads NCBI SRA archives (`.sra`) with its own reader, written from the
-format. ncbi-vdb's sources were read as the reference for the archive format,
-column encodings and spot-name reconstruction, and fasterq-dump's for which reads
-it writes, in what order and under which deflines. Two functions are ports of
-ncbi-vdb code, each marked where it is defined:
+miint reads NCBI SRA archives (`.sra`) with its own reader. ncbi-vdb's sources
+were read as the reference for the archive format, column encodings and
+spot-name reconstruction, and fasterq-dump's for which reads it writes, in what
+order and under which deflines. Most of the reader is written from the format,
+but the parts below are ports (line-by-line translations) or follow the NCBI
+code closely enough to count as copied with modification. Each is marked where
+it is defined.
 
-- `IrzipReconstruct` (`src/sra_codecs.cpp`): the `DECODE` reconstruction of
-  ncbi-vdb's `libs/vxf/irzip.impl.h`, the izip decoder.
+Ports:
+
+- `IrzipReconstruct` (`src/sra_codecs.cpp`): the reconstruction half of `DECODE`
+  in ncbi-vdb's `libs/vxf/irzip.impl.h`, the izip decoder.
 - `FormatSpotName` and `FormatSpotNameNoCoord` (`src/sra_name.cpp`): ncbi-vdb's
   `libs/sraxf/format-spot-name.c`, the `format_spot_name` and
   `format_spot_name_no_coord` functions.
+
+Copied with modification:
+
+- `SkeyIndex::SkeyIndex` (`src/sra_name.cpp`): the trie header follows
+  `PTrieMakeInt` in ncbi-vdb's `libs/klib/ptrie.c`, and the projection follows
+  `KRPTrieIndexInit_v3_v4` and `KPTrieIndexInitID2Ord` in
+  `libs/kdb/rtrieidx-v2.c`.
+- `SkeyIndex::KeyOfNode` (`src/sra_name.cpp`): `PTrieInitNode` and
+  `PTNodeMakeKey` in `libs/klib/ptrie.c`.
+- `IrzipDecode` (`src/sra_codecs.cpp`): the byte-plane half of `DECODE` in
+  `libs/vxf/irzip.impl.h`, and the argument unpacking of `iunzip` in
+  `libs/vxf/irzip.c`.
+- The v1 branch of `ParseVdbBlob` (`src/sra_column.cpp`):
+  `VBlobCreateFromData_v1` in `libs/vdb/blob.c`.
+- `RouteSpot` (`src/sra_run.cpp`): `filter1`, `filter`,
+  `print_fastq_n_reads_split` and `print_fastq_n_reads_split_3` in sra-tools'
+  `tools/external/fasterq-dump/tbl_join.c`.
+- `FOUR_NA_TEXT` (`src/sra_run.cpp`): `INSDC_dna_4na_map_CHARSET` in ncbi-vdb's
+  `interfaces/insdc/insdc.h`.
 
 Nothing else is copied, and no NCBI code is compiled, vendored or linked.
 
