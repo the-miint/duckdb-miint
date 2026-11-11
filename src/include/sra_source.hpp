@@ -67,6 +67,8 @@ private:
 	std::vector<uint8_t> bytes_;
 };
 
+constexpr int BITS_PER_BYTE = 8;
+
 // Little-endian loads. Every archive variant seen in public runs is little-endian, and a
 // big-endian one is rejected when the archive is opened, so the format code reads LE only.
 uint16_t LoadU16(const uint8_t *p);

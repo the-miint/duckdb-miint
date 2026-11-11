@@ -92,10 +92,15 @@ enum class SplitMode {
 };
 
 // A read as fasterq-dump writes it.
+// Where fasterq-dump writes a read: the unpaired (or only) file, or mate file _1, _2, ...
+constexpr uint32_t UNPAIRED_FILE = 0;
+constexpr uint32_t MATE_1_FILE = 1;
+constexpr uint32_t MATE_2_FILE = 2;
+
 struct SraRead {
 	int64_t spot = 0;             // $si
 	uint32_t read_number = 0;     // $ri: the read's position in its spot, 1-based
-	uint32_t destination = 0;     // 0: the unpaired (or only) file; n: file _n
+	uint32_t destination = 0;     // UNPAIRED_FILE: the unpaired (or only) file; n: file _n
 	bool has_name = false;        // the spot's
 	std::string name;             // $sn
 	std::string bases;            // $rl is its length
