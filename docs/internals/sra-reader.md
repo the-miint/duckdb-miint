@@ -1,8 +1,9 @@
 # The SRA reader
 
-`read_sra` (`src/read_sra.cpp`) reads NCBI's SRA archives with a decoder that is an independent implementation written from the format, with NCBI's public-domain sources
-read as its reference. Two functions are ports of ncbi-vdb code (`IrzipReconstruct` and the
-`FormatSpotName` pair); nothing of NCBI's is linked or vendored (`THIRD_PARTY_LICENSES.md`).
+`read_sra` (`src/read_sra.cpp`) reads NCBI's SRA archives with its own decoder, written with NCBI's
+public-domain sources read as its reference. Most of it is written from the format; the parts that
+are ports of NCBI code or follow it closely are marked in the code and listed in
+`THIRD_PARTY_LICENSES.md`. Nothing of NCBI's is linked or vendored.
 Its contract is `fasterq-dump`'s output, byte for byte, and the tests hold it to committed oracles
 that are never edited (`data/sra/README.md`).
 
