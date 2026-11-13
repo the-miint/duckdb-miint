@@ -76,8 +76,8 @@ SELECT (SELECT content FROM read_text('{TEST_DIR}/single_lower.fna')) = ref_text
 ----
 true
 
-# A contig with a character outside 'A'..'z' (a gap '-', a digit) is refused, as predict_genes refuses it: Prodigal
-# would drop it and every coordinate after it would shift, so these cannot be the contigs the genes came from.
+# A contig with a character outside 'A'..'z' (a gap '-', a digit) is refused, as predict_genes refuses it, so these
+# cannot be the contigs the genes came from.
 statement ok
 CREATE TABLE gapped AS
 SELECT read_id, CASE WHEN read_id = '61430_aco' THEN sequence1[1:100] || '-' || sequence1[101:] ELSE sequence1 END
@@ -87,6 +87,19 @@ statement error
 FROM prodigal_genes('single', 'gapped');
 ----
 prodigal_genes: contig '61430_aco' has a character outside 'A'..'z', which predict_genes refuses
+
+# A genome column of another type than VARCHAR (predict_genes passes genome_id through in its type).
+statement ok
+CREATE TABLE single_big AS SELECT * REPLACE (1::BIGINT AS genome_id) FROM single;
+
+statement ok
+CREATE TABLE anthus_big AS SELECT 1::BIGINT AS bin, * FROM anthus;
+
+query I
+SELECT (SELECT string_agg(sequence1, ',' ORDER BY read_id) FROM prodigal_genes('single_big', 'anthus_big', genome_id := 'bin'))
+     = (SELECT string_agg(sequence1, ',' ORDER BY read_id) FROM prodigal_genes('single', 'anthus'));
+----
+true
 
 # The columns: genome_id (for PARTITION_BY), then what COPY FORMAT FASTA writes.
 query IIII
