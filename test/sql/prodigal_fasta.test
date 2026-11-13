@@ -63,6 +63,31 @@ SELECT (SELECT content FROM read_text('{TEST_DIR}/meta.fna'))
 ----
 true
 
+# Prodigal reads a/c/g/t in either case as ACGT: the contigs lowercased give the same -d file.
+statement ok
+CREATE TABLE anthus_lower AS SELECT read_id, lower(sequence1) AS sequence1 FROM anthus;
+
+statement ok
+COPY (FROM prodigal_genes('single', 'anthus_lower')) TO '{TEST_DIR}/single_lower.fna'
+(FORMAT FASTA, INCLUDE_COMMENT true, LINE_WIDTH 70);
+
+query I
+SELECT (SELECT content FROM read_text('{TEST_DIR}/single_lower.fna')) = ref_text('data/prodigal/ref_single.genes.gz');
+----
+true
+
+# A contig with a character outside 'A'..'z' (a gap '-', a digit) is refused, as predict_genes refuses it: Prodigal
+# would drop it and every coordinate after it would shift, so these cannot be the contigs the genes came from.
+statement ok
+CREATE TABLE gapped AS
+SELECT read_id, CASE WHEN read_id = '61430_aco' THEN sequence1[1:100] || '-' || sequence1[101:] ELSE sequence1 END
+       AS sequence1 FROM anthus;
+
+statement error
+FROM prodigal_genes('single', 'gapped');
+----
+prodigal_genes: contig '61430_aco' has a character outside 'A'..'z', which predict_genes refuses
+
 # The columns: genome_id (for PARTITION_BY), then what COPY FORMAT FASTA writes.
 query IIII
 SELECT genome_id, read_id, comment, sequence1 FROM prodigal_proteins('single') LIMIT 1;

@@ -323,13 +323,14 @@ const std::string PRODIGAL_PROTEINS = // NOLINT
     "       _miint_gff_required('prodigal_proteins', protein, 'protein', n) AS sequence1 "
     "FROM _miint_prodigal_fasta_records('prodigal_proteins', relation, per_genome) ORDER BY n; ";
 
-// -d's bases are the contig's as Prodigal encodes them (prodigal_api.c encode_base): a character outside ASCII
-// 'A'..'z' is skipped (so a CR, a digit or a gap '-' does not shift the coordinates), a/c/g/t in either case are
-// ACGT, and every other one is N. A '-' gene is the reverse complement of [position, stop_position). contigs is a
-// table or view of read_id and sequence1, the contigs predict_genes was given; a gene's contig is the row with its
-// read_id, which must be there once. genome_id names the contigs' column of genomes, as predict_genes' genome_id
-// does; given, a gene's contig is the row with its genome_id and read_id, so genomes may share contig names.
-// (The parameter shadows the genes' genome_id column inside this macro, so that one is always written r.genome_id.)
+// -d's bases are the contig's as Prodigal encodes them (prodigal_api.c encode_base): a/c/g/t in either case are
+// ACGT, and every other character is N. A character outside ASCII 'A'..'z' is refused, as predict_genes refuses it
+// (Prodigal would drop it, shifting the coordinates), so a contig predict_genes could not have read is not used. A '-'
+// gene is the reverse complement of [position, stop_position). contigs is a table or view of read_id and sequence1, the
+// contigs predict_genes was given; a gene's contig is the row with its read_id, which must be there once. genome_id
+// names the contigs' column of genomes, as predict_genes' genome_id does; given, a gene's contig is the row with its
+// genome_id and read_id, so genomes may share contig names. (The parameter shadows the genes' genome_id column inside
+// this macro, so that one is always written r.genome_id.)
 const std::string PRODIGAL_GENES = // NOLINT
     "CREATE OR REPLACE MACRO prodigal_genes(relation, contigs, genome_id := NULL, per_genome := false) AS TABLE "
     "WITH records AS ( "
@@ -338,7 +339,8 @@ const std::string PRODIGAL_GENES = // NOLINT
     // kept, so a name given twice is still counted.
     "), bases AS ( "
     "  SELECT genome, contig_id, count(*) OVER (PARTITION BY genome, contig_id) AS copies, "
-    "         regexp_replace(upper(regexp_replace(sequence1, '[^A-z]', '', 'g')), '[^ACGT]', 'N', 'g') AS contig "
+    "         regexp_matches(sequence1, '[^A-z]') AS unreadable, "
+    "         regexp_replace(upper(sequence1), '[^ACGT]', 'N', 'g') AS contig "
     "  FROM ( "
     "    SELECT CASE WHEN genome_id IS NULL THEN NULL "
     "                ELSE struct_extract(_miint_contig_row, genome_id) END AS genome, "
@@ -347,7 +349,7 @@ const std::string PRODIGAL_GENES = // NOLINT
     "  ) "
     "  WHERE contig_id IN (SELECT contig_id FROM records) "
     "), joined AS ( "
-    "  SELECT r.*, b.genome, b.contig, b.copies, b.contig_id IS NOT NULL AS found "
+    "  SELECT r.*, b.genome, b.contig, b.copies, b.unreadable, b.contig_id IS NOT NULL AS found "
     "  FROM records r "
     "  LEFT JOIN bases b ON b.contig_id = r.contig_id "
     "   AND b.genome IS NOT DISTINCT FROM CASE WHEN genome_id IS NULL THEN NULL ELSE r.genome_id END "
@@ -366,6 +368,9 @@ const std::string PRODIGAL_GENES = // NOLINT
     "                         copies)) "
     "       WHEN contig IS NULL "
     "       THEN error(printf('prodigal_genes: contig ''%s'' has a NULL sequence1', contig_id::VARCHAR)) "
+    "       WHEN unreadable "
+    "       THEN error(printf('prodigal_genes: contig ''%s'' has a character outside ''A''..''z'', which predict_genes "
+    "refuses (Prodigal would drop it, shifting every coordinate after it)', contig_id::VARCHAR)) "
     "       WHEN stop_position <= position "
     "       THEN error(printf('prodigal_genes: gene [%d, %d) (row %d) is empty', position, stop_position, n)) "
     "       WHEN position < 1 OR stop_position - 1 > length(contig) "
