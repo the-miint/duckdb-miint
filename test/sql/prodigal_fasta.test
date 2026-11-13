@@ -1,5 +1,5 @@
 # name: test/sql/prodigal_fasta.test
-# description: prodigal_proteins / prodigal_genes: Prodigal's -a and -d FASTA records from predict_genes' rows, written with COPY ... (FORMAT FASTA, INCLUDE_COMMENT true, LINE_WIDTH 60 / 70) and checked byte for byte against the CLI's files on anthus_aco.fas (issue #446). CheckM parses these headers. The input is predict_genes' saved output (data/prodigal/README.md), so this runs without gpl-boundary.
+# description: prodigal_proteins / prodigal_genes: Prodigal's -a and -d FASTA records from predict_genes' rows, written with COPY ... (FORMAT FASTA, INCLUDE_COMMENT true, LINE_WIDTH 60 / 70) and checked byte for byte against the CLI's files on anthus_aco.fas. The input is predict_genes' saved output (data/prodigal/README.md), so this runs without gpl-boundary.
 # group: [sql]
 
 require miint

@@ -1,5 +1,5 @@
 # name: test/sql/copy_fasta_line_width.test
-# description: COPY ... (FORMAT FASTA, LINE_WIDTH n) wraps each sequence at n characters, as Prodigal's -a (60) and -d (70) files are wrapped (issue #446). A sequence whose length is a multiple of n ends without an empty line; without LINE_WIDTH a sequence is one line.
+# description: COPY ... (FORMAT FASTA, LINE_WIDTH n) wraps each sequence at n characters, as Prodigal's -a (60) and -d (70) files are wrapped. A sequence whose length is a multiple of n ends without an empty line; without LINE_WIDTH a sequence is one line.
 # group: [sql]
 
 require miint

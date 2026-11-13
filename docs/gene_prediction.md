@@ -104,10 +104,10 @@ prodigal_proteins(relation, [per_genome := false])
 prodigal_genes(relation, contigs, [genome_id := 'col'], [per_genome := false])
 ```
 
-Table macros that make Prodigal's `-a` (proteins) and `-d` (gene nucleotides) FASTA records from `predict_genes`' rows, for [`COPY ... (FORMAT FASTA)`](writing.md#fasta) to write. On the contigs in `data/prodigal/`, single-genome and metagenomic, the files equal the Prodigal CLI's byte for byte. CheckM parses their headers.
+Table macros that make Prodigal's `-a` (proteins) and `-d` (gene nucleotides) FASTA records from `predict_genes`' rows, for [`COPY ... (FORMAT FASTA)`](writing.md#fasta) to write. On the contigs in `data/prodigal/`, single-genome and metagenomic, the files equal the Prodigal CLI's byte for byte.
 
 - `relation` (VARCHAR, positional): a table or view of `predict_genes`' output, in its order (contig order).
-- `contigs` (VARCHAR, `prodigal_genes` only): a table or view of the contigs `predict_genes` was given, `read_id` and `sequence1`. A gene's bases come from the contig with its `read_id`, which must be there once; a gene whose contig is missing, named twice, or too short for it, is refused.
+- `contigs` (VARCHAR, `prodigal_genes` only): a table or view of the contigs `predict_genes` was given, `read_id` and `sequence1`. A gene's bases come from the contig with its `read_id`, which must be there once; a gene whose contig is missing, named twice, NULL or too short for it, and a gene that is empty (`stop_position` not after `position`), are refused.
 - `genome_id` (VARCHAR, `prodigal_genes` only): the `contigs` column of genomes, as for `predict_genes`. Given, a gene's contig is the one with its genome and `read_id`, so genomes may share contig names (`contig_1`, ...).
 - `per_genome` (BOOLEAN, default false): contigs are numbered (the `n` in `ID=n_g`) from 1 across the relation, as [`COPY ... (FORMAT GFF, DIALECT 'prodigal')`](writing.md#gff) numbers them in one file; true numbers each genome's from 1, as one CLI run per genome does.
 
