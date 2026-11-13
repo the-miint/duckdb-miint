@@ -146,6 +146,27 @@ FROM prodigal_genes('two', 'two_contigs');
 ----
 is named by 2 rows of the contigs relation
 
+# Within one genome, a contig named twice is refused, naming the genome: every bin may have a contig_1.
+statement ok
+CREATE TABLE two_contigs_dup AS
+SELECT * FROM two_contigs UNION ALL SELECT * FROM two_contigs WHERE bin = 'other' AND read_id = '61430_aco';
+
+statement error
+FROM prodigal_genes('two', 'two_contigs_dup', genome_id := 'bin');
+----
+prodigal_genes: contig '61430_aco' of genome 'other' is named by 2 rows of the contigs relation
+
+# A gene that is empty or inverted (stop_position at or before position) is refused, not written without bases.
+statement ok
+CREATE TABLE empty_gene AS
+SELECT * REPLACE (CASE WHEN read_id = '61430_aco' AND gene_index = 1 THEN position ELSE stop_position END
+                  AS stop_position) FROM single;
+
+statement error
+FROM prodigal_genes('empty_gene', 'anthus');
+----
+prodigal_genes: gene [33, 33) (row 1) is empty
+
 # A gene whose contig is not in the contigs relation is refused, not written without bases.
 statement ok
 CREATE TABLE some_contigs AS SELECT * FROM anthus WHERE read_id <> '626029_aco';
