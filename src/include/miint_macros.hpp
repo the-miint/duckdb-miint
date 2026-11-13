@@ -245,15 +245,18 @@ const std::string GFF3_LINES = // NOLINT
     "  ) "
     ") ORDER BY n; ";
 
-// Prodigal's GFF, as `prodigal -f gff` writes it, from predict_genes' columns, in the relation's order (predict_genes
-// returns contig order): '##gff-version  3' (with two spaces, as Prodigal writes it), then each contig's
-// '# Sequence Data' and '# Model Data' lines and its genes. A contig is the rows of one (genome_id, read_id) in a
-// row; seqnum numbers them from 1. A genome's own row (no read_id or gene) is skipped; a contig's row without a gene
-// writes its header lines only, as the CLI does. With per_genome, each genome starts its own file: its own version
-// line, and seqnum from 1, for COPY's PARTITION_BY (genome_id).
-const std::string PRODIGAL_GFF_LINES = // NOLINT
-    "CREATE OR REPLACE MACRO _miint_prodigal_gff_lines(relation, source := 'Prodigal_v" PRODIGAL_VERSION_LITERAL
-    "', per_genome := false) AS TABLE "
+// _miint_prodigal_numbered(relation, per_genome) / _miint_prodigal_strand / _miint_prodigal_gene_data
+//
+// What Prodigal's GFF (COPY FORMAT GFF's prodigal dialect) and its -a / -d FASTA (prodigal_proteins, prodigal_genes)
+// share: the contig numbering and the gene's ID=...;gc_cont= text. fn names the caller in error messages.
+
+// predict_genes' rows, numbered in the relation's order (n; predict_genes returns contig order), with each contig's
+// ordinal, Prodigal's seqnum (the n in ID=n_g). A contig is the rows of one (genome_id, read_id) in a row; seqnum
+// numbers them from 1, across the relation, or from 1 in each genome with per_genome (one CLI run per genome). A
+// genome's own row (no read_id or gene) is skipped; a contig's row without a gene is numbered, as the CLI numbers
+// every contig. new_contig and new_genome mark a contig's and a genome's first row.
+const std::string PRODIGAL_NUMBERED = // NOLINT
+    "CREATE OR REPLACE MACRO _miint_prodigal_numbered(relation, per_genome) AS TABLE "
     "WITH numbered AS ( "
     "  SELECT row_number() OVER () AS n, * FROM query_table(relation) "
     "), contig_rows AS ( "
@@ -264,10 +267,112 @@ const std::string PRODIGAL_GFF_LINES = // NOLINT
     "    row_number() OVER (ORDER BY n) = 1 "
     "      OR lag(genome_id) OVER (ORDER BY n) IS DISTINCT FROM genome_id AS new_genome "
     "  FROM numbered WHERE read_id IS NOT NULL OR gene_index IS NOT NULL "
-    "), seqnums AS ( "
-    "  SELECT *, sum(new_contig::INTEGER) OVER (PARTITION BY CASE WHEN per_genome THEN genome_id END ORDER BY n) "
-    "    AS seqnum "
-    "  FROM contig_rows "
+    ") "
+    "SELECT *, sum(new_contig::INTEGER) OVER (PARTITION BY CASE WHEN per_genome THEN genome_id END ORDER BY n) "
+    "  AS seqnum "
+    "FROM contig_rows; ";
+
+// A gene's strand, '+' or '-'; anything else (NULL included) is refused, naming the row.
+const std::string PRODIGAL_STRAND = // NOLINT
+    "CREATE OR REPLACE MACRO _miint_prodigal_strand(fn, strand, n) AS ( "
+    "  CASE WHEN _miint_gff_required(fn, strand, 'strand', n) IN ('+', '-') THEN strand "
+    "       ELSE error(printf('%s: strand must be ''+'' or ''-'' (row %d has ''%s'')', fn, n, strand::VARCHAR)) END "
+    "); ";
+
+// Prodigal's gene text (pdg_gene_data in its gene.c), the same in its GFF's column 9 and its FASTA headers:
+// ID=seqnum_gene;partial=LR;start_type=..;rbs_motif=..;rbs_spacer=..;gc_cont=%.3f, with None for a missing RBS.
+const std::string PRODIGAL_GENE_DATA = // NOLINT
+    "CREATE OR REPLACE MACRO _miint_prodigal_gene_data(fn, n, seqnum, gene_index, partial_left, partial_right, "
+    "                                                  start_type, rbs_motif, rbs_spacer, gene_gc_content) AS ( "
+    "  printf('ID=%d_%d;partial=%d%d;start_type=%s;rbs_motif=%s;rbs_spacer=%s;gc_cont=%.3f', "
+    "         seqnum, gene_index, "
+    "         _miint_gff_required(fn, partial_left, 'partial_left', n)::INTEGER, "
+    "         _miint_gff_required(fn, partial_right, 'partial_right', n)::INTEGER, "
+    "         _miint_gff_text(fn, start_type, 'start_type', n, false), "
+    "         CASE WHEN rbs_motif IS NULL THEN 'None' "
+    "              ELSE _miint_gff_text(fn, rbs_motif, 'rbs_motif', n, false) END, "
+    "         CASE WHEN rbs_spacer IS NULL THEN 'None' "
+    "              ELSE _miint_gff_text(fn, rbs_spacer, 'rbs_spacer', n, false) END, "
+    "         _miint_gff_required(fn, gene_gc_content, 'gene_gc_content', n)) "
+    "); ";
+
+// prodigal_proteins(relation [, per_genome := false]) / prodigal_genes(relation, contigs [, per_genome := false])
+//
+// Prodigal's -a (proteins) and -d (gene nucleotides) FASTA records from predict_genes' rows, in the relation's order:
+// genome_id, then read_id ('<contig>_<gene>'), comment ('# begin # end # 1|-1 # ID=...;gc_cont=...') and sequence1,
+// the columns COPY ... (FORMAT FASTA, INCLUDE_COMMENT true) writes; Prodigal wraps -a at 60 (LINE_WIDTH 60) and -d
+// at 70 (LINE_WIDTH 70). Numbering as _miint_prodigal_numbered's; a contig's row without a gene has no record.
+
+// A record's read_id and comment, the same for -a and -d (gene.c write_translations / write_nucleotide_seqs).
+const std::string PRODIGAL_FASTA_RECORDS = // NOLINT
+    "CREATE OR REPLACE MACRO _miint_prodigal_fasta_records(fn, relation, per_genome) AS TABLE "
+    "SELECT n, genome_id, read_id AS contig_id, position, stop_position, strand, "
+    "  _miint_gff_text(fn, read_id, 'read_id', n, false) || '_' || gene_index AS fasta_id, "
+    "  printf('# %d # %d # %s # %s', "
+    "         _miint_gff_required(fn, position, 'position', n), "
+    "         _miint_gff_required(fn, stop_position, 'stop_position', n) - 1, "
+    "         CASE _miint_prodigal_strand(fn, strand, n) WHEN '+' THEN '1' ELSE '-1' END, "
+    "         _miint_prodigal_gene_data(fn, n, seqnum, gene_index, partial_left, partial_right, start_type, "
+    "                                   rbs_motif, rbs_spacer, gene_gc_content)) AS comment, "
+    "  protein "
+    "FROM _miint_prodigal_numbered(relation, per_genome) WHERE gene_index IS NOT NULL; ";
+
+const std::string PRODIGAL_PROTEINS = // NOLINT
+    "CREATE OR REPLACE MACRO prodigal_proteins(relation, per_genome := false) AS TABLE "
+    "SELECT genome_id, fasta_id AS read_id, comment, "
+    "       _miint_gff_required('prodigal_proteins', protein, 'protein', n) AS sequence1 "
+    "FROM _miint_prodigal_fasta_records('prodigal_proteins', relation, per_genome) ORDER BY n; ";
+
+// -d's bases are the contig's as Prodigal encodes them (prodigal_api.c encode_base): a character outside ASCII
+// 'A'..'z' is skipped (so a CR, a digit or a gap '-' does not shift the coordinates), a/c/g/t in either case are
+// ACGT, and every other one is N. A '-' gene is the reverse complement of [position, stop_position). contigs is a
+// table or view of read_id and sequence1, the contigs predict_genes was given; a gene's contig is the row with its
+// read_id, which must be there once. genome_id names the contigs' column of genomes, as predict_genes' genome_id
+// does; given, a gene's contig is the row with its genome_id and read_id, so genomes may share contig names.
+// (The parameter shadows the genes' genome_id column inside this macro, so that one is always written r.genome_id.)
+const std::string PRODIGAL_GENES = // NOLINT
+    "CREATE OR REPLACE MACRO prodigal_genes(relation, contigs, genome_id := NULL, per_genome := false) AS TABLE "
+    "WITH bases AS ( "
+    "  SELECT genome, contig_id, count(*) OVER (PARTITION BY genome, contig_id) AS copies, contig "
+    "  FROM ( "
+    "    SELECT CASE WHEN genome_id IS NULL THEN NULL "
+    "                ELSE struct_extract(_miint_contig_row, genome_id)::VARCHAR END AS genome, "
+    "           read_id::VARCHAR AS contig_id, "
+    "           regexp_replace(upper(regexp_replace(sequence1, '[^A-z]', '', 'g')), '[^ACGT]', 'N', 'g') AS contig "
+    "    FROM query_table(contigs) _miint_contig_row "
+    "  ) "
+    "), joined AS ( "
+    "  SELECT r.*, b.contig, b.copies, b.contig_id IS NOT NULL AS found "
+    "  FROM _miint_prodigal_fasta_records('prodigal_genes', relation, per_genome) r "
+    "  LEFT JOIN bases b ON b.contig_id = r.contig_id::VARCHAR "
+    "   AND b.genome IS NOT DISTINCT FROM CASE WHEN genome_id IS NULL THEN NULL ELSE r.genome_id::VARCHAR END "
+    ") "
+    "SELECT j.genome_id, fasta_id AS read_id, comment, "
+    "  CASE WHEN NOT found "
+    "       THEN error(printf('prodigal_genes: contig ''%s'' (row %d) is not in the contigs relation', "
+    "                         contig_id::VARCHAR, n)) "
+    "       WHEN copies > 1 "
+    "       THEN error(printf('prodigal_genes: contig ''%s'' is named by %d rows of the contigs relation', "
+    "                         contig_id::VARCHAR, copies)) "
+    "       WHEN contig IS NULL "
+    "       THEN error(printf('prodigal_genes: contig ''%s'' has a NULL sequence1', contig_id::VARCHAR)) "
+    "       WHEN position < 1 OR stop_position - 1 > length(contig) "
+    "       THEN error(printf('prodigal_genes: gene [%d, %d) (row %d) runs past the end of contig ''%s'' (%d bases)', "
+    "                         position, stop_position, n, contig_id::VARCHAR, length(contig))) "
+    "       WHEN strand = '+' THEN contig[position:stop_position - 1] "
+    "       ELSE reverse(translate(contig[position:stop_position - 1], 'ACGT', 'TGCA')) END AS sequence1 "
+    "FROM joined j ORDER BY n; ";
+
+// Prodigal's GFF, as `prodigal -f gff` writes it, from predict_genes' columns, in the relation's order (predict_genes
+// returns contig order): '##gff-version  3' (with two spaces, as Prodigal writes it), then each contig's
+// '# Sequence Data' and '# Model Data' lines and its genes. Contigs are numbered (seqnum) by _miint_prodigal_numbered;
+// a contig's row without a gene writes its header lines only, as the CLI does. With per_genome, each genome starts
+// its own file: its own version line, and seqnum from 1, for COPY's PARTITION_BY (genome_id).
+const std::string PRODIGAL_GFF_LINES = // NOLINT
+    "CREATE OR REPLACE MACRO _miint_prodigal_gff_lines(relation, source := 'Prodigal_v" PRODIGAL_VERSION_LITERAL
+    "', per_genome := false) AS TABLE "
+    "WITH seqnums AS ( "
+    "  FROM _miint_prodigal_numbered(relation, per_genome) "
     "), lined AS ( "
     "  SELECT genome_id, n, "
     "    CASE WHEN per_genome AND new_genome THEN ['##gff-version  3'] ELSE [] END || "
@@ -290,23 +395,14 @@ const std::string PRODIGAL_GFF_LINES = // NOLINT
     "           THEN error(printf('COPY FORMAT GFF: source ''%s'' is empty or has a control character, which a "
     "GFF line cannot hold', source)) "
     "           ELSE source END || chr(9) || 'CDS' || chr(9) || "
-    "      printf('%d\t%d\t%.1f\t%s\t0\tID=%d_%d;partial=%d%d;start_type=%s;rbs_motif=%s;rbs_spacer=%s;gc_cont=%.3f;"
+    "      printf('%d\t%d\t%.1f\t%s\t0\t%s;"
     "conf=%.2f;score=%.2f;cscore=%.2f;sscore=%.2f;rscore=%.2f;uscore=%.2f;tscore=%.2f;', "
     "             _miint_gff_required('COPY FORMAT GFF', position, 'position', n), "
     "             _miint_gff_required('COPY FORMAT GFF', stop_position, 'stop_position', n) - 1, "
     "             _miint_gff_required('COPY FORMAT GFF', score, 'score', n), "
-    "             CASE WHEN _miint_gff_required('COPY FORMAT GFF', strand, 'strand', n) IN ('+', '-') THEN strand "
-    "                  ELSE error(printf('COPY FORMAT GFF: strand must be ''+'' or ''-'' (row %d has ''%s'')', "
-    "                                    n, strand::VARCHAR)) END, "
-    "             seqnum, gene_index, "
-    "             _miint_gff_required('COPY FORMAT GFF', partial_left, 'partial_left', n)::INTEGER, "
-    "             _miint_gff_required('COPY FORMAT GFF', partial_right, 'partial_right', n)::INTEGER, "
-    "             _miint_gff_text('COPY FORMAT GFF', start_type, 'start_type', n, false), "
-    "             CASE WHEN rbs_motif IS NULL THEN 'None' "
-    "                  ELSE _miint_gff_text('COPY FORMAT GFF', rbs_motif, 'rbs_motif', n, false) END, "
-    "             CASE WHEN rbs_spacer IS NULL THEN 'None' "
-    "                  ELSE _miint_gff_text('COPY FORMAT GFF', rbs_spacer, 'rbs_spacer', n, false) END, "
-    "             _miint_gff_required('COPY FORMAT GFF', gene_gc_content, 'gene_gc_content', n), "
+    "             _miint_prodigal_strand('COPY FORMAT GFF', strand, n), "
+    "             _miint_prodigal_gene_data('COPY FORMAT GFF', n, seqnum, gene_index, partial_left, partial_right, "
+    "                                       start_type, rbs_motif, rbs_spacer, gene_gc_content), "
     "             _miint_gff_required('COPY FORMAT GFF', confidence, 'confidence', n), "
     "             score, "
     "             _miint_gff_required('COPY FORMAT GFF', cscore, 'cscore', n), "
@@ -3005,6 +3101,13 @@ public:
 		register_macro(MIINT_GFF_REQUIRED, "_miint_gff_required");
 		register_macro(MIINT_GFF_INTEGRAL, "_miint_gff_integral");
 		register_macro(GFF3_LINES, "_miint_gff3_lines");
+		// The _miint_prodigal_ helpers before the macros that use them.
+		register_macro(PRODIGAL_NUMBERED, "_miint_prodigal_numbered");
+		register_macro(PRODIGAL_STRAND, "_miint_prodigal_strand");
+		register_macro(PRODIGAL_GENE_DATA, "_miint_prodigal_gene_data");
+		register_macro(PRODIGAL_FASTA_RECORDS, "_miint_prodigal_fasta_records");
+		register_macro(PRODIGAL_PROTEINS, "prodigal_proteins");
+		register_macro(PRODIGAL_GENES, "prodigal_genes");
 		register_macro(PRODIGAL_GFF_LINES, "_miint_prodigal_gff_lines");
 		// The _miint_gfa_ helpers before the views that use them.
 		register_macro(MIINT_GFA_INTEGER_TAG, "_miint_gfa_integer_tag");

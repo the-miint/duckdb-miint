@@ -1,6 +1,6 @@
 # Gene prediction
 
-`predict_genes` calls protein-coding genes in prokaryotic contigs, one row per gene. It runs Prodigal 2.6.5, built from [the-miint's fork](https://github.com/the-miint/prodigal) of [Prodigal](https://github.com/hyattpd/Prodigal). Prodigal is GPL-licensed, so it runs in a separate process, [gpl-boundary](internals/embedded-tools.md#gpl-boundary-process-isolation-host-for-gpl-tools), which miint starts for the call, rather than inside miint. Its genes, proteins and per-contig model data equal the Prodigal CLI's, field by field, for `-p single`, `-p meta`, `-c`, `-g 4` and `-m` on the contigs in `data/prodigal/`. To write them as Prodigal's GFF, see [`COPY ... (FORMAT GFF, DIALECT 'prodigal')`](writing.md#gff).
+`predict_genes` calls protein-coding genes in prokaryotic contigs, one row per gene. It runs Prodigal 2.6.5, built from [the-miint's fork](https://github.com/the-miint/prodigal) of [Prodigal](https://github.com/hyattpd/Prodigal). Prodigal is GPL-licensed, so it runs in a separate process, [gpl-boundary](internals/embedded-tools.md#gpl-boundary-process-isolation-host-for-gpl-tools), which miint starts for the call, rather than inside miint. Its genes, proteins and per-contig model data equal the Prodigal CLI's, field by field, for `-p single`, `-p meta`, `-c`, `-g 4` and `-m` on the contigs in `data/prodigal/`. To write them as Prodigal's GFF, see [`COPY ... (FORMAT GFF, DIALECT 'prodigal')`](writing.md#gff); as its `-a` and `-d` FASTA, [Writing Prodigal's FASTA](#writing-prodigals-fasta).
 
 ## predict_genes
 
@@ -95,4 +95,35 @@ SELECT * FROM predict_genes('assembly', genome_id := 'sample_id', meta_mode := t
 -- Train once on a reference genome, then call other genomes with its model
 SELECT * FROM predict_genes('reference', genome_id := 'filepath', training_path := 'ref.trn');
 SELECT * FROM predict_genes('others', genome_id := 'filepath', training_path := 'ref.trn');
+```
+
+## Writing Prodigal's FASTA
+
+```sql
+prodigal_proteins(relation, [per_genome := false])
+prodigal_genes(relation, contigs, [genome_id := 'col'], [per_genome := false])
+```
+
+Table macros that make Prodigal's `-a` (proteins) and `-d` (gene nucleotides) FASTA records from `predict_genes`' rows, for [`COPY ... (FORMAT FASTA)`](writing.md#fasta) to write. On the contigs in `data/prodigal/`, single-genome and metagenomic, the files equal the Prodigal CLI's byte for byte. CheckM parses their headers.
+
+- `relation` (VARCHAR, positional): a table or view of `predict_genes`' output, in its order (contig order).
+- `contigs` (VARCHAR, `prodigal_genes` only): a table or view of the contigs `predict_genes` was given, `read_id` and `sequence1`. A gene's bases come from the contig with its `read_id`, which must be there once; a gene whose contig is missing, named twice, or too short for it, is refused.
+- `genome_id` (VARCHAR, `prodigal_genes` only): the `contigs` column of genomes, as for `predict_genes`. Given, a gene's contig is the one with its genome and `read_id`, so genomes may share contig names (`contig_1`, ...).
+- `per_genome` (BOOLEAN, default false): contigs are numbered (the `n` in `ID=n_g`) from 1 across the relation, as [`COPY ... (FORMAT GFF, DIALECT 'prodigal')`](writing.md#gff) numbers them in one file; true numbers each genome's from 1, as one CLI run per genome does.
+
+They return `genome_id`, `read_id` (`<contig>_<gene>`), `comment` (`# begin # end # 1|-1 # ID=...;partial=..;start_type=..;rbs_motif=..;rbs_spacer=..;gc_cont=..`) and `sequence1`. Prodigal wraps `-a` at 60 characters and `-d` at 70, so write them with `INCLUDE_COMMENT true` and `LINE_WIDTH 60` or `70`. `-d`'s bases are the contig's as Prodigal reads them: a character outside ASCII `A`..`z` is skipped (so a carriage return or a gap `-` does not shift coordinates), `a`/`c`/`g`/`t` in either case are `ACGT`, and every other character in that range (other letters, and ``[\]^_` ``) is `N`, and a `-` gene is the reverse complement. A contig's row without a gene is numbered but has no record; a genome's own row is skipped.
+
+```sql
+CREATE TABLE contigs AS SELECT * FROM read_fastx('genome.fna', include_filepath := true);
+CREATE TABLE genes AS SELECT * FROM predict_genes('contigs', genome_id := 'filepath');
+
+-- prodigal -a
+COPY (FROM prodigal_proteins('genes')) TO 'genes.faa' (FORMAT FASTA, INCLUDE_COMMENT true, LINE_WIDTH 60);
+
+-- prodigal -d
+COPY (FROM prodigal_genes('genes', 'contigs')) TO 'genes.fna' (FORMAT FASTA, INCLUDE_COMMENT true, LINE_WIDTH 70);
+
+-- A file per genome, each as the CLI would write it for that genome alone
+COPY (FROM prodigal_proteins('genes', per_genome := true)) TO 'faa_by_bin'
+(FORMAT FASTA, INCLUDE_COMMENT true, LINE_WIDTH 60, PARTITION_BY (genome_id), FILE_EXTENSION 'faa');
 ```

@@ -1,0 +1,95 @@
+# name: test/sql/copy_fasta_line_width.test
+# description: COPY ... (FORMAT FASTA, LINE_WIDTH n) wraps each sequence at n characters, as Prodigal's -a (60) and -d (70) files are wrapped (issue #446). A sequence whose length is a multiple of n ends without an empty line; without LINE_WIDTH a sequence is one line.
+# group: [sql]
+
+require miint
+
+statement ok
+CREATE TABLE seqs AS SELECT * FROM (VALUES
+    ('r7', 'ACGTACG'),
+    ('r6', 'ACGTAC'),
+    ('r2', 'AC'),
+    ('r0', '')
+) t(read_id, sequence1);
+
+# 7 bases at 3: two full lines and a short one. 6 at 3: two full lines and no empty third (Prodigal writes no newline
+# after a full line at the end, gene.c write_translations). 2 at 3: one short line. An empty sequence is an empty
+# line, as without LINE_WIDTH.
+statement ok
+COPY seqs TO '{TEST_DIR}/w3.fa' (FORMAT FASTA, LINE_WIDTH 3);
+
+query I
+SELECT content = E'>r7\nACG\nTAC\nG\n>r6\nACG\nTAC\n>r2\nAC\n>r0\n\n' FROM read_text('{TEST_DIR}/w3.fa');
+----
+true
+
+# Without LINE_WIDTH, unchanged: one line per sequence.
+statement ok
+COPY seqs TO '{TEST_DIR}/unwrapped.fa' (FORMAT FASTA);
+
+query I
+SELECT content = E'>r7\nACGTACG\n>r6\nACGTAC\n>r2\nAC\n>r0\n\n' FROM read_text('{TEST_DIR}/unwrapped.fa');
+----
+true
+
+# LINE_WIDTH 1: one base per line.
+statement ok
+COPY (SELECT * FROM seqs WHERE read_id = 'r2') TO '{TEST_DIR}/w1.fa' (FORMAT FASTA, LINE_WIDTH 1);
+
+query I
+SELECT content = E'>r2\nA\nC\n' FROM read_text('{TEST_DIR}/w1.fa');
+----
+true
+
+# The header, comment included, is never wrapped.
+statement ok
+COPY (SELECT 'r7' AS read_id, 'a long comment' AS comment, 'ACGTACG' AS sequence1)
+TO '{TEST_DIR}/comment.fa' (FORMAT FASTA, INCLUDE_COMMENT true, LINE_WIDTH 3);
+
+query I
+SELECT content = E'>r7 a long comment\nACG\nTAC\nG\n' FROM read_text('{TEST_DIR}/comment.fa');
+----
+true
+
+# Paired records are wrapped in both the split files and the interleaved one.
+statement ok
+CREATE TABLE pairs AS SELECT 'p1' AS read_id, 'ACGTA' AS sequence1, 'TTGCA' AS sequence2;
+
+statement ok
+COPY pairs TO '{TEST_DIR}/pair_{ORIENTATION}.fa' (FORMAT FASTA, LINE_WIDTH 2);
+
+query I
+SELECT content = E'>p1\nAC\nGT\nA\n' FROM read_text('{TEST_DIR}/pair_R1.fa');
+----
+true
+
+query I
+SELECT content = E'>p1\nTT\nGC\nA\n' FROM read_text('{TEST_DIR}/pair_R2.fa');
+----
+true
+
+statement ok
+COPY pairs TO '{TEST_DIR}/interleaved.fa' (FORMAT FASTA, INTERLEAVE true, LINE_WIDTH 2);
+
+query I
+SELECT content = E'>p1\nAC\nGT\nA\n>p1\nTT\nGC\nA\n' FROM read_text('{TEST_DIR}/interleaved.fa');
+----
+true
+
+# A width that cannot wrap anything is refused rather than read as "no wrapping".
+statement error
+COPY seqs TO '{TEST_DIR}/zero.fa' (FORMAT FASTA, LINE_WIDTH 0);
+----
+LINE_WIDTH must be at least 1, got 0
+
+statement error
+COPY seqs TO '{TEST_DIR}/negative.fa' (FORMAT FASTA, LINE_WIDTH -5);
+----
+LINE_WIDTH must be at least 1, got -5
+
+# FASTQ lines are not wrapped: four lines per record is what readers of FASTQ expect.
+statement error
+COPY (SELECT 'r' AS read_id, 'AC' AS sequence1, [30, 30]::UTINYINT[] AS qual1) TO '{TEST_DIR}/x.fq'
+(FORMAT FASTQ, LINE_WIDTH 2);
+----
+line_width

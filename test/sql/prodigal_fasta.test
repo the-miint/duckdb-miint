@@ -1,0 +1,202 @@
+# name: test/sql/prodigal_fasta.test
+# description: prodigal_proteins / prodigal_genes: Prodigal's -a and -d FASTA records from predict_genes' rows, written with COPY ... (FORMAT FASTA, INCLUDE_COMMENT true, LINE_WIDTH 60 / 70) and checked byte for byte against the CLI's files on anthus_aco.fas (issue #446). CheckM parses these headers. The input is predict_genes' saved output (data/prodigal/README.md), so this runs without gpl-boundary.
+# group: [sql]
+
+require miint
+
+statement ok
+CREATE TABLE single AS SELECT * FROM read_csv('data/prodigal/anthus_single_genes.csv.gz');
+
+statement ok
+CREATE TABLE meta AS SELECT * FROM read_csv('data/prodigal/anthus_meta_genes.csv.gz');
+
+# A gzipped reference file's text. read_text does not decompress, so it is rebuilt from its lines, which is exact for
+# these files: LF line endings, no empty line, a newline at the end (checked when they were added). The written files
+# are read with read_text, byte for byte.
+statement ok
+CREATE MACRO ref_text(path) AS (
+    SELECT string_agg(line, E'\n' ORDER BY i) || E'\n'
+    FROM (SELECT row_number() OVER () AS i, line
+          FROM read_csv(path, columns = {'line': 'VARCHAR'}, delim = E'\x1f', quote = '', escape = '',
+                        header = false, auto_detect = false)));
+
+# The contigs predict_genes was given, for -d.
+statement ok
+CREATE TABLE anthus AS SELECT read_id, sequence1 FROM read_fastx('data/prodigal/anthus_aco.fas.gz');
+
+# -a, single-genome and metagenomic: the whole file, byte for byte.
+statement ok
+COPY (FROM prodigal_proteins('single')) TO '{TEST_DIR}/single.faa' (FORMAT FASTA, INCLUDE_COMMENT true, LINE_WIDTH 60);
+
+query I
+SELECT (SELECT content FROM read_text('{TEST_DIR}/single.faa'))
+     = ref_text('data/prodigal/ref_single.proteins.gz');
+----
+true
+
+statement ok
+COPY (FROM prodigal_proteins('meta')) TO '{TEST_DIR}/meta.faa' (FORMAT FASTA, INCLUDE_COMMENT true, LINE_WIDTH 60);
+
+query I
+SELECT (SELECT content FROM read_text('{TEST_DIR}/meta.faa'))
+     = ref_text('data/prodigal/ref_meta.proteins.gz');
+----
+true
+
+# -d: the gene's bases from its contig, uppercase, every letter but ACGT as N (anthus_aco.fas has N, S and Y), the
+# reverse complement on '-' (meta has '-' genes and genes running off a contig's end), wrapped at 70.
+statement ok
+COPY (FROM prodigal_genes('single', 'anthus')) TO '{TEST_DIR}/single.fna' (FORMAT FASTA, INCLUDE_COMMENT true, LINE_WIDTH 70);
+
+query I
+SELECT (SELECT content FROM read_text('{TEST_DIR}/single.fna'))
+     = ref_text('data/prodigal/ref_single.genes.gz');
+----
+true
+
+statement ok
+COPY (FROM prodigal_genes('meta', 'anthus')) TO '{TEST_DIR}/meta.fna' (FORMAT FASTA, INCLUDE_COMMENT true, LINE_WIDTH 70);
+
+query I
+SELECT (SELECT content FROM read_text('{TEST_DIR}/meta.fna'))
+     = ref_text('data/prodigal/ref_meta.genes.gz');
+----
+true
+
+# The columns: genome_id (for PARTITION_BY), then what COPY FORMAT FASTA writes.
+query IIII
+SELECT genome_id, read_id, comment, sequence1 FROM prodigal_proteins('single') LIMIT 1;
+----
+anthus	61430_aco_1	# 33 # 200 # 1 # ID=1_1;partial=00;start_type=TTG;rbs_motif=ACT;rbs_spacer=15bp;gc_cont=0.411	MFNALSYFIAKIVCFSQKTESSQGIPCPLLWSAQLSCFKAKWNETADSSGVKTWM*
+
+# Contig numbering (the n in ID=n_g). Two genomes in one relation: numbered on across them by default, as
+# COPY FORMAT GFF numbers them in one file; per_genome restarts at 1 for each genome, as one CLI run per genome does.
+statement ok
+CREATE TABLE two AS SELECT * FROM single UNION ALL SELECT * REPLACE ('other' AS genome_id) FROM single;
+
+query II
+SELECT genome_id, regexp_extract(comment, 'ID=([0-9]+_[0-9]+)', 1) FROM prodigal_proteins('two')
+WHERE read_id = '61430_aco_1';
+----
+anthus	1_1
+other	23_1
+
+query II
+SELECT genome_id, regexp_extract(comment, 'ID=([0-9]+_[0-9]+)', 1) FROM prodigal_proteins('two', per_genome := true)
+WHERE read_id = '61430_aco_1';
+----
+anthus	1_1
+other	1_1
+
+# A file per genome: per_genome with PARTITION_BY (genome_id). Each genome's file is the CLI's file for that genome
+# alone; both genomes here are anthus_aco.fas, so both equal ref_single.proteins.
+statement ok
+COPY (FROM prodigal_proteins('two', per_genome := true)) TO '{TEST_DIR}/by_genome'
+(FORMAT FASTA, INCLUDE_COMMENT true, LINE_WIDTH 60, PARTITION_BY (genome_id), FILE_EXTENSION 'faa');
+
+query I
+SELECT (SELECT content FROM read_text('{TEST_DIR}/by_genome/genome_id=anthus/data_0.faa'))
+     = ref_text('data/prodigal/ref_single.proteins.gz');
+----
+true
+
+query I
+SELECT (SELECT content FROM read_text('{TEST_DIR}/by_genome/genome_id=other/data_0.faa'))
+     = ref_text('data/prodigal/ref_single.proteins.gz');
+----
+true
+
+# A contig's row without a gene (predict_genes writes one for a contig with no genes) is numbered, as the CLI numbers
+# every contig, but has no record; a genome's own row (no read_id, no gene) is neither.
+statement ok
+CREATE TABLE sparse AS
+SELECT * FROM single WHERE read_id = '61430_aco' AND gene_index = 1
+UNION ALL SELECT * REPLACE ('gene_less' AS read_id, NULL AS gene_index) FROM single WHERE read_id = '61430_aco' AND gene_index = 1
+UNION ALL SELECT * REPLACE (NULL AS read_id, NULL AS gene_index) FROM single WHERE read_id = '61430_aco' AND gene_index = 1
+UNION ALL SELECT * FROM single WHERE read_id = '626029_aco' AND gene_index = 1;
+
+query II
+SELECT read_id, regexp_extract(comment, 'ID=([0-9]+_[0-9]+)', 1) FROM prodigal_proteins('sparse');
+----
+61430_aco_1	1_1
+626029_aco_1	3_1
+
+# Genomes that share contig names (bins named contig_1, contig_2, ...): genome_id names the contigs' genome column, as
+# predict_genes' does, and each gene takes the bases of its own genome's contig. 'other' has the same contig names
+# as 'anthus' and their complements as bases, so its genes are the complements of anthus' genes.
+statement ok
+CREATE TABLE two_contigs AS
+SELECT 'anthus' AS bin, read_id, sequence1 FROM anthus
+UNION ALL SELECT 'other' AS bin, read_id, translate(sequence1, 'ACGT', 'TGCA') FROM anthus;
+
+# Every gene of 'other' is the complement of anthus'; 4 genes are all N (Prodigal calls genes across runs of N), the
+# same in both, so 125 differ.
+query II
+SELECT count(*) FILTER (WHERE o.sequence1 = translate(a.sequence1, 'ACGT', 'TGCA')),
+       count(*) FILTER (WHERE o.sequence1 <> a.sequence1)
+FROM prodigal_genes('two', 'two_contigs', genome_id := 'bin') a
+JOIN prodigal_genes('two', 'two_contigs', genome_id := 'bin') o USING (read_id)
+WHERE a.genome_id = 'anthus' AND o.genome_id = 'other';
+----
+129	125
+
+# Without genome_id, the shared names are refused rather than one genome's bases written for the other's genes.
+statement error
+FROM prodigal_genes('two', 'two_contigs');
+----
+is named by 2 rows of the contigs relation
+
+# A gene whose contig is not in the contigs relation is refused, not written without bases.
+statement ok
+CREATE TABLE some_contigs AS SELECT * FROM anthus WHERE read_id <> '626029_aco';
+
+statement error
+FROM prodigal_genes('single', 'some_contigs');
+----
+prodigal_genes: contig '626029_aco' (row
+
+# A contig named twice in the contigs relation is refused: which one's bases are the gene's is not known.
+statement ok
+CREATE TABLE twice AS SELECT * FROM anthus UNION ALL SELECT * FROM anthus WHERE read_id = '61430_aco';
+
+statement error
+FROM prodigal_genes('single', 'twice');
+----
+prodigal_genes: contig '61430_aco' is named by 2 rows of the contigs relation
+
+# A gene that runs past its contig's end (the wrong contigs relation) is refused, not cut short.
+statement ok
+CREATE TABLE short_contigs AS SELECT read_id, sequence1[1:100] AS sequence1 FROM anthus;
+
+statement error
+FROM prodigal_genes('single', 'short_contigs');
+----
+runs past the end of contig
+
+# Values a header needs: NULL is refused, naming the column, and a strand must be '+' or '-'.
+statement ok
+CREATE TABLE no_position AS
+SELECT * REPLACE (CASE WHEN read_id = '61430_aco' AND gene_index = 1 THEN NULL END::BIGINT AS position) FROM single;
+
+statement error
+FROM prodigal_proteins('no_position');
+----
+prodigal_proteins: NULL position (row 1)
+
+statement ok
+CREATE TABLE bad_strand AS
+SELECT * REPLACE (CASE WHEN read_id = '61430_aco' AND gene_index = 1 THEN '.' ELSE strand END AS strand) FROM single;
+
+statement error
+FROM prodigal_proteins('bad_strand');
+----
+prodigal_proteins: strand must be '+' or '-' (row 1 has '.')
+
+# A BIGINT read_id (predict_genes keeps the contigs' read_id type) is written as its digits.
+statement ok
+CREATE TABLE numbered AS SELECT * REPLACE (42::BIGINT AS read_id) FROM single WHERE read_id = '61430_aco';
+
+query I
+SELECT read_id FROM prodigal_proteins('numbered') LIMIT 1;
+----
+42_1

@@ -111,6 +111,7 @@ Write query results to FASTA format files. Requires `read_id` and `sequence1` co
 - `INTERLEAVE` (default: false): When the data is paired-end, write R1/R2 interleaved into a single file. Optional — see "Single-end vs paired-end output" below. Cannot be combined with the `{ORIENTATION}` placeholder.
 - `COMPRESSION` (default: auto): Enable gzip compression (auto-detected from `.gz` extension). Local `.gz` output is written as **BGZF** (block-gzip via htslib): a fully standard gzip file readable by any gzip tool, but compressed in parallel — it follows DuckDB's thread count (`PRAGMA threads`) and runs ~10x faster than single-threaded gzip on multi-core hosts, while staying block-indexable. Output order is preserved. (Remote `scheme://` targets fall back to single-threaded gzip.)
 - `COMPRESSION_LEVEL` (0-9, default: 1): BGZF compression level for local `.gz` output, as for BAM. Lower is faster and writes larger files. Refused for uncompressed output and for remote targets, whose gzip writer takes no level.
+- `LINE_WIDTH` (integer, at least 1; default: none): wrap each sequence at this many characters, the last line shorter; a sequence whose length is a multiple of it ends without an empty line. Without it each sequence is one line. The header is never wrapped. FASTA only.
 
 **Single-end vs paired-end output:**
 
@@ -133,7 +134,13 @@ TO 'output_{ORIENTATION}.fasta' (FORMAT FASTA);
 -- Compressed with comments
 COPY (SELECT * FROM read_fastx('input.fasta'))
 TO 'output.fasta.gz' (FORMAT FASTA, INCLUDE_COMMENT true);
+
+-- Lines of 60
+COPY (SELECT * FROM read_fastx('input.fasta'))
+TO 'output.fasta' (FORMAT FASTA, LINE_WIDTH 60);
 ```
+
+Prodigal's `-a` (proteins) and `-d` (gene nucleotides) FASTA, from `predict_genes`, are written with this format and the [`prodigal_proteins` and `prodigal_genes`](gene_prediction.md#writing-prodigals-fasta) macros.
 
 ###  SAM and BAM
 

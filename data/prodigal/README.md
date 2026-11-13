@@ -37,6 +37,8 @@ byte, to check the single-genome options against the CLI. The GFFs' carriage ret
 | `anthus_masked.fas.gz` | `anthus_aco.fas` with bases 401..460 of each contig replaced by `N` (LF line endings); on `anthus_aco.fas` itself `-m` changes nothing |
 | `ref_masked.gff.gz` | `prodigal -i anthus_masked.fas -p single -f gff -o ref_masked.gff` |
 | `ref_masked_m.gff.gz`, `ref_masked_m.proteins.gz` | `prodigal -i anthus_masked.fas -p single -m -f gff -o ref_masked_m.gff -a ref_masked_m.proteins` |
+| `ref_single.genes.gz` | `prodigal -i anthus_aco.fas -p single -d ref_single.genes` (this Prodigal reproduces `ref_single.proteins` byte for byte) |
+| `ref_meta.genes.gz` | `prodigal -i anthus_aco.fas -p meta -d ref_meta.genes` (this Prodigal reproduces `ref_meta.proteins` byte for byte) |
 
 `predict_genes`' own output on `anthus_aco.fas`, for `copy_gff_prodigal.test` to run without gpl-boundary
 (`predict_genes.test` checks it is still `predict_genes`' output):
@@ -63,12 +65,14 @@ c41ab7dd508065edd384a288bd2570beff9eaded73ebd2ef829f7bf11e498c88  anthus_single_
 ed4d5259945d09194b2ef5aae4606bf713df27256a7a0d10145da1000a972a41  ref_masked_m.gff
 615fcd75a2dde0d51658585428d1e3b5b7301799d24685c241c81e3e7f3e3529  ref_masked_m.proteins
 6a51e610470c41fffef1a50f4c7e1413a560953daadf265873bbf9d365f5653c  ref_masked.gff
+bfd3e41dea798f524a7b4665d8548e244e1cabeeafe4abf9d77a6084ac91348c  ref_meta.genes
 86d1f55762754b579d8acf6f28f81204da9ce633b61637c4ce8fecec9c49bc29  ref_meta.gff
 a662d74385723c7771892c82c5a08620f4b9d86b679cd8d397a0c8123a20a4b6  ref_meta.proteins
 5391437b9aa8e96bb24fe3c103282ddca5a4bc1c5a109369ad532a37fefe263c  ref_single_c.gff
 361684b4cef4efca8a16d843f53d9546440ba656765c1ade66d1eb5a2be0f858  ref_single_c.proteins
 581d4c6e73ca0afa69b986f212c64a771fc16c6f355378f24030d56aefa3e14c  ref_single_g4.gff
 9c080f5febcbb784047b635e1f281777656aa1e23c910a29e1863fb9af9e661a  ref_single_g4.proteins
+36c262e4bd3533de768ea68c1f67aca62166412e0d83554570026d010a81b299  ref_single.genes
 c7d51315fd61e7505b7d5a328f8b55eb2b71824fa04c19b7567d30be2b0a5eba  ref_single.gff
 1d803c1d922cff73a1e98c8879ff392e65930908d8ca6c48213f4b5dbcafa1dc  ref_single.proteins
 ```

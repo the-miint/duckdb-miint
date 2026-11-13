@@ -61,7 +61,7 @@ The docs are organized by task. Full index: **[docs/table_of_contents.md](docs/t
 | [Installation & building](docs/installation.md) | Installing from community extensions, building from source, dependencies |
 | [Reading files](docs/reading.md) | FASTA/FASTQ, SAM/BAM, PAF, GFA, myloasm output, SFF, BIOM, mzML/mzXML, GFF, jplace, Newick |
 | [Writing files](docs/writing.md) | Writing FASTQ, FASTA, SAM/BAM, BIOM, Newick, and GFF files |
-| [Gene prediction](docs/gene_prediction.md) | Prodigal gene calling with `predict_genes` |
+| [Gene prediction](docs/gene_prediction.md) | Prodigal gene calling with `predict_genes`; its FASTA with `prodigal_proteins` / `prodigal_genes` |
 | Alignment | [Reference](docs/alignment_reference.md) (minimap2/bowtie2/SortMeRNA), [pairwise](docs/alignment_pairwise.md) (WFA2/KSW2), [multiple](docs/alignment_multiple.md) (MAFFT/abPOA), and [analysis](docs/alignment_analysis.md) |
 | Amplicon & community | [Quality control](docs/qc.md), [denoising](docs/denoising.md), [chimera checking](docs/chimera.md), [clustering](docs/clustering.md), [search](docs/search.md) |
 | Classification & abundance | [Taxonomic classification](docs/classification.md) (RYpe), [profiling & feature tables](docs/profiling.md) (sylph, Woltka OGU) |
