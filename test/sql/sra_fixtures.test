@@ -1,0 +1,88 @@
+# name: test/sql/sra_fixtures.test
+# description: The SRA fixtures and fasterq-dump oracles in data/sra are present and match oracle_md5.csv (data/sra/README.md)
+# group: [sql]
+
+require miint
+
+# The oracles were generated once by fasterq-dump and are never regenerated, so a
+# changed or missing file is a failure, not a skip. oracle_md5.csv records the md5 of
+# the FASTQ each oracle file decompresses to; the queries below check every oracle
+# against it. The .sra fixtures with oracles are checked by the reader's parity tests,
+# which must reproduce those md5s from them.
+
+# The fixtures without oracles are each refused for what they hold, and another archive
+# of the same kind would be refused the same way, so their bytes are pinned here: these
+# are NCBI's md5s, as data/sra/README.md records them.
+query I
+SELECT count(*)
+FROM (VALUES ('SRR26779001.sra', '631d6aebf5ded903029d757bf0a7075d'),
+             ('SRR2513321.sra', 'ed285e33ed614c616b58c1b15272a446'),
+             ('SRR882123.sra', 'f55ddde79a98ec4730940e0bee288195'),
+             ('SRR4424282.sralite', '0599bb7936ad57889bb597e5e13d99bb')) pin(file, md5)
+LEFT JOIN read_blob('data/sra/*') b ON replace(b.filename, '\', '/') = 'data/sra/' || pin.file
+WHERE b.filename IS NULL OR md5(b.content) <> pin.md5;
+----
+0
+
+# Every archive in data/sra is either one of those or has oracles.
+query I
+SELECT count(*)
+FROM read_blob('data/sra/*.sra*') b
+WHERE parse_filename(b.filename) NOT IN ('SRR26779001.sra', 'SRR2513321.sra', 'SRR882123.sra', 'SRR4424282.sralite')
+  AND parse_filename(b.filename, true) NOT IN (SELECT DISTINCT run FROM read_csv('data/sra/oracle/oracle_md5.csv'));
+----
+0
+
+# The oracle manifest covers 18 runs in three modes, and each run's .sra is present.
+query II
+SELECT count(*), count(DISTINCT run)
+FROM read_csv('data/sra/oracle/oracle_md5.csv');
+----
+62	18
+
+query I
+SELECT count(*)
+FROM (SELECT DISTINCT run FROM read_csv('data/sra/oracle/oracle_md5.csv')) m
+LEFT JOIN read_blob('data/sra/*.sra') b ON replace(b.filename, '\', '/') = 'data/sra/' || m.run || '.sra'
+WHERE b.filename IS NULL;
+----
+0
+
+statement ok
+CREATE TABLE manifest AS
+SELECT run, mode, 'data/sra/oracle/' || run || '/' || file AS path, md5, bytes, records
+FROM read_csv('data/sra/oracle/oracle_md5.csv');
+
+# The md5 recorded for each file is that of the FASTQ the .gz decompresses to. A
+# split-3 defline is '@$ac.$si $sn length=$rl', repeated on the '+' line, which
+# read_fastx keeps whole as read_id and comment, so rendering its rows back to
+# text must reproduce the recorded md5 for every split-3 file.
+query III
+WITH rendered AS (
+    SELECT replace(filepath, '\', '/') AS path,
+           md5(string_agg('@' || read_id || ' ' || comment || chr(10) || sequence1 || chr(10) ||
+                          '+' || read_id || ' ' || comment || chr(10) ||
+                          list_aggregate(list_transform(qual1, lambda q: chr(q::INTEGER + 33)), 'string_agg', '') ||
+                          chr(10), '' ORDER BY sequence_index)) AS md5,
+           count(*) AS records
+    FROM read_fastx('data/sra/oracle/*/split_3/*.fastq.gz', include_filepath = true)
+    GROUP BY ALL
+)
+SELECT count(*), count(r.path), count(*) FILTER (WHERE r.md5 <> m.md5 OR r.records <> m.records)
+FROM manifest m LEFT JOIN rendered r USING (path)
+WHERE m.mode = 'split_3';
+----
+26	26	0
+
+# A split-spot defline carries '/$ri' after the spot id, which read_fastx strips,
+# so these files are checked by record count only; the byte-for-byte check is the
+# reader's parity test.
+query II
+SELECT count(*), count(*) FILTER (WHERE r.records IS DISTINCT FROM m.records)
+FROM manifest m
+LEFT JOIN (SELECT replace(filepath, '\', '/') AS path, count(*) AS records
+           FROM read_fastx('data/sra/oracle/*/split_spot/*.fastq.gz', include_filepath = true)
+           GROUP BY ALL) r USING (path)
+WHERE m.mode IN ('split_spot', 'split_spot_tech');
+----
+36	0

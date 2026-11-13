@@ -16,11 +16,11 @@ namespace duckdb {
 ReadENASequencesTableFunction::Data::Data(std::vector<miint::ENARunInfo> runs, bool include_fp, uint8_t offset,
                                           bool trim, const std::string &prefer_format)
     : runs(std::move(runs)), include_filepath(include_fp), qual_offset(offset), use_aspera(false), trim(trim),
-      prefer_format(prefer_format), names({"sequence_index", "read_id", "comment", "sequence1", "sequence2", "qual1",
-                                           "qual2", "run_accession", "sample_accession", "experiment_accession"}),
-      types({LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
-             LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT), LogicalType::LIST(LogicalType::UTINYINT),
-             LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR}) {
+      prefer_format(prefer_format), names(SequenceColumnNames()), types(SequenceColumnTypes()) {
+	for (const char *accession : {"run_accession", "sample_accession", "experiment_accession"}) {
+		names.emplace_back(accession);
+		types.emplace_back(LogicalType::VARCHAR);
+	}
 	if (include_filepath) {
 		names.emplace_back("filepath");
 		types.emplace_back(LogicalType::VARCHAR);

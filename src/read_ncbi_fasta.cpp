@@ -1,6 +1,7 @@
 #include "read_ncbi_fasta.hpp"
 #include "catalog_utils.hpp"
 #include "miint_log.hpp"
+#include "table_function_common.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/common/vector/constant_vector.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
@@ -56,15 +57,8 @@ ReadNCBIFastaTableFunction::Data::Data(std::vector<std::string> accessions, std:
                                        const std::string &api_key, bool include_filepath, int64_t batch_size)
     : accessions(std::move(accessions)), work_units(std::move(work_units)), api_key(api_key),
       include_filepath(include_filepath), batch_size(batch_size) {
-	// Schema matches read_fastx exactly
-	names = {"sequence_index", "read_id", "comment", "sequence1", "sequence2", "qual1", "qual2"};
-	types = {LogicalType::BIGINT,
-	         LogicalType::VARCHAR,
-	         LogicalType::VARCHAR,
-	         LogicalType::VARCHAR,
-	         LogicalType::VARCHAR,
-	         LogicalType::LIST(LogicalType::UTINYINT),
-	         LogicalType::LIST(LogicalType::UTINYINT)};
+	names = SequenceColumnNames();
+	types = SequenceColumnTypes();
 
 	if (include_filepath) {
 		names.push_back("filepath");

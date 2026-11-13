@@ -363,6 +363,43 @@ if echo "$MZXML_EXPECTED_SHA  $MZXML_FILE" | sha256sum -c --quiet 2>/dev/null; t
     export MZXML_REAL_DATA="$MZXML_FILE"
 fi
 
+# Download and cache the two real SRA runs whose fasterq-dump md5s are committed in
+# data/sra/real_oracles.csv, which also records their sha256s. Each is downloaded to a .part file
+# and only renamed once whole, so an interrupted download is retried rather than kept.
+SRA_CACHE_DIR="$CACHE_DIR/sra"
+mkdir -p "$SRA_CACHE_DIR"
+SRA_REAL_OK=1
+SRA_CAN_CHECK=1
+if ! command -v sha256sum > /dev/null; then
+    echo "Warning: no sha256sum command, so the SRA real data downloads cannot be checked; skipping SRA real data tests"
+    SRA_REAL_OK=0
+    SRA_CAN_CHECK=0
+fi
+# One line per run: real_oracles.csv's run and sra_sha256 columns.
+while [ "$SRA_CAN_CHECK" = 1 ] && read -r SRA_RUN SRA_SHA; do
+    SRA_FILE="$SRA_CACHE_DIR/$SRA_RUN.sra"
+    if [ ! -f "$SRA_FILE" ]; then
+        echo "Downloading SRA run $SRA_RUN..."
+        if wget -q -O "$SRA_FILE.part" "https://sra-pub-run-odp.s3.amazonaws.com/sra/$SRA_RUN/$SRA_RUN"; then
+            mv "$SRA_FILE.part" "$SRA_FILE"
+        else
+            echo "Warning: SRA run $SRA_RUN download failed, skipping SRA real data tests"
+            SRA_REAL_OK=0
+            continue
+        fi
+    fi
+    # Compared directly: macOS's sha256sum -c does not read a checklist from stdin.
+    # A mismatch is not a network failure: NCBI replaced the object, or the file is
+    # damaged, and the oracles in real_oracles.csv no longer apply to it.
+    if [ "$(sha256sum "$SRA_FILE" | awk '{print $1}')" != "$SRA_SHA" ]; then
+        echo "ERROR: $SRA_FILE does not match the sha256 in data/sra/real_oracles.csv. Remove it to download it again; if it still differs, NCBI replaced the object." >&2
+        exit 1
+    fi
+done < <(awk -F, 'NR > 1 { print $1, $3 }' data/sra/real_oracles.csv | sort -u)
+if [ "$SRA_REAL_OK" = 1 ]; then
+    export SRA_REAL_DATA="$SRA_CACHE_DIR"
+fi
+
 # Detect compile-time optional features by querying the built extension
 if echo "SELECT * FROM miint_versions() WHERE library = 'HDF5';" | ./build/release/duckdb -csv 2>/dev/null | grep -q HDF5; then
     export HDF5_AVAILABLE=1

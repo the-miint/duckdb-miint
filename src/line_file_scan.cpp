@@ -1,7 +1,5 @@
 #include "line_file_scan.hpp"
 
-#include "remote_file_helper.hpp"
-
 #include <algorithm>
 #include <climits>
 #include "duckdb/common/vector/flat_vector.hpp"
@@ -18,26 +16,14 @@ unique_ptr<FunctionData> BindLineScan(ClientContext &context, TableFunctionBindI
 	auto data = make_uniq<LineScanData>();
 	const std::string function_name = input.table_function.GetName().GetIdentifierName();
 	data->function_name = function_name;
-	const auto &arg = input.inputs[0];
 
-	if (arg.IsNull()) {
-		throw InvalidInputException(function_name + ": first argument cannot be NULL");
-	}
-	if (arg.type().id() == LogicalTypeId::VARCHAR) {
-		data->file_paths = ExpandGlobPatternWithInfo(fs, context, arg.ToString()).paths;
-	} else if (arg.type().id() == LogicalTypeId::LIST) {
-		data->file_paths = ExpandPathList(fs, arg, function_name);
-	} else {
-		throw InvalidInputException(function_name + ": first argument must be VARCHAR or VARCHAR[]");
-	}
+	data->file_paths = ExpandPathArgument(fs, context, input.inputs[0], function_name).paths;
 	for (const auto &path : data->file_paths) {
 		if (IsStdinPath(path)) {
 			throw InvalidInputException(function_name + ": stdin is not supported");
 		}
-		if (!miint::RemoteFileHelper::IsRemotePath(path) && !fs.FileExists(path)) {
-			throw IOException("File not found: " + path);
-		}
 	}
+	RequireLocalFilesExist(fs, data->file_paths);
 	data->include_filepath = ParseIncludeFilepathParameter(input.named_parameters);
 	if (data->include_filepath) {
 		names.emplace_back("filepath");

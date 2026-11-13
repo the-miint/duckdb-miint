@@ -5,6 +5,7 @@
 #include "miint_log.hpp"
 #include "miint_named_parameter.hpp"
 #include "rype_common.hpp"
+#include "table_function_common.hpp"
 
 #include "duckdb/common/arrow/arrow_wrapper.hpp"
 #include "duckdb/common/file_system.hpp"

@@ -2,6 +2,7 @@
 #include "remote_file_helper.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
+#include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/vector/constant_vector.hpp"
@@ -115,6 +116,63 @@ GlobExpansionResult ExpandGlobPatternWithInfo(FileSystem &fs, ClientContext &con
 	std::sort(result.paths.begin(), result.paths.end());
 
 	return result;
+}
+
+GlobExpansionResult ExpandPathArgument(FileSystem &fs, ClientContext &context, const Value &arg,
+                                       const std::string &function_name) {
+	if (arg.IsNull()) {
+		throw InvalidInputException(function_name + ": first argument cannot be NULL");
+	}
+	if (arg.type().id() == LogicalTypeId::VARCHAR) {
+		return ExpandGlobPatternWithInfo(fs, context, arg.ToString());
+	}
+	if (arg.type().id() == LogicalTypeId::LIST) {
+		GlobExpansionResult result;
+		result.paths = ExpandPathList(fs, arg, function_name);
+		result.is_glob = false;
+		return result;
+	}
+	throw InvalidInputException(function_name + ": first argument must be VARCHAR or VARCHAR[]");
+}
+
+void RequireLocalFilesExist(FileSystem &fs, const std::vector<std::string> &paths) {
+	for (const auto &path : paths) {
+		if (!IsStdinPath(path) && !miint::RemoteFileHelper::IsRemotePath(path) && !fs.FileExists(path)) {
+			throw IOException("File not found: " + path);
+		}
+	}
+}
+
+std::vector<std::string> SequenceColumnNames() {
+	return {"sequence_index", "read_id", "comment", "sequence1", "sequence2", "qual1", "qual2"};
+}
+
+std::vector<LogicalType> SequenceColumnTypes() {
+	return {LogicalType::BIGINT,
+	        LogicalType::VARCHAR,
+	        LogicalType::VARCHAR,
+	        LogicalType::VARCHAR,
+	        LogicalType::VARCHAR,
+	        LogicalType::LIST(LogicalType::UTINYINT),
+	        LogicalType::LIST(LogicalType::UTINYINT)};
+}
+
+idx_t GetNonNegativeOption(ClientContext &context, const char *name, idx_t if_null, const char *zero_means) {
+	Value v;
+	// Registered at extension load (LoadInternal in src/miint_extension.cpp).
+	// Missing means the option was never registered, which is a load-order
+	// programmer error rather than a user mistake.
+	if (!context.TryGetCurrentSetting(name, v)) {
+		throw InternalException("miint extension option '%s' is not registered — was LoadInternal completed?", name);
+	}
+	if (v.IsNull()) {
+		return if_null;
+	}
+	const auto value = v.GetValue<int64_t>();
+	if (value < 0) {
+		throw InvalidInputException("%s must be >= 0 (%s)", name, zero_means);
+	}
+	return NumericCast<idx_t>(value);
 }
 
 // --- Result vector helpers ---

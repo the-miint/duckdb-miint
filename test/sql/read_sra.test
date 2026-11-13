@@ -1,0 +1,341 @@
+# name: test/sql/read_sra.test
+# description: read_sra reads local .sra files as fasterq-dump does, in a read_fastx-compatible schema (data/sra/README.md)
+# group: [sql]
+
+require miint
+
+# Every read must match fasterq-dump's output for the same run (the committed oracles), as
+# read_fastx reads those FASTQ files: same reads, bases and qualities, in fasterq-dump's order,
+# with mates paired the way --split-3 writes them, and the same defline after the id (the comment
+# column: the spot name, as fasterq-dump rebuilds it, then read 1's length).
+
+# ---------------------------------------------------------------------------------------------
+# Arguments, checked when the query binds
+
+statement error
+SELECT * FROM read_sra(NULL);
+----
+read_sra: first argument cannot be NULL
+
+statement error
+SELECT * FROM read_sra('data/sra/no_such_run.sra');
+----
+File not found: data/sra/no_such_run.sra
+
+statement error
+SELECT * FROM read_sra(['data/sra/SRR4424282.sra', NULL]);
+----
+read_sra: file path list cannot contain NULL
+
+statement error
+SELECT * FROM read_sra([]::VARCHAR[]);
+----
+read_sra: at least one file path must be provided
+
+statement error
+SELECT * FROM read_sra('data/sra/nomatch_*.sra');
+----
+No files matched pattern: data/sra/nomatch_*.sra
+
+statement error
+SELECT * FROM read_sra('/dev/stdin');
+----
+read_sra: stdin is not supported (an .sra file is read at random positions)
+
+statement error
+SELECT * FROM read_sra(42);
+----
+read_sra: first argument must be VARCHAR or VARCHAR[]
+
+statement error
+SELECT * FROM read_sra('data/sra/SRR4424282.sra', split := 'files');
+----
+read_sra: split must be 'split_3' or 'spot', not 'files'
+
+# split-3 always skips technical reads (fasterq-dump switches to split-files instead, with a
+# notice); asking for both is refused rather than answered differently.
+statement error
+SELECT * FROM read_sra('data/sra/SRR4424282.sra', include_technical := true);
+----
+read_sra: include_technical requires split => 'spot'
+
+# Opening and classifying a run is work: it happens when the query runs, so EXPLAIN of a run
+# that will be refused still succeeds.
+statement ok
+EXPLAIN SELECT * FROM read_sra('data/sra/SRR26779001.sra');
+
+# ---------------------------------------------------------------------------------------------
+# Schema
+
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM read_sra('data/sra/SRR4424282.sra'));
+----
+sequence_index	BIGINT
+read_id	VARCHAR
+comment	VARCHAR
+sequence1	VARCHAR
+sequence2	VARCHAR
+qual1	UTINYINT[]
+qual2	UTINYINT[]
+
+# One row per read: the read's position in its spot is kept, since fasterq-dump prints it and
+# read_id does not carry it.
+query II
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM read_sra('data/sra/SRR4424282.sra', split := 'spot', include_filepath := true));
+----
+sequence_index	BIGINT
+read_id	VARCHAR
+comment	VARCHAR
+sequence1	VARCHAR
+sequence2	VARCHAR
+qual1	UTINYINT[]
+qual2	UTINYINT[]
+read_number	UTINYINT
+filepath	VARCHAR
+
+# ---------------------------------------------------------------------------------------------
+# Runs miint does not read are refused, each named for what it is
+
+statement error
+SELECT count(*) FROM read_sra('data/sra/SRR26779001.sra');
+----
+read_sra: SRR26779001: cSRA (aligned reads
+
+statement error
+SELECT count(*) FROM read_sra('data/sra/SRR2513321.sra');
+----
+read_sra: SRR2513321: a PacBio or Nanopore database with a CONSENSUS table
+
+statement error
+SELECT count(*) FROM read_sra('data/sra/SRR882123.sra');
+----
+read_sra: SRR882123: table type 'NCBI:SRA:_454_:tbl:v2#1.0.7' is not supported
+
+statement error
+SELECT count(*) FROM read_sra('data/sra/SRR4424282.sralite');
+----
+read_sra: SRR4424282: SRA Lite (no original qualities) is not supported
+
+# ---------------------------------------------------------------------------------------------
+# Parity with fasterq-dump --split-3, over all 18 decodable fixtures read in one call
+
+statement ok
+CREATE TABLE runs AS SELECT * FROM (VALUES
+    (1, 'SRR32151205'), (2, 'SRR34459993'), (3, 'ERR16653849'), (4, 'ERR5009897'), (5, 'SRR4424282'),
+    (6, 'SRR6016450'), (7, 'DRR501055'), (8, 'SRR4439672'), (9, 'SRR24770212'), (10, 'ERR8523629'),
+    (11, 'SRR30810369'), (12, 'SRR30938008'), (13, 'ERR932865'), (14, 'ERR1160027'), (15, 'SRR14704581'),
+    (16, 'SRR36240868'), (17, 'DRR880686'), (18, 'SRR37135232')) t(run_pos, run);
+
+statement ok
+CREATE TABLE ours AS
+SELECT row_number() OVER () AS pos, *
+FROM read_sra(['data/sra/SRR32151205.sra', 'data/sra/SRR34459993.sra', 'data/sra/ERR16653849.sra',
+               'data/sra/ERR5009897.sra', 'data/sra/SRR4424282.sra', 'data/sra/SRR6016450.sra',
+               'data/sra/DRR501055.sra', 'data/sra/SRR4439672.sra', 'data/sra/SRR24770212.sra',
+               'data/sra/ERR8523629.sra', 'data/sra/SRR30810369.sra', 'data/sra/SRR30938008.sra',
+               'data/sra/ERR932865.sra', 'data/sra/ERR1160027.sra', 'data/sra/SRR14704581.sra',
+               'data/sra/SRR36240868.sra', 'data/sra/DRR880686.sra', 'data/sra/SRR37135232.sra']);
+
+# The oracle as read_fastx reads it: mates from _1/_2 paired by position, and the unpaired file.
+statement ok
+CREATE TABLE oracle AS
+SELECT read_id, comment, sequence1, sequence2, qual1, qual2
+FROM read_fastx('data/sra/oracle/*/split_3/*_1.fastq.gz', sequence2 := 'data/sra/oracle/*/split_3/*_2.fastq.gz')
+UNION ALL
+SELECT read_id, comment, sequence1, sequence2, qual1, qual2
+FROM read_fastx('data/sra/oracle/*/split_3/*.fastq.gz', include_filepath := true)
+WHERE NOT regexp_matches(filepath, '_[0-9]\.fastq\.gz$');
+
+query II
+SELECT (SELECT count(*) FROM ours), (SELECT count(*) FROM oracle);
+----
+8865	8865
+
+query I
+SELECT count(*) FROM (SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM ours EXCEPT ALL SELECT * FROM oracle);
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT * FROM oracle EXCEPT ALL SELECT read_id, comment, sequence1, sequence2, qual1, qual2 FROM ours);
+----
+0
+
+# fasterq-dump's order: runs as listed, spots ascending. sequence_index is the spot's row id, the
+# number read_id also carries.
+query I
+SELECT count(*) FROM ours WHERE sequence_index <> CAST(split_part(read_id, '.', 2) AS BIGINT);
+----
+0
+
+query I
+SELECT count(*) FROM (
+    SELECT pos, lag(r.run_pos) OVER (ORDER BY pos) AS prev_run, r.run_pos,
+           lag(sequence_index) OVER (ORDER BY pos) AS prev_spot, sequence_index
+    FROM ours JOIN runs r ON split_part(read_id, '.', 1) = r.run)
+WHERE prev_run > run_pos OR (prev_run = run_pos AND prev_spot >= sequence_index);
+----
+0
+
+# A spot with fewer than two biological reads is one unpaired row; ERR5009897's second reads are
+# all empty, so every one of its spots is.
+query II
+SELECT count(*), count(sequence2) FROM ours WHERE read_id LIKE 'ERR5009897.%';
+----
+248	0
+
+# SRR24770212 has both kinds of spot: the records in its oracle's unpaired file and in each of _1
+# and _2 (data/sra/oracle/oracle_md5.csv).
+query II
+SELECT count(*) FILTER (WHERE sequence2 IS NULL), count(*) FILTER (WHERE sequence2 IS NOT NULL) FROM ours WHERE read_id LIKE 'SRR24770212.%';
+----
+83	1535
+
+# ---------------------------------------------------------------------------------------------
+# Parity with fasterq-dump --split-spot: one row per read
+
+statement ok
+CREATE TABLE ours_spot AS
+SELECT row_number() OVER () AS pos, *
+FROM read_sra(['data/sra/SRR32151205.sra', 'data/sra/SRR34459993.sra', 'data/sra/ERR16653849.sra',
+               'data/sra/ERR5009897.sra', 'data/sra/SRR4424282.sra', 'data/sra/SRR6016450.sra',
+               'data/sra/DRR501055.sra', 'data/sra/SRR4439672.sra', 'data/sra/SRR24770212.sra',
+               'data/sra/ERR8523629.sra', 'data/sra/SRR30810369.sra', 'data/sra/SRR30938008.sra',
+               'data/sra/ERR932865.sra', 'data/sra/ERR1160027.sra', 'data/sra/SRR14704581.sra',
+               'data/sra/SRR36240868.sra', 'data/sra/DRR880686.sra', 'data/sra/SRR37135232.sra'],
+              split := 'spot');
+
+statement ok
+CREATE TABLE oracle_spot AS
+SELECT read_id, comment, sequence1, qual1 FROM read_fastx('data/sra/oracle/*/split_spot/*.fastq.gz');
+
+query II
+SELECT (SELECT count(*) FROM ours_spot), (SELECT count(*) FROM oracle_spot);
+----
+12777	12777
+
+query I
+SELECT count(*) FROM (SELECT read_id, comment, sequence1, qual1 FROM ours_spot EXCEPT ALL SELECT * FROM oracle_spot);
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT * FROM oracle_spot EXCEPT ALL SELECT read_id, comment, sequence1, qual1 FROM ours_spot);
+----
+0
+
+query I
+SELECT count(*) FROM ours_spot WHERE sequence2 IS NOT NULL OR qual2 IS NOT NULL;
+----
+0
+
+# SRR6016450's first read is technical (and empty), so each spot's one written read is read 2.
+query II
+SELECT min(read_number), max(read_number) FROM ours_spot WHERE read_id LIKE 'SRR6016450.%';
+----
+2	2
+
+# fasterq-dump --include-technical wrote the same reads for every fixture (data/sra/README.md).
+query I
+SELECT count(*) FROM (
+    SELECT * EXCLUDE (pos) FROM ours_spot
+    EXCEPT ALL
+    SELECT * FROM read_sra(['data/sra/SRR32151205.sra', 'data/sra/SRR34459993.sra', 'data/sra/ERR16653849.sra',
+               'data/sra/ERR5009897.sra', 'data/sra/SRR4424282.sra', 'data/sra/SRR6016450.sra',
+               'data/sra/DRR501055.sra', 'data/sra/SRR4439672.sra', 'data/sra/SRR24770212.sra',
+               'data/sra/ERR8523629.sra', 'data/sra/SRR30810369.sra', 'data/sra/SRR30938008.sra',
+               'data/sra/ERR932865.sra', 'data/sra/ERR1160027.sra', 'data/sra/SRR14704581.sra',
+               'data/sra/SRR36240868.sra', 'data/sra/DRR880686.sra', 'data/sra/SRR37135232.sra'],
+              split := 'spot', include_technical := true));
+----
+0
+
+# ---------------------------------------------------------------------------------------------
+# Parallel decoding keeps fasterq-dump's order
+
+# Units of 7 spots split every multi-spot fixture over many units, decoded by several threads;
+# batch indexes must put the rows back in run and spot order, the same rows as one unit per run.
+statement ok
+SET threads = 8;
+
+statement ok
+SET miint_sra_spots_per_unit = 7;
+
+statement ok
+CREATE TABLE ours_small_units AS
+SELECT row_number() OVER () AS pos, *
+FROM read_sra(['data/sra/SRR32151205.sra', 'data/sra/SRR34459993.sra', 'data/sra/ERR16653849.sra',
+               'data/sra/ERR5009897.sra', 'data/sra/SRR4424282.sra', 'data/sra/SRR6016450.sra',
+               'data/sra/DRR501055.sra', 'data/sra/SRR4439672.sra', 'data/sra/SRR24770212.sra',
+               'data/sra/ERR8523629.sra', 'data/sra/SRR30810369.sra', 'data/sra/SRR30938008.sra',
+               'data/sra/ERR932865.sra', 'data/sra/ERR1160027.sra', 'data/sra/SRR14704581.sra',
+               'data/sra/SRR36240868.sra', 'data/sra/DRR880686.sra', 'data/sra/SRR37135232.sra']);
+
+# A plain CREATE TABLE AS inserts by batch index, which fails if two threads share one; its rows
+# keep the batch order.
+statement ok
+CREATE TABLE ctas_small_units AS
+SELECT read_id, sequence_index
+FROM read_sra(['data/sra/SRR32151205.sra', 'data/sra/SRR34459993.sra', 'data/sra/ERR16653849.sra',
+               'data/sra/ERR5009897.sra', 'data/sra/SRR4424282.sra', 'data/sra/SRR6016450.sra',
+               'data/sra/DRR501055.sra', 'data/sra/SRR4439672.sra', 'data/sra/SRR24770212.sra',
+               'data/sra/ERR8523629.sra', 'data/sra/SRR30810369.sra', 'data/sra/SRR30938008.sra',
+               'data/sra/ERR932865.sra', 'data/sra/ERR1160027.sra', 'data/sra/SRR14704581.sra',
+               'data/sra/SRR36240868.sra', 'data/sra/DRR880686.sra', 'data/sra/SRR37135232.sra']);
+
+statement ok
+RESET miint_sra_spots_per_unit;
+
+query II
+SELECT count(*), count(*) FILTER (WHERE a.read_id IS DISTINCT FROM b.read_id)
+FROM ours a FULL JOIN (SELECT rowid + 1 AS pos, read_id FROM ctas_small_units) b USING (pos);
+----
+8865	0
+
+query II
+SELECT count(*), count(*) FILTER (WHERE a.read_id IS DISTINCT FROM b.read_id OR a.sequence1 IS DISTINCT FROM b.sequence1
+                                  OR a.sequence2 IS DISTINCT FROM b.sequence2 OR a.qual1 IS DISTINCT FROM b.qual1
+                                  OR a.qual2 IS DISTINCT FROM b.qual2)
+FROM ours a FULL JOIN ours_small_units b USING (pos);
+----
+8865	0
+
+statement ok
+SET miint_sra_spots_per_unit = -1;
+
+statement error
+SELECT count(*) FROM read_sra('data/sra/SRR4424282.sra');
+----
+miint_sra_spots_per_unit must be >= 0
+
+statement ok
+RESET miint_sra_spots_per_unit;
+
+# ---------------------------------------------------------------------------------------------
+# Inputs and options
+
+query II
+SELECT DISTINCT filepath, count(*) OVER () FROM read_sra('data/sra/SRR4424282.sra', include_filepath := true);
+----
+data/sra/SRR4424282.sra	3
+
+# A glob reads every match; here the run is classified before a row is produced. SRR4424282 (3
+# spots) and SRR4439672 (2620) match, each one row per spot.
+query I
+SELECT count(*) FROM read_sra('data/sra/SRR44*.sra');
+----
+2623
+
+# A prepared statement runs the scan again on every execution.
+statement ok
+PREPARE q AS SELECT count(*) FROM read_sra('data/sra/SRR4424282.sra');
+
+query I
+EXECUTE q;
+----
+3
+
+query I
+EXECUTE q;
+----
+3

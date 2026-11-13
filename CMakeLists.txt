@@ -355,6 +355,7 @@ list(
   src/read_paf.cpp
   src/read_sequences_sam.cpp
   src/read_sequences_sff.cpp
+  src/read_sra.cpp
   src/reference_table_reader.cpp
   src/remote_file_helper.cpp
   src/rype_classify.cpp
@@ -384,6 +385,12 @@ list(
   src/shear_tree.cpp
   src/simulate_resemblance.cpp
   src/simulate_resemblance_function.cpp
+  src/sra_archive.cpp
+  src/sra_codecs.cpp
+  src/sra_column.cpp
+  src/sra_name.cpp
+  src/sra_run.cpp
+  src/sra_source.cpp
   src/table_function_common.cpp
   src/taxdump_archive.cpp
   src/taxdump_parser.cpp
@@ -488,6 +495,12 @@ list(
   src/SequenceReader.cpp
   src/SFFReader.cpp
   src/simulate_resemblance.cpp
+  src/sra_archive.cpp
+  src/sra_codecs.cpp
+  src/sra_column.cpp
+  src/sra_name.cpp
+  src/sra_run.cpp
+  src/sra_source.cpp
   src/taxdump_archive.cpp
   src/taxdump_parser.cpp
   src/taxonomy_lineage.cpp
@@ -572,6 +585,12 @@ list(
   test/cpp/test_sigpipe_bootstrap.cpp
   test/cpp/test_SimulateCluster.cpp
   test/cpp/test_SimulateGradient.cpp
+  test/cpp/test_SraArchive.cpp
+  test/cpp/test_SraCodecs.cpp
+  test/cpp/test_SraColumn.cpp
+  test/cpp/test_SraName.cpp
+  test/cpp/test_SraRun.cpp
+  test/cpp/test_SraSpots.cpp
   test/cpp/test_taxdump_archive.cpp
   test/cpp/test_taxdump_parser.cpp
   test/cpp/test_taxonomy_lineage.cpp
