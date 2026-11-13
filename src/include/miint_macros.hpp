@@ -298,7 +298,8 @@ const std::string PRODIGAL_GENE_DATA = // NOLINT
 
 // prodigal_proteins(relation [, per_genome := false]) / prodigal_genes(relation, contigs [, per_genome := false])
 //
-// Prodigal's -a (proteins) and -d (gene nucleotides) FASTA records from predict_genes' rows, in the relation's order:
+// Prodigal's -a (proteins) and -d (gene nucleotides) FASTA records from predict_genes' rows, in no set order (the CLI
+// writes them in contig order; a FASTA file is a set of records, and a sort would stop the rows streaming to COPY):
 // genome_id, then read_id ('<contig>_<gene>'), comment ('# begin # end # 1|-1 # ID=...;gc_cont=...') and sequence1,
 // the columns COPY ... (FORMAT FASTA, INCLUDE_COMMENT true) writes; Prodigal wraps -a at 60 (LINE_WIDTH 60) and -d
 // at 70 (LINE_WIDTH 70). Numbering as _miint_prodigal_numbered's; a contig's row without a gene has no record.
@@ -321,7 +322,7 @@ const std::string PRODIGAL_PROTEINS = // NOLINT
     "CREATE OR REPLACE MACRO prodigal_proteins(relation, per_genome := false) AS TABLE "
     "SELECT genome_id, fasta_id AS read_id, comment, "
     "       _miint_gff_required('prodigal_proteins', protein, 'protein', n) AS sequence1 "
-    "FROM _miint_prodigal_fasta_records('prodigal_proteins', relation, per_genome) ORDER BY n; ";
+    "FROM _miint_prodigal_fasta_records('prodigal_proteins', relation, per_genome); ";
 
 // -d's bases are the contig's as Prodigal encodes them (prodigal_api.c encode_base): a/c/g/t in either case are
 // ACGT, and every other character is N. A character outside ASCII 'A'..'z' is refused, as predict_genes refuses it
@@ -380,7 +381,7 @@ const std::string PRODIGAL_GENES = // NOLINT
     "       WHEN strand = '+' THEN substring(contig, position, stop_position - position) "
     "       ELSE sequence_dna_reverse_complement(substring(contig, position, stop_position - position)) END "
     "    AS sequence1 "
-    "FROM joined j ORDER BY n; ";
+    "FROM joined j; ";
 
 // Prodigal's GFF, as `prodigal -f gff` writes it, from predict_genes' columns, in the relation's order (predict_genes
 // returns contig order): '##gff-version  3' (with two spaces, as Prodigal writes it), then each contig's

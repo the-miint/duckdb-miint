@@ -104,7 +104,7 @@ prodigal_proteins(relation, [per_genome := false])
 prodigal_genes(relation, contigs, [genome_id := 'col'], [per_genome := false])
 ```
 
-Table macros that make Prodigal's `-a` (proteins) and `-d` (gene nucleotides) FASTA records from `predict_genes`' rows, for [`COPY ... (FORMAT FASTA)`](writing.md#fasta) to write. On the contigs in `data/prodigal/`, single-genome and metagenomic, the files equal the Prodigal CLI's byte for byte.
+Table macros that make Prodigal's `-a` (proteins) and `-d` (gene nucleotides) FASTA records from `predict_genes`' rows, for [`COPY ... (FORMAT FASTA)`](writing.md#fasta) to write. On the contigs in `data/prodigal/`, single-genome and metagenomic, the files hold the Prodigal CLI's records byte for byte. The records come out in no set order, as a FASTA file's records are a set; the CLI writes them in contig order.
 
 - `relation` (VARCHAR, positional): a table or view of `predict_genes`' output, in its order (contig order).
 - `contigs` (VARCHAR, `prodigal_genes` only): a table or view of the contigs `predict_genes` was given, `read_id` and `sequence1`. A gene's bases come from the contig with its `read_id`, which must be there once, with `read_id` of the genes' type. A gene whose contig is missing, named twice, NULL, too short for it, or holds a character outside ASCII `A`..`z` (which `predict_genes` refuses), and a gene that is empty (`stop_position` not after `position`), are refused.
