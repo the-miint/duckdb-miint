@@ -10,10 +10,11 @@
 namespace duckdb {
 
 //===--------------------------------------------------------------------===//
-// Bind Data (inherits from shared base - no FASTA-specific fields needed)
+// Bind Data
 //===--------------------------------------------------------------------===//
 struct FastaCopyBindData : public SequenceCopyBindData {
-	// No FASTA-specific fields (unlike FASTQ which has qual_offset)
+	// LINE_WIDTH: wrap each sequence at this many characters; 0 (no LINE_WIDTH) writes it on one line.
+	idx_t line_width = 0;
 
 	unique_ptr<FunctionData> Copy() const override {
 		auto result = make_uniq<FastaCopyBindData>();
@@ -30,7 +31,7 @@ struct FastaCopyBindData : public SequenceCopyBindData {
 		result->names = names;
 		result->indices = indices;
 		result->read_id_type = read_id_type;
-		// No FASTA-specific fields to copy
+		result->line_width = line_width;
 		return result;
 	}
 
@@ -40,7 +41,8 @@ struct FastaCopyBindData : public SequenceCopyBindData {
 		       include_comment == other.include_comment && compression == other.compression &&
 		       compression_level == other.compression_level && file_path == other.file_path &&
 		       has_r2_columns == other.has_r2_columns && split_output == other.split_output &&
-		       flush_size == other.flush_size && names == other.names && read_id_type == other.read_id_type;
+		       flush_size == other.flush_size && names == other.names && read_id_type == other.read_id_type &&
+		       line_width == other.line_width;
 	}
 };
 
@@ -85,6 +87,17 @@ static unique_ptr<FunctionData> FastaCopyBind(ClientContext &context, CopyFuncti
 	result->compression = common_params.compression;
 	result->compression_level = common_params.compression_level;
 	result->flush_size = common_params.flush_size;
+
+	for (auto &option : input.info.options) {
+		if (option.first == "line_width") {
+			// Declared BIGINT, so DuckDB hands over exactly one non-NULL BIGINT.
+			const auto width = option.second[0].GetValue<int64_t>();
+			if (width < 1) {
+				throw BinderException("LINE_WIDTH must be at least 1, got %lld", static_cast<long long>(width));
+			}
+			result->line_width = static_cast<idx_t>(width);
+		}
+	}
 
 	// {ORIENTATION} in the path => split R1/R2 files; otherwise a single (optionally interleaved) file.
 	ResolveOutputMode(result->file_path, result->interleave, result->split_output);
@@ -133,8 +146,11 @@ static unique_ptr<LocalFunctionData> FastaCopyInitializeLocal(ExecutionContext &
 // sequence bytes twice (into an intermediate `record` string, then into the stream). For
 // a FASTA of bacterial genomes (~5 MB/record) that's ~10 MB of extra memory bandwidth per
 // record; direct writes let the sequence flow kseq->MemoryStream with a single memcpy.
+// With line_width > 0 the sequence is written in lines of line_width, the last one shorter, and no empty line
+// after a sequence whose length is a multiple of it (as Prodigal writes -a and -d); an empty sequence is an empty
+// line either way.
 static void WriteFastaRecordToBuffer(MemoryStream &stream, const char *id, idx_t id_size, const char *seq,
-                                     idx_t seq_size, const char *comment, idx_t comment_size) {
+                                     idx_t seq_size, const char *comment, idx_t comment_size, idx_t line_width) {
 	stream.WriteData(const_data_ptr_cast(">"), 1);
 	stream.WriteData(const_data_ptr_cast(id), id_size);
 	if (comment_size > 0) {
@@ -142,8 +158,15 @@ static void WriteFastaRecordToBuffer(MemoryStream &stream, const char *id, idx_t
 		stream.WriteData(const_data_ptr_cast(comment), comment_size);
 	}
 	stream.WriteData(const_data_ptr_cast("\n"), 1);
-	stream.WriteData(const_data_ptr_cast(seq), seq_size);
-	stream.WriteData(const_data_ptr_cast("\n"), 1);
+	if (line_width == 0 || seq_size <= line_width) {
+		stream.WriteData(const_data_ptr_cast(seq), seq_size);
+		stream.WriteData(const_data_ptr_cast("\n"), 1);
+		return;
+	}
+	for (idx_t offset = 0; offset < seq_size; offset += line_width) {
+		stream.WriteData(const_data_ptr_cast(seq + offset), MinValue(line_width, seq_size - offset));
+		stream.WriteData(const_data_ptr_cast("\n"), 1);
+	}
 }
 
 static void FastaCopySink(ExecutionContext &context, FunctionData &bind_data, GlobalFunctionData &gstate_p,
@@ -233,7 +256,8 @@ static void FastaCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 		idx_t seq1_size = seq1_strings[seq1_row].GetSize();
 
 		// Write R1 record to local buffer
-		WriteFastaRecordToBuffer(stream_r1, id_ptr, id_size, seq1_ptr, seq1_size, comment_ptr, comment_size);
+		WriteFastaRecordToBuffer(stream_r1, id_ptr, id_size, seq1_ptr, seq1_size, comment_ptr, comment_size,
+		                         fdata.line_width);
 		lstate.writer_state_r1->written_anything = true;
 
 		// Handle R2. A record is paired iff sequence2 is non-NULL; a NULL sequence2 means a
@@ -250,12 +274,12 @@ static void FastaCopySink(ExecutionContext &context, FunctionData &bind_data, Gl
 				if (fdata.split_output) {
 					// Write R2 to the separate R2 buffer (file created lazily on first flush).
 					WriteFastaRecordToBuffer(*stream_r2, id_ptr, id_size, seq2_ptr, seq2_size, comment_ptr,
-					                         comment_size);
+					                         comment_size, fdata.line_width);
 					lstate.writer_state_r2->written_anything = true;
 				} else if (fdata.interleave) {
 					// Write R2 interleaved into the same buffer as R1.
-					WriteFastaRecordToBuffer(stream_r1, id_ptr, id_size, seq2_ptr, seq2_size, comment_ptr,
-					                         comment_size);
+					WriteFastaRecordToBuffer(stream_r1, id_ptr, id_size, seq2_ptr, seq2_size, comment_ptr, comment_size,
+					                         fdata.line_width);
 				} else {
 					// Single-file output but this record is paired and there is nowhere to put R2.
 					throw InvalidInputException(
@@ -306,6 +330,7 @@ static void FastaCopyFinalize(ClientContext &context, FunctionData &bind_data, G
 //===--------------------------------------------------------------------===//
 static void FastaCopyOptions(ClientContext &context, CopyOptionsInput &input) {
 	DeclareSequenceCopyOptions(input);
+	DeclareCopyOption(input, "line_width", LogicalType::BIGINT);
 }
 
 CopyFunction CopyFastaFunction::GetFunction() {

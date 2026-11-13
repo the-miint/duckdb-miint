@@ -80,7 +80,7 @@ Two constraints come with it:
 
 ## Genomes
 
-- [Gene prediction](gene_prediction.md) - Call prokaryotic genes and their proteins (Prodigal, single-genome or metagenomic), and write them as Prodigal's GFF.
+- [Gene prediction](gene_prediction.md) - Call prokaryotic genes and their proteins (Prodigal, single-genome or metagenomic), and write them as Prodigal's GFF, or its `-a`/`-d` FASTA (`prodigal_proteins`, `prodigal_genes`).
 
 ## Amplicon & community analysis
 
