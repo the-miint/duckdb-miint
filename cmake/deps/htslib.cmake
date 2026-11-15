@@ -102,7 +102,7 @@ else()
     # 'make' (which builds both static and shared) and 'make install' (which
     # requires the shared lib) both fail. Build only the static library and
     # manually copy the artifacts.
-    set(HTSLIB_BUILD_COMMAND make lib-static)
+    set(HTSLIB_BUILD_COMMAND make -j${MIINT_SUBBUILD_JOBS} lib-static)
     # libhts.a is in <BINARY_DIR> (out-of-source build), but headers are
     # read-only source files so we copy them from the source tree directly.
     set(HTSLIB_INSTALL_COMMAND
@@ -115,15 +115,15 @@ else()
         ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1/htslib
         ${CMAKE_CURRENT_BINARY_DIR}/htslib/include/htslib)
   else()
-    set(HTSLIB_BUILD_COMMAND make)
+    set(HTSLIB_BUILD_COMMAND make -j${MIINT_SUBBUILD_JOBS})
     set(HTSLIB_INSTALL_COMMAND make install)
   endif()
   ExternalProject_Add(
     htslib_build
     SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1
     CONFIGURE_COMMAND
-      env ${HTSLIB_CFLAGS} ${HTSLIB_LDFLAGS} ${HTSLIB_LIBS}
-      ${HTSLIB_PKG_CONFIG_PATH}
+      env ${MIINT_SUBBUILD_COMPILER_VARS} ${HTSLIB_CFLAGS} ${HTSLIB_LDFLAGS}
+      ${HTSLIB_LIBS} ${HTSLIB_PKG_CONFIG_PATH}
       ${CMAKE_CURRENT_SOURCE_DIR}/ext/htslib-1.22.1/configure
       ${MIINT_AUTOTOOLS_HOST} --prefix=${CMAKE_CURRENT_BINARY_DIR}/htslib
       --disable-libcurl --disable-bz2 --disable-lzma ${HTSLIB_LIBDEFLATE_FLAG}

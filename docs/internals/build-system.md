@@ -7,7 +7,7 @@ How miint's CMake is laid out, and what to edit when you add a source, a test or
 | File | Holds |
 |---|---|
 | `CMakeLists.txt` | The `MIINT_ENABLE_*` options, the **platform matrix** (the only place a platform turns a feature off), the includes below in order, the always-compiled sources, and the three targets. |
-| `cmake/miint_helpers.cmake` | `miint_git_version()`, `miint_configure_target()`, `miint_check_unique()`, and the cross-compile flags (`MIINT_OSX_ARCH_CFLAGS`, `MIINT_AUTOTOOLS_HOST`, `EMSCRIPTEN_THREAD_CFLAGS`). |
+| `cmake/miint_helpers.cmake` | `miint_git_version()`, `miint_configure_target()`, `miint_check_unique()`, the cross-compile flags (`MIINT_OSX_ARCH_CFLAGS`, `MIINT_AUTOTOOLS_HOST`, `EMSCRIPTEN_THREAD_CFLAGS`), and the job count and compiler launcher for sub-builds (`MIINT_SUBBUILD_*`). |
 | `cmake/system_deps.cmake` | Libraries found rather than built: ZLIB, Threads, expat, Eigen (and its two defines), libdeflate, zstd. |
 | `cmake/openmp.cmake` | The `miint_openmp` target (UniFrac needs it; krepp uses it if present). |
 | `cmake/isa_dispatch.cmake` | Per-instruction-set builds of a kernel (`miint_add_isa_variants`). |
@@ -51,4 +51,5 @@ A deps file builds its library, then appends to these lists. `include()` shares 
 - **Platform gates live only in the matrix.** A deps file may still turn its own feature off when a package is missing (`set(MIINT_ENABLE_<NAME> OFF)` then `return()`), as the tidy-check builds need.
 - **Headers whose names collide get a narrower scope.** `MIINT_INCLUDE_DIRS` reaches every target in the directory, and its order decides which of two same-named headers an include finds when the header is not beside the including file. When a library ships headers named like another's, scope them to the files that need them with `set_source_files_properties` (see `krepp.cmake`).
 - **`tests` sources must be DuckDB-free.** `tests` has no libduckdb and is built without `MIINT_STATIC_BUILD`, so a source in both lists is compiled twice with different `#ifdef`s. That is why the lists cannot share objects.
+- **Give every ExternalProject sub-build the job count and the launcher.** A sub-build runs its own make or CMake outside this build's graph, so it gets neither by itself and compiles one file at a time, uncached. Pass `-j${MIINT_SUBBUILD_JOBS}` to `make` and `--parallel ${MIINT_SUBBUILD_JOBS}` to `cmake --build`; pass `${MIINT_SUBBUILD_COMPILER_VARS}` to a make or autotools build and `${MIINT_SUBBUILD_LAUNCHER_ARGS}` to a CMake one (`${MIINT_SUBBUILD_CC}` where the command already names its C compiler).
 - **Format `cmake/` yourself.** `make format-check` covers the root `CMakeLists.txt` but nothing under `cmake/`; run `cmake-format -i` on what you change there, with cmake-format 0.6.13 (the version CI pins). CI's `cmake-format` job checks all of `cmake/`.

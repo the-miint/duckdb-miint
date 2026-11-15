@@ -69,6 +69,52 @@ if(EMSCRIPTEN AND (CMAKE_CXX_FLAGS MATCHES "-pthread"
       "Emscripten threading detected: propagating -pthread to C library builds")
 endif()
 
+# Job count and compiler launcher for the ExternalProject sub-builds in
+# cmake/deps/. They run their own make or CMake outside this build's graph, so
+# they get neither its parallelism nor the launcher (ccache) DuckDB's CMake
+# detects, and without them each compiles one file at a time, uncached.
+#
+# Jobs: CMAKE_BUILD_PARALLEL_LEVEL if set, else the CPUs this process may run on
+# (`nproc` honours taskset and cpuset limits), else CMake's logical core count
+# (macOS has no `nproc`). Each sub-build gets the whole count: several start
+# together, but only for seconds, and a share of it would leave the longest
+# (htslib) short once the others finish. No `make -l`: on a small runner the
+# main build's own jobs keep the load above the core count, so it would put
+# every sub-build back on one job.
+if("$ENV{CMAKE_BUILD_PARALLEL_LEVEL}" MATCHES "^[1-9][0-9]*$")
+  set(MIINT_SUBBUILD_JOBS "$ENV{CMAKE_BUILD_PARALLEL_LEVEL}")
+else()
+  execute_process(
+    COMMAND nproc
+    OUTPUT_VARIABLE MIINT_SUBBUILD_JOBS
+    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+  if(NOT MIINT_SUBBUILD_JOBS MATCHES "^[1-9][0-9]*$")
+    cmake_host_system_information(RESULT MIINT_SUBBUILD_JOBS
+                                  QUERY NUMBER_OF_LOGICAL_CORES)
+  endif()
+endif()
+
+# Launcher: MIINT_SUBBUILD_COMPILER_VARS ("CC=<launcher> <compiler>", "CXX=...")
+# for make and autotools sub-builds, MIINT_SUBBUILD_LAUNCHER_ARGS for CMake
+# ones, MIINT_SUBBUILD_CC for a sub-build that already names its C compiler.
+# Without a launcher the first two are empty and MIINT_SUBBUILD_CC is the bare
+# compiler, so those sub-builds keep the compiler they chose before.
+set(MIINT_SUBBUILD_CC "${CMAKE_C_COMPILER}")
+set(MIINT_SUBBUILD_COMPILER_VARS "")
+set(MIINT_SUBBUILD_LAUNCHER_ARGS "")
+if(CMAKE_C_COMPILER_LAUNCHER)
+  set(MIINT_SUBBUILD_CC "${CMAKE_C_COMPILER_LAUNCHER} ${CMAKE_C_COMPILER}")
+  list(APPEND MIINT_SUBBUILD_COMPILER_VARS "CC=${MIINT_SUBBUILD_CC}")
+  list(APPEND MIINT_SUBBUILD_LAUNCHER_ARGS
+       -DCMAKE_C_COMPILER_LAUNCHER=${CMAKE_C_COMPILER_LAUNCHER})
+endif()
+if(CMAKE_CXX_COMPILER_LAUNCHER)
+  list(APPEND MIINT_SUBBUILD_COMPILER_VARS
+       "CXX=${CMAKE_CXX_COMPILER_LAUNCHER} ${CMAKE_CXX_COMPILER}")
+  list(APPEND MIINT_SUBBUILD_LAUNCHER_ARGS
+       -DCMAKE_CXX_COMPILER_LAUNCHER=${CMAKE_CXX_COMPILER_LAUNCHER})
+endif()
+
 # Fail on a source listed twice in <list_name>. The likely cause is a feature's
 # source also added to the core list in CMakeLists.txt, which would compile it
 # even with that feature OFF.

@@ -91,7 +91,9 @@ ExternalProject_Add(
              -DCMAKE_POLICY_VERSION_MINIMUM=3.5
              ${SORTMERNA_ZLIB_ARGS}
              ${SORTMERNA_OSX_ARCH_ARG}
+             ${MIINT_SUBBUILD_LAUNCHER_ARGS}
   BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target parasail
+                --parallel ${MIINT_SUBBUILD_JOBS}
   BUILD_BYPRODUCTS ${PARASAIL_LIB_FILE}
   INSTALL_COMMAND "")
 
@@ -133,6 +135,9 @@ ExternalProject_Add(
     # which would otherwise look in a setup.py install prefix.
     -DPARASAIL_LIB=${PARASAIL_LIB_FILE}
     -DPARASAIL_INCLUDE_DIR=${PARASAIL_SRC_DIR}
+    ${MIINT_SUBBUILD_LAUNCHER_ARGS}
+  BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --parallel
+                ${MIINT_SUBBUILD_JOBS}
   BUILD_BYPRODUCTS ${SORTMERNA_API_LIB} ${SORTMERNA_VERSION_LIB}
                    ${SORTMERNA_ALP_LIB}
   INSTALL_COMMAND "")

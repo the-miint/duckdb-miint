@@ -12,10 +12,14 @@ ExternalProject_Add(
   SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/ext/WFA2-lib
   CONFIGURE_COMMAND ""
   BUILD_COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/WFA2-lib clean
+  # WFA2-lib's Makefile does not order `setup` (which creates build/ and lib/)
+  # before the subdirectory builds that write into them, so under -j an object
+  # can be written before its directory exists. Create them first.
+  COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/WFA2-lib setup
   COMMAND
-    make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/WFA2-lib all "BUILD_TOOLS=0"
-    "BUILD_EXAMPLES=0" "BUILD_WFA_PARALLEL=0"
-    "CC_FLAGS=-Wall -O2 ${WFA2_FPIC} ${WFA2_ARCH_CFLAGS}"
+    make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/WFA2-lib -j${MIINT_SUBBUILD_JOBS}
+    all ${MIINT_SUBBUILD_COMPILER_VARS} "BUILD_TOOLS=0" "BUILD_EXAMPLES=0"
+    "BUILD_WFA_PARALLEL=0" "CC_FLAGS=-Wall -O2 ${WFA2_FPIC} ${WFA2_ARCH_CFLAGS}"
   INSTALL_COMMAND
     ${CMAKE_COMMAND} -E copy
     ${CMAKE_CURRENT_SOURCE_DIR}/ext/WFA2-lib/lib/libwfa.a
