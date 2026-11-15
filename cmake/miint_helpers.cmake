@@ -69,18 +69,17 @@ if(EMSCRIPTEN AND (CMAKE_CXX_FLAGS MATCHES "-pthread"
       "Emscripten threading detected: propagating -pthread to C library builds")
 endif()
 
-# Job count and compilers for the ExternalProject sub-builds in cmake/deps/.
-# They run their own make or CMake outside this build's graph, so they get
-# neither its parallelism nor the launcher (ccache) DuckDB's CMake detects, and
-# without them each compiles one file at a time, uncached.
+# Job count and compilers for the ExternalProject sub-builds in cmake/deps/. Why
+# they need them, and which variable goes to which kind of sub-build:
+# docs/internals/build-system.md, "Rules".
 #
 # Jobs, read at configure time: CMAKE_BUILD_PARALLEL_LEVEL if set, else half the
-# CPUs this process may run on (`nproc` honours taskset and cpuset limits;
-# CMake's logical core count where there is no `nproc`, as on macOS). Half,
-# because about seven sub-builds can start together beside the main build's own
-# jobs, and a full count each would multiply the compilers, and the memory they
-# need, on a small runner. No `make -l`: there the main build alone keeps the
-# load above the core count, so it would put every sub-build back on one job.
+# CPUs this process may run on. `nproc` honours taskset and cpuset limits;
+# CMake's logical core count, the fallback where there is no `nproc` (macOS),
+# does not. Half, because every sub-build without DEPENDS starts at once, beside
+# the main build's own jobs. No `make -l`: on a small runner the main build
+# alone keeps the load above the core count, so it would put every sub-build
+# back on one job.
 if("$ENV{CMAKE_BUILD_PARALLEL_LEVEL}" MATCHES "^[1-9][0-9]*$")
   set(MIINT_SUBBUILD_JOBS "$ENV{CMAKE_BUILD_PARALLEL_LEVEL}")
 else()
@@ -92,15 +91,18 @@ else()
     cmake_host_system_information(RESULT _miint_cpus
                                   QUERY NUMBER_OF_LOGICAL_CORES)
   endif()
+  if(NOT _miint_cpus MATCHES "^[1-9][0-9]*$")
+    set(_miint_cpus 1)
+  endif()
   math(EXPR MIINT_SUBBUILD_JOBS "(${_miint_cpus} + 1) / 2")
 endif()
 
-# Compilers: MIINT_SUBBUILD_COMPILER_VARS ("CC=...", "CXX=...") for make and
-# autotools sub-builds is always this build's compilers, behind the launcher
-# when there is one, so that installing ccache changes caching and nothing else.
-# MIINT_SUBBUILD_LAUNCHER_ARGS passes the launcher to CMake sub-builds (empty
-# without one). A launcher may be a list: joined with spaces for CC/CXX, and its
-# ';' kept as $<SEMICOLON> so each -D stays one argument.
+# Compilers: MIINT_SUBBUILD_COMPILER_VARS ("CC=...", "CXX=...") is always this
+# build's compilers, behind CMAKE_<LANG>_COMPILER_LAUNCHER when it is set, so a
+# launcher changes caching and nothing else. MIINT_SUBBUILD_LAUNCHER_ARGS
+# forwards the launcher to CMake sub-builds. A launcher may be a list: joined
+# with spaces for CC/CXX, and its ';' kept as $<SEMICOLON> so each -D stays one
+# argument.
 list(JOIN CMAKE_C_COMPILER_LAUNCHER " " _miint_c_launcher)
 list(JOIN CMAKE_CXX_COMPILER_LAUNCHER " " _miint_cxx_launcher)
 string(STRIP "${_miint_c_launcher} ${CMAKE_C_COMPILER}" _miint_cc)

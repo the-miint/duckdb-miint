@@ -80,15 +80,13 @@ if(WIN32)
     "LDFLAGS = -fvisibility=hidden\n"
     "LIBS = -lz\n"
     "prefix = ${CMAKE_CURRENT_BINARY_DIR}/htslib\n")
-  # Left on plain make, without MIINT_SUBBUILD_JOBS or the sub-build compilers:
-  # this branch builds only on MinGW, which pull-request CI does not build, so
-  # the change could not be tested before merge.
   ExternalProject_Add(
     htslib_build
     SOURCE_DIR ${HTSLIB_SRC}
     CONFIGURE_COMMAND ""
     BUILD_COMMAND make -C ${HTSLIB_SRC} clean
-    COMMAND make -C ${HTSLIB_SRC} libhts.a
+    COMMAND make -C ${HTSLIB_SRC} -j${MIINT_SUBBUILD_JOBS} libhts.a
+            ${MIINT_SUBBUILD_COMPILER_VARS}
     INSTALL_COMMAND ${CMAKE_COMMAND} -E make_directory
                     ${CMAKE_CURRENT_BINARY_DIR}/htslib/lib
     COMMAND ${CMAKE_COMMAND} -E copy ${HTSLIB_SRC}/libhts.a
