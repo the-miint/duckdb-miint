@@ -8,6 +8,10 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+# miint uses no C++20 modules. Without this, CMake 3.28+ scans every C++20
+# target for them: an extra scan step per source, and -fmodules-ts on every
+# compile, which ccache refuses to cache.
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
 # How this build is laid out, and how to add a source or a dependency:
 # docs/internals/build-system.md. Each embedded dependency lives in its own
