@@ -6,6 +6,8 @@
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/types.hpp" // ListType, LogicalTypeId (column type validation)
 #include "duckdb/parallel/task_scheduler.hpp"
+#include "duckdb/parser/statement/copy_statement.hpp"
+#include "duckdb/planner/binder.hpp"
 
 #include <htslib-1.22.1/htslib/bgzf.h>
 #include <cerrno>
@@ -15,8 +17,7 @@ namespace duckdb {
 //===--------------------------------------------------------------------===//
 // FormatWriterState Implementation
 //===--------------------------------------------------------------------===//
-FormatWriterState::FormatWriterState(ClientContext &context, idx_t flush_size_p)
-    : flush_size(flush_size_p), written_anything(false) {
+FormatWriterState::FormatWriterState(ClientContext &context, idx_t flush_size_p) : flush_size(flush_size_p) {
 	stream = make_uniq<MemoryStream>();
 }
 
@@ -26,22 +27,20 @@ FormatWriterState::~FormatWriterState() {
 
 void FormatWriterState::Reset() {
 	stream->Rewind();
-	written_anything = false;
 }
 
 //===--------------------------------------------------------------------===//
 // Format Writer Helper Functions
 //===--------------------------------------------------------------------===//
-// Write the accumulated local buffer to the file in <= 1 GiB slices, then reset the buffer.
-// Caller must hold the global lock. This guards every CopyFileHandle::Write backend, not just one:
-// the remote-gzip fallback goes through DuckDB's MiniZStreamWrapper, which casts the write size to
-// unsigned int and throws "Information loss on integer cast" on a single >4 GiB write; chunking
-// keeps that (and any 32-bit limit in the bgzf/BufferedFileWriter backends) safe regardless of how
-// much the local MemoryStream accumulated.
-static void WriteBufferToFile(CopyFileHandle &file, FormatWriterState &local_state) {
+// Write a buffer's contents to the file in <= 1 GiB slices. Caller must hold the global lock. This
+// guards every CopyFileHandle::Write backend, not just one: the remote-gzip fallback goes through
+// DuckDB's MiniZStreamWrapper, which casts the write size to unsigned int and throws "Information
+// loss on integer cast" on a single >4 GiB write; chunking keeps that (and any 32-bit limit in the
+// bgzf/BufferedFileWriter backends) safe regardless of how much the MemoryStream accumulated.
+static void WriteStreamInSlices(CopyFileHandle &file, MemoryStream &stream) {
 	constexpr idx_t MAX_WRITE_CHUNK = 1ULL * 1024 * 1024 * 1024; // 1 GiB
-	const_data_ptr_t data = local_state.stream->GetData();
-	idx_t remaining = local_state.stream->GetPosition();
+	const_data_ptr_t data = stream.GetData();
+	idx_t remaining = stream.GetPosition();
 	idx_t offset = 0;
 	while (remaining > 0) {
 		idx_t to_write = remaining < MAX_WRITE_CHUNK ? remaining : MAX_WRITE_CHUNK;
@@ -49,33 +48,23 @@ static void WriteBufferToFile(CopyFileHandle &file, FormatWriterState &local_sta
 		offset += to_write;
 		remaining -= to_write;
 	}
-
-	// Reset local buffer
-	local_state.Reset();
 }
 
-void FlushFormatBuffer(FormatWriterState &local_state, CopyFileHandle &file, mutex &lock) {
-	if (!local_state.written_anything) {
-		return;
-	}
-
-	lock_guard<mutex> glock(lock);
-	WriteBufferToFile(file, local_state);
-}
-
-void FlushR2Buffer(FormatWriterState &local_state, SequenceCopyGlobalState &gstate) {
-	if (!local_state.written_anything) {
-		return;
-	}
-
-	lock_guard<mutex> glock(gstate.lock);
+// The R2 file, created on the first R2 write across all threads. This is what keeps an all-single-end
+// dataset from producing an empty R2 file in split mode. Caller must hold the global lock.
+static CopyFileHandle &GetR2File(SequenceCopyGlobalState &gstate) {
 	if (!gstate.file_r2) {
-		// First non-NULL R2 record across all threads -> create the R2 file now. This is what
-		// keeps an all-single-end dataset from producing an empty R2 file in split mode.
 		gstate.file_r2 = make_uniq<CopyFileHandle>(*gstate.fs, gstate.r2_path, gstate.compression,
 		                                           gstate.compression_threads, gstate.compression_level);
 	}
-	WriteBufferToFile(*gstate.file_r2, local_state);
+	return *gstate.file_r2;
+}
+
+void WriteSequenceStream(SequenceCopyGlobalState &gstate, SequenceStream stream, MemoryStream &data) {
+	if (data.GetPosition() == 0) {
+		return;
+	}
+	WriteStreamInSlices(stream == SequenceStream::R1 ? *gstate.file_r1 : GetR2File(gstate), data);
 }
 
 //===--------------------------------------------------------------------===//
@@ -278,6 +267,12 @@ void DeclareSequenceCopyOptions(CopyOptionsInput &input) {
 	DeclareCompressionLevelCopyOption(input);
 }
 
+void AddGzipFileExtension(CopyFunctionBindInput &input, FileCompressionType compression) {
+	if (compression == FileCompressionType::GZIP && !IsFileCompressed(input.file_extension, compression)) {
+		input.file_extension += CompressionExtensionFromType(compression);
+	}
+}
+
 int GzipCompressionLevel(const vector<Value> &values, FileCompressionType compression, const string &file_path) {
 	const int level = CopyOptionCompressionLevel(values);
 	if (compression != FileCompressionType::GZIP) {
@@ -389,40 +384,12 @@ unique_ptr<GlobalFunctionData> SequenceCopyInitializeGlobal(ClientContext &conte
 	                                            gstate->compression_level);
 
 	if (fdata.split_output) {
-		// R2 file is created lazily on the first non-NULL R2 record (see FlushR2Buffer), so a
+		// R2 file is created lazily on the first non-NULL R2 record (see GetR2File), so a
 		// single-end dataset written with {ORIENTATION} never produces an empty R2 file.
 		gstate->r2_path = SubstituteOrientation(file_path, "R2");
 	}
 
 	return gstate;
-}
-
-unique_ptr<LocalFunctionData> SequenceCopyInitializeLocal(ExecutionContext &context,
-                                                          const SequenceCopyBindData &fdata) {
-	auto lstate = make_uniq<SequenceCopyLocalState>();
-
-	lstate->writer_state_r1 = make_uniq<FormatWriterState>(context.client, fdata.flush_size);
-
-	if (fdata.split_output) {
-		lstate->writer_state_r2 = make_uniq<FormatWriterState>(context.client, fdata.flush_size);
-	}
-
-	return lstate;
-}
-
-void SequenceCopyCombine(const SequenceCopyBindData &fdata, SequenceCopyGlobalState &gstate,
-                         SequenceCopyLocalState &lstate) {
-	// Flush any remaining data in local buffers
-	FlushFormatBuffer(*lstate.writer_state_r1, *gstate.file_r1, gstate.lock);
-
-	if (fdata.split_output) {
-		FlushR2Buffer(*lstate.writer_state_r2, gstate);
-	}
-
-	// Publish this thread's single/paired observations for the cross-thread consistency check.
-	lock_guard<mutex> glock(gstate.lock);
-	gstate.saw_paired |= lstate.saw_paired;
-	gstate.saw_single |= lstate.saw_single;
 }
 
 void SequenceCopyFinalize(SequenceCopyGlobalState &gstate) {
@@ -442,6 +409,35 @@ void SequenceCopyFinalize(SequenceCopyGlobalState &gstate) {
 	if (gstate.file_r2) {
 		gstate.file_r2->Close();
 	}
+}
+
+//===--------------------------------------------------------------------===//
+// Sequence Copy on DuckDB's Batch API
+//===--------------------------------------------------------------------===//
+CopyFunctionExecutionMode SequenceCopyExecutionMode(bool preserve_insertion_order, bool supports_batch_index) {
+	return preserve_insertion_order ? CopyFunctionExecutionMode::REGULAR_COPY_TO_FILE
+	                                : CopyFunctionExecutionMode::PARALLEL_COPY_TO_FILE;
+}
+
+BoundStatement SequenceCopyPlan(Binder &binder, CopyStatement &stmt, const string &writer_format) {
+	auto &info = *stmt.info;
+	// Option names are identifiers, which compare case-insensitively.
+	if (info.options.find("row_group_size") == info.options.end()) {
+		info.options["row_group_size"] = {Value::UBIGINT(SEQUENCE_DEFAULT_BATCH_ROWS)};
+	}
+	if (info.options.find("row_group_size_bytes") == info.options.end()) {
+		info.options["row_group_size_bytes"] = {Value(SEQUENCE_DEFAULT_BATCH_BYTES)};
+	}
+	info.format = writer_format;
+	return binder.Bind(stmt);
+}
+
+string SequenceChunkReader::ReadId(idx_t row) const {
+	string buf;
+	const char *ptr;
+	idx_t size;
+	ResolveSequenceRecordId(read_id_data, row, fdata.read_id_type, buf, ptr, size);
+	return string(ptr, size);
 }
 
 } // namespace duckdb

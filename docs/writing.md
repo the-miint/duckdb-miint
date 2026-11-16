@@ -47,8 +47,9 @@ Write query results to FASTQ format files. Requires `read_id`, `sequence1`, and 
 - `INCLUDE_COMMENT` (default: false): Include comment field in output
 - `ID_AS_SEQUENCE_INDEX` (default: false): Use `sequence_index` as identifier instead of `read_id`
 - `INTERLEAVE` (default: false): When the data is paired-end, write R1/R2 interleaved into a single file. Optional — see "Single-end vs paired-end output" below. Cannot be combined with the `{ORIENTATION}` placeholder.
-- `COMPRESSION` (default: auto): Enable gzip compression (auto-detected from `.gz` extension). Local `.gz` output is written as **BGZF** (block-gzip via htslib): a fully standard gzip file readable by any gzip tool, but compressed in parallel — it follows DuckDB's thread count (`PRAGMA threads`) and runs ~10x faster than single-threaded gzip on multi-core hosts, while staying block-indexable. Output order is preserved. (Remote `scheme://` targets fall back to single-threaded gzip.)
+- `COMPRESSION` (default: auto): Enable gzip compression (auto-detected from `.gz` extension). Local `.gz` output is written as **BGZF** (block-gzip via htslib): a fully standard gzip file readable by any gzip tool, but compressed in parallel — it follows DuckDB's thread count (`PRAGMA threads`) and runs ~10x faster than single-threaded gzip on multi-core hosts, while staying block-indexable. Compression keeps the records in the order they are written (see "Threads, order and memory" below). (Remote `scheme://` targets fall back to single-threaded gzip.)
 - `COMPRESSION_LEVEL` (0-9, default: 1): BGZF compression level for local `.gz` output, as for BAM. Lower is faster and writes larger files. Refused for uncompressed output and for remote targets, whose gzip writer takes no level.
+- `ROW_GROUP_SIZE`, `ROW_GROUP_SIZE_BYTES` (defaults: 64 and `'8MB'`): how DuckDB batches the records it hands the writer; see "Threads, order and memory" below.
 
 **Single-end vs paired-end output:**
 
@@ -64,6 +65,17 @@ The writer fails loud (rather than guessing or silently dropping data) when:
 - `sequence2` and `qual2` disagree on NULL-ness within a record, or
 - the input mixes single-end and paired-end records.
 
+An error about a record's data names its `read_id`: a NULL `sequence1`, `qual1` or (with `ID_AS_SEQUENCE_INDEX`) `sequence_index`; a NULL quality score; a score that would encode past `~` (126); a quality length that does not match the sequence; `sequence2` and `qual2` disagreeing on NULL; a paired record with nowhere to put R2.
+
+**Threads, order and memory:**
+
+- **Insertion order kept** (the default): records are written in the query's order, on one thread, and the file is the same whatever `threads` is set to. The work that feeds the COPY directly runs on that thread too; work behind a sort, an aggregate or a join's build side still uses all threads.
+- **When record order does not matter**, add `PRESERVE_ORDER false` to the COPY, or `SET preserve_insertion_order = false`. The query and the writer then use all of DuckDB's threads, and the records come out in an order that can change from run to run. Mates stay together: an interleaved file has each R2 right after its R1, and split R1/R2 files stay in step.
+- A source whose rows come in no fixed order, such as the `rype_filter`, `align_minimap2` or `read_ena_sequences` table functions, is written on all threads without either setting. An `ORDER BY` keeps its order (on one thread) under `SET preserve_insertion_order = false`, but not under `PRESERVE_ORDER false`, which drops it.
+- `PARTITION_BY` and `PER_THREAD_OUTPUT` always use all threads, and name their files `data_0.fastq` and so on (`data_0.fastq.gz` with gzip).
+- **Batches.** DuckDB hands the writer its rows in batches. Unless the COPY sets them, `ROW_GROUP_SIZE 64` and `ROW_GROUP_SIZE_BYTES '8MB'` are added; a value given replaces its default, and the other default stays. A batch ends at whichever it reaches first: `ROW_GROUP_SIZE` rows (a pair is one row), or `ROW_GROUP_SIZE_BYTES`, measured as DuckDB's in-memory size of the rows rather than the text written. A batch can pass either: DuckDB adds rows a chunk at a time and cuts a chunk only at the byte cap, and keeps the row that crosses it. `FORMAT _miint_fastq`, the writer behind `FORMAT FASTQ`, adds no defaults. How a batch is written: [architecture notes](internals/architecture.md#record-writers-on-duckdbs-batch-api).
+- **Memory.** The writer's text buffers sit outside DuckDB's `memory_limit`; the rows themselves are held by DuckDB and counted against it.
+
 **Examples:**
 ```sql
 -- Basic single-end FASTQ output. SELECT * carries NULL sequence2/qual2 columns;
@@ -72,11 +84,11 @@ COPY (SELECT * FROM read_fastx('input.fastq'))
 TO 'output.fastq' (FORMAT FASTQ);
 
 -- Paired-end interleaved output (single file)
-COPY (SELECT * FROM read_fastx('R1.fastq', 'R2.fastq'))
+COPY (SELECT * FROM read_fastx('R1.fastq', sequence2 = 'R2.fastq'))
 TO 'output.fastq' (FORMAT FASTQ, INTERLEAVE true);
 
 -- Paired-end split files (the {ORIENTATION} placeholder selects split output)
-COPY (SELECT * FROM read_fastx('R1.fastq', 'R2.fastq'))
+COPY (SELECT * FROM read_fastx('R1.fastq', sequence2 = 'R2.fastq'))
 TO 'output_{ORIENTATION}.fastq' (FORMAT FASTQ);
 
 -- Single-end data with {ORIENTATION} simply writes the R1 file (output_R1.fastq.gz)
@@ -90,6 +102,10 @@ TO 'output.fastq.gz' (FORMAT FASTQ, QUAL_OFFSET 33, COMPRESSION gzip);
 -- Use sequence index as identifier
 COPY (SELECT * FROM read_fastx('input.fastq'))
 TO 'output.fastq' (FORMAT FASTQ, ID_AS_SEQUENCE_INDEX true);
+
+-- Record order does not matter: write on all threads
+COPY (SELECT * FROM read_fastx('R1.fastq.gz', sequence2 = 'R2.fastq.gz') WHERE length(sequence1) >= 100)
+TO 'filtered_{ORIENTATION}.fastq.gz' (FORMAT FASTQ, PRESERVE_ORDER false);
 ```
 
 ### FASTA
@@ -109,8 +125,9 @@ Write query results to FASTA format files. Requires `read_id` and `sequence1` co
 - `INCLUDE_COMMENT` (default: false): Include comment field in output
 - `ID_AS_SEQUENCE_INDEX` (default: false): Use `sequence_index` as identifier instead of `read_id`
 - `INTERLEAVE` (default: false): When the data is paired-end, write R1/R2 interleaved into a single file. Optional — see "Single-end vs paired-end output" below. Cannot be combined with the `{ORIENTATION}` placeholder.
-- `COMPRESSION` (default: auto): Enable gzip compression (auto-detected from `.gz` extension). Local `.gz` output is written as **BGZF** (block-gzip via htslib): a fully standard gzip file readable by any gzip tool, but compressed in parallel — it follows DuckDB's thread count (`PRAGMA threads`) and runs ~10x faster than single-threaded gzip on multi-core hosts, while staying block-indexable. Output order is preserved. (Remote `scheme://` targets fall back to single-threaded gzip.)
+- `COMPRESSION` (default: auto): Enable gzip compression (auto-detected from `.gz` extension). Local `.gz` output is written as **BGZF** (block-gzip via htslib): a fully standard gzip file readable by any gzip tool, but compressed in parallel — it follows DuckDB's thread count (`PRAGMA threads`) and runs ~10x faster than single-threaded gzip on multi-core hosts, while staying block-indexable. Compression keeps the records in the order they are written (see "Threads, order and memory" below). (Remote `scheme://` targets fall back to single-threaded gzip.)
 - `COMPRESSION_LEVEL` (0-9, default: 1): BGZF compression level for local `.gz` output, as for BAM. Lower is faster and writes larger files. Refused for uncompressed output and for remote targets, whose gzip writer takes no level.
+- `ROW_GROUP_SIZE`, `ROW_GROUP_SIZE_BYTES` (defaults: 64 and `'8MB'`): how DuckDB batches the records it hands the writer; see "Threads, order and memory" below.
 - `LINE_WIDTH` (integer, at least 1; default: none): wrap each sequence at this many characters, the last line shorter; a sequence whose length is a multiple of it ends without an empty line. Without it each sequence is one line. The header is never wrapped. FASTA only.
 
 **Single-end vs paired-end output:**
@@ -121,6 +138,10 @@ FASTA paired-end output works the same way as FASTQ (a record is paired when `se
 - **No `{ORIENTATION}`** writes a single file; paired data is interleaved only if `INTERLEAVE=true`.
 - The writer fails loud when paired data is sent to a single-file path without `INTERLEAVE=true`, when `{ORIENTATION}` is combined with `INTERLEAVE=true`, or when the input mixes single-end and paired-end records.
 
+An error about a record's data (a NULL `sequence1`, or with `ID_AS_SEQUENCE_INDEX` a NULL `sequence_index`; a paired record with nowhere to put R2) names its `read_id`.
+
+**Threads, order and memory:** as for [FASTQ](#fastq), with files named `data_0.fasta` (`data_0.fasta.gz` with gzip), and `FORMAT _miint_fasta` as the writer behind `FORMAT FASTA`.
+
 **Examples:**
 ```sql
 -- Basic FASTA output (single-end; NULL sequence2 columns are recognized as single-end)
@@ -128,7 +149,7 @@ COPY (SELECT * FROM read_fastx('input.fasta'))
 TO 'output.fasta' (FORMAT FASTA);
 
 -- Paired-end split files (the {ORIENTATION} placeholder selects split output)
-COPY (SELECT * FROM read_fastx('R1.fasta', 'R2.fasta'))
+COPY (SELECT * FROM read_fastx('R1.fasta', sequence2 = 'R2.fasta'))
 TO 'output_{ORIENTATION}.fasta' (FORMAT FASTA);
 
 -- Compressed with comments
@@ -138,6 +159,10 @@ TO 'output.fasta.gz' (FORMAT FASTA, INCLUDE_COMMENT true);
 -- Lines of 60
 COPY (SELECT * FROM read_fastx('input.fasta'))
 TO 'output.fasta' (FORMAT FASTA, LINE_WIDTH 60);
+
+-- Genome order does not matter: write on all threads
+COPY (SELECT read_id, sequence1 FROM genomes)
+TO 'genomes.fasta.gz' (FORMAT FASTA, PRESERVE_ORDER false);
 ```
 
 Prodigal's `-a` (proteins) and `-d` (gene nucleotides) FASTA, from `predict_genes`, are written with this format and the [`prodigal_proteins` and `prodigal_genes`](gene_prediction.md#writing-prodigals-fasta) macros.
@@ -271,7 +296,7 @@ COPY (
 ) TO 'filtered.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table');
 
 -- Write BAM with sequence data (SEQ and QUAL populated from FASTQ)
-CREATE TABLE sequences AS SELECT * FROM read_fastx('reads_R1.fastq', 'reads_R2.fastq');
+CREATE TABLE sequences AS SELECT * FROM read_fastx('reads_R1.fastq', sequence2 = 'reads_R2.fastq');
 
 COPY (SELECT * FROM read_alignments('input.bam'))
 TO 'with_seq.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table', SEQUENCE_DATA 'sequences');
@@ -296,7 +321,7 @@ These columns match the output schema of `read_fastx`, so the typical workflow i
 
 ```sql
 -- Load sequences
-CREATE TABLE sequences AS SELECT * FROM read_fastx('R1.fastq', 'R2.fastq');
+CREATE TABLE sequences AS SELECT * FROM read_fastx('R1.fastq', sequence2 = 'R2.fastq');
 
 -- Load alignments
 CREATE TABLE alignments AS SELECT * FROM read_alignments('aligned.bam');

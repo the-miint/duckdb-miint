@@ -97,8 +97,11 @@ hardcode 2048; reference the macro.
 
 **`string_t` inlines only ≤ 12 bytes** (4-byte length + 4-byte prefix + 8-byte pointer,
 union'd with 4-byte length + 12 inline bytes). Consequences for us:
-- Every read sequence and quality string is heap-allocated with pointer chasing; none are
-  ever inlined.
+- Most read sequences and quality strings are longer, so they are on the heap, reached through
+  the pointer. Not all: a read, a trimmed read, a barcode or a UMI can be 12 bytes or fewer, and
+  is then inline. A `const char *` from `GetData()` must then come from the `string_t` in the
+  vector, not from a copy of it, which takes the bytes with it (the FASTA/FASTQ writers'
+  `SequenceChunkReader` returns references for this reason).
 - The 4-byte prefix exists as a comparison early-out, and our data defeats it: read IDs
   sharing an instrument/run prefix (`A00123:...`) collide on all 4 prefix bytes, so every
   comparison follows the pointer anyway. Sorting or joining on read ID is more expensive
@@ -275,15 +278,61 @@ pipeline task waits on. In detail:
 - A library error kept in a thread-local, such as `rype_get_last_error()`, is read inside the
   job that made the call.
 
-**A COPY whose format declares no `execution_mode` runs the whole pipeline on one thread.**
-`PhysicalCopyToFile` is then a sequential sink, and the pipeline, source included, is one task
-whatever the source's `MaxThreads()` (`plan_copy_to_file.cpp`, `pipeline.cpp`). No miint COPY
-format declares one. The FASTQ format needs its rows in order: an in-order feed to htslib's
-BGZF writer gives a deterministic file, and split R1/R2 output writes mates in step. A table
-function with heavy per-row work therefore does that work on its own jobs and only emits from
-`Execute` (`rype_filter` maps reads on async jobs). Time such a function through the sink its
-users write to: a CTAS of a source that declares `NO_ORDER` is a parallel sink, so it does not
-show the problem.
+### COPY TO
+
+Verified on DuckDB 2.0 (`d54cbbe`).
+
+- **The format's `execution_mode` picks the operator.**
+  - With none, the COPY is REGULAR: `PhysicalCopyToFile` is a sequential sink, so the pipeline,
+    source included, is one task whatever the source's `MaxThreads()` (`plan_copy_to_file.cpp`,
+    `pipeline.cpp`).
+  - PARALLEL lets every thread prepare batches.
+  - BATCH (`PhysicalBatchCopyToFile`) restores source order from batch indexes.
+  - What miint's FASTA and FASTQ writers return is in
+    [architecture.md](architecture.md#record-writers-on-duckdbs-batch-api).
+- **"Order kept" is what the callback is told.** It is false for a source that declares
+  `NO_ORDER`; true for an `ORDER BY` (`FIXED_ORDER`) whatever the setting; otherwise the
+  `preserve_insertion_order` setting decides. The COPY's `PRESERVE_ORDER` overrides all of these,
+  and `PARTITION_BY`, `PER_THREAD_OUTPUT`, `FILE_SIZE_BYTES` and `ORDER_BY` force it off
+  (`PhysicalPlanGenerator::PreserveInsertionOrder`, called from `plan_copy_to_file.cpp`). `EXPLAIN` does not show which mode
+  ran.
+- **An order-kept COPY still runs its source on one thread.** A table function with heavy
+  per-row work does that work on its own jobs and only emits from `Execute` (`rype_filter`
+  maps reads on async jobs). Time such a function through the sink its users write to: a CTAS
+  of a source that declares `NO_ORDER` is a parallel sink, so it does not show the problem.
+- **Batches.** DuckDB collects rows into a `ColumnDataCollection`, then calls the format's
+  `prepare_batch` and `flush_batch`. A format without them gets a legacy adapter: its
+  `copy_to_sink` and `copy_to_combine` run once per batch, with a fresh local state, under the
+  per-file lock (`FlushLegacyCopyBatch` in `physical_copy_to_file.cpp`).
+  - In REGULAR and PARALLEL, DuckDB appends whole input chunks to a batch and checks the caps
+    after each append (`PhysicalCopyToFile::Sink`). With neither `ROW_GROUP_SIZE` nor `ROW_GROUP_SIZE_BYTES`,
+    every chunk is a batch of its own (`CopyFunctionBatchAnalyzer::AnyBatchQualifies`).
+  - A batch is flushed at whichever cap it reaches first: `ROW_GROUP_SIZE` rows or
+    `ROW_GROUP_SIZE_BYTES`. The row cap never cuts a chunk, so a 2,048-row chunk stays whole
+    under `ROW_GROUP_SIZE 64`.
+  - Only `ROW_GROUP_SIZE_BYTES` cuts a chunk (`CopyBatchSlicer::Slice`): the batch takes rows up
+    to and including the one that reaches the cap. The exception is the rest of a chunk: it is
+    left whole unless the batch reaches 9/8 of the cap before the chunk's last row, so a batch
+    can stay under 9/8 of the cap until its last row, which can take it further.
+    `'8MB'` is 8,000,000 bytes, as `ColumnDataCollection::SizeInBytes` counts them.
+  - BATCH mode is different: it holds each source batch whole before cutting it, which for a
+    table or Parquet row group of genomes is most of the input.
+- **Defaults.** A format can default the rows (`desired_batch_size`) but not the bytes: the
+  `copy_default_batch_size_bytes_t` typedef has no field. FASTA/FASTQ add both through a `plan`
+  callback instead. `plan` replaces binding, so it must rebind as a different format, or it
+  recurses. DuckDB checks options against the format named in the statement before calling
+  `plan`. `PARTITION_PATH` survives the rebind: the rebound statement binds it as any COPY would
+  (FASTA and FASTQ write correct partition directories with it, as DuckDB's JSON writer, which
+  also rewrites its COPY through `plan`, does).
+- **Concurrency.** In PARALLEL and partitioned COPYs, `prepare_batch` runs outside any lock and
+  is given the first file's global state, not necessarily the destination's
+  (`PhysicalCopyToFile::PrepareBatch`). `flush_batch` runs under the destination's per-file
+  lock.
+- **Observing batches.** `CALL enable_logging('PhysicalOperator')` (in the shell, add
+  `storage = 'memory'`), then read `duckdb_logs_parsed('PhysicalOperator')`. There is one
+  `PhysicalCopyToFile`/`FlushBatch` row per batch, with `info.file`, `info.rows`, `info.size`
+  and `info.reason` (`BATCH_SIZE`, `BATCH_SIZE_BYTES`, `FORCED_FLUSH`), but no thread id.
+  `test/sql/copy_fastx_batches.test` uses it.
 
 ### Output order costs threads and memory
 

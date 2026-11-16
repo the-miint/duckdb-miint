@@ -210,12 +210,49 @@ steps the computation one wave at a time.
 
 ### Adding a new COPY format
 1. Create `copy_<format>.cpp` and header
-2. Implement `CopyFunction` with `Bind()`, `InitGlobal()`, `Sink()`, `Finalize()`
+2. Implement `CopyFunction` with `Bind()`, `InitGlobal()`, `Sink()`, `Finalize()`; a format whose records should be written on several threads uses the batch API instead (below)
 3. Declare every option in a `copy_options` callback with `DeclareCopyOption` (`src/include/copy_option_parsing.hpp`), and read them in `Bind()` with that header's helpers, ending the if-chain with `ThrowUnreadCopyOption`. Without `copy_options`, DuckDB checks no option: an unknown one reaches `Bind()`, and a bare one arrives with no value.
 4. Use `copy_format_common.cpp` utilities for buffering/compression
 5. Register in `LoadInternal()`
 6. Add to `MIINT_EXTENSION_SOURCES` ([build-system.md](build-system.md))
 7. Create comprehensive SQL tests (basic, compression, edge cases)
+
+#### Record writers on DuckDB's batch API
+
+A COPY format that declares no `execution_mode` runs its whole pipeline on one thread ([duckdb-engine-notes.md](duckdb-engine-notes.md#copy-to)). FASTA and FASTQ write through `prepare_batch`/`flush_batch` instead, so that with order off the query and the formatting run on every thread.
+
+- **Two registrations.**
+  - The public one (`fasta`) has only `copy_options`, `extension` and a `plan` callback, `SequenceCopyPlan`. The callback adds `ROW_GROUP_SIZE 64` and `ROW_GROUP_SIZE_BYTES '8MB'`, each only when the statement has none of its own (why 8 MB: at `SEQUENCE_DEFAULT_BATCH_BYTES`). It then sets the format to the writer registration (`_miint_fasta`) and binds the statement again, which must be a different format ([duckdb-engine-notes.md](duckdb-engine-notes.md#copy-to)).
+  - DuckDB checks the options against the public registration before calling `plan`, so an unknown option is reported against `FASTA`.
+  - A path ending in `.fasta` reaches the callback too.
+- **The writer registration** has `copy_options` and `copy_to_bind`, plus:
+  - `copy_to_initialize_global` and `copy_to_finalize`;
+  - `prepare_batch` and `flush_batch`;
+  - `execution_mode` and `extension`, which names partitioned and per-thread files.
+
+  It has no `copy_to_initialize_local`, `copy_to_sink` or `copy_to_combine`: DuckDB calls them only for a format without `prepare_batch`, and in BATCH mode.
+- **Mode** (`SequenceCopyExecutionMode`). REGULAR when insertion order is kept: one thread, input order, and output byte-identical at any thread count. PARALLEL when it is not.
+  - Order is off under `PRESERVE_ORDER false`, under `SET preserve_insertion_order = false` without an `ORDER BY`, for a source that declares `NO_ORDER`, and for `PARTITION_BY`/`PER_THREAD_OUTPUT`.
+  - Never BATCH: it holds each source batch whole before the writer sees it ([duckdb-engine-notes.md](duckdb-engine-notes.md#copy-to)), which for genome-length records is most of the input.
+- **Invariants.**
+  - `prepare_batch` reads the bind data and nothing else: it runs concurrently and may be handed another file's global state.
+  - `flush_batch` writes a batch's R1 and R2 text in one call, under the global lock. The R2 file is created on its first write. DuckDB calls it one batch at a time per file.
+  - Cross-row checks travel with the batch: `saw_paired`/`saw_single` are merged into the global state at flush, and `copy_to_finalize` checks them.
+  - Data errors are raised in `prepare_batch` and name the record's `read_id`: the row checks in the first pass, and a quality score past `~` when the second pass formats the record. A batch formatted only in `flush_batch` is checked (`Check`) before `prepare_batch` returns.
+- **Memory.** The text buffers sit outside DuckDB's buffer manager, so outside `memory_limit`. `prepare_batch` therefore makes two passes over a batch. The first checks every row and sums each record's exact size (`Size`). The second formats into buffers of exactly that size, allocated by the batch (an owning `MemoryStream` needs a power-of-two capacity). Text longer than its size fails in `WriteData`, and text shorter is an internal error, so `Size` and `Write` cannot drift apart unnoticed. A batch whose text would exceed `SEQUENCE_DEFER_FORMAT_BYTES` (64 MiB) is not formatted there: `flush_batch` formats it, writing to the file each time `DEFAULT_COPY_FLUSH_SIZE` (1 MiB) has gathered. A record larger than that is held whole, so this bounds a batch of many records, not one record's text.
+- **Code.** `SequencePrepareBatch` and `SequenceFlushBatch` (`src/include/copy_format_common.hpp`) are templates over a writer's FORMAT:
+  - `Visit` walks a chunk, checking rows and emitting records to the R1 or R2 stream;
+  - `Size` returns a record's exact length as text;
+  - `Write` appends a record's text;
+  - `Check` raises the data error `Write` would, without writing, for a batch formatted only in `flush_batch`.
+
+  `SequenceChunkReader` holds what FASTA and FASTQ read alike: the id and comment, `sequence1`/`sequence2` (as references into the vector, since a short string lives inside its `string_t`: [duckdb-engine-notes.md](duckdb-engine-notes.md#execution-format-vectors)), the R2 routing, and the NULL errors.
+- **The cap's semantics.** A batch closes at whichever cap it reaches first; only `ROW_GROUP_SIZE_BYTES` cuts a chunk, and the batch keeps the row that crosses it: [duckdb-engine-notes.md](duckdb-engine-notes.md#copy-to).
+- **Tests to copy.**
+  - `test/sql/copy_fastx_bytes.test`: the md5 of each output, pinned at 1 and 8 threads.
+  - `test/sql/copy_fastx_batches.test`: the cap, observed in DuckDB's `PhysicalOperator` log; batches over 64 MiB against small ones; paired and single-end rows in different batches; errors; short reads against text built in SQL; the registrations.
+  - `test/sql/copy_fastx_parallel.test`: from a source that can be scanned in parallel, input order with order kept (which tells REGULAR from PARALLEL), and record multisets, mates and partitions with order off.
+  - `test/cpp/test_CopySequenceDeferral.cpp` (`tests_duckdb`): which batches are formatted in `flush_batch`, which no SQL test can see.
 
 ### Adding scalar/aggregate functions
 1. Implement in appropriate source file

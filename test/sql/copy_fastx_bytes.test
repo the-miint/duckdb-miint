@@ -1,0 +1,231 @@
+# name: test/sql/copy_fastx_bytes.test
+# description: COPY FORMAT FASTA/FASTQ with insertion order kept writes the same bytes as at commit 352ec60a. Each output's md5 is pinned to that commit's output, at threads=1 and threads=8, for every option that shapes the bytes. A gzip output must decompress to exactly the uncompressed output of the same query, so the check holds whichever deflate library a platform builds with.
+# group: [sql]
+
+require miint
+
+# Inputs are derived from md5 and arithmetic only, so they are the same on every platform and DuckDB version (hash()
+# is not). Lengths vary (50-200, 40-150) so that LINE_WIDTH 60 meets both partial lines and exact multiples. Every
+# fifth comment is NULL, which is written as no comment at all.
+statement ok
+CREATE TABLE reads AS
+SELECT *,
+       list_transform(range(length(sequence1)), lambda j: ((i * 7 + j * 13) % 41)::UTINYINT) AS qual1,
+       list_transform(range(length(sequence2)), lambda j: ((i * 11 + j * 5) % 41)::UTINYINT) AS qual2
+FROM (SELECT i,
+             'r' || i AS read_id,
+             CASE WHEN i % 5 = 0 THEN NULL ELSE 'len=' || (50 + i % 151) END AS comment,
+             left(repeat(translate(md5(i::VARCHAR), '0123456789abcdef', 'ACGTACGTACGTACGT'), 7), 50 + i % 151)
+                 AS sequence1,
+             left(repeat(translate(md5(i::VARCHAR || '/2'), '0123456789abcdef', 'ACGTACGTACGTACGT'), 5), 40 + i % 111)
+                 AS sequence2
+      FROM range(1, 5001) r(i));
+
+# 10 kb records: one DataChunk of them (300 FASTA records, 3 MB; 200 FASTQ records, 4 MB) is one batch under the
+# default cap.
+statement ok
+CREATE TABLE long_reads AS
+SELECT i, 'L' || i AS read_id,
+       repeat(translate(md5(i::VARCHAR), '0123456789abcdef', 'ACGTACGTACGTACGT'), 313) AS sequence1
+FROM range(1, 301) r(i);
+
+# 1 Mb records: with ROW_GROUP_SIZE 1000 and ROW_GROUP_SIZE_BYTES '1GB' the whole input is one batch of more than
+# 64 MiB (70 MB of FASTA; 80 MB of FASTQ from 40 records), the size above which a batch is formatted in flush_batch
+# rather than prepare_batch.
+statement ok
+CREATE TABLE huge AS
+SELECT i, 'H' || i AS read_id,
+       repeat(translate(md5(i::VARCHAR), '0123456789abcdef', 'ACGTACGTACGTACGT'), 31250) AS sequence1
+FROM range(1, 71) r(i);
+
+# A gzipped file's text. read_text does not decompress, so it is rebuilt from the lines read_csv decompresses, which is
+# exact for these files: LF line endings, no empty line, a newline at the end. (The same macro as prodigal_fasta.test.)
+statement ok
+CREATE MACRO ref_text(path) AS (
+    SELECT string_agg(line, E'\n' ORDER BY i) || E'\n'
+    FROM (SELECT row_number() OVER () AS i, line
+          FROM read_csv(path, columns = {'line': 'VARCHAR'}, delim = E'\x1f', quote = '', escape = '',
+                        header = false, auto_detect = false)));
+
+foreach threads 1 8
+
+statement ok
+SET threads={threads};
+
+# FASTA
+
+statement ok
+COPY (SELECT read_id, sequence1 FROM reads WHERE i <= 300) TO '{TEST_DIR}/fxb{threads}_fa_plain.fasta' (FORMAT FASTA);
+
+statement ok
+COPY (SELECT read_id, comment, sequence1 FROM reads WHERE i <= 300)
+TO '{TEST_DIR}/fxb{threads}_fa_comment.fasta' (FORMAT FASTA, INCLUDE_COMMENT true);
+
+statement ok
+COPY (SELECT i AS sequence_index, read_id, sequence1 FROM reads WHERE i <= 300)
+TO '{TEST_DIR}/fxb{threads}_fa_seqindex.fasta' (FORMAT FASTA, ID_AS_SEQUENCE_INDEX true);
+
+statement ok
+COPY (SELECT i AS read_id, sequence1 FROM reads WHERE i <= 300) TO '{TEST_DIR}/fxb{threads}_fa_bigint.fasta' (FORMAT FASTA);
+
+statement ok
+COPY (SELECT md5(i::VARCHAR)::UUID AS read_id, sequence1 FROM reads WHERE i <= 300)
+TO '{TEST_DIR}/fxb{threads}_fa_uuid.fasta' (FORMAT FASTA);
+
+statement ok
+COPY (SELECT read_id, sequence1 FROM reads WHERE i <= 300)
+TO '{TEST_DIR}/fxb{threads}_fa_width60.fasta' (FORMAT FASTA, LINE_WIDTH 60);
+
+statement ok
+COPY (SELECT read_id, sequence1, sequence2 FROM reads WHERE i <= 300)
+TO '{TEST_DIR}/fxb{threads}_fa_interleave.fasta' (FORMAT FASTA, INTERLEAVE true);
+
+statement ok
+COPY (SELECT read_id, sequence1, sequence2 FROM reads WHERE i <= 300)
+TO '{TEST_DIR}/fxb{threads}_fa_split.{ORIENTATION}.fasta' (FORMAT FASTA);
+
+statement ok
+COPY (SELECT read_id, sequence1 FROM reads WHERE i <= 300)
+TO '{TEST_DIR}/fxb{threads}_fa_plain.fasta.gz' (FORMAT FASTA, COMPRESSION gzip);
+
+statement ok
+COPY (SELECT read_id, sequence1, sequence2 FROM reads WHERE i <= 300)
+TO '{TEST_DIR}/fxb{threads}_fa_split.{ORIENTATION}.fasta.gz' (FORMAT FASTA, COMPRESSION gzip);
+
+statement ok
+COPY (SELECT read_id, comment, sequence1 FROM reads) TO '{TEST_DIR}/fxb{threads}_fa_all.fasta' (FORMAT FASTA, INCLUDE_COMMENT true);
+
+statement ok
+COPY (SELECT read_id, sequence1 FROM long_reads) TO '{TEST_DIR}/fxb{threads}_fa_long.fasta' (FORMAT FASTA);
+
+statement ok
+COPY (FROM (VALUES ('e1', 'ACGT'), ('e2', ''), ('e3', 'GG')) v(read_id, sequence1))
+TO '{TEST_DIR}/fxb{threads}_fa_empty_seq.fasta' (FORMAT FASTA);
+
+statement ok
+COPY (SELECT read_id, sequence1 FROM reads WHERE false) TO '{TEST_DIR}/fxb{threads}_fa_zero_rows.fasta' (FORMAT FASTA);
+
+statement ok
+COPY (SELECT read_id, sequence1 FROM huge)
+TO '{TEST_DIR}/fxb{threads}_fa_huge.fasta' (FORMAT FASTA, ROW_GROUP_SIZE 1000, ROW_GROUP_SIZE_BYTES '1GB');
+
+# FASTQ
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM reads WHERE i <= 300) TO '{TEST_DIR}/fxb{threads}_fq_plain.fastq' (FORMAT FASTQ);
+
+statement ok
+COPY (SELECT read_id, comment, sequence1, qual1 FROM reads WHERE i <= 300)
+TO '{TEST_DIR}/fxb{threads}_fq_comment.fastq' (FORMAT FASTQ, INCLUDE_COMMENT true);
+
+statement ok
+COPY (SELECT i AS sequence_index, read_id, sequence1, qual1 FROM reads WHERE i <= 300)
+TO '{TEST_DIR}/fxb{threads}_fq_seqindex.fastq' (FORMAT FASTQ, ID_AS_SEQUENCE_INDEX true);
+
+statement ok
+COPY (SELECT i AS read_id, sequence1, qual1 FROM reads WHERE i <= 300) TO '{TEST_DIR}/fxb{threads}_fq_bigint.fastq' (FORMAT FASTQ);
+
+statement ok
+COPY (SELECT md5(i::VARCHAR)::UUID AS read_id, sequence1, qual1 FROM reads WHERE i <= 300)
+TO '{TEST_DIR}/fxb{threads}_fq_uuid.fastq' (FORMAT FASTQ);
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM reads WHERE i <= 300)
+TO '{TEST_DIR}/fxb{threads}_fq_offset64.fastq' (FORMAT FASTQ, QUAL_OFFSET 64);
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM reads WHERE i <= 300)
+TO '{TEST_DIR}/fxb{threads}_fq_interleave.fastq' (FORMAT FASTQ, INTERLEAVE true);
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM reads WHERE i <= 300)
+TO '{TEST_DIR}/fxb{threads}_fq_split.{ORIENTATION}.fastq' (FORMAT FASTQ);
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM reads WHERE i <= 300)
+TO '{TEST_DIR}/fxb{threads}_fq_plain.fastq.gz' (FORMAT FASTQ, COMPRESSION gzip);
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM reads WHERE i <= 300)
+TO '{TEST_DIR}/fxb{threads}_fq_split.{ORIENTATION}.fastq.gz' (FORMAT FASTQ, COMPRESSION gzip);
+
+statement ok
+COPY (SELECT read_id, comment, sequence1, qual1 FROM reads)
+TO '{TEST_DIR}/fxb{threads}_fq_all.fastq' (FORMAT FASTQ, INCLUDE_COMMENT true);
+
+statement ok
+COPY (SELECT read_id, sequence1, list_transform(range(length(sequence1)), lambda j: ((i * 3 + j) % 41)::UTINYINT) AS qual1
+      FROM long_reads WHERE i <= 200)
+TO '{TEST_DIR}/fxb{threads}_fq_long.fastq' (FORMAT FASTQ);
+
+statement ok
+COPY (FROM (VALUES ('e1', 'ACGT', [30, 31, 32, 33]::UTINYINT[]), ('e2', '', []::UTINYINT[]), ('e3', 'GG', [40, 2]::UTINYINT[]))
+           v(read_id, sequence1, qual1))
+TO '{TEST_DIR}/fxb{threads}_fq_empty_seq.fastq' (FORMAT FASTQ);
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM reads WHERE false) TO '{TEST_DIR}/fxb{threads}_fq_zero_rows.fastq' (FORMAT FASTQ);
+
+statement ok
+COPY (SELECT read_id, sequence1, list_transform(range(length(sequence1)), lambda j: ((i * 7 + j * 13) % 41)::UTINYINT) AS qual1
+      FROM huge WHERE i <= 40)
+TO '{TEST_DIR}/fxb{threads}_fq_huge.fastq' (FORMAT FASTQ, ROW_GROUP_SIZE 1000, ROW_GROUP_SIZE_BYTES '1GB');
+
+# Read back on one thread: the outputs are what is under test, not the readers.
+statement ok
+SET threads=1;
+
+# The md5 of every uncompressed output, pinned to the bytes written at 352ec60a. One expected block serves both thread counts,
+# so this also asserts that the thread count does not change a byte.
+query II
+SELECT replace(parse_filename(filename), 'fxb{threads}_', '') AS output, md5(content)
+FROM read_text(['{TEST_DIR}/fxb{threads}_*.fasta', '{TEST_DIR}/fxb{threads}_*.fastq'])
+ORDER BY output;
+----
+fa_all.fasta	44b1af578900dfed32615a4bb0082565
+fa_bigint.fasta	dac8ec0ccf9243be4a59dc194b764f8b
+fa_comment.fasta	c3be56f037a2d987a6fdeb2e899725f7
+fa_empty_seq.fasta	86af3bc11ee2a3bdc85690724d97b4c9
+fa_huge.fasta	67d9bbd12d28d3c89e5f40fb4b897a94
+fa_interleave.fasta	e2d21eed79be90965410d087ec58d789
+fa_long.fasta	090ca3e28361967261c22cb581e2b48e
+fa_plain.fasta	c553f23f3e416cd5238ce444f0f0df64
+fa_seqindex.fasta	dac8ec0ccf9243be4a59dc194b764f8b
+fa_split.R1.fasta	c553f23f3e416cd5238ce444f0f0df64
+fa_split.R2.fasta	2f63321b7ed5487f08718e585db494dd
+fa_uuid.fasta	fd33fa31b080d73310efd49a9476fa7c
+fa_width60.fasta	f0ffe8461220630efc38e5949ac46e1c
+fa_zero_rows.fasta	d41d8cd98f00b204e9800998ecf8427e
+fq_all.fastq	6da4397d20644341abc7f04dd75870d5
+fq_bigint.fastq	cadb7ca88fa500211fbe7259342b5ecc
+fq_comment.fastq	bd8eff142932ce3a1221bda053248658
+fq_empty_seq.fastq	0686f0561410c3fd677014ccf081ba44
+fq_huge.fastq	3433ee5bc6928f033f1da44f04db6b99
+fq_interleave.fastq	19b479264e093ae8bf253a20996919e1
+fq_long.fastq	45e0a6dd65b245fd7298ba2d837b5f09
+fq_offset64.fastq	e8dc51802094eceff037bfdd1ea33c74
+fq_plain.fastq	9980dd7aafbb0ecc0ea7a396d7bac347
+fq_seqindex.fastq	cadb7ca88fa500211fbe7259342b5ecc
+fq_split.R1.fastq	9980dd7aafbb0ecc0ea7a396d7bac347
+fq_split.R2.fastq	96826b15056aef96bda4563a2160daec
+fq_uuid.fastq	b80b1ae553ece31bda1592ecd56deab0
+fq_zero_rows.fastq	d41d8cd98f00b204e9800998ecf8427e
+
+# Each gzip output decompresses to exactly the uncompressed output of the same query (pinned above).
+query IIIIII
+SELECT md5(ref_text('{TEST_DIR}/fxb{threads}_fa_plain.fasta.gz'))
+           = (SELECT md5(content) FROM read_text('{TEST_DIR}/fxb{threads}_fa_plain.fasta')),
+       md5(ref_text('{TEST_DIR}/fxb{threads}_fa_split.R1.fasta.gz'))
+           = (SELECT md5(content) FROM read_text('{TEST_DIR}/fxb{threads}_fa_split.R1.fasta')),
+       md5(ref_text('{TEST_DIR}/fxb{threads}_fa_split.R2.fasta.gz'))
+           = (SELECT md5(content) FROM read_text('{TEST_DIR}/fxb{threads}_fa_split.R2.fasta')),
+       md5(ref_text('{TEST_DIR}/fxb{threads}_fq_plain.fastq.gz'))
+           = (SELECT md5(content) FROM read_text('{TEST_DIR}/fxb{threads}_fq_plain.fastq')),
+       md5(ref_text('{TEST_DIR}/fxb{threads}_fq_split.R1.fastq.gz'))
+           = (SELECT md5(content) FROM read_text('{TEST_DIR}/fxb{threads}_fq_split.R1.fastq')),
+       md5(ref_text('{TEST_DIR}/fxb{threads}_fq_split.R2.fastq.gz'))
+           = (SELECT md5(content) FROM read_text('{TEST_DIR}/fxb{threads}_fq_split.R2.fastq'));
+----
+true	true	true	true	true	true
+
+endloop

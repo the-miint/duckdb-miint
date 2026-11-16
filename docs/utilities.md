@@ -242,11 +242,11 @@ Paired-end read merging, powered by the [vsearch](https://github.com/torognes/vs
 SELECT read_id,
        (merge_pairs_vsearch(sequence1, qual1, sequence2, qual2)).merged AS merged,
        (merge_pairs_vsearch(sequence1, qual1, sequence2, qual2)).sequence AS merged_seq
-FROM read_fastx('forward.fq', 'reverse.fq');
+FROM read_fastx('forward.fq', sequence2 = 'reverse.fq');
 
 -- Filter to only successfully merged reads
 SELECT read_id, m.*
-FROM read_fastx('forward.fq', 'reverse.fq'),
+FROM read_fastx('forward.fq', sequence2 = 'reverse.fq'),
      LATERAL (SELECT merge_pairs_vsearch(sequence1, qual1, sequence2, qual2)) AS m(result)
 WHERE m.result.merged;
 ```
