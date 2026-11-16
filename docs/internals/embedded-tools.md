@@ -40,7 +40,7 @@ Run-time / conditional: `MIINT_USE_JEMALLOC` is set when DuckDB's jemalloc is li
 
 ## 1. Statically Linked from Source (ExternalProject)
 
-Each sub-build below gets a job count and this build's compilers or launcher (`MIINT_SUBBUILD_*`; [`build-system.md`](build-system.md#rules)), except the Rust crates, which cargo schedules itself.
+Which ExternalProject sub-builds get a job count and this build's compilers or launcher (`MIINT_SUBBUILD_*`), and which are left out: [`build-system.md`](build-system.md#rules).
 
 ### HTSlib 1.22.1
 - **Location:** `ext/htslib-1.22.1/` (release tarball, not a submodule)

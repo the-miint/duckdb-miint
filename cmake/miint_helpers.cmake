@@ -70,28 +70,19 @@ if(EMSCRIPTEN AND (CMAKE_CXX_FLAGS MATCHES "-pthread"
 endif()
 
 # Job count and compilers for the ExternalProject sub-builds in cmake/deps/. Why
-# they need them, and which variable goes to which kind of sub-build:
-# docs/internals/build-system.md, "Rules".
+# they need them, why half the CPUs, and which variable goes to which kind of
+# sub-build: docs/internals/build-system.md, "Rules".
 #
-# Jobs, read at configure time: CMAKE_BUILD_PARALLEL_LEVEL if set, else half the
-# CPUs this process may run on. `nproc` honours taskset and cpuset limits;
-# CMake's logical core count, the fallback where there is no `nproc` (macOS),
-# does not. Half, because every sub-build without DEPENDS starts at once, beside
-# the main build's own jobs. No `make -l`: on a small runner the main build
-# alone keeps the load above the core count, so it would put every sub-build
-# back on one job.
+# Jobs, read at configure time: CMAKE_BUILD_PARALLEL_LEVEL if set, else half of
+# ProcessorCount, which on Linux runs `nproc` and so honours taskset and cpuset
+# limits. No `make -l`: on a small runner the main build alone keeps the load
+# above the core count, so it would put every sub-build back on one job.
 if("$ENV{CMAKE_BUILD_PARALLEL_LEVEL}" MATCHES "^[1-9][0-9]*$")
   set(MIINT_SUBBUILD_JOBS "$ENV{CMAKE_BUILD_PARALLEL_LEVEL}")
 else()
-  execute_process(
-    COMMAND nproc
-    OUTPUT_VARIABLE _miint_cpus
-    OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-  if(NOT _miint_cpus MATCHES "^[1-9][0-9]*$")
-    cmake_host_system_information(RESULT _miint_cpus
-                                  QUERY NUMBER_OF_LOGICAL_CORES)
-  endif()
-  if(NOT _miint_cpus MATCHES "^[1-9][0-9]*$")
+  include(ProcessorCount)
+  ProcessorCount(_miint_cpus)
+  if(_miint_cpus EQUAL 0)
     set(_miint_cpus 1)
   endif()
   math(EXPR MIINT_SUBBUILD_JOBS "(${_miint_cpus} + 1) / 2")
