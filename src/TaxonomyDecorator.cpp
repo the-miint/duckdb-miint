@@ -20,8 +20,8 @@ uint32_t F1Score::Threshold(uint32_t total, uint32_t min_count) {
 }
 
 std::strong_ordering F1Score::Compare(uint32_t c1, uint32_t m1, uint32_t c2, uint32_t m2, uint32_t total) {
-	// 2c1/(total+m1) against 2c2/(total+m2), cross-multiplied. Each product is at most
-	// kMaxTips * 2 * kMaxTips = 2^63.
+	// 2c1/(total+m1) against 2c2/(total+m2), cross-multiplied; kMaxTips keeps the products in
+	// uint64.
 	const uint64_t lhs = uint64_t(c1) * (uint64_t(total) + m2);
 	const uint64_t rhs = uint64_t(c2) * (uint64_t(total) + m1);
 	return lhs <=> rhs;
@@ -118,11 +118,11 @@ uint32_t CladeCountIndex::CladeCount(uint32_t node, size_t rank, NameId name) co
 	return static_cast<uint32_t>(hi - lo);
 }
 
-uint32_t CladeCountIndex::NumTips(uint32_t node) const {
+uint32_t CladeCountIndex::InformativeTipCount(uint32_t node) const {
 	return informative_prefix_[tree_.last(node) + 1] - informative_prefix_[tree_.pre(node)];
 }
 
-uint32_t CladeCountIndex::LeafCount(uint32_t node) const {
+uint32_t CladeCountIndex::TipCount(uint32_t node) const {
 	return tip_prefix_[tree_.last(node) + 1] - tip_prefix_[tree_.pre(node)];
 }
 

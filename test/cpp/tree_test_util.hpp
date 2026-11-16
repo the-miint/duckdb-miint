@@ -88,6 +88,26 @@ inline bool naive_is_tip(const TreeArrays &t, uint32_t v) {
 	return std::find(t.parent.begin(), t.parent.end(), v) == t.parent.end();
 }
 
+// Whether each node has a child, in one pass: naive_is_tip for every node at once.
+inline std::vector<bool> has_child(const TreeArrays &t) {
+	std::vector<bool> out(t.parent.size(), false);
+	for (uint32_t parent : t.parent) {
+		if (parent != kNoParent) {
+			out[parent] = true;
+		}
+	}
+	return out;
+}
+
+inline uint32_t root_of(const TreeArrays &t) {
+	for (uint32_t v = 0; v < t.parent.size(); v++) {
+		if (t.parent[v] == kNoParent) {
+			return v;
+		}
+	}
+	throw std::logic_error("root_of: no root");
+}
+
 // ---------------------------------------------------------------------------
 // Random trees. Structure first (each node's parent is an earlier node, and often the
 // immediately preceding one, so long chains appear), then the labels are shuffled so the

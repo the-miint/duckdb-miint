@@ -1,8 +1,7 @@
-// A second, independent check of CladeCountIndex: the same counts computed relationally, by a
-// deliberately naive recursive CTE over (node, parent) and (tip, rank, name), in an in-process
-// DuckDB. The index finds a subtree by preorder ranges and binary searches; the CTE walks
-// parent links and groups, so an indexing off-by-one in one cannot hide in the other. Later
-// placement stages extend this oracle.
+// A second, independent check of CladeCountIndex: the same counts computed by a recursive CTE
+// that walks parent links over (node, parent) and (tip, rank, name) tables in an in-process
+// DuckDB, then groups. The index finds a subtree by preorder ranges and binary searches, so an
+// indexing off-by-one cannot hide in both.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -24,7 +23,7 @@ using namespace miint::test;
 
 namespace {
 
-void Run(duckdb::Connection &con, const std::string &sql) {
+void Exec(duckdb::Connection &con, const std::string &sql) {
 	auto result = con.Query(sql);
 	INFO(sql << ": " << result->GetError());
 	REQUIRE_FALSE(result->HasError());
@@ -46,8 +45,8 @@ void ForEachRow(duckdb::Connection &con, const std::string &sql, F f) {
 // Replaces the tables' contents with one case: every node and its parent, and one row per
 // named rank of every informative tip.
 void Load(duckdb::Connection &con, const TaxonomyCase &c, const TaxonomyStore &store) {
-	Run(con, "DELETE FROM tree");
-	Run(con, "DELETE FROM tip_name");
+	Exec(con, "DELETE FROM tree");
+	Exec(con, "DELETE FROM tip_name");
 	std::string nodes = "INSERT INTO tree VALUES ";
 	std::string names;
 	for (uint32_t v = 0; v < c.tree.parent.size(); v++) {
@@ -66,9 +65,9 @@ void Load(duckdb::Connection &con, const TaxonomyCase &c, const TaxonomyStore &s
 			}
 		}
 	}
-	Run(con, nodes);
+	Exec(con, nodes);
 	if (!names.empty()) {
-		Run(con, "INSERT INTO tip_name VALUES " + names);
+		Exec(con, "INSERT INTO tip_name VALUES " + names);
 	}
 }
 
@@ -96,8 +95,8 @@ WITH RECURSIVE up(tip, node) AS (
 TEST_CASE("CladeCountIndex agrees with recursive-CTE counts", "[taxonomy_decorator]") {
 	duckdb::DuckDB db(nullptr);
 	duckdb::Connection con(db);
-	Run(con, "CREATE TABLE tree (node INTEGER, parent INTEGER)");
-	Run(con, "CREATE TABLE tip_name (node INTEGER, rank INTEGER, name INTEGER)");
+	Exec(con, "CREATE TABLE tree (node INTEGER, parent INTEGER)");
+	Exec(con, "CREATE TABLE tip_name (node INTEGER, rank INTEGER, name INTEGER)");
 
 	std::mt19937 rng(20261119);
 	size_t compared = 0;
@@ -131,9 +130,9 @@ TEST_CASE("CladeCountIndex agrees with recursive-CTE counts", "[taxonomy_decorat
 		// Every (node, rank, name): the CTE's count, or 0 where it has no row.
 		for (uint32_t v = 0; v < n; v++) {
 			INFO("node " << v);
-			REQUIRE(index.NumTips(v) == (num_tips.count(v) ? num_tips[v] : 0));
+			REQUIRE(index.InformativeTipCount(v) == (num_tips.count(v) ? num_tips[v] : 0));
 			// Every node has a tip below it, so every node has a row.
-			REQUIRE(index.LeafCount(v) == leaf_count.at(v));
+			REQUIRE(index.TipCount(v) == leaf_count.at(v));
 			for (size_t r = 0; r < kRankCount; r++) {
 				for (NameId name = 0; name < store.NameCount(r); name++) {
 					auto found = clade.find({v, r, name});

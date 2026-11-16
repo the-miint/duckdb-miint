@@ -36,7 +36,6 @@ enum Rank : size_t { kDomain, kPhylum, kClass, kOrder };
 //   Row E (D1; P3) is on no tip.
 constexpr uint32_t kRoot = 3, kN1 = 7, kN2 = 0, kN3 = 8, kT4 = 1, kT5 = 6, kT6 = 2, kT7 = 4, kT8 = 5;
 constexpr uint32_t kNodes = 9;
-constexpr uint32_t NP = TreeIndex::NO_PARENT;
 
 TaxonomyRow Row(std::string id, std::initializer_list<std::string> names) {
 	TaxonomyRow row {std::move(id), {}};
@@ -54,7 +53,7 @@ TaxonomyStore HandStore() {
 
 TreeIndex HandTree() {
 	std::vector<uint32_t> parent(kNodes);
-	parent[kRoot] = NP;
+	parent[kRoot] = kNoParent;
 	parent[kN1] = kRoot;
 	parent[kN2] = kRoot;
 	parent[kN3] = kN2;
@@ -108,7 +107,7 @@ int Sign(std::strong_ordering o) {
 }
 } // namespace
 
-// Precision is c / NumTips and the fold breaks ties by LeafCount, so the two must differ in
+// Precision is c / InformativeTipCount and score ties are broken by TipCount, so the two must differ in
 // exactly one way: a tip with no row, or one whose lineage cleaning wiped, is a leaf but not an
 // informative tip. Counts must also follow the tree through a one-child node and a
 // three-child node.
@@ -124,9 +123,9 @@ TEST_CASE("CladeCountIndex counts a hand-built tree", "[taxonomy_decorator]") {
 	CladeCountIndex index(HandTree(), store, HandRows());
 	REQUIRE(index.Tree().size() == kNodes);
 
-	CHECK(Observed([&](uint32_t v) { return index.LeafCount(v); }) ==
+	CHECK(Observed([&](uint32_t v) { return index.TipCount(v); }) ==
 	      ByNode({{kRoot, 5}, {kN1, 2}, {kN2, 3}, {kN3, 3}, {kT4, 1}, {kT5, 1}, {kT6, 1}, {kT7, 1}, {kT8, 1}}));
-	CHECK(Observed([&](uint32_t v) { return index.NumTips(v); }) ==
+	CHECK(Observed([&](uint32_t v) { return index.InformativeTipCount(v); }) ==
 	      ByNode({{kRoot, 3}, {kN1, 2}, {kN2, 1}, {kN3, 1}, {kT4, 1}, {kT5, 1}, {kT6, 1}}));
 
 	CHECK(Observed([&](uint32_t v) { return index.CladeCount(v, kDomain, d1); }) ==
@@ -182,11 +181,24 @@ TEST_CASE("CladeCountIndex rejects a bad row mapping", "[taxonomy_decorator]") {
 	message = ErrorOf(rows);
 	CHECK_THAT(message, ContainsSubstring("row 99"));
 	CHECK_THAT(message, ContainsSubstring("5 rows"));
+
+	// The boundaries: one entry too many, and the first row past the end.
+	rows = HandRows();
+	rows.push_back(std::nullopt);
+	message = ErrorOf(rows);
+	CHECK_THAT(message, ContainsSubstring("10 entries"));
+	CHECK_THAT(message, ContainsSubstring("9 nodes"));
+
+	rows = HandRows();
+	rows[kT8] = 5;
+	message = ErrorOf(rows);
+	CHECK_THAT(message, ContainsSubstring("row 5,"));
+	CHECK_THAT(message, ContainsSubstring("5 rows"));
 }
 
-// A node is a candidate when its count reaches max(min_count, ceil(total/2)): recall >= 1/2,
-// tested in integers, so a clade holding exactly half of an even total qualifies. min_count
-// only matters for small totals, and 0 would admit nodes with no informative tips.
+// Pinned here (the rule itself is documented at F1Score::Threshold): a clade holding exactly
+// half of an even total is eligible, min_count matters only for small totals, and 0 is
+// rejected.
 TEST_CASE("F1Score::Threshold is max(min_count, ceil(total/2))", "[taxonomy_decorator]") {
 	struct Case {
 		uint32_t total, min_count, expected;
@@ -202,16 +214,16 @@ TEST_CASE("F1Score::Threshold is max(min_count, ceil(total/2))", "[taxonomy_deco
 	CHECK_THROWS_AS(F1Score::Threshold(4, 0), std::invalid_argument);
 }
 
-// The fold keeps the best-scoring candidate for a name, so Compare must order by
-// F1 = 2c/(total+m) exactly: equal rationals tie (the fold's tie-break then decides), and
-// values doubles cannot tell apart are still ordered.
-TEST_CASE("F1Score::Compare orders candidates by F1, exactly", "[taxonomy_decorator]") {
+// A name is assigned to its best-scoring node, so Compare must order exactly: equal rationals
+// tie, and values doubles cannot tell apart are still ordered.
+TEST_CASE("F1Score::Compare orders scores by F1, exactly", "[taxonomy_decorator]") {
 	// Same c, fewer tips below: higher precision wins.
 	CHECK(Sign(F1Score::Compare(3, 4, 3, 6, 4)) == 1);
 	CHECK(Sign(F1Score::Compare(3, 6, 3, 4, 4)) == -1);
 	// More of the name but much less precise: 8/12 against 6/7.
 	CHECK(Sign(F1Score::Compare(4, 8, 3, 3, 4)) == -1);
-	// Different (c, m), equal F1: 4/6 and 6/9.
+	// Different (c, m), equal F1: 4/6 and 6/9. A divergence from tax2tree, whose doubles rank
+	// the first higher (see F1Score).
 	CHECK(Sign(F1Score::Compare(2, 2, 3, 5, 4)) == 0);
 	CHECK(Sign(F1Score::Compare(3, 5, 2, 2, 4)) == 0);
 
@@ -219,23 +231,25 @@ TEST_CASE("F1Score::Compare orders candidates by F1, exactly", "[taxonomy_decora
 	constexpr uint32_t kCap = F1Score::kMaxTips;
 	CHECK(Sign(F1Score::Compare(kCap, kCap, kCap, kCap, kCap)) == 0);
 	CHECK(Sign(F1Score::Compare(kCap, kCap, kCap - 1, kCap, kCap)) == 1);
-	// Cross products about 7.8e18 that differ by exactly 1, so the two F1 values are the same
-	// double: only exact integer arithmetic orders them.
+	// Cross products c1(total+m2) = 7794523695057664824 and c2(total+m1) = 7794523695057664825:
+	// candidate 1's F1 is lower by one unit, and the two F1 values are the same double, so only
+	// exact integer arithmetic orders them.
 	const uint32_t c1 = 1839998538, m1 = 2139392963, c2 = 1818229075, m2 = 2088673900;
 	REQUIRE(F1Score::ScoreForReport(c1, m1, kCap) == F1Score::ScoreForReport(c2, m2, kCap));
 	CHECK(Sign(F1Score::Compare(c1, m1, c2, m2, kCap)) == -1);
 	CHECK(Sign(F1Score::Compare(c2, m2, c1, m1, kCap)) == 1);
 }
 
-// ScoreForReport is what a user reads beside a placement, so it must be F1 itself.
+// ScoreForReport is what a user reads beside an assigned name, so it must be F1 itself.
 TEST_CASE("F1Score::ScoreForReport is 2c/(total+m)", "[taxonomy_decorator]") {
 	CHECK_THAT(F1Score::ScoreForReport(3, 4, 4), WithinRel(0.75, 1e-15));
 	CHECK_THAT(F1Score::ScoreForReport(2, 2, 4), WithinRel(2.0 / 3.0, 1e-15));
 	CHECK_THAT(F1Score::ScoreForReport(1, 1, 1), WithinRel(1.0, 1e-15));
 }
 
-// Every later stage reads these counts, so they must equal a count made the slow way, on trees
-// with chains, multifurcations, unmapped and wiped tips, and names down to strain.
+// Decoration reads every count from this index, so each must equal the count found by walking
+// up from every tip, on trees with chains, multifurcations, tips with no row or a wiped one, and
+// names down to strain.
 TEST_CASE("CladeCountIndex matches counts made by walking up from every tip", "[taxonomy_decorator]") {
 	std::mt19937 rng(20261116);
 	for (int trial = 0; trial < 300; trial++) {
@@ -248,10 +262,10 @@ TEST_CASE("CladeCountIndex matches counts made by walking up from every tip", "[
 		INFO("trial " << trial << ", " << n << " nodes");
 		for (uint32_t v = 0; v < n; v++) {
 			INFO("node " << v);
-			REQUIRE(index.LeafCount(v) == naive.leaf_count[v]);
-			REQUIRE(index.NumTips(v) == naive.num_tips[v]);
+			REQUIRE(index.TipCount(v) == naive.leaf_count[v]);
+			REQUIRE(index.InformativeTipCount(v) == naive.num_tips[v]);
 			if (v != root) {
-				REQUIRE(index.NumTips(c.tree.parent[v]) >= index.NumTips(v));
+				REQUIRE(index.InformativeTipCount(c.tree.parent[v]) >= index.InformativeTipCount(v));
 			}
 			for (size_t r = 0; r < kRankCount; r++) {
 				for (NameId name = 0; name < store.NameCount(r); name++) {
@@ -267,10 +281,9 @@ TEST_CASE("CladeCountIndex matches counts made by walking up from every tip", "[
 	}
 }
 
-// Placement searches for a name's lowest candidates along at most two root paths. That is
-// sound only if candidates are closed upward and there are at most two lowest ones, and two
-// only when two disjoint clades each hold exactly half of an even total.
-TEST_CASE("CladeCountIndex candidates are closed upward with at most two lowest", "[taxonomy_decorator]") {
+// Decoration searches at most two root paths for a name's lowest eligible nodes, which part 1
+// of F1Score's contract makes sound. This checks that contract on the index's counts.
+TEST_CASE("CladeCountIndex eligible nodes are closed upward with at most two lowest", "[taxonomy_decorator]") {
 	std::mt19937 rng(20261117);
 	bool saw_two = false;
 	for (int trial = 0; trial < 300; trial++) {
@@ -287,7 +300,7 @@ TEST_CASE("CladeCountIndex candidates are closed upward with at most two lowest"
 					auto eligible = [&](uint32_t v) {
 						return index.CladeCount(v, r, name) >= threshold;
 					};
-					// A lowest candidate: eligible, with no eligible child.
+					// A lowest eligible node: one with no eligible child.
 					std::vector<bool> has_eligible_child(n, false);
 					for (uint32_t v = 0; v < n; v++) {
 						if (eligible(v) && c.tree.parent[v] != kNoParent) {

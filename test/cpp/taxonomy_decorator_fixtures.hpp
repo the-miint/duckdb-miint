@@ -9,12 +9,11 @@
 #include <cstdint>
 #include <optional>
 #include <random>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
 // Random trees with random taxonomies on their tips, and the counts CladeCountIndex should
-// give for them, found by walking parents. Shared by the index's unit tests and its SQL oracle.
+// give for them, found by walking parents.
 
 namespace miint::test {
 
@@ -27,22 +26,12 @@ struct TaxonomyCase {
 	std::vector<std::optional<size_t>> row_of_node;
 };
 
-inline std::vector<bool> has_child(const TreeArrays &t) {
-	std::vector<bool> out(t.parent.size(), false);
-	for (uint32_t parent : t.parent) {
-		if (parent != kNoParent) {
-			out[parent] = true;
-		}
-	}
-	return out;
-}
-
 // A random tree of n nodes (random_tree: chains and multifurcations, numbered in no order),
 // with a taxonomy drawn from a random name hierarchy, so no lineage has a gap or a name under
 // two parents, as TaxonomyStore requires. Lineages stop at random depths (NULL tails, up to
 // strain); some are domain-only or all NULL, some carry a bad name, so cleaning truncates or
-// wipes them; some tips carry no row; and a few rows sit on no tip, so the store holds names
-// the tree does not.
+// wipes them; some tips carry no row; and a few rows sit on no tip, so the store can hold
+// names the tree does not.
 inline TaxonomyCase random_taxonomy_case(std::mt19937 &rng, uint32_t n) {
 	TaxonomyCase c;
 	c.tree = random_tree(rng, n, true);
@@ -140,15 +129,6 @@ inline NaiveCounts naive_counts(const TaxonomyCase &c, const TaxonomyStore &stor
 		}
 	}
 	return out;
-}
-
-inline uint32_t root_of(const TreeArrays &t) {
-	for (uint32_t v = 0; v < t.parent.size(); v++) {
-		if (t.parent[v] == kNoParent) {
-			return v;
-		}
-	}
-	throw std::logic_error("root_of: no root");
 }
 
 } // namespace miint::test
