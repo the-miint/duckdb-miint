@@ -392,6 +392,7 @@ list(
   src/taxdump_archive.cpp
   src/taxdump_parser.cpp
   src/taxonomy_lineage.cpp
+  src/TaxonomyDecorator.cpp
   src/TaxonomyStore.cpp
   src/tree_ancestors.cpp
   src/tree_function_utils.cpp
@@ -496,6 +497,7 @@ list(
   src/taxdump_archive.cpp
   src/taxdump_parser.cpp
   src/taxonomy_lineage.cpp
+  src/TaxonomyDecorator.cpp
   src/TaxonomyStore.cpp
   src/TreeIndex.cpp
   src/WFA2Aligner.cpp
@@ -581,6 +583,7 @@ list(
   test/cpp/test_taxdump_archive.cpp
   test/cpp/test_taxdump_parser.cpp
   test/cpp/test_taxonomy_lineage.cpp
+  test/cpp/test_TaxonomyDecorator.cpp
   test/cpp/test_TaxonomyStore.cpp
   test/cpp/test_TreeIndex.cpp
   test/cpp/test_WFA2Aligner.cpp
@@ -692,7 +695,8 @@ if(BUILD_UNITTESTS)
   add_executable(
     tests_duckdb
     test/cpp/test_RypeInputStream.cpp test/cpp/test_RypeFilterParallel.cpp
-    test/cpp/test_RypeFilterSchedule.cpp test/cpp/test_HttpClientCommon.cpp)
+    test/cpp/test_RypeFilterSchedule.cpp test/cpp/test_HttpClientCommon.cpp
+    test/cpp/test_TaxonomyDecoratorOracle.cpp)
   target_link_libraries(tests_duckdb Catch2::Catch2WithMain duckdb_static)
   link_extension_libraries(tests_duckdb "")
   # Sets RLIMIT_FSIZE, so POSIX only
