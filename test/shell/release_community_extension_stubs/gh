@@ -13,16 +13,18 @@
 # (`run view --json jobs`); `pr edit` fails without changing the PR (GitHub refuses
 # the classic-Projects query it makes), while
 # `api -X PATCH repos/<repo>/pulls/<n> -f body=...` sets the description and `pr ready`
-# marks a draft ready; `api` has no --repo flag, and exits 1 on an HTTP error. From `gh pr ready --help`, not observed: `--undo` turns a PR back
-# into a draft. Taken from
-# test/shell/cron_publish_extension_stubs/gh, where it was observed: `run list --branch`
-# matches a run's head branch (a tag push's is the tag), newest first, `--limit` applied
-# after filtering.
+# marks a draft ready; `api` has no --repo flag, and prints the response body unless
+# given --silent (seen on a 404). From `gh pr ready --help`, not observed: `--undo`
+# turns a PR back into a draft. Taken from test/shell/cron_publish_extension_stubs/gh,
+# where it was observed: `run list --branch` matches a run's head branch (a tag push's
+# is the tag), newest first, `--limit` applied after filtering.
 #
-# To catch a script that asks the wrong question, it refuses any command, flag, path or
-# argument it does not model, and any call the real CLI or GitHub would answer
-# differently. It filters runs by --repo and --workflow, and prints only the --json
-# fields asked for. Every call is appended to $SCENARIO_DIR/gh.calls.
+# To catch a script that asks the wrong question, it refuses an unknown subcommand, flag
+# or api path, and a call whose arguments it does not model (each `refuse` below says
+# which). On `api` it accepts only the flags each call uses, and elsewhere it refuses
+# `api`'s -X, -f and --silent; other flags are parsed for every subcommand and ignored
+# where no branch reads them. It filters runs by --repo and --workflow, and prints only
+# the --json fields asked for. Every call is appended to $SCENARIO_DIR/gh.calls.
 set -euo pipefail
 : "${SCENARIO_DIR:?}"
 printf '%s\n' "$*" >> "$SCENARIO_DIR/gh.calls"
@@ -75,11 +77,11 @@ done
 allow() {
     local f
     for f in ${seen[@]+"${seen[@]}"}; do
-        [[ " $* " == *" $f "* ]] || refuse "$sub $action: flag $f is not modelled here"
+        [[ " $* " == *" $f "* ]] || refuse "$sub${action:+ $action}: flag $f is not modelled here"
     done
 }
 [[ "$sub" == api ]] || [[ " ${seen[*]-} " != *" -X "* && " ${seen[*]-} " != *" -f "* && " ${seen[*]-} " != *" --silent "* ]] ||
-    refuse "$sub $action: -X, -f and --silent are modelled only for api"
+    refuse "$sub${action:+ $action}: -X, -f and --silent are modelled only for api"
 
 # project: keep only the --json fields, as the real CLI prints them.
 project() { jq -c --arg f "$json" '($f | split(",")) as $k | if type == "array" then map(with_entries(select(.key as $x | $k | index($x)))) else with_entries(select(.key as $x | $k | index($x))) end'; }
@@ -143,8 +145,7 @@ case "$sub $action" in
             [[ "$positional" =~ ^repos/$CE_REPO/pulls/([0-9]+)$ ]] || refuse "unsupported PATCH of '$positional'"
             n="${BASH_REMATCH[1]}"
             [[ ${#fields[@]} -eq 1 && "${fields[0]}" == body=* ]] || refuse "PATCH of a PR with fields other than body"
-            # Without --silent, `gh api` prints the response body (`gh api --help`): here
-            # the whole pull request.
+            # Without --silent, `gh api` prints the response body: here the whole pull request.
             [[ "$silent" == true ]] || refuse "PATCH of a PR without --silent"
             jq -e --argjson n "$n" 'any(.[]; .number == $n and .state == "OPEN")' "$PRS" > /dev/null ||
                 refuse "PATCH of PR $n, which is not an open PR"
@@ -152,7 +153,6 @@ case "$sub $action" in
             exit 0
         fi
         allow --jq
-        [[ "$method" == GET && ${#fields[@]} -eq 0 ]] || refuse "unsupported api $method"
         [[ "$positional" == repos/* ]] || refuse "unsupported api path '$positional'"
         jq -c --arg r "${positional#repos/}" '.[$r] // error("no such repository: \($r)")' "$SCENARIO_DIR/fork.json" | jq -r "$expr"
         ;;
