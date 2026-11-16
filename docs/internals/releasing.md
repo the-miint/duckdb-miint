@@ -55,7 +55,7 @@ When DuckDB opens its next release's feature freeze (a `vX.Y-<codename>` branch 
    ```bash
    ./scripts/release-community-extension.sh v1.2.0
    ```
-   The script marks the PR ready, without pushing to it, once the PR's `Community Extension Build` run on the commit it names has passed; until then it says so and changes nothing.
+   The script marks the PR ready, without pushing to it, once community-extensions has built the commit the PR names and passed (`build.yml` for `ref`, `build_<codename>.yml` for a frozen series); until then it says so and changes nothing.
 6. Publish the release notes:
    ```bash
    gh release create v1.2.0 --verify-tag --generate-notes --notes-start-tag <previous release>
@@ -72,12 +72,13 @@ A patch release on a frozen series names its key, `./scripts/release-community-e
 |---|---|
 | The argument is not `vX.Y.Z` or `vX.Y.Z-rc.N` | The descriptor names only tagged commits, the only ones whose build reports a version. |
 | The tag is lightweight | The tag message is the release's summary, and `git describe` ranks any annotated tag on the commit above it. |
-| A build of the commit would report another tag | `git describe` over origin's tags on the commit, as the build runs it, must give this tag. |
+| A build of the commit would report another tag (`git describe` over origin's release tags on the commit, as the build runs it) | The binary would report that tag as its version, while the PR and `extension.version` name this one. |
 | The tag is not on origin, or origin is not the descriptor's `repo.github` | community-extensions checks the commit out from `repo.github`. |
+| A local copy of the tag, or of another release tag on the commit, differs from origin's | The checks would read a commit other than the one community-extensions fetches. |
 | The commit is not on the key's release branch | Only merged code ships. |
 | The tag push's CI run is missing, has not passed, or tested another commit | Only a tag push builds wasm_eh. |
 | The key does not already hold a commit | So `repo.github` or an `extension:` field is never rewritten. |
 | `origin` is not your fork of duckdb/community-extensions, or `upstream` is not duckdb/community-extensions | The change is proposed against upstream's descriptor, from a branch on your fork. |
 | Your fork has the release's branch but no open PR from it | It holds an unfinished attempt on an old upstream; the script prints the command that deletes it. |
 
-On the PR it proposes, every new PR opens as a draft, a ready PR goes back to draft before anything is pushed to it, and only a final tag, once the PR's build has passed on the commit the fork branch names, marks it ready. `--dry-run` runs every check up to the descriptor change and prints the change, pushing nothing and changing no PR; like every run, it fetches the tag and the remotes' branches. The script never switches or edits your community-extensions checkout: it commits in a temporary worktree. It expects that checkout at `../community-extensions` (or `COMMUNITY_EXTENSIONS_DIR`). `test/shell/release_community_extension.sh` has a scenario for each refusal and each PR transition.
+On the PR it proposes, every new PR opens as a draft, a ready PR goes back to draft before anything is pushed to it, a push rewrites the PR's description to name the new tag, and only a final tag, once community-extensions has built the commit the fork branch names and passed, marks it ready. `--dry-run` runs every check up to the descriptor change and prints the change (or that there is nothing to push, and the PR's state), pushing nothing and changing no PR; like every run, it fetches origin's release tags on the commit and the remotes' branches. The script never switches or edits your community-extensions checkout: it commits in a temporary worktree. It expects that checkout at `../community-extensions` (or `COMMUNITY_EXTENSIONS_DIR`). `test/shell/release_community_extension.sh` has a scenario for each refusal in this table and each PR transition.

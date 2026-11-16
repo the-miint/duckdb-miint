@@ -35,7 +35,6 @@ cd "$REPO_DIR"
 
 CE="${COMMUNITY_EXTENSIONS_DIR:-$REPO_DIR/../community-extensions}"
 CE_REPO=duckdb/community-extensions
-CE_WORKFLOW=build.yml
 DESC=extensions/miint/description.yml
 WORKFLOW=MainDistributionPipeline.yml
 
@@ -159,12 +158,14 @@ if [[ "$KEY" == ref ]]; then
     BRANCH="$(printf '%s\n' "$heads" | awk '$1 == "ref:" && $3 == "HEAD" {sub("^refs/heads/", "", $2); print $2}')"
     [[ -n "$BRANCH" ]] || die "cannot read origin's default branch"
     PR_BRANCH="miint-v$VERSION"
+    CE_WORKFLOW=build.yml
 else
     heads="$(git ls-remote --heads origin)" || die "cannot read origin's branches"
     BRANCH="$(printf '%s\n' "$heads" | awk -v k="$KEY" '{sub("^refs/heads/", "", $2)} $2 ~ ("^v[0-9]+\\.[0-9]+-" k "$") {print $2}')"
     n="$(printf '%s' "$BRANCH" | grep -c . || true)"
     [[ "$n" == 1 ]] || die "expected one v<X.Y>-$KEY branch on origin for key '$KEY', found $n"
     PR_BRANCH="miint-$KEY-v$VERSION"
+    CE_WORKFLOW="build_$KEY.yml"
 fi
 git fetch -q origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH"
 git merge-base --is-ancestor "$SHA" "refs/remotes/origin/$BRANCH" ||
@@ -229,10 +230,19 @@ git -C "$CE" show "$BASE:$DESC" > "$WORK/current.yml"
 edit_descriptor "$WORK/current.yml" "$WORK/wanted.yml"
 WILL_PUSH=false
 cmp -s "$WORK/current.yml" "$WORK/wanted.yml" || WILL_PUSH=true
+pr_number="" pr_draft="" pr_url=""
+[[ -n "$pr" ]] && read -r pr_number pr_draft pr_url <<< "$pr"
 
 if [[ "$DRY_RUN" == true ]]; then
-    say "dry run: the descriptor change on $FORK_OWNER:$PR_BRANCH would be"
-    diff -u -L "a/$DESC" -L "b/$DESC" "$WORK/current.yml" "$WORK/wanted.yml" || true
+    if [[ "$WILL_PUSH" == true ]]; then
+        say "dry run: the descriptor change on $FORK_OWNER:$PR_BRANCH would be"
+        diff -u -L "a/$DESC" -L "b/$DESC" "$WORK/current.yml" "$WORK/wanted.yml" || true
+    else
+        say "dry run: $FORK_OWNER:$PR_BRANCH already points $KEY at $SHORT; nothing to push"
+    fi
+    if [[ -n "$pr" ]]; then
+        say "PR: $pr_url ($([[ "$pr_draft" == true ]] && echo draft || echo ready))"
+    fi
     exit 0
 fi
 
@@ -241,13 +251,23 @@ fi
 # readies a PR; a ready PR goes back to draft before anything is pushed to it.
 # ---------------------------------------------------------------------------
 
-pr_number="" pr_draft="" pr_url=""
-[[ -n "$pr" ]] && read -r pr_number pr_draft pr_url <<< "$pr"
 if [[ -n "$pr" && "$pr_draft" != true && ("$IS_RC" == true || "$WILL_PUSH" == true) ]]; then
     gh pr ready "$pr_number" --repo "$CE_REPO" --undo
     pr_draft=true
     say "PR back to draft: $pr_url"
 fi
+
+body="Points \`repo.$KEY\` at [$TAG](https://github.com/$MIINT_REPO/tree/$TAG) of $MIINT_REPO ($SHA)"
+[[ "$KEY" == ref ]] && body+=" and \`extension.version\` at $VERSION"
+body+="."
+if [[ "$IS_RC" == true ]]; then
+    draft_body="$body"$'\n\n'"Draft until v$VERSION is tagged on the same commit."
+else
+    draft_body="$body"$'\n\n'"Draft until this PR's CI passes."
+fi
+RERUN_CMD="./scripts/release-community-extension.sh v$VERSION"
+[[ "$KEY" != ref ]] && RERUN_CMD+=" $KEY"
+RERUN="rerun $RERUN_CMD once the PR's community-extensions build has passed, to mark it ready"
 
 if [[ "$WILL_PUSH" == true ]]; then
     WORKTREE="$WORK/worktree"
@@ -256,21 +276,14 @@ if [[ "$WILL_PUSH" == true ]]; then
     git -C "$WORKTREE" commit -q -m "miint: $KEY -> $TAG ($SHORT)" -- "$DESC"
     git -C "$WORKTREE" push -q origin "HEAD:refs/heads/$PR_BRANCH"
     say "pushed $FORK_OWNER:$PR_BRANCH: $KEY -> $SHORT"
+    if [[ -n "$pr" ]]; then
+        gh pr edit "$pr_number" --repo "$CE_REPO" --body "$draft_body"
+    fi
 fi
 
-body="Points \`repo.$KEY\` at [$TAG](https://github.com/$MIINT_REPO/tree/$TAG) of $MIINT_REPO ($SHA)"
-[[ "$KEY" == ref ]] && body+=" and \`extension.version\` at $VERSION"
-body+="."
-RERUN="rerun this script with v$VERSION once the PR's community-extensions CI has passed, to mark it ready"
-
 if [[ -z "$pr" ]]; then
-    if [[ "$IS_RC" == true ]]; then
-        create_body="$body"$'\n\n'"Draft until v$VERSION is tagged on the same commit."
-    else
-        create_body="$body"$'\n\n'"Draft until this PR's CI passes."
-    fi
     url="$(gh pr create --repo "$CE_REPO" --base main --head "$FORK_OWNER:$PR_BRANCH" \
-        --title "miint: v$VERSION" --body "$create_body" --draft)"
+        --title "miint: v$VERSION" --body "$draft_body" --draft)"
     if [[ "$IS_RC" == true ]]; then
         say "opened draft PR: $url"
     else
@@ -287,16 +300,21 @@ elif [[ "$pr_draft" != true ]]; then
     say "PR: $pr_url (already ready)"
 else
     # Ready only the build its CI passed: the PR's head must be the fork branch that names
-    # SHA, and that commit's community-extensions build run must have completed and passed.
+    # SHA, and the key's community-extensions workflow (build.yml for ref, build_<key>.yml
+    # for a frozen series) must have built that commit and passed. A run whose key the PR
+    # did not change skips its build and still concludes success, so the build's own jobs
+    # (named ".../build / <platform>") must be there.
     pr_head="$(gh pr view "$pr_number" --repo "$CE_REPO" --json headRefOid --jq .headRefOid)"
     [[ "$pr_head" == "$(git -C "$CE" rev-parse "refs/remotes/origin/$PR_BRANCH")" ]] ||
         die "PR $pr_url's head is not $FORK_OWNER:$PR_BRANCH as fetched; rerun"
     ce_run="$(gh run list --repo "$CE_REPO" --workflow "$CE_WORKFLOW" --commit "$pr_head" --limit 1 \
-        --json status,conclusion,url --jq '.[0] // empty | "\(.status) \(.url) \(.conclusion)"')"
+        --json databaseId,status,conclusion,url --jq '.[0] // empty | "\(.databaseId) \(.status) \(.url) \(.conclusion)"')"
     [[ -n "$ce_run" ]] || die "PR $pr_url has no $CE_WORKFLOW run on ${pr_head:0:7} yet; $RERUN"
-    read -r ce_status ce_url ce_conclusion <<< "$ce_run"
+    read -r ce_id ce_status ce_url ce_conclusion <<< "$ce_run"
     [[ "$ce_status" == completed && "$ce_conclusion" == success ]] ||
         die "PR $pr_url's CI has not passed (${ce_status} ${ce_conclusion:-}): $ce_url; $RERUN"
+    built="$(gh run view "$ce_id" --repo "$CE_REPO" --json jobs --jq '[.jobs[] | select(.name | test("(^| / )build / "))] | length')"
+    [[ "$built" -gt 0 ]] || die "PR $pr_url's $CE_WORKFLOW run built nothing (its build was skipped): $ce_url"
     gh pr edit "$pr_number" --repo "$CE_REPO" --body "$body"
     gh pr ready "$pr_number" --repo "$CE_REPO"
     say "PR marked ready: $pr_url"
