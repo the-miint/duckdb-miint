@@ -51,8 +51,8 @@ usage() {
 }
 
 # Set a community-extensions PR's description. Through the REST API, not `gh pr edit`:
-# gh 2.46's `pr edit` also reads the PR's classic Projects, which GitHub now refuses, and
-# fails without changing anything.
+# gh 2.46's `pr edit` also reads the PR's classic Projects, which GitHub refuses, and fails
+# without changing anything.
 set_pr_body() {
     gh api -X PATCH "repos/$CE_REPO/pulls/$1" -f body="$2" --silent
 }

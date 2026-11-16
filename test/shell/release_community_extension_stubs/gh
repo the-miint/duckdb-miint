@@ -13,17 +13,16 @@
 # (`run view --json jobs`); `pr edit` fails without changing the PR (GitHub refuses
 # the classic-Projects query it makes), while
 # `api -X PATCH repos/<repo>/pulls/<n> -f body=...` sets the description and `pr ready`
-# marks a draft ready. From `gh pr ready --help`, not observed: `--undo` turns a PR back
+# marks a draft ready; `api` has no --repo flag, and exits 1 on an HTTP error. From `gh pr ready --help`, not observed: `--undo` turns a PR back
 # into a draft. Taken from
 # test/shell/cron_publish_extension_stubs/gh, where it was observed: `run list --branch`
 # matches a run's head branch (a tag push's is the tag), newest first, `--limit` applied
 # after filtering.
 #
-# To catch a script that asks the wrong question, it refuses what it does not model:
-# a --repo other than the one each command belongs to, `pr list` without
-# `--state open`, a PR whose head branch is not on the fork, `pr edit`. It filters runs
-# by --repo and --workflow, and prints only the --json fields asked for. Every call is
-# appended to $SCENARIO_DIR/gh.calls.
+# To catch a script that asks the wrong question, it refuses any command, flag, path or
+# argument it does not model, and any call the real CLI or GitHub would answer
+# differently. It filters runs by --repo and --workflow, and prints only the --json
+# fields asked for. Every call is appended to $SCENARIO_DIR/gh.calls.
 set -euo pipefail
 : "${SCENARIO_DIR:?}"
 printf '%s\n' "$*" >> "$SCENARIO_DIR/gh.calls"
@@ -45,8 +44,9 @@ action=""
     shift
 }
 expr="." json="" repo="" workflow="" branch="" commit="" event="" state="" limit=20 head="" title="" body=""
-draft=false undo=false silent=false positional="" method=GET fields=()
+draft=false undo=false silent=false positional="" method=GET fields=() seen=()
 while (($#)); do
+    [[ "$1" == -* ]] && seen+=("$1")
     case "$1" in
         --jq) expr="$2"; shift 2 ;;
         --json) json="$2"; shift 2 ;;
@@ -70,6 +70,16 @@ while (($#)); do
         *) positional="$1"; shift ;;
     esac
 done
+
+# allow: refuse a flag this call does not model.
+allow() {
+    local f
+    for f in ${seen[@]+"${seen[@]}"}; do
+        [[ " $* " == *" $f "* ]] || refuse "$sub $action: flag $f is not modelled here"
+    done
+}
+[[ "$sub" == api ]] || [[ " ${seen[*]-} " != *" -X "* && " ${seen[*]-} " != *" -f "* && " ${seen[*]-} " != *" --silent "* ]] ||
+    refuse "$sub $action: -X, -f and --silent are modelled only for api"
 
 # project: keep only the --json fields, as the real CLI prints them.
 project() { jq -c --arg f "$json" '($f | split(",")) as $k | if type == "array" then map(with_entries(select(.key as $x | $k | index($x)))) else with_entries(select(.key as $x | $k | index($x))) end'; }
@@ -129,16 +139,19 @@ case "$sub $action" in
         ;;
     "api ")
         if [[ "$method" == PATCH ]]; then
+            allow -X -f --silent
             [[ "$positional" =~ ^repos/$CE_REPO/pulls/([0-9]+)$ ]] || refuse "unsupported PATCH of '$positional'"
             n="${BASH_REMATCH[1]}"
             [[ ${#fields[@]} -eq 1 && "${fields[0]}" == body=* ]] || refuse "PATCH of a PR with fields other than body"
-            # Without --silent, the real CLI prints the whole pull request into the output.
+            # Without --silent, `gh api` prints the response body (`gh api --help`): here
+            # the whole pull request.
             [[ "$silent" == true ]] || refuse "PATCH of a PR without --silent"
             jq -e --argjson n "$n" 'any(.[]; .number == $n and .state == "OPEN")' "$PRS" > /dev/null ||
                 refuse "PATCH of PR $n, which is not an open PR"
             update_prs --argjson n "$n" --arg b "${fields[0]#body=}" 'map(if .number == $n then .body = $b else . end)'
             exit 0
         fi
+        allow --jq
         [[ "$method" == GET && ${#fields[@]} -eq 0 ]] || refuse "unsupported api $method"
         [[ "$positional" == repos/* ]] || refuse "unsupported api path '$positional'"
         jq -c --arg r "${positional#repos/}" '.[$r] // error("no such repository: \($r)")' "$SCENARIO_DIR/fork.json" | jq -r "$expr"
