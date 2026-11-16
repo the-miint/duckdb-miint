@@ -82,9 +82,18 @@ WITH RECURSIVE up(tip, node) AS (
 )
 )";
 
+// The same for every tip, informative or not: a node that is no node's parent.
+const char *kUpFromEveryTip = R"(
+WITH RECURSIVE up(tip, node) AS (
+    SELECT node, node FROM tree WHERE node NOT IN (SELECT parent FROM tree WHERE parent IS NOT NULL)
+    UNION ALL
+    SELECT up.tip, tree.parent FROM up JOIN tree ON tree.node = up.node WHERE tree.parent IS NOT NULL
+)
+)";
+
 } // namespace
 
-TEST_CASE("CladeCountIndex agrees with a recursive-CTE count", "[taxonomy_decorator]") {
+TEST_CASE("CladeCountIndex agrees with recursive-CTE counts", "[taxonomy_decorator]") {
 	duckdb::DuckDB db(nullptr);
 	duckdb::Connection con(db);
 	Run(con, "CREATE TABLE tree (node INTEGER, parent INTEGER)");
@@ -110,17 +119,32 @@ TEST_CASE("CladeCountIndex agrees with a recursive-CTE count", "[taxonomy_decora
 		std::map<uint32_t, uint32_t> num_tips;
 		ForEachRow(con, std::string(kUp) + "SELECT node, count(*) FROM up GROUP BY node",
 		           [&](auto col) { num_tips[col(0)] = col(1); });
+		std::map<uint32_t, uint32_t> leaf_count;
+		ForEachRow(con, std::string(kUpFromEveryTip) + "SELECT node, count(*) FROM up GROUP BY node",
+		           [&](auto col) { leaf_count[col(0)] = col(1); });
+		std::map<std::pair<size_t, NameId>, uint32_t> total;
+		ForEachRow(con, "SELECT rank, name, count(*) FROM tip_name GROUP BY rank, name", [&](auto col) {
+			total[{col(0), col(1)}] = col(2);
+		});
 		compared += clade.size();
 
 		// Every (node, rank, name): the CTE's count, or 0 where it has no row.
 		for (uint32_t v = 0; v < n; v++) {
 			INFO("node " << v);
 			REQUIRE(index.NumTips(v) == (num_tips.count(v) ? num_tips[v] : 0));
+			// Every node has a tip below it, so every node has a row.
+			REQUIRE(index.LeafCount(v) == leaf_count.at(v));
 			for (size_t r = 0; r < kRankCount; r++) {
 				for (NameId name = 0; name < store.NameCount(r); name++) {
 					auto found = clade.find({v, r, name});
 					REQUIRE(index.CladeCount(v, r, name) == (found == clade.end() ? 0 : found->second));
 				}
+			}
+		}
+		for (size_t r = 0; r < kRankCount; r++) {
+			for (NameId name = 0; name < store.NameCount(r); name++) {
+				auto found = total.find({r, name});
+				REQUIRE(index.Total(r, name) == (found == total.end() ? 0 : found->second));
 			}
 		}
 	}

@@ -56,13 +56,14 @@ struct F1Score {
 //
 // Each subtree is a contiguous range of preorder positions (TreeIndex), so the tips carrying
 // a name, listed by preorder position, hold the ones below a node as one contiguous run.
-// Memory is O(n) per-node arrays plus one entry per (informative tip, named rank).
+// Memory is O(n) per-node arrays, one entry per (informative tip, named rank), and one offset
+// per name in the store.
 //
 // A tip is informative when it carries a taxonomy row that kept a lineage after cleaning
 // (TaxonomyStore::IsInformative). Other tips, unmapped or not, count in LeafCount only.
 //
 // Accessors take nodes, ranks (kLineageRanks indexes) and NameIds in range for the tree and
-// store the index was built from.
+// store the index was built from; kMissingName is not a NameId.
 class CladeCountIndex {
 public:
 	// `row_of_node` has one entry per node of `tree`: the store row a tip carries, or nullopt.
