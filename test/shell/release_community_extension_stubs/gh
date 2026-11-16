@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Stub gh for release-community-extension.sh scenario tests. Serves CI runs from
+# $SCENARIO_DIR/runs.json and keeps pull requests in $SCENARIO_DIR/prs.json, modelling
+# what the script relies on, as the real CLI behaves: `run list --branch` matches a
+# run's head branch (a tag push's head branch is the tag), results come newest-first
+# by run id, `--limit` truncates after filtering, and `--jq` applies to the JSON
+# array. Every call is appended to $SCENARIO_DIR/gh.calls.
+set -euo pipefail
+: "${SCENARIO_DIR:?}"
+printf '%s\n' "$*" >> "$SCENARIO_DIR/gh.calls"
+RUNS="$SCENARIO_DIR/runs.json"
+PRS="$SCENARIO_DIR/prs.json"
+[[ -f "$PRS" ]] || printf '[]' > "$PRS"
+
+sub="$1" action="$2"
+shift 2
+expr="." branch="" event="" limit=20 head="" title="" draft=false number=""
+while (($#)); do
+    case "$1" in
+        --jq) expr="$2"; shift 2 ;;
+        --branch) branch="$2"; shift 2 ;;
+        --event) event="$2"; shift 2 ;;
+        --limit) limit="$2"; shift 2 ;;
+        --head) head="$2"; shift 2 ;;
+        --title) title="$2"; shift 2 ;;
+        --draft) draft=true; shift ;;
+        --repo | --workflow | --json | --state | --base | --body) shift 2 ;;
+        -*) echo "gh stub: unsupported flag '$1'" >&2; exit 2 ;;
+        *) number="$1"; shift ;;
+    esac
+done
+
+case "$sub $action" in
+    "run list")
+        jq -c --arg b "$branch" --arg e "$event" --argjson n "$limit" \
+            '[.[] | select(($b == "" or .headBranch == $b) and ($e == "" or .event == $e))] | sort_by(.databaseId) | reverse | .[:$n]' \
+            "$RUNS" | jq -r "$expr"
+        ;;
+    "pr list")
+        # --head names a branch without its owner, as the real CLI expects.
+        jq -c --arg h "$head" '[.[] | select(.headRefName == $h and .state == "OPEN")]' "$PRS" | jq -r "$expr"
+        ;;
+    "pr create")
+        n=$(($(jq length "$PRS") + 1))
+        url="https://example/pull/$n"
+        jq -c --argjson n "$n" --arg h "${head#*:}" --arg o "${head%%:*}" --arg t "$title" --argjson d "$draft" --arg u "$url" \
+            '. + [{number: $n, headRefName: $h, headOwner: $o, title: $t, isDraft: $d, state: "OPEN", url: $u}]' \
+            "$PRS" > "$PRS.new"
+        mv "$PRS.new" "$PRS"
+        printf '%s\n' "$url"
+        ;;
+    "pr ready")
+        jq -c --argjson n "$number" 'map(if .number == $n then .isDraft = false else . end)' "$PRS" > "$PRS.new"
+        mv "$PRS.new" "$PRS"
+        ;;
+    *) echo "gh stub: unsupported '$sub $action'" >&2; exit 2 ;;
+esac

@@ -24,7 +24,7 @@ Outside this repo (do these after CI is green and a release tag is pushed):
 
 - The cron host's env file (e.g. `/etc/miint-publish.env`) overrides `DUCKDB_VERSION`, and `BRANCH` on a series move; editing the script alone changes nothing there. The live FTP paths become `<ver>/` and `tagged/<ver>/`, leaving the previous version's trees serving until retired.
 - The playground console in the umbrella site repo pins both `@duckdb/duckdb-wasm` and `EXT_VERSION`. A C++ extension only loads into a duckdb-wasm of the *same* core version, so bump both together and verify the npm build actually reports the new version before flipping.
-- `duckdb/community-extensions` `extensions/miint/description.yml` carries the `ref` that `INSTALL miint FROM community` serves; open a PR bumping it to the new tag.
+- `duckdb/community-extensions` `extensions/miint/description.yml` carries the `ref` that `INSTALL miint FROM community` serves; it moves only with a release, by [`internals/releasing.md`](internals/releasing.md).
 
 Traps when verifying a bump:
 
