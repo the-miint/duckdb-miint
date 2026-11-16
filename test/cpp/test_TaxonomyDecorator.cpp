@@ -108,8 +108,8 @@ int Sign(std::strong_ordering o) {
 } // namespace
 
 // Precision is c / InformativeTipCount and score ties are broken by TipCount, so the two must differ in
-// exactly one way: a tip with no row, or one whose lineage cleaning wiped, is a leaf but not an
-// informative tip. Counts must also follow the tree through a one-child node and a
+// exactly one way: a tip with no row, or one whose lineage cleaning wiped, is a tip but not an
+// informative one. Counts must also follow the tree through a one-child node and a
 // three-child node.
 TEST_CASE("CladeCountIndex counts a hand-built tree", "[taxonomy_decorator]") {
 	auto store = HandStore();
@@ -232,8 +232,8 @@ TEST_CASE("F1Score::Compare orders scores by F1, exactly", "[taxonomy_decorator]
 	CHECK(Sign(F1Score::Compare(kCap, kCap, kCap, kCap, kCap)) == 0);
 	CHECK(Sign(F1Score::Compare(kCap, kCap, kCap - 1, kCap, kCap)) == 1);
 	// Cross products c1(total+m2) = 7794523695057664824 and c2(total+m1) = 7794523695057664825:
-	// candidate 1's F1 is lower by one unit, and the two F1 values are the same double, so only
-	// exact integer arithmetic orders them.
+	// (c1, m1)'s cross product is lower by one, so its F1 is lower, yet the two F1 values are the
+	// same double: only exact integer arithmetic orders them.
 	const uint32_t c1 = 1839998538, m1 = 2139392963, c2 = 1818229075, m2 = 2088673900;
 	REQUIRE(F1Score::ScoreForReport(c1, m1, kCap) == F1Score::ScoreForReport(c2, m2, kCap));
 	CHECK(Sign(F1Score::Compare(c1, m1, c2, m2, kCap)) == -1);
@@ -262,8 +262,8 @@ TEST_CASE("CladeCountIndex matches counts made by walking up from every tip", "[
 		INFO("trial " << trial << ", " << n << " nodes");
 		for (uint32_t v = 0; v < n; v++) {
 			INFO("node " << v);
-			REQUIRE(index.TipCount(v) == naive.leaf_count[v]);
-			REQUIRE(index.InformativeTipCount(v) == naive.num_tips[v]);
+			REQUIRE(index.TipCount(v) == naive.tip_count[v]);
+			REQUIRE(index.InformativeTipCount(v) == naive.informative_tip_count[v]);
 			if (v != root) {
 				REQUIRE(index.InformativeTipCount(c.tree.parent[v]) >= index.InformativeTipCount(v));
 			}
@@ -335,15 +335,15 @@ TEST_CASE("CladeCountIndex eligible nodes are closed upward with at most two low
 TEST_CASE("F1Score::Compare agrees with exact fractions", "[taxonomy_decorator]") {
 	std::mt19937 rng(20261118);
 	bool saw_tie = false, saw_less = false, saw_greater = false;
-	auto random_candidate = [&](uint32_t total) {
+	auto random_score = [&](uint32_t total) {
 		const uint32_t c = std::uniform_int_distribution<uint32_t>(1, total)(rng);
 		const uint32_t m = std::uniform_int_distribution<uint32_t>(c, 40)(rng);
 		return std::pair<uint32_t, uint32_t>(c, m);
 	};
 	for (int trial = 0; trial < 20000; trial++) {
 		const uint32_t total = std::uniform_int_distribution<uint32_t>(1, 30)(rng);
-		const auto [c1, m1] = random_candidate(total);
-		const auto [c2, m2] = random_candidate(total);
+		const auto [c1, m1] = random_score(total);
+		const auto [c2, m2] = random_score(total);
 		const uint64_t n1 = 2 * c1, d1 = total + m1, g1 = std::gcd(n1, d1);
 		const uint64_t n2 = 2 * c2, d2 = total + m2, g2 = std::gcd(n2, d2);
 		int expected;

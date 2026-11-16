@@ -88,7 +88,7 @@ inline bool naive_is_tip(const TreeArrays &t, uint32_t v) {
 	return std::find(t.parent.begin(), t.parent.end(), v) == t.parent.end();
 }
 
-// Whether each node has a child, in one pass: naive_is_tip for every node at once.
+// Whether each node has a child, in one pass: the negation of naive_is_tip, for every node at once.
 inline std::vector<bool> has_child(const TreeArrays &t) {
 	std::vector<bool> out(t.parent.size(), false);
 	for (uint32_t parent : t.parent) {

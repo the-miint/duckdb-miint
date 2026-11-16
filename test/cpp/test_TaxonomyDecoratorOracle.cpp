@@ -115,12 +115,12 @@ TEST_CASE("CladeCountIndex agrees with recursive-CTE counts", "[taxonomy_decorat
 		           [&](auto col) {
 			           clade[{col(0), col(1), col(2)}] = col(3);
 		           });
-		std::map<uint32_t, uint32_t> num_tips;
+		std::map<uint32_t, uint32_t> informative_tip_count;
 		ForEachRow(con, std::string(kUp) + "SELECT node, count(*) FROM up GROUP BY node",
-		           [&](auto col) { num_tips[col(0)] = col(1); });
-		std::map<uint32_t, uint32_t> leaf_count;
+		           [&](auto col) { informative_tip_count[col(0)] = col(1); });
+		std::map<uint32_t, uint32_t> tip_count;
 		ForEachRow(con, std::string(kUpFromEveryTip) + "SELECT node, count(*) FROM up GROUP BY node",
-		           [&](auto col) { leaf_count[col(0)] = col(1); });
+		           [&](auto col) { tip_count[col(0)] = col(1); });
 		std::map<std::pair<size_t, NameId>, uint32_t> total;
 		ForEachRow(con, "SELECT rank, name, count(*) FROM tip_name GROUP BY rank, name", [&](auto col) {
 			total[{col(0), col(1)}] = col(2);
@@ -130,9 +130,9 @@ TEST_CASE("CladeCountIndex agrees with recursive-CTE counts", "[taxonomy_decorat
 		// Every (node, rank, name): the CTE's count, or 0 where it has no row.
 		for (uint32_t v = 0; v < n; v++) {
 			INFO("node " << v);
-			REQUIRE(index.InformativeTipCount(v) == (num_tips.count(v) ? num_tips[v] : 0));
+			REQUIRE(index.InformativeTipCount(v) == (informative_tip_count.count(v) ? informative_tip_count[v] : 0));
 			// Every node has a tip below it, so every node has a row.
-			REQUIRE(index.TipCount(v) == leaf_count.at(v));
+			REQUIRE(index.TipCount(v) == tip_count.at(v));
 			for (size_t r = 0; r < kRankCount; r++) {
 				for (NameId name = 0; name < store.NameCount(r); name++) {
 					auto found = clade.find({v, r, name});

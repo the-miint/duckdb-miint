@@ -24,15 +24,17 @@ namespace miint {
 // Contract. Decoration finds each name's lowest eligible nodes by searching at most two root
 // paths, and that search relies on both of these:
 //   1. A node is eligible for a name exactly when its count c reaches a threshold that depends
-//      only on (total, min_count) and is at least ceil(total/2). Counts never decrease toward
-//      the root, so a name's eligible nodes are closed upward; and two disjoint eligible nodes
-//      hold at least total between them, so there are at most two lowest ones, and two only
-//      when each holds exactly half of an even total.
+//      only on (total, min_count) and is at least 1 and at least ceil(total/2). Counts never
+//      decrease toward the root, so a name's eligible nodes are closed upward. A threshold of
+//      at least 1 keeps every node without the name ineligible, and one of at least
+//      ceil(total/2) means two disjoint eligible nodes hold at least total between them, so
+//      there are at most two lowest ones, and two only when each holds exactly half of an
+//      even total.
 //   2. The score depends on (c, m, total) only.
 // A rule that breaks (1), for example one under which an ancestor is ineligible while a
 // descendant is eligible, breaks that search. Decoration would then need per-node count maps
-// merged up the tree, small-to-large: O(n log n) map operations before any query, against two
-// binary searches per count here. Nothing here supports that.
+// merged up the tree, small-to-large: O(n log n) map operations to build, against O(n) work to
+// build this index and two binary searches per count. Nothing here supports that.
 //
 // The F-beta family generalizes F1 as (1+b^2)c/(b^2 total+m). For beta = 2 or 1/2 its cross
 // products reach 5L^2 for L tips, against F1's 2L^2, which overflows uint64 at kMaxTips: it

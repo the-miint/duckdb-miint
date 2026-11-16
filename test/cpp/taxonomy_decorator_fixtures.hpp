@@ -91,8 +91,8 @@ inline CladeCountIndex build_index(const TaxonomyCase &c, const TaxonomyStore &s
 struct NaiveCounts {
 	// clade[rank][name][node]
 	std::array<std::vector<std::vector<uint32_t>>, kRankCount> clade;
-	std::vector<uint32_t> num_tips;
-	std::vector<uint32_t> leaf_count;
+	std::vector<uint32_t> informative_tip_count;
+	std::vector<uint32_t> tip_count;
 
 	uint32_t Total(size_t rank, NameId name, uint32_t root) const {
 		return clade[rank][name][root];
@@ -105,8 +105,8 @@ inline NaiveCounts naive_counts(const TaxonomyCase &c, const TaxonomyStore &stor
 	for (size_t r = 0; r < kRankCount; r++) {
 		out.clade[r].assign(store.NameCount(r), std::vector<uint32_t>(n, 0));
 	}
-	out.num_tips.assign(n, 0);
-	out.leaf_count.assign(n, 0);
+	out.informative_tip_count.assign(n, 0);
+	out.tip_count.assign(n, 0);
 	const auto internal = has_child(c.tree);
 	for (uint32_t tip = 0; tip < n; tip++) {
 		if (internal[tip]) {
@@ -115,11 +115,11 @@ inline NaiveCounts naive_counts(const TaxonomyCase &c, const TaxonomyStore &stor
 		const auto &row = c.row_of_node[tip];
 		const bool informative = row && store.IsInformative(*row);
 		for (uint32_t v = tip; v != kNoParent; v = c.tree.parent[v]) {
-			out.leaf_count[v]++;
+			out.tip_count[v]++;
 			if (!informative) {
 				continue;
 			}
-			out.num_tips[v]++;
+			out.informative_tip_count[v]++;
 			for (size_t r = 0; r < kRankCount; r++) {
 				const NameId name = store.Name(*row, r);
 				if (name != kMissingName) {
