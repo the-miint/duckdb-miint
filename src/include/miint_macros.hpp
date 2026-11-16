@@ -388,6 +388,11 @@ const std::string PRODIGAL_GENES = // NOLINT
 // '# Sequence Data' and '# Model Data' lines and its genes. Contigs are numbered (seqnum) by _miint_prodigal_numbered;
 // a contig's row without a gene writes its header lines only, as the CLI does. With per_genome, each genome starts
 // its own file: its own version line, and seqnum from 1, for COPY's PARTITION_BY (genome_id).
+// Column 6 is score (score=), the CLI's in single-genome mode. In metagenomic mode Prodigal's CLI (main.c) prints
+// column 6 from the best bin's nodes built and scored afresh after calling the genes, while score= keeps the scores
+// from the bin loop (intergenic_mod among them; the-miint/prodigal's docs/upstream-behavior.md, quirks 1 and 2).
+// Prodigal's library, and so predict_genes, does not return the fresh scores, so there column 6 can differ from the
+// CLI's.
 const std::string PRODIGAL_GFF_LINES = // NOLINT
     "CREATE OR REPLACE MACRO _miint_prodigal_gff_lines(relation, source := 'Prodigal_v" PRODIGAL_VERSION_LITERAL
     "', per_genome := false) AS TABLE "
