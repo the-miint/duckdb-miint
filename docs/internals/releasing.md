@@ -52,7 +52,7 @@ When DuckDB opens its next release's feature freeze (a `vX.Y-<codename>` branch 
    git push origin v1.2.0
    ./scripts/release-community-extension.sh v1.2.0
    ```
-   The script marks the PR ready without pushing to it: the build is the one already tested.
+   The script marks the PR ready, without pushing to it, once the PR's own CI has passed on the commit it names; until then it says so and changes nothing. A candidate pushed to a ready PR turns it back into a draft.
 5. Publish the release notes:
    ```bash
    gh release create v1.2.0 --verify-tag --generate-notes --notes-start-tag <previous release>
@@ -63,4 +63,4 @@ A patch release on a frozen line names its key: `./scripts/release-community-ext
 
 ## What the script refuses
 
-`scripts/release-community-extension.sh` changes nothing unless the tag is an annotated `vX.Y.Z` or `vX.Y.Z-rc.N`, is on origin, names a commit on the key's release branch, and its tag push's CI run passed. `--dry-run` runs every check and prints the descriptor change. It never switches or edits your community-extensions checkout: it commits in a temporary worktree. It expects that checkout at `../community-extensions` (or `COMMUNITY_EXTENSIONS_DIR`), with your fork as `origin` and duckdb/community-extensions as `upstream`. `test/shell/release_community_extension.sh` covers each refusal and each PR state.
+`scripts/release-community-extension.sh` proposes nothing unless the tag is an annotated `vX.Y.Z` or `vX.Y.Z-rc.N`, is on origin (the repository the descriptor's `repo.github` names), names a commit on the key's release branch, and its tag push's CI run passed. It refuses a key that does not already hold a commit, and a fork branch left by a closed PR. `--dry-run` runs every check and prints the descriptor change, pushing nothing and changing no PR; like every run, it fetches the tag and the remotes' branches. It never switches or edits your community-extensions checkout: it commits in a temporary worktree. It expects that checkout at `../community-extensions` (or `COMMUNITY_EXTENSIONS_DIR`), with your fork as `origin` and duckdb/community-extensions as `upstream`. `test/shell/release_community_extension.sh` covers each refusal and each PR state.

@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016 # $names inside single-quoted jq programs are jq variables
 # Stub gh for release-community-extension.sh scenario tests. Serves CI runs from
 # $SCENARIO_DIR/runs.json and keeps pull requests in $SCENARIO_DIR/prs.json, modelling
-# what the script relies on, as the real CLI behaves: `run list --branch` matches a
-# run's head branch (a tag push's head branch is the tag), results come newest-first
-# by run id, `--limit` truncates after filtering, and `--jq` applies to the JSON
-# array. Every call is appended to $SCENARIO_DIR/gh.calls.
+# what the script relies on, as the real CLI behaves:
+#   - `run list --branch` matches a run's head branch (a tag push's head branch is the
+#     tag); results come newest-first by run id; `--limit` truncates after filtering.
+#   - `pr list --head` matches the branch name whatever fork it is on.
+#   - `pr view` reports a PR's head as its fork branch's current commit, read from
+#     $SCENARIO_DIR/ce-fork.git, and its checks from the PR's `checks` field.
+#   - `--jq` applies to the JSON the real command would print.
+# Every call is appended to $SCENARIO_DIR/gh.calls.
 set -euo pipefail
 : "${SCENARIO_DIR:?}"
 printf '%s\n' "$*" >> "$SCENARIO_DIR/gh.calls"
@@ -14,7 +19,7 @@ PRS="$SCENARIO_DIR/prs.json"
 
 sub="$1" action="$2"
 shift 2
-expr="." branch="" event="" limit=20 head="" title="" draft=false number=""
+expr="." branch="" event="" limit=20 head="" title="" draft=false undo=false number=""
 while (($#)); do
     case "$1" in
         --jq) expr="$2"; shift 2 ;;
@@ -24,11 +29,17 @@ while (($#)); do
         --head) head="$2"; shift 2 ;;
         --title) title="$2"; shift 2 ;;
         --draft) draft=true; shift ;;
+        --undo) undo=true; shift ;;
         --repo | --workflow | --json | --state | --base | --body) shift 2 ;;
         -*) echo "gh stub: unsupported flag '$1'" >&2; exit 2 ;;
         *) number="$1"; shift ;;
     esac
 done
+
+update_prs() {
+    jq -c "$@" "$PRS" > "$PRS.new"
+    mv "$PRS.new" "$PRS"
+}
 
 case "$sub $action" in
     "run list")
@@ -37,21 +48,23 @@ case "$sub $action" in
             "$RUNS" | jq -r "$expr"
         ;;
     "pr list")
-        # --head names a branch without its owner, as the real CLI expects.
         jq -c --arg h "$head" '[.[] | select(.headRefName == $h and .state == "OPEN")]' "$PRS" | jq -r "$expr"
         ;;
     "pr create")
         n=$(($(jq length "$PRS") + 1))
-        url="https://example/pull/$n"
-        jq -c --argjson n "$n" --arg h "${head#*:}" --arg o "${head%%:*}" --arg t "$title" --argjson d "$draft" --arg u "$url" \
-            '. + [{number: $n, headRefName: $h, headOwner: $o, title: $t, isDraft: $d, state: "OPEN", url: $u}]' \
-            "$PRS" > "$PRS.new"
-        mv "$PRS.new" "$PRS"
-        printf '%s\n' "$url"
+        update_prs --argjson n "$n" --arg h "${head#*:}" --arg o "${head%%:*}" --arg t "$title" --argjson d "$draft" \
+            '. + [{number: $n, headRefName: $h, headRepositoryOwner: {login: $o}, title: $t, isDraft: $d, state: "OPEN",
+                   url: ("https://example/pull/" + ($n | tostring)), checks: []}]'
+        printf 'https://example/pull/%s\n' "$n"
         ;;
     "pr ready")
-        jq -c --argjson n "$number" 'map(if .number == $n then .isDraft = false else . end)' "$PRS" > "$PRS.new"
-        mv "$PRS.new" "$PRS"
+        update_prs --argjson n "$number" --argjson u "$undo" 'map(if .number == $n then .isDraft = $u else . end)'
+        ;;
+    "pr view")
+        ref="$(jq -r --argjson n "$number" '.[] | select(.number == $n) | .headRefName' "$PRS")"
+        oid="$(git --git-dir="$SCENARIO_DIR/ce-fork.git" rev-parse "refs/heads/$ref")"
+        jq -c --argjson n "$number" --arg oid "$oid" \
+            '.[] | select(.number == $n) | {headRefOid: $oid, statusCheckRollup: .checks}' "$PRS" | jq -r "$expr"
         ;;
     *) echo "gh stub: unsupported '$sub $action'" >&2; exit 2 ;;
 esac
