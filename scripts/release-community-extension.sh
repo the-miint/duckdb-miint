@@ -50,6 +50,13 @@ usage() {
     exit 1
 }
 
+# Set a community-extensions PR's description. Through the REST API, not `gh pr edit`:
+# gh 2.46's `pr edit` also reads the PR's classic Projects, which GitHub refuses, and fails
+# without changing anything.
+set_pr_body() {
+    gh api -X PATCH "repos/$CE_REPO/pulls/$1" -f body="$2" --silent
+}
+
 # owner/name from a GitHub remote URL (https, ssh or scp-like), or nothing. The URL is
 # read from the config, not `git remote get-url`, which applies insteadOf rewrites.
 github_repo() {
@@ -278,7 +285,7 @@ if [[ "$WILL_PUSH" == true ]]; then
     git -C "$WORKTREE" push -q origin "HEAD:refs/heads/$PR_BRANCH"
     say "pushed $FORK_OWNER:$PR_BRANCH: $KEY -> $SHORT"
     if [[ -n "$pr" ]]; then
-        gh pr edit "$pr_number" --repo "$CE_REPO" --body "$draft_body"
+        set_pr_body "$pr_number" "$draft_body"
     fi
 fi
 
@@ -320,7 +327,7 @@ else
         --jq '[.jobs[] | select((.name | test("(^| / )build / ")) and (.name | test("/ Generate matrix$") | not) and .conclusion == "success")] | length')"
     [[ "$built" -gt 0 ]] ||
         die "PR $pr_url's $CE_WORKFLOW run has no passed platform build job (a '.../build / <platform>' job): $ce_url"
-    gh pr edit "$pr_number" --repo "$CE_REPO" --body "$body"
+    set_pr_body "$pr_number" "$body"
     gh pr ready "$pr_number" --repo "$CE_REPO"
     say "PR marked ready: $pr_url"
 fi
