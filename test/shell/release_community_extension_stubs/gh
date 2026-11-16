@@ -10,16 +10,20 @@
 # GitHub spells it; `run list --workflow --commit` finds a PR's build run by its head
 # commit; a run whose descriptor key the PR did not change concludes success with its
 # `build` job skipped, and a run that built has jobs named ".../build / <platform>"
-# (`run view --json jobs`). From `gh pr ready --help`, not observed: `--undo` turns a PR
-# back into a draft. Taken from test/shell/cron_publish_extension_stubs/gh, where it was
-# observed: `run list --branch` matches a run's head branch (a tag push's is the tag),
-# newest first, `--limit` applied after filtering.
+# (`run view --json jobs`); `pr edit` fails without changing the PR (GitHub refuses
+# the classic-Projects query it makes), while
+# `api -X PATCH repos/<repo>/pulls/<n> -f body=...` sets the description and `pr ready`
+# marks a draft ready. From `gh pr ready --help`, not observed: `--undo` turns a PR back
+# into a draft. Taken from
+# test/shell/cron_publish_extension_stubs/gh, where it was observed: `run list --branch`
+# matches a run's head branch (a tag push's is the tag), newest first, `--limit` applied
+# after filtering.
 #
 # To catch a script that asks the wrong question, it refuses what it does not model:
 # a --repo other than the one each command belongs to, `pr list` without
-# `--state open`, a PR whose head branch is not on the fork. It filters runs by --repo
-# and --workflow, and prints only the --json fields asked for. Every call is appended
-# to $SCENARIO_DIR/gh.calls.
+# `--state open`, a PR whose head branch is not on the fork, `pr edit`. It filters runs
+# by --repo and --workflow, and prints only the --json fields asked for. Every call is
+# appended to $SCENARIO_DIR/gh.calls.
 set -euo pipefail
 : "${SCENARIO_DIR:?}"
 printf '%s\n' "$*" >> "$SCENARIO_DIR/gh.calls"
@@ -41,7 +45,7 @@ action=""
     shift
 }
 expr="." json="" repo="" workflow="" branch="" commit="" event="" state="" limit=20 head="" title="" body=""
-draft=false undo=false positional=""
+draft=false undo=false positional="" method=GET fields=()
 while (($#)); do
     case "$1" in
         --jq) expr="$2"; shift 2 ;;
@@ -59,6 +63,9 @@ while (($#)); do
         --base) [[ "$2" == main ]] || refuse "unexpected --base $2"; shift 2 ;;
         --draft) draft=true; shift ;;
         --undo) undo=true; shift ;;
+        -X) method="$2"; shift 2 ;;
+        -f) fields+=("$2"); shift 2 ;;
+        --silent) shift ;;
         -*) refuse "unsupported flag '$1'" ;;
         *) positional="$1"; shift ;;
     esac
@@ -111,10 +118,7 @@ case "$sub $action" in
         fi
         update_prs --argjson n "$positional" --argjson u "$undo" 'map(if .number == $n then .isDraft = $u else . end)'
         ;;
-    "pr edit")
-        pr_repo
-        update_prs --argjson n "$positional" --arg b "$body" 'map(if .number == $n then .body = $b else . end)'
-        ;;
+    "pr edit") refuse "pr edit fails against GitHub; set the body with api -X PATCH" ;;
     "pr view")
         pr_repo
         # A PR's head is its fork branch's commit, unless the scenario moved it.
@@ -124,6 +128,15 @@ case "$sub $action" in
             project | jq -r "$expr"
         ;;
     "api ")
+        if [[ "$method" == PATCH ]]; then
+            [[ "$positional" =~ ^repos/$CE_REPO/pulls/([0-9]+)$ ]] || refuse "unsupported PATCH of '$positional'"
+            n="${BASH_REMATCH[1]}"
+            [[ ${#fields[@]} -eq 1 && "${fields[0]}" == body=* ]] || refuse "PATCH of a PR with fields other than body"
+            jq -e --argjson n "$n" 'any(.[]; .number == $n)' "$PRS" > /dev/null || refuse "PATCH of PR $n, which does not exist"
+            update_prs --argjson n "$n" --arg b "${fields[0]#body=}" 'map(if .number == $n then .body = $b else . end)'
+            exit 0
+        fi
+        [[ "$method" == GET && ${#fields[@]} -eq 0 ]] || refuse "unsupported api $method"
         [[ "$positional" == repos/* ]] || refuse "unsupported api path '$positional'"
         jq -c --arg r "${positional#repos/}" '.[$r] // error("no such repository: \($r)")' "$SCENARIO_DIR/fork.json" | jq -r "$expr"
         ;;
