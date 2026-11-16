@@ -2,13 +2,10 @@
 # shellcheck disable=SC2016 # $names inside single-quoted jq programs are jq variables
 # Scenario tests for scripts/release-community-extension.sh, which points miint's
 # descriptor in duckdb/community-extensions at a release tag and opens, updates or
-# readies the PR. Covers what it refuses (a commit hash, a lightweight tag, a tag that
-# was never pushed, an unreachable origin, an origin that is not the descriptor's
-# repository, a tag off the release branch, a tag whose CI has not passed, a frozen-line
-# key with a tag from another line, a key that does not hold a commit, a fork branch
-# left from an abandoned PR), what it does to the PR for each tag (a candidate, a second
-# candidate, the final tag before and after the PR's CI passes, a final tag on a new
-# commit), and that it ignores another fork's same-named branch.
+# readies the PR from the maintainer's fork. Each refusal the script makes has a
+# scenario that triggers it and checks that nothing was proposed; each PR transition
+# (open, push to, back to draft, ready, stay a draft) has a scenario that checks the
+# fork branch and the PR afterwards.
 #
 # Every remote is a local bare repository behind a GitHub URL (url.<path>.insteadOf),
 # and gh is a stub (release_community_extension_stubs/), so nothing leaves the machine.
@@ -73,7 +70,9 @@ new_scenario() {
     mkdir -p "$SD"
     printf '[]' > "$SD/runs.json"
     printf '[]' > "$SD/prs.json"
+    printf '{"tester/community-extensions": {"owner": {"login": "tester"}, "parent": {"full_name": "duckdb/community-extensions"}}}' > "$SD/fork.json"
     : > "$SD/gh.calls"
+    TAG_SECOND=0
 
     git init -q --bare -b v2.0-cyanoptera "$SD/miint.git"
     git init -q -b v1.5-variegata "$SD/miint"
@@ -132,42 +131,42 @@ EOF
     printf 'uncommitted\n' >> "$SD/ce/README.md"
 }
 
-# tag NAME SHA [lightweight]: create the tag in the miint clone and push it.
+# tag NAME SHA [lightweight]: create the tag in the miint clone and push it. Annotated
+# tags are dated one second apart, in the order created, as git describe needs.
 tag() {
     if [ "${3:-}" = lightweight ]; then
         git -C "$SD/miint" tag "$1" "$2"
     else
-        git -C "$SD/miint" tag -a "$1" -m "Release $1" "$2"
+        TAG_SECOND=$((TAG_SECOND + 1))
+        GIT_COMMITTER_DATE="2026-01-01T00:00:$(printf '%02d' "$TAG_SECOND")" \
+            git -C "$SD/miint" tag -a "$1" -m "Release $1" "$2"
     fi
     git -C "$SD/miint" push -q origin "refs/tags/$1"
 }
 
-# add_run TAG SHA STATUS CONCLUSION: the tag push's CI run, as gh run list reports it.
-add_run() {
+# add_run_in REPO WORKFLOW EVENT BRANCH SHA STATUS CONCLUSION: a CI run as gh lists it.
+add_run_in() {
     local id
     id=$(($(jq length "$SD/runs.json") + 1))
-    jq -c --argjson id "$id" --arg b "$1" --arg s "$2" --arg st "$3" --arg c "$4" \
-        '. + [{databaseId: $id, event: "push", headBranch: $b, headSha: $s, status: $st, conclusion: $c, url: ("https://example/run/" + ($id | tostring))}]' \
-        "$SD/runs.json" > "$SD/runs.new"
+    jq -c --argjson id "$id" --arg r "$1" --arg w "$2" --arg e "$3" --arg b "$4" --arg s "$5" --arg st "$6" --arg c "$7" \
+        '. + [{databaseId: $id, repo: $r, workflow: $w, event: $e, headBranch: $b, headSha: $s, status: $st, conclusion: $c,
+               url: ("https://example/run/" + ($id | tostring))}]' "$SD/runs.json" > "$SD/runs.new"
     mv "$SD/runs.new" "$SD/runs.json"
 }
+# add_run TAG SHA STATUS CONCLUSION: the tag push's run in miint's CI.
+add_run() { add_run_in the-miint/duckdb-miint MainDistributionPipeline.yml push "$1" "$2" "$3" "$4"; }
+# add_ce_run BRANCH STATUS CONCLUSION: community-extensions' build of the fork branch's head.
+add_ce_run() { add_run_in duckdb/community-extensions build.yml pull_request "$1" "$(fork_branch "$1")" "$2" "$3"; }
 
 prs() {
     jq -c "$@" "$SD/prs.json" > "$SD/prs.new"
     mv "$SD/prs.new" "$SD/prs.json"
 }
-# set_checks PR CONCLUSION...: the PR's community-extensions checks; "" is still running.
-set_checks() {
-    local n="$1" checks
-    shift
-    checks="$(printf '%s\n' "$@" | jq -R '{conclusion: .}' | jq -sc '.')"
-    prs --argjson n "$n" --argjson c "$checks" 'map(if .number == $n then .checks = $c else . end)'
-}
 set_pr() { prs --argjson n "$1" "map(if .number == \$n then $2 else . end)"; }
 # add_foreign_pr BRANCH OWNER: an open draft PR from someone else's fork.
 add_foreign_pr() {
     prs --arg h "$1" --arg o "$2" \
-        '. + [{number: (length + 1), headRefName: $h, headRepositoryOwner: {login: $o}, isDraft: true, state: "OPEN", url: "https://example/pull/foreign", checks: []}]'
+        '. + [{number: (length + 1), headRefName: $h, headRepositoryOwner: {login: $o}, isDraft: true, state: "OPEN", url: "https://example/pull/foreign"}]'
 }
 
 invoke() {
@@ -184,7 +183,7 @@ changed_lines() { diff <(upstream_desc) <(fork_desc "$1") | grep -c '^>' || true
 pr_count() { jq length "$SD/prs.json"; }
 pr_at() { jq -r ".[$1].$2" "$SD/prs.json"; }
 # gh calls that change a PR.
-pr_changes() { grep -cE '^pr (create|ready)' "$SD/gh.calls" || true; }
+pr_changes() { grep -cE '^pr (create|ready|edit)' "$SD/gh.calls" || true; }
 has_line() { fork_desc "$1" | grep -qxF -- "$2"; }
 said() { printf '%s\n' "$OUT" | grep -qF -- "$1"; }
 # The maintainer's community-extensions checkout is exactly as they left it.
@@ -217,8 +216,14 @@ propose_rc1() {
     add_run v1.1.0-rc.1 "$T2" completed success
     invoke v1.1.0-rc.1
 }
+# A new commit T3 on the default branch.
+new_commit() {
+    T3="$(commit T3)"
+    git -C "$SD/miint" push -q origin v2.0-cyanoptera
+}
 
-# ---------------------------------------------------------------------------
+# --- PR transitions ----------------------------------------------------------
+
 new_scenario
 propose_rc1
 ok=0
@@ -232,41 +237,51 @@ fi
 report "a release candidate opens a draft PR pointing ref at the tagged commit" \
     "community-extensions' CI checks a candidate before anything can ship: the PR must name the tagged commit, change only ref and version, stay a draft so it cannot be merged early, and leave the maintainer's own checkout alone" "$ok"
 
-# ---------------------------------------------------------------------------
 new_scenario
 propose_rc1
 before="$(fork_branch miint-v1.1.0)"
-set_checks 1 SUCCESS SKIPPED
+add_ce_run miint-v1.1.0 completed success
 tag v1.1.0 "$T2"
 add_run v1.1.0 "$T2" completed success
 invoke v1.1.0
 ok=0
 if [ "$EXIT" = 0 ] && [ "$(fork_branch miint-v1.1.0)" = "$before" ] && [ "$(pr_count)" = 1 ] &&
-    [ "$(pr_at 0 isDraft)" = false ] && ce_untouched; then
+    [ "$(pr_at 0 isDraft)" = false ] && pr_at 0 body | grep -qF "tree/v1.1.0)" && ce_untouched; then
     ok=1
 fi
-report "the final tag on the candidate's commit readies the PR without pushing to it" \
-    "the final tag names the same build the candidate did; pushing to the PR again would rebuild every platform on community-extensions for nothing" "$ok"
+report "the final tag on the candidate's commit readies the PR, naming the final tag, without pushing to it" \
+    "the final tag names the same build the candidate did; pushing again would rebuild every platform on community-extensions for nothing, and the merged PR should name the release, not the candidate" "$ok"
 
-# ---------------------------------------------------------------------------
-for checks in "SUCCESS ''" "none"; do
+for ce in "in_progress" "none"; do
     new_scenario
     propose_rc1
-    if [ "$checks" != none ]; then set_checks 1 SUCCESS ""; fi
+    if [ "$ce" != none ]; then add_ce_run miint-v1.1.0 in_progress ""; fi
     tag v1.1.0 "$T2"
     add_run v1.1.0 "$T2" completed success
     invoke v1.1.0
     ok=0
-    if [ "$EXIT" != 0 ] && [ "$(pr_at 0 isDraft)" = true ] && said "CI has not passed"; then ok=1; fi
-    report "the final tag leaves the PR a draft until its community-extensions CI passes (checks: $checks)" \
-        "readying the PR offers the build to DuckDB's maintainers to merge; a build whose own CI is still running or never ran must not be offered" "$ok"
+    expected="has not passed"
+    [ "$ce" = none ] && expected="has no build.yml run"
+    if [ "$EXIT" != 0 ] && [ "$(pr_at 0 isDraft)" = true ] && said "$expected" && said "rerun this script with v1.1.0"; then ok=1; fi
+    report "the final tag leaves the PR a draft until its community-extensions build passes (build: $ce)" \
+        "readying the PR offers the build to DuckDB's maintainers to merge; a build still running, or never run, must not be offered" "$ok"
 done
 
-# ---------------------------------------------------------------------------
 new_scenario
 propose_rc1
-T3="$(commit T3)"
-git -C "$SD/miint" push -q origin v2.0-cyanoptera
+add_ce_run miint-v1.1.0 completed success
+set_pr 1 '.headRefOid = "ffffffffffffffffffffffffffffffffffffffff"'
+tag v1.1.0 "$T2"
+add_run v1.1.0 "$T2" completed success
+invoke v1.1.0
+ok=0
+if [ "$EXIT" != 0 ] && [ "$(pr_at 0 isDraft)" = true ] && said "head is not"; then ok=1; fi
+report "the final tag does not ready a PR whose head is not the fork branch it checked" \
+    "the CI that passed is the CI of the commit the script checked; a PR head that moved since names something else" "$ok"
+
+new_scenario
+propose_rc1
+new_commit
 tag v1.1.0 "$T3"
 add_run v1.1.0 "$T3" completed success
 invoke v1.1.0
@@ -278,12 +293,22 @@ fi
 report "a final tag on a new commit pushes to the PR but leaves it a draft" \
     "a PR is marked ready only for a build community-extensions' CI has already passed; the new commit's build has only just started" "$ok"
 
-# ---------------------------------------------------------------------------
+new_scenario
+propose_rc1
+set_pr 1 '.isDraft = false'
+new_commit
+tag v1.1.0 "$T3"
+add_run v1.1.0 "$T3" completed success
+invoke v1.1.0
+ok=0
+if [ "$EXIT" = 0 ] && has_line miint-v1.1.0 "  ref: $T3" && [ "$(pr_at 0 isDraft)" = true ]; then ok=1; fi
+report "a final tag on a new commit turns a ready PR back into a draft" \
+    "a ready PR can be merged, and the new commit's build has not been checked" "$ok"
+
 new_scenario
 propose_rc1
 before="$(fork_branch miint-v1.1.0)"
-T3="$(commit T3)"
-git -C "$SD/miint" push -q origin v2.0-cyanoptera
+new_commit
 tag v1.1.0-rc.2 "$T3"
 add_run v1.1.0-rc.2 "$T3" completed success
 invoke v1.1.0-rc.2
@@ -297,12 +322,10 @@ fi
 report "a second candidate on a new commit updates the same draft PR" \
     "one release is one PR: the maintainers review a single thread, and its CI always tests the newest candidate" "$ok"
 
-# ---------------------------------------------------------------------------
 new_scenario
 propose_rc1
 set_pr 1 '.isDraft = false'
-T3="$(commit T3)"
-git -C "$SD/miint" push -q origin v2.0-cyanoptera
+new_commit
 tag v1.1.0-rc.2 "$T3"
 add_run v1.1.0-rc.2 "$T3" completed success
 invoke v1.1.0-rc.2
@@ -311,25 +334,36 @@ if [ "$EXIT" = 0 ] && has_line miint-v1.1.0 "  ref: $T3" && [ "$(pr_at 0 isDraft
 report "a candidate pushed to a ready PR turns it back into a draft" \
     "a ready PR can be merged, and a candidate's commit must not ship as the release that extension.version names" "$ok"
 
-# ---------------------------------------------------------------------------
 new_scenario
 propose_rc1
 before="$(fork_branch miint-v1.1.0)"
-set_pr 1 '.state = "CLOSED"'
-T3="$(commit T3)"
-git -C "$SD/miint" push -q origin v2.0-cyanoptera
+set_pr 1 '.isDraft = false | .undoFails = true'
+new_commit
 tag v1.1.0-rc.2 "$T3"
 add_run v1.1.0-rc.2 "$T3" completed success
 invoke v1.1.0-rc.2
 ok=0
-if [ "$EXIT" != 0 ] && [ "$(fork_branch miint-v1.1.0)" = "$before" ] && [ "$(pr_count)" = 1 ] &&
-    said "push origin --delete miint-v1.1.0"; then
+if [ "$EXIT" != 0 ] && [ "$(fork_branch miint-v1.1.0)" = "$before" ]; then ok=1; fi
+report "a PR that cannot be turned back into a draft is not pushed to" \
+    "pushing first and failing to undo would leave a mergeable PR naming a commit nobody has checked" "$ok"
+
+new_scenario
+tag v1.0.2 "$L2"
+add_run v1.0.2 "$L2" completed success
+invoke v1.0.2 variegata
+first_draft="$(pr_at 0 isDraft)"
+add_ce_run miint-variegata-v1.0.2 completed success
+invoke v1.0.2 variegata
+ok=0
+B=miint-variegata-v1.0.2
+if [ "$EXIT" = 0 ] && [ "$first_draft" = true ] && [ "$(pr_at 0 isDraft)" = false ] && has_line $B "  variegata: $L2" &&
+    has_line $B "  ref: $OLD_REF" && has_line $B "  version: '1.0.1'" && [ "$(changed_lines $B)" = 1 ] &&
+    [ "$(pr_count)" = 1 ]; then
     ok=1
 fi
-report "a fork branch left by a closed PR is refused, with the command that clears it" \
-    "that branch holds an abandoned descriptor on an old upstream; building on it would propose a PR that conflicts with what upstream has since merged" "$ok"
+report "a frozen series' release changes only its own key, and opens as a draft until its build passes" \
+    "community-extensions rebuilds only the keys a PR changes, and extension.version describes the latest-stable series; and a release with no candidate gets the same CI check before it is offered to merge" "$ok"
 
-# ---------------------------------------------------------------------------
 new_scenario
 add_foreign_pr miint-v1.1.0 someone-else
 propose_rc1
@@ -341,122 +375,6 @@ fi
 report "another fork's open PR from a same-named branch is not taken for this release's" \
     "gh matches --head by branch name on any fork; acting on that PR would ready or report someone else's change, and never propose ours" "$ok"
 
-# ---------------------------------------------------------------------------
-new_scenario
-add_run v1.1.0-rc.1 "$T2" completed success
-invoke "$T2"
-ok=0
-if [ "$EXIT" != 0 ] && nothing_proposed && said 'vX.Y.Z'; then ok=1; fi
-report "a commit hash is refused" \
-    "community-extensions builds whatever ref names, and only a commit carrying a vX.Y.Z tag makes the shipped binary report its version instead of a hash" "$ok"
-
-# ---------------------------------------------------------------------------
-new_scenario
-tag v1.1.0-rc.1 "$T2"
-tag v1.1.0 "$T2" lightweight
-add_run v1.1.0 "$T2" completed success
-invoke v1.1.0
-ok=0
-if [ "$EXIT" != 0 ] && nothing_proposed && said 'annotated'; then ok=1; fi
-report "a lightweight tag is refused" \
-    "git describe prefers an annotated tag on the same commit, so a lightweight final tag beside an annotated candidate ships a binary that reports the candidate's version" "$ok"
-
-# ---------------------------------------------------------------------------
-new_scenario
-git -C "$SD/miint" tag -a v1.1.0-rc.1 -m "Release v1.1.0-rc.1" "$T2"
-add_run v1.1.0-rc.1 "$T2" completed success
-invoke v1.1.0-rc.1
-ok=0
-if [ "$EXIT" != 0 ] && nothing_proposed && said 'push the tag first'; then ok=1; fi
-report "a tag that was never pushed is refused" \
-    "community-extensions checks the commit out from GitHub; a tag that exists only locally is not there for the build to report" "$ok"
-
-# ---------------------------------------------------------------------------
-new_scenario
-tag v1.1.0-rc.1 "$T2"
-add_run v1.1.0-rc.1 "$T2" completed success
-git -C "$SD/miint" config --unset "url.$SD/miint.git.insteadOf"
-git -C "$SD/miint" config "url.$SD/nowhere.git.insteadOf" "$MIINT_URL"
-invoke v1.1.0-rc.1
-ok=0
-if [ "$EXIT" != 0 ] && nothing_proposed && said "cannot read origin" && ! said 'push the tag first'; then ok=1; fi
-report "an unreachable origin is reported as such" \
-    "telling the maintainer to push a tag that is already pushed sends them after the wrong problem" "$ok"
-
-# ---------------------------------------------------------------------------
-new_scenario
-git -C "$SD/miint" remote set-url origin https://github.com/someone/duckdb-miint.git
-git -C "$SD/miint" config "url.$SD/miint.git.insteadOf" https://github.com/someone/duckdb-miint.git
-tag v1.1.0-rc.1 "$T2"
-add_run v1.1.0-rc.1 "$T2" completed success
-invoke v1.1.0-rc.1
-ok=0
-if [ "$EXIT" != 0 ] && nothing_proposed && said 'repo.github'; then ok=1; fi
-report "an origin other than the descriptor's repository is refused" \
-    "community-extensions checks the commit out from repo.github; a tag and branch found on a personal fork may not exist there" "$ok"
-
-# ---------------------------------------------------------------------------
-new_scenario
-tag v1.2.0 "$F1"
-add_run v1.2.0 "$F1" completed success
-invoke v1.2.0
-ok=0
-if [ "$EXIT" != 0 ] && nothing_proposed && said 'v2.0-cyanoptera'; then ok=1; fi
-report "a tag off the default branch is refused" \
-    "only code merged to the release branch ships; a tag on an unmerged branch would publish code no review has passed" "$ok"
-
-# ---------------------------------------------------------------------------
-for state in "completed failure" "in_progress " "none"; do
-    new_scenario
-    tag v1.1.0-rc.1 "$T2"
-    if [ "$state" != none ]; then
-        # shellcheck disable=SC2086 # the status and conclusion are two words on purpose
-        add_run v1.1.0-rc.1 "$T2" $state
-    fi
-    invoke v1.1.0-rc.1
-    ok=0
-    if [ "$EXIT" != 0 ] && nothing_proposed && said 'CI'; then ok=1; fi
-    report "a tag whose CI run has not passed is refused ($state)" \
-        "wasm_eh and the full platform list build only on a tag push; a tag whose run has not passed may not build on community-extensions either" "$ok"
-done
-
-# ---------------------------------------------------------------------------
-new_scenario
-tag v1.0.2 "$L2"
-add_run v1.0.2 "$L2" completed success
-invoke v1.0.2 variegata
-ok=0
-B=miint-variegata-v1.0.2
-if [ "$EXIT" = 0 ] && [ -n "$(fork_branch $B)" ] && has_line $B "  variegata: $L2" &&
-    has_line $B "  ref: $OLD_REF" && has_line $B "  version: '1.0.1'" && [ "$(changed_lines $B)" = 1 ] &&
-    [ "$(pr_count)" = 1 ] && [ "$(pr_at 0 isDraft)" = false ]; then
-    ok=1
-fi
-report "a frozen-line release changes only its own key" \
-    "community-extensions rebuilds only the keys a PR changes, and extension.version describes the latest-stable line, so touching ref or version would rebuild or mislabel the current release" "$ok"
-
-# ---------------------------------------------------------------------------
-new_scenario
-tag v1.1.0-rc.1 "$T2"
-add_run v1.1.0-rc.1 "$T2" completed success
-invoke v1.1.0-rc.1 variegata
-ok=0
-if [ "$EXIT" != 0 ] && nothing_proposed && said 'v1.5-variegata'; then ok=1; fi
-report "a frozen-line key needs a tag on that line" \
-    "the key decides which DuckDB version builds the commit, and a commit from the DuckDB 2.0 line does not build against DuckDB 1.5" "$ok"
-
-# ---------------------------------------------------------------------------
-new_scenario
-git -C "$SD/miint" push -q origin "$T2:refs/heads/v9.9-github"
-tag v1.1.0-rc.1 "$T2"
-add_run v1.1.0-rc.1 "$T2" completed success
-invoke v1.1.0-rc.1 github
-ok=0
-if [ "$EXIT" != 0 ] && nothing_proposed && said "'  github: <commit>'"; then ok=1; fi
-report "a key that does not hold a commit is refused" \
-    "rewriting repo.github, or an extension: field, with a commit hash would propose a descriptor community-extensions cannot build" "$ok"
-
-# ---------------------------------------------------------------------------
 new_scenario
 tag v1.1.0-rc.1 "$T2"
 add_run v1.1.0-rc.1 "$T2" completed success
@@ -468,6 +386,158 @@ if [ "$EXIT" = 0 ] && nothing_proposed && ce_untouched &&
 fi
 report "--dry-run shows the descriptor change and proposes nothing" \
     "the maintainer can see exactly what will be proposed before anything reaches a shared repository" "$ok"
+
+# --- Refusals ----------------------------------------------------------------
+
+new_scenario
+propose_rc1
+before="$(fork_branch miint-v1.1.0)"
+set_pr 1 '.state = "CLOSED"'
+new_commit
+tag v1.1.0-rc.2 "$T3"
+add_run v1.1.0-rc.2 "$T3" completed success
+invoke v1.1.0-rc.2
+ok=0
+if [ "$EXIT" != 0 ] && [ "$(fork_branch miint-v1.1.0)" = "$before" ] && [ "$(pr_count)" = 1 ] &&
+    said "push origin --delete miint-v1.1.0"; then
+    ok=1
+fi
+report "a fork branch with no open PR from it is refused, with the command that clears it" \
+    "that branch holds an unfinished attempt on an old upstream; building on it would propose a PR that conflicts with what upstream has since merged" "$ok"
+
+new_scenario
+add_run v1.1.0-rc.1 "$T2" completed success
+invoke "$T2"
+ok=0
+if [ "$EXIT" != 0 ] && nothing_proposed && said 'vX.Y.Z'; then ok=1; fi
+report "a commit hash is refused" \
+    "community-extensions builds whatever ref names, and only a commit carrying a vX.Y.Z tag makes the shipped binary report its version instead of a hash" "$ok"
+
+new_scenario
+tag v1.1.0 "$T2" lightweight
+add_run v1.1.0 "$T2" completed success
+invoke v1.1.0
+ok=0
+if [ "$EXIT" != 0 ] && nothing_proposed && said 'lightweight'; then ok=1; fi
+report "a lightweight tag is refused" \
+    "a release's tag message is its summary, and an annotated tag records who tagged it and when; a lightweight tag has none of them" "$ok"
+
+new_scenario
+tag v1.1.0-rc.1 "$T2"
+tag v1.1.0 "$T2" lightweight
+add_run v1.1.0 "$T2" completed success
+invoke v1.1.0
+ok=0
+if [ "$EXIT" != 0 ] && nothing_proposed; then ok=1; fi
+report "a lightweight final tag beside an annotated candidate is refused" \
+    "git describe prefers an annotated tag on the same commit, so that build would report the candidate's version" "$ok"
+
+new_scenario
+tag v1.1.0 "$T2"
+tag v1.1.0-rc.1 "$T2"
+add_run v1.1.0 "$T2" completed success
+invoke v1.1.0
+ok=0
+if [ "$EXIT" != 0 ] && nothing_proposed && said "would report v1.1.0-rc.1"; then ok=1; fi
+report "a final tag older than a candidate on the same commit is refused" \
+    "git describe takes the newest annotated tag, so that build would report the candidate's version" "$ok"
+
+new_scenario
+git -C "$SD/miint" tag -a v1.1.0-rc.1 -m "Release v1.1.0-rc.1" "$T2"
+add_run v1.1.0-rc.1 "$T2" completed success
+invoke v1.1.0-rc.1
+ok=0
+if [ "$EXIT" != 0 ] && nothing_proposed && said 'push the tag first'; then ok=1; fi
+report "a tag that was never pushed is refused" \
+    "community-extensions checks the commit out from GitHub; a tag that exists only locally is not there for the build to report" "$ok"
+
+new_scenario
+tag v1.1.0-rc.1 "$T2"
+add_run v1.1.0-rc.1 "$T2" completed success
+git -C "$SD/miint" config --unset "url.$SD/miint.git.insteadOf"
+git -C "$SD/miint" config "url.$SD/nowhere.git.insteadOf" "$MIINT_URL"
+invoke v1.1.0-rc.1
+ok=0
+if [ "$EXIT" != 0 ] && nothing_proposed && said "cannot read origin" && ! said 'push the tag first'; then ok=1; fi
+report "an unreachable origin is reported as such" \
+    "telling the maintainer to push a tag that is already pushed sends them after the wrong problem" "$ok"
+
+new_scenario
+git -C "$SD/miint" remote set-url origin https://github.com/someone/duckdb-miint.git
+git -C "$SD/miint" config "url.$SD/miint.git.insteadOf" https://github.com/someone/duckdb-miint.git
+tag v1.1.0-rc.1 "$T2"
+add_run_in someone/duckdb-miint MainDistributionPipeline.yml push v1.1.0-rc.1 "$T2" completed success
+invoke v1.1.0-rc.1
+ok=0
+if [ "$EXIT" != 0 ] && nothing_proposed && said 'repo.github'; then ok=1; fi
+report "an origin other than the descriptor's repository is refused" \
+    "community-extensions checks the commit out from repo.github; a tag and branch found on a personal fork may not exist there" "$ok"
+
+new_scenario
+git -C "$SD/ce" remote set-url upstream https://github.com/someone/community-extensions.git
+git -C "$SD/ce" config "url.$SD/ce-upstream.git.insteadOf" https://github.com/someone/community-extensions.git
+propose_rc1
+ok=0
+if [ "$EXIT" != 0 ] && nothing_proposed && said "'upstream' remote must be duckdb/community-extensions"; then ok=1; fi
+report "an upstream other than duckdb/community-extensions is refused" \
+    "the change is proposed against upstream's descriptor; any other repository's is not the one DuckDB builds from" "$ok"
+
+new_scenario
+printf '{"tester/community-extensions": {"owner": {"login": "tester"}, "parent": null}}' > "$SD/fork.json"
+propose_rc1
+ok=0
+if [ "$EXIT" != 0 ] && nothing_proposed && said "is not a fork of duckdb/community-extensions"; then ok=1; fi
+report "an origin that is not a fork of duckdb/community-extensions is refused" \
+    "the script pushes to origin before it opens the PR; pushing release branches to an unrelated repository is a change nobody asked for" "$ok"
+
+new_scenario
+tag v1.2.0 "$F1"
+add_run v1.2.0 "$F1" completed success
+invoke v1.2.0
+ok=0
+if [ "$EXIT" != 0 ] && nothing_proposed && said 'v2.0-cyanoptera'; then ok=1; fi
+report "a tag off the default branch is refused" \
+    "only code merged to the release branch ships; a tag on an unmerged branch would publish code no review has passed" "$ok"
+
+for state in "completed failure" "in_progress " "none" "other-commit"; do
+    new_scenario
+    tag v1.1.0-rc.1 "$T2"
+    # shellcheck disable=SC2086 # the status and conclusion are two words
+    case "$state" in
+        none) ;;
+        other-commit) add_run v1.1.0-rc.1 "$L2" completed success ;;
+        *) add_run v1.1.0-rc.1 "$T2" $state ;;
+    esac
+    invoke v1.1.0-rc.1
+    ok=0
+    case "$state" in
+        none) expected="no CI run" ;;
+        other-commit) expected="tested ${L2:0:7}" ;;
+        *) expected="has not passed" ;;
+    esac
+    if [ "$EXIT" != 0 ] && nothing_proposed && said "$expected"; then ok=1; fi
+    report "a tag whose CI run has not passed on its commit is refused ($state)" \
+        "wasm_eh builds only on a tag push; a tag whose run has not passed, or tested another commit, may not build on community-extensions either" "$ok"
+done
+
+new_scenario
+tag v1.1.0-rc.1 "$T2"
+add_run v1.1.0-rc.1 "$T2" completed success
+invoke v1.1.0-rc.1 variegata
+ok=0
+if [ "$EXIT" != 0 ] && nothing_proposed && said 'v1.5-variegata'; then ok=1; fi
+report "a frozen series' key needs a tag on that series" \
+    "the key decides which DuckDB version builds the commit, and a commit from the DuckDB 2.0 series does not build against DuckDB 1.5" "$ok"
+
+new_scenario
+git -C "$SD/miint" push -q origin "$T2:refs/heads/v9.9-github"
+tag v1.1.0-rc.1 "$T2"
+add_run v1.1.0-rc.1 "$T2" completed success
+invoke v1.1.0-rc.1 github
+ok=0
+if [ "$EXIT" != 0 ] && nothing_proposed && said "'  github: <commit>'"; then ok=1; fi
+report "a key that does not hold a commit is refused" \
+    "rewriting repo.github, or an extension: field, with a commit hash would propose a descriptor community-extensions cannot build" "$ok"
 
 # ---------------------------------------------------------------------------
 if [ "$FAILED" = 0 ]; then

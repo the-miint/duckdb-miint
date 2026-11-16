@@ -1,6 +1,13 @@
 # Releasing
 
-How a duckdb-miint release is numbered, cut, and delivered to `INSTALL miint FROM community`. Moving to a new DuckDB version is a separate procedure: [`../UPDATING.md`](../UPDATING.md).
+How a duckdb-miint release is numbered, cut, and delivered to `INSTALL miint FROM community`. Moving to a new DuckDB release series is a separate procedure: [`docs/UPDATING.md`](https://github.com/the-miint/duckdb-miint/blob/HEAD/docs/UPDATING.md).
+
+## How community-extensions builds miint
+
+- The descriptor, `extensions/miint/description.yml` in [duckdb/community-extensions](https://github.com/duckdb/community-extensions), names one miint commit per DuckDB release series, under a key: `ref` for DuckDB's latest stable release, the series' codename (`variegata`, ...) for an older one, `ref_next` for an upcoming one. `extension.version` is a single field shared by all of them, so it follows `ref`.
+- A merged descriptor change rebuilds only the keys it changed, on every platform the descriptor allows (wasm_mvp and wasm_threads among them, which miint's CI never builds), and publishes the result over the previous build. There are no versioned installs.
+- At every DuckDB release, community-extensions rebuilds every extension from `ref` without asking. So `ref` only ever names a release tag.
+- DuckDB staff review every descriptor PR, so release when there is something to ship, at most about monthly, and not per merge.
 
 ## Versions and tags
 
@@ -9,28 +16,21 @@ Versions are semver on the SQL surface, independent of DuckDB's numbering:
 | Bump | When |
 |---|---|
 | Major | A released function is removed or renamed, its parameters, output columns or types change, or a changed default changes results. |
-| Minor | New functions or features, and moving to a new DuckDB minor version. |
+| Minor | New functions or features, and moving to a new DuckDB release series (1.5 → 2.0 included). |
 | Patch | Fixes only, build fixes included. |
 
 A release is an annotated tag, `vX.Y.Z`, preceded by one or more `vX.Y.Z-rc.N` on the commit it will name. The tag message is the release's summary.
 
-A DuckDB 2.0 build of a tagged commit reports the tag as its version (`miint_version()`, `extension_version` in `duckdb_extensions()`), found with `git describe --tags --match "v*.*.*"`. It reports a commit hash otherwise. `git describe` prefers an annotated tag over a lightweight one on the same commit, and the newer of two annotated tags, so tag the final after the candidate, and never lightweight. DuckDB 1.5 builds always report a hash: its build passes the pattern with literal quotes, fixed for 2.0 by [duckdb/duckdb#24083](https://github.com/duckdb/duckdb/pull/24083).
+A DuckDB 2.0 build of a tagged commit reports the tag as its version (`miint_version()`, `extension_version` in `duckdb_extensions()`), found with `git describe --tags --match "v*.*.*"`. It reports a commit hash otherwise. Among the release tags on the commit, `git describe` prefers an annotated tag to a lightweight one, then the newest, so tag the final after the candidate. DuckDB 1.5 builds always report a hash: its build passes the pattern with literal quotes, fixed for 2.0 by [duckdb/duckdb#24083](https://github.com/duckdb/duckdb/pull/24083).
 
 ## Branches
 
 | Branch | Releases | Descriptor key |
 |---|---|---|
 | The default branch, for DuckDB's latest stable release (`v2.0-cyanoptera`) | every release | `ref` |
-| The previous DuckDB line (`v1.5-variegata`) | frozen at `v1.0.1`; a patch release only on demand | the line's codename (`variegata`) |
+| An older series' branch (`v1.5-variegata`) | frozen: a patch release only on demand | the series' codename (`variegata`) |
 
-When DuckDB opens its next release's feature freeze (a `vX.Y-<codename>` branch upstream), create the matching branch and set `ref_next` in the descriptor by hand, as community-extensions' [`UPDATING.md`](https://github.com/duckdb/community-extensions/blob/main/UPDATING.md) describes. At DuckDB's release that branch becomes the default, and the old one freezes under its codename key.
-
-## How community-extensions builds miint
-
-- The descriptor, `extensions/miint/description.yml` in [duckdb/community-extensions](https://github.com/duckdb/community-extensions), names one commit per DuckDB line (`ref`, `variegata`, ...). `extension.version` is a single field shared by all of them, so it follows `ref`.
-- A merged descriptor change rebuilds only the keys it changed, on every platform, and publishes the result over the previous build. There are no versioned installs.
-- At every DuckDB release, community-extensions rebuilds every extension from `ref` without asking. So `ref` only ever names a release tag.
-- DuckDB staff review every descriptor PR, so release when there is something to ship, at most about monthly, and not per merge.
+When DuckDB opens its next release's feature freeze (a `vX.Y-<codename>` branch upstream), create the matching branch and set `ref_next` in the descriptor, by hand, to a release candidate's commit, as community-extensions' [`UPDATING.md`](https://github.com/duckdb/community-extensions/blob/main/UPDATING.md) describes. At DuckDB's release that branch becomes the default and its candidate's final tag goes to `ref`; add the old series' codename key, by hand, naming the commit of its last release tag. The script then maintains both.
 
 ## Cutting a release
 
@@ -40,27 +40,44 @@ When DuckDB opens its next release's feature freeze (a `vX.Y-<codename>` branch 
    git tag -a v1.2.0-rc.1 -m "Release v1.2.0-rc.1 ..." <commit>
    git push origin v1.2.0-rc.1
    ```
-   The tag push builds every platform, wasm_eh included, which branch pushes and pull requests do not.
+   The tag push adds wasm_eh to the platforms CI builds, which branch pushes and pull requests skip.
 3. When that run passes, propose it:
    ```bash
    ./scripts/release-community-extension.sh v1.2.0-rc.1
    ```
    This opens a draft PR from your fork. A fix means a new commit, `-rc.2` on it, and the same command, which pushes to the same PR.
-4. When the tag's CI and the PR's CI have both passed, tag the final on the same commit, push it, and wait for its CI:
+4. When the PR's own CI has passed, tag the final on the same commit and push it:
    ```bash
    git tag -a v1.2.0 -m "Release v1.2.0 ..." <same commit>
    git push origin v1.2.0
+   ```
+5. When the final tag's CI run has passed:
+   ```bash
    ./scripts/release-community-extension.sh v1.2.0
    ```
-   The script marks the PR ready, without pushing to it, once the PR's own CI has passed on the commit it names; until then it says so and changes nothing. A candidate pushed to a ready PR turns it back into a draft.
-5. Publish the release notes:
+   The script marks the PR ready, without pushing to it, once the PR's `Community Extension Build` run on the commit it names has passed; until then it says so and changes nothing.
+6. Publish the release notes:
    ```bash
    gh release create v1.2.0 --verify-tag --generate-notes --notes-start-tag <previous release>
    ```
-6. The publish cron (`scripts/cron-publish-extension.sh`) puts the tag's builds, wasm_eh included, under `tagged/<duckdb version>/` on its next run.
+7. The publish cron (`scripts/cron-publish-extension.sh`) puts the tag's builds, wasm_eh included, under `tagged/<duckdb version>/` on its next run.
 
-A patch release on a frozen line names its key: `./scripts/release-community-extension.sh v1.0.2 variegata`.
+A patch release on a frozen series names its key, `./scripts/release-community-extension.sh v1.0.2 variegata`, and needs no candidate: the PR opens as a draft, and running the same command again once its CI has passed marks it ready.
 
-## What the script refuses
+## What the script refuses, and why
 
-`scripts/release-community-extension.sh` proposes nothing unless the tag is an annotated `vX.Y.Z` or `vX.Y.Z-rc.N`, is on origin (the repository the descriptor's `repo.github` names), names a commit on the key's release branch, and its tag push's CI run passed. It refuses a key that does not already hold a commit, and a fork branch left by a closed PR. `--dry-run` runs every check and prints the descriptor change, pushing nothing and changing no PR; like every run, it fetches the tag and the remotes' branches. It never switches or edits your community-extensions checkout: it commits in a temporary worktree. It expects that checkout at `../community-extensions` (or `COMMUNITY_EXTENSIONS_DIR`), with your fork as `origin` and duckdb/community-extensions as `upstream`. `test/shell/release_community_extension.sh` covers each refusal and each PR state.
+`scripts/release-community-extension.sh` proposes nothing when:
+
+| Refused | Why |
+|---|---|
+| The argument is not `vX.Y.Z` or `vX.Y.Z-rc.N` | The descriptor names only tagged commits, the only ones whose build reports a version. |
+| The tag is lightweight | The tag message is the release's summary, and `git describe` ranks any annotated tag on the commit above it. |
+| A build of the commit would report another tag | `git describe` over origin's tags on the commit, as the build runs it, must give this tag. |
+| The tag is not on origin, or origin is not the descriptor's `repo.github` | community-extensions checks the commit out from `repo.github`. |
+| The commit is not on the key's release branch | Only merged code ships. |
+| The tag push's CI run is missing, has not passed, or tested another commit | Only a tag push builds wasm_eh. |
+| The key does not already hold a commit | So `repo.github` or an `extension:` field is never rewritten. |
+| `origin` is not your fork of duckdb/community-extensions, or `upstream` is not duckdb/community-extensions | The change is proposed against upstream's descriptor, from a branch on your fork. |
+| Your fork has the release's branch but no open PR from it | It holds an unfinished attempt on an old upstream; the script prints the command that deletes it. |
+
+On the PR it proposes, every new PR opens as a draft, a ready PR goes back to draft before anything is pushed to it, and only a final tag, once the PR's build has passed on the commit the fork branch names, marks it ready. `--dry-run` runs every check up to the descriptor change and prints the change, pushing nothing and changing no PR; like every run, it fetches the tag and the remotes' branches. The script never switches or edits your community-extensions checkout: it commits in a temporary worktree. It expects that checkout at `../community-extensions` (or `COMMUNITY_EXTENSIONS_DIR`). `test/shell/release_community_extension.sh` has a scenario for each refusal and each PR transition.
