@@ -45,7 +45,7 @@ action=""
     shift
 }
 expr="." json="" repo="" workflow="" branch="" commit="" event="" state="" limit=20 head="" title="" body=""
-draft=false undo=false positional="" method=GET fields=()
+draft=false undo=false silent=false positional="" method=GET fields=()
 while (($#)); do
     case "$1" in
         --jq) expr="$2"; shift 2 ;;
@@ -65,7 +65,7 @@ while (($#)); do
         --undo) undo=true; shift ;;
         -X) method="$2"; shift 2 ;;
         -f) fields+=("$2"); shift 2 ;;
-        --silent) shift ;;
+        --silent) silent=true; shift ;;
         -*) refuse "unsupported flag '$1'" ;;
         *) positional="$1"; shift ;;
     esac
@@ -132,7 +132,10 @@ case "$sub $action" in
             [[ "$positional" =~ ^repos/$CE_REPO/pulls/([0-9]+)$ ]] || refuse "unsupported PATCH of '$positional'"
             n="${BASH_REMATCH[1]}"
             [[ ${#fields[@]} -eq 1 && "${fields[0]}" == body=* ]] || refuse "PATCH of a PR with fields other than body"
-            jq -e --argjson n "$n" 'any(.[]; .number == $n)' "$PRS" > /dev/null || refuse "PATCH of PR $n, which does not exist"
+            # Without --silent, the real CLI prints the whole pull request into the output.
+            [[ "$silent" == true ]] || refuse "PATCH of a PR without --silent"
+            jq -e --argjson n "$n" 'any(.[]; .number == $n and .state == "OPEN")' "$PRS" > /dev/null ||
+                refuse "PATCH of PR $n, which is not an open PR"
             update_prs --argjson n "$n" --arg b "${fields[0]#body=}" 'map(if .number == $n then .body = $b else . end)'
             exit 0
         fi

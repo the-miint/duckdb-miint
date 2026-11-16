@@ -196,8 +196,8 @@ upstream_desc() { git --git-dir="$SD/ce-upstream.git" show "main:$DESC"; }
 changed_lines() { diff <(upstream_desc) <(fork_desc "$1") | grep -c '^>' || true; }
 pr_count() { jq length "$SD/prs.json"; }
 pr_at() { jq -r ".[$1].$2" "$SD/prs.json"; }
-# gh calls that change a PR.
-pr_changes() { grep -cE '^pr (create|ready|edit)' "$SD/gh.calls" || true; }
+# gh calls that change a PR: a description is set with `api -X PATCH`.
+pr_changes() { grep -cE '^(pr (create|ready|edit)|api -X PATCH)' "$SD/gh.calls" || true; }
 has_line() { fork_desc "$1" | grep -qxF -- "$2"; }
 said() { printf '%s\n' "$OUT" | grep -qF -- "$1"; }
 # The maintainer's community-extensions checkout is exactly as they left it.
