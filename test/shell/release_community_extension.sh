@@ -266,25 +266,30 @@ fi
 report "the final tag on the candidate's commit readies the PR, naming the final tag, without pushing to it" \
     "the final tag names the same build the candidate did; pushing again would rebuild every platform on community-extensions for nothing, and the merged PR should name the release, not the candidate" "$ok"
 
-for ce in "in_progress " "completed failure" "none" "completed success skipped"; do
+for ce in "in_progress " "completed failure" "none" "completed success skipped" "completed success matrix-only"; do
     new_scenario
     propose_rc1
     # shellcheck disable=SC2086 # the status and conclusion are two words
     case "$ce" in
         none) ;;
         *skipped) add_ce_run miint-v1.1.0 completed success build.yml skipped ;;
+        *matrix-only)
+            add_run_in duckdb/community-extensions build.yml pull_request miint-v1.1.0 "$(fork_branch miint-v1.1.0)" completed success \
+                '[{"name": "build / Generate matrix", "conclusion": "success"}, {"name": "build / linux_amd64", "conclusion": "skipped"}]'
+            ;;
         *) add_ce_run miint-v1.1.0 $ce ;;
     esac
     tag v1.1.0 "$T2"
     add_run v1.1.0 "$T2" completed success
     invoke v1.1.0
     ok=0
+    hint="rerun ./scripts/release-community-extension.sh v1.1.0 once"
     case "$ce" in
         none) expected="has no build.yml run" ;;
-        *skipped) expected="built nothing" ;;
+        *skipped | *matrix-only) expected="has no passed platform build job" hint="" ;;
         *) expected="has not passed" ;;
     esac
-    if [ "$EXIT" != 0 ] && [ "$(pr_at 0 isDraft)" = true ] && said "$expected"; then ok=1; fi
+    if [ "$EXIT" != 0 ] && [ "$(pr_at 0 isDraft)" = true ] && said "$expected" && { [ -z "$hint" ] || said "$hint"; }; then ok=1; fi
     report "the final tag leaves the PR a draft until its community-extensions build passes (build: $ce)" \
         "readying the PR offers the build to DuckDB's maintainers to merge; a build still running, failed, never run, or skipped must not be offered" "$ok"
 done
@@ -321,10 +326,9 @@ report "a fork URL that spells the owner in another case still finds the release
 new_scenario
 propose_rc1
 tag v1.1.0 "$T2"
-add_ce_run miint-v1.1.0 completed success
-invoke --dry-run v1.1.0
+invoke v1.1.0
 ok=0
-if [ "$EXIT" != 0 ] && said "no CI run"; then ok=1; fi
+if [ "$EXIT" != 0 ] && said "no CI run" && [ "$(pr_changes)" = 1 ] && [ "$(pr_at 0 isDraft)" = true ]; then ok=1; fi
 report "a final tag with no CI run of its own is refused, though its candidate's run passed on the same commit" \
     "each tag's own push builds what that tag's binary reports; a candidate's run built a binary that reports the candidate" "$ok"
 
@@ -517,6 +521,18 @@ ok=0
 if [ "$EXIT" != 0 ] && nothing_proposed && said "differs from origin's"; then ok=1; fi
 report "a local tag that differs from origin's is refused" \
     "the checks would read a commit other than the one community-extensions fetches" "$ok"
+
+new_scenario
+tag v1.1.0 "$T2"
+tag v1.1.0-rc.1 "$T2"
+add_run v1.1.0 "$T2" completed success
+git -C "$SD/miint" tag -d v1.1.0-rc.1 > /dev/null
+git -C "$SD/miint" tag -a v1.1.0-rc.1 -m "moved" "$F1"
+invoke v1.1.0
+ok=0
+if [ "$EXIT" != 0 ] && nothing_proposed && said "local tag v1.1.0-rc.1 differs"; then ok=1; fi
+report "a local copy of another release tag on the commit that differs from origin's is refused" \
+    "git describe would then see another set of tags than community-extensions' checkout; here origin's build reports the candidate, which the moved local copy would hide" "$ok"
 
 new_scenario
 tag v1.1.0 "$T2"

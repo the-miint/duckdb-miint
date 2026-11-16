@@ -12,9 +12,10 @@
 #
 #   <key>      the descriptor key to point at the tag: `ref` (default) or a frozen
 #              release series' codename, such as `variegata`
-#   --dry-run  run every check up to the descriptor change and print the change; push
-#              nothing and change no PR. The check of the PR's own CI, which only
-#              readying a PR needs, is not run.
+#   --dry-run  run every check up to the descriptor change, print the change (or that
+#              there is nothing to push) and the PR's state; push nothing and change no
+#              PR. The check of the PR's own CI, which only readying a PR needs, is not
+#              run.
 #
 # Environment:
 #   COMMUNITY_EXTENSIONS_DIR  clone of your community-extensions fork, with the fork as
@@ -302,8 +303,10 @@ else
     # Ready only the build its CI passed: the PR's head must be the fork branch that names
     # SHA, and the key's community-extensions workflow (build.yml for ref, build_<key>.yml
     # for a frozen series) must have built that commit and passed. A run whose key the PR
-    # did not change skips its build and still concludes success, so the build's own jobs
-    # (named ".../build / <platform>") must be there.
+    # did not change skips its build and still concludes success; choosing the key's own
+    # workflow avoids that run, and requiring a passed platform job (".../build /
+    # <platform>", not the matrix job) keeps the check true if community-extensions moves
+    # a key to another workflow.
     pr_head="$(gh pr view "$pr_number" --repo "$CE_REPO" --json headRefOid --jq .headRefOid)"
     [[ "$pr_head" == "$(git -C "$CE" rev-parse "refs/remotes/origin/$PR_BRANCH")" ]] ||
         die "PR $pr_url's head is not $FORK_OWNER:$PR_BRANCH as fetched; rerun"
@@ -313,8 +316,10 @@ else
     read -r ce_id ce_status ce_url ce_conclusion <<< "$ce_run"
     [[ "$ce_status" == completed && "$ce_conclusion" == success ]] ||
         die "PR $pr_url's CI has not passed (${ce_status} ${ce_conclusion:-}): $ce_url; $RERUN"
-    built="$(gh run view "$ce_id" --repo "$CE_REPO" --json jobs --jq '[.jobs[] | select(.name | test("(^| / )build / "))] | length')"
-    [[ "$built" -gt 0 ]] || die "PR $pr_url's $CE_WORKFLOW run built nothing (its build was skipped): $ce_url"
+    built="$(gh run view "$ce_id" --repo "$CE_REPO" --json jobs \
+        --jq '[.jobs[] | select((.name | test("(^| / )build / ")) and (.name | test("/ Generate matrix$") | not) and .conclusion == "success")] | length')"
+    [[ "$built" -gt 0 ]] ||
+        die "PR $pr_url's $CE_WORKFLOW run has no passed platform build job (a '.../build / <platform>' job): $ce_url"
     gh pr edit "$pr_number" --repo "$CE_REPO" --body "$body"
     gh pr ready "$pr_number" --repo "$CE_REPO"
     say "PR marked ready: $pr_url"

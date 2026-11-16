@@ -93,9 +93,12 @@ case "$sub $action" in
         git --git-dir="$FORK_GIT" rev-parse -q --verify "refs/heads/${head#*:}" > /dev/null ||
             refuse "pr create from ${head#*:}, which is not on the fork"
         n=$(($(jq length "$PRS") + 1))
-        # GitHub records the owner's login as it spells it (lowercase in these fixtures),
-        # whatever case the --head argument used.
-        owner="$(printf '%s' "${head%%:*}" | tr '[:upper:]' '[:lower:]')"
+        # GitHub records the owner's login as it spells it, whatever case the --head
+        # argument used: the login fork.json gives for that owner.
+        owner="$(jq -r --arg o "${head%%:*}" \
+            'to_entries[] | select((.key | split("/")[0] | ascii_downcase) == ($o | ascii_downcase)) | .value.owner.login' \
+            "$SCENARIO_DIR/fork.json")"
+        [[ -n "$owner" ]] || refuse "pr create from an owner fork.json does not know: ${head%%:*}"
         update_prs --argjson n "$n" --arg h "${head#*:}" --arg o "$owner" --arg t "$title" --arg b "$body" --argjson d "$draft" \
             '. + [{number: $n, headRefName: $h, headRepositoryOwner: {login: $o}, title: $t, body: $b, isDraft: $d, state: "OPEN",
                    url: ("https://example/pull/" + ($n | tostring))}]'
