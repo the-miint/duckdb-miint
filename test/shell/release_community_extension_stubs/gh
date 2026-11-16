@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2016 # $names inside single-quoted jq programs are jq variables
+# Stub gh for release-community-extension.sh scenario tests. Serves CI runs from
+# $SCENARIO_DIR/runs.json, keeps pull requests in $SCENARIO_DIR/prs.json, and answers
+# `api repos/<fork>` from $SCENARIO_DIR/fork.json.
+#
+# It models what the script relies on. Observed against the real CLI (gh 2.46,
+# duckdb/community-extensions, 2026-11-16): `pr list --head` matches the branch name on
+# any fork, and reports the fork as headRepositoryOwner.login, the owner's login as
+# GitHub spells it; `run list --workflow --commit` finds a PR's build run by its head
+# commit; a run whose descriptor key the PR did not change concludes success with its
+# `build` job skipped, and a run that built has jobs named ".../build / <platform>"
+# (`run view --json jobs`). From `gh pr ready --help`, not observed: `--undo` turns a PR
+# back into a draft. Taken from test/shell/cron_publish_extension_stubs/gh, where it was
+# observed: `run list --branch` matches a run's head branch (a tag push's is the tag),
+# newest first, `--limit` applied after filtering.
+#
+# To catch a script that asks the wrong question, it refuses what it does not model:
+# a --repo other than the one each command belongs to, `pr list` without
+# `--state open`, a PR whose head branch is not on the fork. It filters runs by --repo
+# and --workflow, and prints only the --json fields asked for. Every call is appended
+# to $SCENARIO_DIR/gh.calls.
+set -euo pipefail
+: "${SCENARIO_DIR:?}"
+printf '%s\n' "$*" >> "$SCENARIO_DIR/gh.calls"
+RUNS="$SCENARIO_DIR/runs.json"
+PRS="$SCENARIO_DIR/prs.json"
+FORK_GIT="$SCENARIO_DIR/ce-fork.git"
+CE_REPO=duckdb/community-extensions
+
+refuse() {
+    echo "gh stub: $1" >&2
+    exit 2
+}
+
+sub="$1"
+shift
+action=""
+[[ "$sub" == api ]] || {
+    action="$1"
+    shift
+}
+expr="." json="" repo="" workflow="" branch="" commit="" event="" state="" limit=20 head="" title="" body=""
+draft=false undo=false positional=""
+while (($#)); do
+    case "$1" in
+        --jq) expr="$2"; shift 2 ;;
+        --json) json="$2"; shift 2 ;;
+        --repo) repo="$2"; shift 2 ;;
+        --workflow) workflow="$2"; shift 2 ;;
+        --branch) branch="$2"; shift 2 ;;
+        --commit) commit="$2"; shift 2 ;;
+        --event) event="$2"; shift 2 ;;
+        --state) state="$2"; shift 2 ;;
+        --limit) limit="$2"; shift 2 ;;
+        --head) head="$2"; shift 2 ;;
+        --title) title="$2"; shift 2 ;;
+        --body) body="$2"; shift 2 ;;
+        --base) [[ "$2" == main ]] || refuse "unexpected --base $2"; shift 2 ;;
+        --draft) draft=true; shift ;;
+        --undo) undo=true; shift ;;
+        -*) refuse "unsupported flag '$1'" ;;
+        *) positional="$1"; shift ;;
+    esac
+done
+
+# project: keep only the --json fields, as the real CLI prints them.
+project() { jq -c --arg f "$json" '($f | split(",")) as $k | if type == "array" then map(with_entries(select(.key as $x | $k | index($x)))) else with_entries(select(.key as $x | $k | index($x))) end'; }
+update_prs() {
+    jq -c "$@" "$PRS" > "$PRS.new"
+    mv "$PRS.new" "$PRS"
+}
+pr_repo() { [[ "$repo" == "$CE_REPO" ]] || refuse "pr $action against '$repo', not $CE_REPO"; }
+
+case "$sub $action" in
+    "run list")
+        [[ -n "$repo" && -n "$workflow" ]] || refuse "run list without --repo and --workflow"
+        jq -c --arg r "$repo" --arg w "$workflow" --arg b "$branch" --arg c "$commit" --arg e "$event" --argjson n "$limit" \
+            '[.[] | select(.repo == $r and .workflow == $w and ($b == "" or .headBranch == $b) and ($c == "" or .headSha == $c) and ($e == "" or .event == $e))]
+             | sort_by(.databaseId) | reverse | .[:$n]' "$RUNS" | project | jq -r "$expr"
+        ;;
+    "pr list")
+        pr_repo
+        [[ "$state" == open ]] || refuse "pr list --state '$state' (only open is modelled)"
+        jq -c --arg h "$head" '[.[] | select(.headRefName == $h and .state == "OPEN")]' "$PRS" | project | jq -r "$expr"
+        ;;
+    "run view")
+        [[ "$repo" == "$CE_REPO" ]] || refuse "run view against '$repo', not $CE_REPO"
+        jq -c --argjson id "$positional" '.[] | select(.databaseId == $id)' "$RUNS" | project | jq -r "$expr"
+        ;;
+    "pr create")
+        pr_repo
+        git --git-dir="$FORK_GIT" rev-parse -q --verify "refs/heads/${head#*:}" > /dev/null ||
+            refuse "pr create from ${head#*:}, which is not on the fork"
+        n=$(($(jq length "$PRS") + 1))
+        # GitHub records the owner's login as it spells it, whatever case the --head
+        # argument used: the login fork.json gives for that owner.
+        owner="$(jq -r --arg o "${head%%:*}" \
+            'to_entries[] | select((.key | split("/")[0] | ascii_downcase) == ($o | ascii_downcase)) | .value.owner.login' \
+            "$SCENARIO_DIR/fork.json")"
+        [[ -n "$owner" ]] || refuse "pr create from an owner fork.json does not know: ${head%%:*}"
+        update_prs --argjson n "$n" --arg h "${head#*:}" --arg o "$owner" --arg t "$title" --arg b "$body" --argjson d "$draft" \
+            '. + [{number: $n, headRefName: $h, headRepositoryOwner: {login: $o}, title: $t, body: $b, isDraft: $d, state: "OPEN",
+                   url: ("https://example/pull/" + ($n | tostring))}]'
+        printf 'https://example/pull/%s\n' "$n"
+        ;;
+    "pr ready")
+        pr_repo
+        if [[ "$undo" == true ]] && jq -e --argjson n "$positional" '.[] | select(.number == $n) | .undoFails' "$PRS" > /dev/null; then
+            refuse "pr ready --undo failed (simulated)"
+        fi
+        update_prs --argjson n "$positional" --argjson u "$undo" 'map(if .number == $n then .isDraft = $u else . end)'
+        ;;
+    "pr edit")
+        pr_repo
+        update_prs --argjson n "$positional" --arg b "$body" 'map(if .number == $n then .body = $b else . end)'
+        ;;
+    "pr view")
+        pr_repo
+        # A PR's head is its fork branch's commit, unless the scenario moved it.
+        ref="$(jq -r --argjson n "$positional" '.[] | select(.number == $n) | .headRefName' "$PRS")"
+        oid="$(git --git-dir="$FORK_GIT" rev-parse "refs/heads/$ref")"
+        jq -c --argjson n "$positional" --arg oid "$oid" '.[] | select(.number == $n) | .headRefOid //= $oid' "$PRS" |
+            project | jq -r "$expr"
+        ;;
+    "api ")
+        [[ "$positional" == repos/* ]] || refuse "unsupported api path '$positional'"
+        jq -c --arg r "${positional#repos/}" '.[$r] // error("no such repository: \($r)")' "$SCENARIO_DIR/fork.json" | jq -r "$expr"
+        ;;
+    *) refuse "unsupported '$sub $action'" ;;
+esac

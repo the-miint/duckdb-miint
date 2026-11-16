@@ -174,6 +174,7 @@ Developer-facing deep dives live under `docs/internals/`:
 - **[`docs/internals/arrow-zero-copy.md`](docs/internals/arrow-zero-copy.md)** — zero-copy Arrow C Data Interface → DuckDB Vector conversion, with lifetime management and reference implementations.
 - **[`docs/internals/per-sample-pattern.md`](docs/internals/per-sample-pattern.md)** — the `sample_id` named parameter that partitions an input relation and runs a function's pipeline once per distinct sample, prepending a sample column. Covers `src/include/per_sample_table_function.hpp` (bind-time discovery, exec-time atomic claim) and which functions use it.
 - **[`docs/internals/duckdb-engine-notes.md`](docs/internals/duckdb-engine-notes.md)** — non-obvious DuckDB engine behavior that affects extension code, one section per engine area (such as why a caught DuckDB exception's `what()` is JSON); its headings list the areas.
+- **[`docs/internals/releasing.md`](docs/internals/releasing.md)** — version numbers, release branches, how a release is tagged and reaches community-extensions (`scripts/release-community-extension.sh`).
 
 User-facing API reference (parameters, return types, examples) is organized by task under `docs/` — start from the index at [`docs/table_of_contents.md`](docs/table_of_contents.md) (e.g. `docs/reading.md`, `docs/writing.md`, `docs/alignment_*.md`, `docs/qc.md`, `docs/diversity.md`, `docs/insdc_ena.md`, `docs/utilities.md`).
 

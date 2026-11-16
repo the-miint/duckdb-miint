@@ -12,7 +12,7 @@ as follows:
   - `duckdb_version` input in the `duckdb-stable-build` job
   - `duckdb_version` input in the `code-quality-check` job
   - the commented-out artifact name in the disabled `verify-wasm` job (`miint-<ver>-extension-...`), so it isn't stale when that job is re-enabled
-  - `ci_tools_version` and the `uses:` refs need NO change within a release series — they point at the moving release-series branch, not a per-patch tag. Moving to a new series (e.g. `v1.5-variegata` → `v2.0-cyanoptera`) changes both, together with the `./extension-ci-tools` branch above, and the `BRANCH` default and example env file in `scripts/cron-publish-extension.sh` when the new series' branch becomes the one published
+  - `ci_tools_version` and the `uses:` refs need NO change within a release series — they point at the moving release-series branch, not a per-patch tag. Moving to a new series (e.g. `v1.5-variegata` → `v2.0-cyanoptera`) changes both, together with the `./extension-ci-tools` branch above, and the `BRANCH` default and example env file in `scripts/cron-publish-extension.sh` when the new series' branch becomes the one published, and the branch table and descriptor keys in [`internals/releasing.md`](internals/releasing.md#branches)
   - Before DuckDB tags a release, the workflow can build against the duckdb submodule's commit instead: add a job that calls extension-ci-tools' `_submodule_version.yml` and pass its `version` output as both `duckdb_version` inputs. `check-duckdb-version.sh` then reports PRE-RELEASE and skips the other spellings, and the artifacts carry the commit hash, which no released DuckDB loads and the publish cron rejects. On release day put the literal version back in both inputs, drop the job, and run the bump script
 - Bump the target version everywhere else it is spelled out
   - `Dockerfile` `ARG DUCKDB_VERSION` (local default; `docker.yml` resolves the newest Docker Hub tag at runtime and passes `--build-arg`)
@@ -24,7 +24,7 @@ Outside this repo (do these after CI is green and a release tag is pushed):
 
 - The cron host's env file (e.g. `/etc/miint-publish.env`) overrides `DUCKDB_VERSION`, and `BRANCH` on a series move; editing the script alone changes nothing there. The live FTP paths become `<ver>/` and `tagged/<ver>/`, leaving the previous version's trees serving until retired.
 - The playground console in the umbrella site repo pins both `@duckdb/duckdb-wasm` and `EXT_VERSION`. A C++ extension only loads into a duckdb-wasm of the *same* core version, so bump both together and verify the npm build actually reports the new version before flipping.
-- `duckdb/community-extensions` `extensions/miint/description.yml` carries the `ref` that `INSTALL miint FROM community` serves; open a PR bumping it to the new tag.
+- `duckdb/community-extensions` `extensions/miint/description.yml` carries the `ref` that `INSTALL miint FROM community` serves; it moves only with a release, by [`internals/releasing.md`](internals/releasing.md).
 
 Traps when verifying a bump:
 

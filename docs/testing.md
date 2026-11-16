@@ -245,6 +245,7 @@ fi
 **Example test files:**
 - `test/shell/read_alignments_stdin.sh` - Tests for reading SAM/BAM from stdin
 - `test/shell/cron_publish_extension.sh` - Scenario tests for run selection in `scripts/cron-publish-extension.sh` (stubbed `gh`, `mail`, `ssh`, `rsync` and `hostname`; skips without jq, flock and GNU coreutils)
+- `test/shell/release_community_extension.sh` - Scenario tests for `scripts/release-community-extension.sh`: what it refuses, and the PR it opens, updates or readies (local bare repositories and a stubbed `gh`; skips without jq)
 
 **Good practices for shell tests:**
 - Use `set -e` to exit on first error
