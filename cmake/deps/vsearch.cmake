@@ -65,10 +65,11 @@ ExternalProject_Add(
   # optimization level — so without an explicit -O here the whole library
   # (including the SIMD Needleman-Wunsch aligner) builds at -O0, ~4x slower.
   COMMAND
-    ${CMAKE_COMMAND} -E env "CXXFLAGS=-O3 -fPIC ${VSEARCH_ARCH_CFLAGS}"
+    ${CMAKE_COMMAND} -E env ${MIINT_SUBBUILD_COMPILER_VARS}
+    "CXXFLAGS=-O3 -fPIC ${VSEARCH_ARCH_CFLAGS}"
     "CFLAGS=-O3 -fPIC ${VSEARCH_ARCH_CFLAGS}" ${VSEARCH_BUILD_DIR}/configure
     ${MIINT_AUTOTOOLS_HOST}
-  BUILD_COMMAND make -C src libvsearch.a
+  BUILD_COMMAND make -C src -j${MIINT_SUBBUILD_JOBS} libvsearch.a
   INSTALL_COMMAND "" ${VSEARCH_DIR_ARGS}
   BUILD_BYPRODUCTS ${VSEARCH_BUILD_DIR}/src/libvsearch.a)
 

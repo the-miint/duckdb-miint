@@ -21,8 +21,9 @@ ExternalProject_Add(
   CONFIGURE_COMMAND ""
   BUILD_COMMAND make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/mafft/core clean
   COMMAND
-    make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/mafft/core libmafft_parttree.a
-    "CC=${CMAKE_C_COMPILER}" "CFLAGS=-O3 ${MAFFT_FPIC} ${MAFFT_ARCH_CFLAGS}"
+    make -C ${CMAKE_CURRENT_SOURCE_DIR}/ext/mafft/core -j${MIINT_SUBBUILD_JOBS}
+    libmafft_parttree.a ${MIINT_SUBBUILD_COMPILER_VARS}
+    "CFLAGS=-O3 ${MAFFT_FPIC} ${MAFFT_ARCH_CFLAGS}"
     "ENABLE_MULTITHREAD=-Denablemultithread"
   INSTALL_COMMAND
     ${CMAKE_COMMAND} -E copy

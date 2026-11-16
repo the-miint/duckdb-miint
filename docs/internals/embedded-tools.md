@@ -40,6 +40,8 @@ Run-time / conditional: `MIINT_USE_JEMALLOC` is set when DuckDB's jemalloc is li
 
 ## 1. Statically Linked from Source (ExternalProject)
 
+Which ExternalProject sub-builds get a job count and this build's compilers or launcher (`MIINT_SUBBUILD_*`), and which are left out: [`build-system.md`](build-system.md#rules).
+
 ### HTSlib 1.22.1
 - **Location:** `ext/htslib-1.22.1/` (release tarball, not a submodule)
 - **Purpose:** SAM/BAM/CRAM parsing
@@ -73,6 +75,7 @@ Run-time / conditional: `MIINT_USE_JEMALLOC` is set when DuckDB's jemalloc is li
 - **Build:** Makefile (not CMake — WFA2's primary build is Makefile); `BUILD_TOOLS=0 BUILD_EXAMPLES=0 BUILD_WFA_PARALLEL=0`; produces `libwfa.a` (C core) + `libwfacpp.a` (C++ bindings)
 - **Link order:** `wfa2cpp` **before** `wfa2` — C++ depends on C
 - **Flag convention:** WFA2 uses `CC_FLAGS` (not `CFLAGS`/`CXXFLAGS`)
+- **Parallel build:** `make setup` runs before `make -jN all`. WFA2's Makefile does not order `setup`, which creates `build/` and `lib/`, before the subdirectory builds that write into them, so under `-j` an object could be written before its directory exists.
 - **IUPAC matching:** `WFA2Aligner::align_cigar_semiglobal_iupac` uses the lambda-match callback API (`alignEndsFree(matchFunct, args, ...)`) for degenerate base matching in `extract_linked_amplicon`
 
 ### vsearch (v2.30.5-miint fork)

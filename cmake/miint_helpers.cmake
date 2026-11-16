@@ -69,6 +69,46 @@ if(EMSCRIPTEN AND (CMAKE_CXX_FLAGS MATCHES "-pthread"
       "Emscripten threading detected: propagating -pthread to C library builds")
 endif()
 
+# Job count and compilers for the ExternalProject sub-builds in cmake/deps/. Why
+# they need them, why half the CPUs, and which variable goes to which kind of
+# sub-build: docs/internals/build-system.md, "Rules".
+#
+# Jobs, read at configure time: CMAKE_BUILD_PARALLEL_LEVEL if set, else half of
+# ProcessorCount, which on Linux runs `nproc` and so honours taskset and cpuset
+# limits. No `make -l`: on a small runner the main build alone keeps the load
+# above the core count, so it would put every sub-build back on one job.
+if("$ENV{CMAKE_BUILD_PARALLEL_LEVEL}" MATCHES "^[1-9][0-9]*$")
+  set(MIINT_SUBBUILD_JOBS "$ENV{CMAKE_BUILD_PARALLEL_LEVEL}")
+else()
+  include(ProcessorCount)
+  ProcessorCount(_miint_cpus)
+  if(_miint_cpus EQUAL 0)
+    set(_miint_cpus 1)
+  endif()
+  math(EXPR MIINT_SUBBUILD_JOBS "(${_miint_cpus} + 1) / 2")
+endif()
+
+# Compilers: MIINT_SUBBUILD_COMPILER_VARS ("CC=...", "CXX=...") is always this
+# build's compilers, behind CMAKE_<LANG>_COMPILER_LAUNCHER when it is set, so a
+# launcher changes caching and nothing else. MIINT_SUBBUILD_LAUNCHER_ARGS
+# forwards the launcher to CMake sub-builds. A launcher may be a list: joined
+# with spaces for CC/CXX, and its ';' kept as $<SEMICOLON> so each -D stays one
+# argument.
+list(JOIN CMAKE_C_COMPILER_LAUNCHER " " _miint_c_launcher)
+list(JOIN CMAKE_CXX_COMPILER_LAUNCHER " " _miint_cxx_launcher)
+string(STRIP "${_miint_c_launcher} ${CMAKE_C_COMPILER}" _miint_cc)
+string(STRIP "${_miint_cxx_launcher} ${CMAKE_CXX_COMPILER}" _miint_cxx)
+set(MIINT_SUBBUILD_COMPILER_VARS "CC=${_miint_cc}" "CXX=${_miint_cxx}")
+set(MIINT_SUBBUILD_LAUNCHER_ARGS "")
+foreach(lang C CXX)
+  if(CMAKE_${lang}_COMPILER_LAUNCHER)
+    string(REPLACE ";" "$<SEMICOLON>" _miint_launcher
+                   "${CMAKE_${lang}_COMPILER_LAUNCHER}")
+    list(APPEND MIINT_SUBBUILD_LAUNCHER_ARGS
+         "-DCMAKE_${lang}_COMPILER_LAUNCHER=${_miint_launcher}")
+  endif()
+endforeach()
+
 # Fail on a source listed twice in <list_name>. The likely cause is a feature's
 # source also added to the core list in CMakeLists.txt, which would compile it
 # even with that feature OFF.
