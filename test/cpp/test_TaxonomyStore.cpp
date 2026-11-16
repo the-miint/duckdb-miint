@@ -120,7 +120,7 @@ TEST_CASE("TaxonomyStore rejects malformed values, naming the id and column", "[
 }
 
 // A NULL above a name is a hole this store will not fill: the caller supplies a gap-free
-// taxonomy. (tax2tree itself accepts the gap.)
+// taxonomy. (tax2tree keeps a gap below the phylum, and empties a lineage with no phylum.)
 TEST_CASE("TaxonomyStore rejects gaps", "[taxonomy_store]") {
 	auto message = ErrorOf({Row("G1", {"A", std::nullopt, "C"})});
 	CHECK_THAT(message, ContainsSubstring("feature_id 'G1'"));

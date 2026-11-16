@@ -54,7 +54,7 @@ struct LineageTruncation {
 //
 // Cleaning, per row: the first rank whose value contains a bad-name token, and every rank
 // below it, become missing; then a lineage missing its domain or its phylum becomes missing
-// entirely (the row is non-informative). Cleaning runs first so that a lineage cut back to
+// entirely (the row is non-informative). The bad-name cut runs first so that a lineage cut back to
 // its domain is emptied too. tax2tree differs: it empties only the bad rank, which leaves a
 // gap; its min-informative rule tests the phylum alone, before the bad-name filter; and its
 // tokens do not include incertae sedis.
