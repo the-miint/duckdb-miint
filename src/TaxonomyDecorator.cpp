@@ -68,6 +68,18 @@ CladeCountIndex::CladeCountIndex(TreeIndex tree, const TaxonomyStore &store,
 	auto informative = [&](uint32_t v) {
 		return row_of_node[v] && store.IsInformative(*row_of_node[v]);
 	};
+	// Calls f(rank, name) for each named rank of v's row, if v is an informative tip.
+	auto for_each_name = [&](uint32_t v, auto &&f) {
+		if (!informative(v)) {
+			return;
+		}
+		for (size_t r = 0; r < kRanks; r++) {
+			const NameId name = store.Name(*row_of_node[v], r);
+			if (name != kMissingName) {
+				f(r, name);
+			}
+		}
+	};
 
 	// First pass, in preorder: the prefix sums, and how many tips carry each name.
 	tip_prefix_.assign(n + 1, 0);
@@ -79,15 +91,7 @@ CladeCountIndex::CladeCountIndex(TreeIndex tree, const TaxonomyStore &store,
 		const uint32_t v = node_at[p];
 		tip_prefix_[p + 1] = tip_prefix_[p] + tree_.is_tip(v);
 		informative_prefix_[p + 1] = informative_prefix_[p] + informative(v);
-		if (!informative(v)) {
-			continue;
-		}
-		for (size_t r = 0; r < kRanks; r++) {
-			const NameId name = store.Name(*row_of_node[v], r);
-			if (name != kMissingName) {
-				offsets_[r][name + 1]++;
-			}
-		}
+		for_each_name(v, [&](size_t r, NameId name) { offsets_[r][name + 1]++; });
 	}
 
 	// Second pass, in preorder: each tip's position into its names' runs.
@@ -98,16 +102,7 @@ CladeCountIndex::CladeCountIndex(TreeIndex tree, const TaxonomyStore &store,
 		next[r].assign(offsets_[r].begin(), offsets_[r].end() - 1);
 	}
 	for (uint32_t p = 0; p < n; p++) {
-		const uint32_t v = node_at[p];
-		if (!informative(v)) {
-			continue;
-		}
-		for (size_t r = 0; r < kRanks; r++) {
-			const NameId name = store.Name(*row_of_node[v], r);
-			if (name != kMissingName) {
-				occurrences_[r][next[r][name]++] = p;
-			}
-		}
+		for_each_name(node_at[p], [&](size_t r, NameId name) { occurrences_[r][next[r][name]++] = p; });
 	}
 }
 
