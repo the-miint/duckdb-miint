@@ -195,7 +195,7 @@ TaxonomyStore::TaxonomyStore(const std::vector<TaxonomyRow> &rows, const std::ve
 
 		for (size_t r = 0; r < depth; r++) {
 			const NameId parent = r == 0 ? kMissingName : names_[i * kRanks + r - 1];
-			auto [it, inserted] = name_ids[r].emplace(*ranks[r], static_cast<NameId>(name_text_[r].size()));
+			auto [it, inserted] = name_ids[r].try_emplace(*ranks[r], static_cast<NameId>(name_text_[r].size()));
 			const NameId name = it->second;
 			if (inserted) {
 				if (name == kMissingName) {
