@@ -15,9 +15,9 @@ namespace miint {
 // Rate Limiting Behavior:
 // - Without API key: Limited to 3 requests/second
 // - With API key: Limited to 10 requests/second
-// - Requests are paced PACING_MARGIN further apart than those limits
-// - Rate limiting is shared by every NCBIClient in the process that sends to the same server
-//   with the same API key, so back-to-back statements stay under the quota together
+// - Requests are spaced PACING_MARGIN times the interval those limits allow
+// - The spacing is shared by every NCBIClient in the process that sends to the same server
+//   with the same API key (RequestPacer in ncbi_client.cpp says why)
 // - Thread-safe: Multiple threads can share a single client instance
 //
 // Retry Behavior:
@@ -37,11 +37,11 @@ public:
 	// Rate limits (requests per second)
 	static constexpr double RATE_LIMIT_NO_KEY = 3.0;
 	static constexpr double RATE_LIMIT_WITH_KEY = 10.0;
-	// Requests go this much further apart than the limit allows. NCBI counts requests as they
-	// arrive, and network jitter bunches requests sent exactly 1/limit apart: in back-to-back
-	// queries paced at 3 a second, 3 of 28 requests got a 429, and 20% wider, none of 48 did
-	// (2026-11-16). Natively a 429 costs a retry; in a browser it fails the request, because
-	// NCBI sends it without CORS headers.
+	// Requests are spaced this many times the interval the limit allows: at most 2.5 a second
+	// without a key and about 8.3 with one. NCBI counts requests as they arrive, and network
+	// jitter bunches requests sent exactly at the limit: measured on 2026-11-16, back-to-back
+	// queries paced at exactly 3 a second drew 429s, and paced at 1.2 times the interval drew
+	// none.
 	static constexpr double PACING_MARGIN = 1.2;
 
 	// Retry configuration
@@ -104,9 +104,10 @@ public:
 		return NCBIParser::ParseFasta(fasta_text);
 	}
 
-	// Waits until NCBI's quota lets this client send a request to `url`'s server; the quota is
-	// shared with every client in the process that sends to that server with the same API key.
-	// Every request, retries included, goes through it.
+	// Waits until this client may send a request to `url`: requests from every client in the
+	// process to the same server with the same API key are spaced to stay under NCBI's limit.
+	// Every request miint sends goes through it, its own retries included; DuckDB's HTTP client
+	// may itself re-send a GET answered 429, after the wait the response's Retry-After names.
 	void RespectRateLimit(const std::string &url);
 
 private:
@@ -127,7 +128,7 @@ private:
 	// Check if HTTP status code is retryable
 	static bool IsRetryableStatus(int status);
 
-	// Rate limiting (thread-safe)
+	// The requests per second NCBI allows this client: RATE_LIMIT_WITH_KEY or RATE_LIMIT_NO_KEY.
 	double GetRateLimit() const;
 };
 

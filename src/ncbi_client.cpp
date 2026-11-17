@@ -16,27 +16,24 @@ namespace {
 // reset between queries. Each statement builds its own NCBIClient, so the pacing lives here,
 // one pacer per server and API key for the whole process: kept in the client, back-to-back
 // statements exceed the quota, and the 429 NCBI then sends carries no CORS header, so in a
-// browser the request fails instead of being retried.
+// browser the request fails instead of being retried. A slot goes to whichever waiter takes
+// the lock first, not to the one that has waited longest.
 struct RequestPacer {
 	std::mutex lock;
 	std::chrono::steady_clock::time_point next_slot; // when the next request may go
 };
 
-// "https://eutils.ncbi.nlm.nih.gov" for any E-utilities URL.
-std::string SchemeAndHost(const std::string &url) {
-	const auto scheme_end = url.find("://");
-	if (scheme_end == std::string::npos) {
-		return url;
-	}
-	return url.substr(0, url.find('/', scheme_end + 3));
-}
-
+// The pacer for requests to `url`'s server (its scheme, host and port, as DuckDB splits the URL
+// for its own per-server retry quota) with `api_key`.
 RequestPacer &PacerFor(const std::string &url, const std::string &api_key) {
+	std::string path;
+	std::string server;
+	duckdb::HTTPUtil::DecomposeURL(url, path, server);
 	// Never destroyed: a query still running on another thread at exit may be using them.
 	static auto *pacers_lock = new std::mutex();
 	static auto *pacers = new std::map<std::string, RequestPacer>(); // a pacer's address survives later inserts
 	std::lock_guard<std::mutex> guard(*pacers_lock);
-	return (*pacers)[SchemeAndHost(url) + '\n' + api_key];
+	return (*pacers)[server + '\n' + api_key];
 }
 
 } // namespace
@@ -63,9 +60,9 @@ void NCBIClient::RespectRateLimit(const std::string &url) {
 			}
 			wait = pacer.next_slot - now;
 		}
-		// Wait holding neither the lock nor a slot: Ctrl-C ends this query's wait at once, and a
-		// query that stops waiting leaves nothing for the next one to wait out. Rounded up, so a
-		// request never goes before the slot opens.
+		// Wait holding neither the lock nor a slot: Ctrl-C ends this query's wait within a tenth
+		// of a second, and a query that stops waiting leaves nothing for the next one to wait
+		// out. Rounded up, so a request never goes before the slot opens.
 		SleepUnlessInterrupted(context, std::chrono::ceil<std::chrono::milliseconds>(wait));
 	}
 }

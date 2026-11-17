@@ -59,9 +59,12 @@ The functions here that go online, and `blast`, which searches NCBI BLAST, wait 
 and for NCBI:
 
 - `read_ncbi`, `read_ncbi_fasta`, `read_ncbi_annotation` and `read_ncbi_lineage` space their
-  requests to stay under NCBI's limits, 3 a second without an API key and 10 with one, with a 20%
-  margin. The spacing counts every request in the process to the same server with the same key, so
-  back-to-back queries stay under the limits together.
+  requests to stay under NCBI's limits of 3 a second without an API key and 10 with one: they send
+  at most 2.5 a second without a key and about 8.3 with one. Every request the DuckDB process sends
+  to E-utilities with the same key counts, so back-to-back queries stay under the limits together.
+  `read_ncbi_fasta`'s assembly downloads (NCBI's Datasets API) and a mirror set through
+  `miint_ncbi_eutils_url` are each paced on their own, and separate processes are not paced
+  together.
 - `read_ncbi`, `read_ncbi_fasta`, `read_ncbi_annotation` and `read_ncbi_lineage` retry a transient
   failure after 1, 2, 4, 8, 16 and 32 s. `read_ncbi_taxdump`, `read_gtdb_metadata` and
   `read_gtdb_qc_failed` retry a download after 1, 2 and 4 s.
@@ -147,7 +150,7 @@ WHERE molecule_type = 'DNA';
 - Empty accessions raise `InvalidInputException` at bind time
 - A table or view name passed where an accession belongs is rejected at bind time — see [Accessions are literals, not table names](#accessions-are-literals-not-table-names)
 - Invalid accessions that NCBI silently drops appear in `miint_warnings()` (filter with `SELECT * FROM miint_warnings() WHERE message LIKE '%read_ncbi%'`) — they do not raise
-- For bulk downloads, set `api_key` for the higher 10 req/s rate; with the default `batch_size=500` a 10,000-accession query is bound by ~20 round-trips, not by the per-accession rate cap
+- For bulk downloads, set `api_key` for NCBI's higher limit (10 req/s, of which miint uses about 8.3); with the default `batch_size=500` a 10,000-accession query is bound by ~20 round-trips, not by the per-accession rate cap
 
 ## Read sequences 
 
