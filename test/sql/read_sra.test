@@ -261,21 +261,12 @@ SET threads = 8;
 statement ok
 SET miint_sra_spots_per_unit = 7;
 
-statement ok
-CREATE TABLE ours_small_units AS
-SELECT row_number() OVER () AS pos, *
-FROM read_sra(['data/sra/SRR32151205.sra', 'data/sra/SRR34459993.sra', 'data/sra/ERR16653849.sra',
-               'data/sra/ERR5009897.sra', 'data/sra/SRR4424282.sra', 'data/sra/SRR6016450.sra',
-               'data/sra/DRR501055.sra', 'data/sra/SRR4439672.sra', 'data/sra/SRR24770212.sra',
-               'data/sra/ERR8523629.sra', 'data/sra/SRR30810369.sra', 'data/sra/SRR30938008.sra',
-               'data/sra/ERR932865.sra', 'data/sra/ERR1160027.sra', 'data/sra/SRR14704581.sra',
-               'data/sra/SRR36240868.sra', 'data/sra/DRR880686.sra', 'data/sra/SRR37135232.sra']);
-
-# A plain CREATE TABLE AS inserts by batch index, which fails if two threads share one; its rows
-# keep the batch order.
+# A plain CREATE TABLE AS keeps the scan parallel (a window over it, such as row_number() OVER (),
+# would make its pipeline single-threaded) and inserts by batch index, which fails if two threads
+# share one; its rows keep the batch order, so rowid + 1 is each row's position.
 statement ok
 CREATE TABLE ctas_small_units AS
-SELECT read_id, sequence_index
+SELECT *
 FROM read_sra(['data/sra/SRR32151205.sra', 'data/sra/SRR34459993.sra', 'data/sra/ERR16653849.sra',
                'data/sra/ERR5009897.sra', 'data/sra/SRR4424282.sra', 'data/sra/SRR6016450.sra',
                'data/sra/DRR501055.sra', 'data/sra/SRR4439672.sra', 'data/sra/SRR24770212.sra',
@@ -286,17 +277,14 @@ FROM read_sra(['data/sra/SRR32151205.sra', 'data/sra/SRR34459993.sra', 'data/sra
 statement ok
 RESET miint_sra_spots_per_unit;
 
+# Every column of every row, decoded in parallel with the run's name index shared among threads,
+# against one unit per run.
 query II
-SELECT count(*), count(*) FILTER (WHERE a.read_id IS DISTINCT FROM b.read_id)
-FROM ours a FULL JOIN (SELECT rowid + 1 AS pos, read_id FROM ctas_small_units) b USING (pos);
-----
-8865	0
-
-query II
-SELECT count(*), count(*) FILTER (WHERE a.read_id IS DISTINCT FROM b.read_id OR a.sequence1 IS DISTINCT FROM b.sequence1
-                                  OR a.sequence2 IS DISTINCT FROM b.sequence2 OR a.qual1 IS DISTINCT FROM b.qual1
-                                  OR a.qual2 IS DISTINCT FROM b.qual2)
-FROM ours a FULL JOIN ours_small_units b USING (pos);
+SELECT count(*), count(*) FILTER (WHERE a.sequence_index IS DISTINCT FROM b.sequence_index
+                                  OR a.read_id IS DISTINCT FROM b.read_id OR a.comment IS DISTINCT FROM b.comment
+                                  OR a.sequence1 IS DISTINCT FROM b.sequence1 OR a.sequence2 IS DISTINCT FROM b.sequence2
+                                  OR a.qual1 IS DISTINCT FROM b.qual1 OR a.qual2 IS DISTINCT FROM b.qual2)
+FROM ours a FULL JOIN (SELECT rowid + 1 AS pos, * FROM ctas_small_units) b USING (pos);
 ----
 8865	0
 

@@ -1,0 +1,65 @@
+# name: test/sql/read_sra_https.test
+# description: read_sra reads remote .sra files by range requests, returning the same rows as the local files
+# group: [sql]
+
+# `make test` skips this file because httpfs is not linked into unittest;
+# run_tests.sh runs it in its httpfs pass, against its range server over data/.
+
+require miint
+
+require httpfs
+
+require-env MIINT_HTTPS_TEST_URL
+
+# 4386 rows: the fixtures' 2620, 1618 and 148 spots (data/sra/README.md), one row each under
+# split_3. They cover paired and unpaired spots, names from the skey index, and a flat table.
+statement ok
+CREATE TABLE local_rows AS
+SELECT row_number() OVER () AS pos, * EXCLUDE (filepath), replace(filepath, 'data/sra/', '') AS file
+FROM read_sra(['data/sra/SRR4439672.sra', 'data/sra/SRR24770212.sra', 'data/sra/ERR932865.sra'],
+              include_filepath := true);
+
+statement ok
+CREATE TABLE remote_rows AS
+SELECT row_number() OVER () AS pos, * EXCLUDE (filepath),
+       replace(filepath, '{MIINT_HTTPS_TEST_URL}/sra/', '') AS file
+FROM read_sra(['{MIINT_HTTPS_TEST_URL}/sra/SRR4439672.sra', '{MIINT_HTTPS_TEST_URL}/sra/SRR24770212.sra',
+               '{MIINT_HTTPS_TEST_URL}/sra/ERR932865.sra'],
+              include_filepath := true);
+
+query II
+SELECT count(*), count(*) FILTER (WHERE l IS DISTINCT FROM r)
+FROM local_rows l FULL JOIN remote_rows r USING (pos);
+----
+4386	0
+
+# Units of 100 spots: each thread reads its unit's blobs by range requests at its own positions,
+# so a remote run is read over many units at once. The rows still come back in spot order.
+statement ok
+SET threads = 4;
+
+statement ok
+SET miint_sra_spots_per_unit = 100;
+
+statement ok
+CREATE TABLE remote_units AS
+SELECT *
+FROM read_sra(['{MIINT_HTTPS_TEST_URL}/sra/SRR4439672.sra', '{MIINT_HTTPS_TEST_URL}/sra/SRR24770212.sra',
+               '{MIINT_HTTPS_TEST_URL}/sra/ERR932865.sra']);
+
+statement ok
+RESET miint_sra_spots_per_unit;
+
+query II
+SELECT count(*), count(*) FILTER (WHERE l.read_id IS DISTINCT FROM r.read_id OR l.comment IS DISTINCT FROM r.comment
+                                  OR l.sequence1 IS DISTINCT FROM r.sequence1 OR l.sequence2 IS DISTINCT FROM r.sequence2
+                                  OR l.qual1 IS DISTINCT FROM r.qual1 OR l.qual2 IS DISTINCT FROM r.qual2)
+FROM local_rows l FULL JOIN (SELECT rowid + 1 AS pos, * FROM remote_units) r USING (pos);
+----
+4386	0
+
+# A missing remote file fails, naming the run.
+statement error
+SELECT count(*) FROM read_sra('{MIINT_HTTPS_TEST_URL}/sra/SRR0000000.sra');
+----
+SRR0000000
