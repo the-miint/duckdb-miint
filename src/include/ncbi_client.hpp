@@ -16,8 +16,8 @@ namespace miint {
 // - Without API key: Limited to 3 requests/second
 // - With API key: Limited to 10 requests/second
 // - Requests are paced PACING_MARGIN further apart than those limits
-// - Rate limiting is shared by every NCBIClient in the process that uses the same API key,
-//   so back-to-back statements stay under the quota together
+// - Rate limiting is shared by every NCBIClient in the process that sends to the same server
+//   with the same API key, so back-to-back statements stay under the quota together
 // - Thread-safe: Multiple threads can share a single client instance
 //
 // Retry Behavior:
@@ -104,10 +104,10 @@ public:
 		return NCBIParser::ParseFasta(fasta_text);
 	}
 
-	// Waits until NCBI's quota lets this client send its next request; the quota is shared
-	// with every client in the process that uses the same API key. Every request, retries
-	// included, goes through it.
-	void RespectRateLimit();
+	// Waits until NCBI's quota lets this client send a request to `url`'s server; the quota is
+	// shared with every client in the process that sends to that server with the same API key.
+	// Every request, retries included, goes through it.
+	void RespectRateLimit(const std::string &url);
 
 private:
 	duckdb::ClientContext &context;

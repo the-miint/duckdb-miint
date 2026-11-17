@@ -14,19 +14,29 @@ namespace {
 
 // NCBI's quota is per IP address without an API key and per key with one, and it does not
 // reset between queries. Each statement builds its own NCBIClient, so the pacing lives here,
-// one pacer per API key for the whole process: kept in the client, back-to-back statements
-// exceed the quota, and the 429 NCBI then sends carries no CORS header, so in a browser the
-// request fails instead of being retried.
+// one pacer per server and API key for the whole process: kept in the client, back-to-back
+// statements exceed the quota, and the 429 NCBI then sends carries no CORS header, so in a
+// browser the request fails instead of being retried.
 struct RequestPacer {
 	std::mutex lock;
 	std::chrono::steady_clock::time_point next_slot; // when the next request may go
 };
 
-RequestPacer &PacerFor(const std::string &api_key) {
-	static std::mutex pacers_lock;
-	static std::map<std::string, RequestPacer> pacers; // a pacer's address survives later inserts
-	std::lock_guard<std::mutex> guard(pacers_lock);
-	return pacers[api_key];
+// "https://eutils.ncbi.nlm.nih.gov" for any E-utilities URL.
+std::string SchemeAndHost(const std::string &url) {
+	const auto scheme_end = url.find("://");
+	if (scheme_end == std::string::npos) {
+		return url;
+	}
+	return url.substr(0, url.find('/', scheme_end + 3));
+}
+
+RequestPacer &PacerFor(const std::string &url, const std::string &api_key) {
+	// Never destroyed: a query still running on another thread at exit may be using them.
+	static auto *pacers_lock = new std::mutex();
+	static auto *pacers = new std::map<std::string, RequestPacer>(); // a pacer's address survives later inserts
+	std::lock_guard<std::mutex> guard(*pacers_lock);
+	return (*pacers)[SchemeAndHost(url) + '\n' + api_key];
 }
 
 } // namespace
@@ -39,20 +49,24 @@ double NCBIClient::GetRateLimit() const {
 	return api_key.empty() ? RATE_LIMIT_NO_KEY : RATE_LIMIT_WITH_KEY;
 }
 
-void NCBIClient::RespectRateLimit() {
+void NCBIClient::RespectRateLimit(const std::string &url) {
 	const auto min_interval = std::chrono::milliseconds(static_cast<int>(1000.0 * PACING_MARGIN / GetRateLimit()));
-	auto &pacer = PacerFor(api_key);
-	std::chrono::steady_clock::time_point slot;
-	{
-		std::lock_guard<std::mutex> guard(pacer.lock);
-		slot = std::max(std::chrono::steady_clock::now(), pacer.next_slot);
-		pacer.next_slot = slot + min_interval;
-	}
-	// Wait outside the lock, so one query's Ctrl-C never waits behind another query's turn.
-	// Rounded up: a request never goes before its slot.
-	const auto now = std::chrono::steady_clock::now();
-	if (slot > now) {
-		SleepUnlessInterrupted(context, std::chrono::ceil<std::chrono::milliseconds>(slot - now));
+	auto &pacer = PacerFor(url, api_key);
+	while (true) {
+		std::chrono::steady_clock::duration wait;
+		{
+			std::lock_guard<std::mutex> guard(pacer.lock);
+			const auto now = std::chrono::steady_clock::now();
+			if (now >= pacer.next_slot) {
+				pacer.next_slot = now + min_interval;
+				return;
+			}
+			wait = pacer.next_slot - now;
+		}
+		// Wait holding neither the lock nor a slot: Ctrl-C ends this query's wait at once, and a
+		// query that stops waiting leaves nothing for the next one to wait out. Rounded up, so a
+		// request never goes before the slot opens.
+		SleepUnlessInterrupted(context, std::chrono::ceil<std::chrono::milliseconds>(wait));
 	}
 }
 
@@ -85,7 +99,7 @@ std::string NCBIClient::MakeRequest(const std::string &url, bool use_api_key_hea
 		// Rate-limit each attempt, not just the first: after backing off for a
 		// 429/5xx retry we still need to honour the per-request cadence so the
 		// next retry doesn't fire faster than NCBI's quota allows.
-		RespectRateLimit();
+		RespectRateLimit(url);
 		auto response = http_util.Request(get_request);
 
 		if (response->Success()) {
@@ -140,7 +154,7 @@ std::string NCBIClient::MakeRequestPOST(const std::string &url, const std::strin
 	// NCBI's epost serves the read endpoint and must honour the per-request
 	// cadence on every attempt, not just the first.
 	for (int attempt = 0; attempt <= MAX_RETRIES; attempt++) {
-		RespectRateLimit();
+		RespectRateLimit(url);
 		duckdb::PostRequestInfo post_request(url, headers, *params, buf_ptr, body.size());
 		post_request.try_request = true;
 		auto response = http_util.Request(post_request);

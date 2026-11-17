@@ -65,33 +65,53 @@ TEST_CASE("SleepUnlessInterrupted ends at Ctrl-C", "[http_client]") {
 // let back-to-back statements exceed the quota. NCBI then answers 429. Natively that is
 // retried, but in a browser the 429 carries no CORS header, so duckdb-wasm sees a failed
 // request and the statement fails (the-miint/duckdb-miint#459).
-TEST_CASE("NCBIClient paces requests across clients that share an API key", "[http_client]") {
+// Each test sends to its own server (".invalid" hosts, never contacted), so no other test's
+// requests count against its quota. Without a key the quota is 3 requests a second, and requests
+// go PACING_MARGIN further apart than that.
+const auto NO_KEY_INTERVAL = std::chrono::milliseconds(
+    static_cast<int>(1000.0 * miint::NCBIClient::PACING_MARGIN / miint::NCBIClient::RATE_LIMIT_NO_KEY));
+
+TEST_CASE("NCBIClient paces requests across clients that share a server and API key", "[http_client]") {
 	DuckDB db(nullptr);
 	Connection con1(db);
 	Connection con2(db);
-	// A key no other test uses, so no earlier request counts against it. With a key the quota
-	// is 10 requests a second: one every 100 ms.
-	const std::string key = "test-http-client-common-shared-pacer";
-	const auto interval = std::chrono::milliseconds(static_cast<int>(1000.0 / miint::NCBIClient::RATE_LIMIT_WITH_KEY));
+	const std::string url = "http://pacing-shared.invalid/entrez/eutils/efetch.fcgi";
 	const auto start = std::chrono::steady_clock::now();
-	miint::NCBIClient(*con1.context, key).RespectRateLimit();
-	miint::NCBIClient(*con2.context, key).RespectRateLimit();
-	miint::NCBIClient(*con1.context, key).RespectRateLimit();
+	miint::NCBIClient(*con1.context).RespectRateLimit(url);
+	miint::NCBIClient(*con2.context).RespectRateLimit(url);
+	miint::NCBIClient(*con1.context).RespectRateLimit(url);
 	// The first request may go at once and each later one an interval after the one before, so
 	// the third goes no sooner than two intervals after the start. A loaded machine can only
 	// make it later.
-	CHECK(std::chrono::steady_clock::now() - start >= 2 * interval);
+	CHECK(std::chrono::steady_clock::now() - start >= 2 * NO_KEY_INTERVAL);
 }
 
-TEST_CASE("NCBIClient paces each API key on its own", "[http_client]") {
-	// Two keys are two quotas: one key's requests never wait for another's.
+TEST_CASE("NCBIClient paces each server and API key on its own", "[http_client]") {
+	// Two servers, or two keys, are two quotas: requests to one never wait for the other's.
 	DuckDB db(nullptr);
 	Connection con(db);
-	const auto interval = std::chrono::milliseconds(static_cast<int>(1000.0 / miint::NCBIClient::RATE_LIMIT_WITH_KEY));
 	const auto start = std::chrono::steady_clock::now();
-	miint::NCBIClient(*con.context, "test-http-client-common-key-a").RespectRateLimit();
-	miint::NCBIClient(*con.context, "test-http-client-common-key-b").RespectRateLimit();
-	CHECK(std::chrono::steady_clock::now() - start < interval);
+	miint::NCBIClient(*con.context).RespectRateLimit("http://pacing-a.invalid/entrez/eutils/epost.fcgi");
+	miint::NCBIClient(*con.context).RespectRateLimit("http://pacing-b.invalid/entrez/eutils/epost.fcgi");
+	miint::NCBIClient(*con.context, "pacing-key").RespectRateLimit("http://pacing-a.invalid/entrez/eutils/efetch.fcgi");
+	// Each is the first request on its pacer, so none waits.
+	CHECK(std::chrono::steady_clock::now() - start < NO_KEY_INTERVAL);
+}
+
+TEST_CASE("NCBIClient leaves no wait behind when Ctrl-C ends one", "[http_client]") {
+	// A query cancelled while it waits for its turn sends nothing, so the next request must not
+	// wait for it as well.
+	DuckDB db(nullptr);
+	Connection con1(db);
+	Connection con2(db);
+	const std::string url = "http://pacing-interrupted.invalid/entrez/eutils/efetch.fcgi";
+	const auto start = std::chrono::steady_clock::now();
+	miint::NCBIClient(*con1.context).RespectRateLimit(url);
+	con2.Interrupt();
+	REQUIRE_THROWS_AS(miint::NCBIClient(*con2.context).RespectRateLimit(url), InterruptException);
+	miint::NCBIClient(*con1.context).RespectRateLimit(url);
+	// con1's second request goes one interval after its first, as if con2 had never asked.
+	CHECK(std::chrono::steady_clock::now() - start < 2 * NO_KEY_INTERVAL);
 }
 
 // read_ncbi_taxdump fetches an http(s) source with an HTTP GET and opens any other through
