@@ -16,10 +16,10 @@ require-env MIINT_ENA_REPORTS_URL_BASE
 
 # The HTTP clients wait between attempts, backing off 1, 2, 4 s and on: 7 s in all
 # for ENA and read_ncbi_taxdump, 63 s for NCBI and BLAST. BLAST also waits for its
-# own estimate of a search's length, up to an hour, then 15 s between polls; NCBI
-# spaces its requests 0.4 s apart and BLAST a third of a second. Every wait polls
-# the query's interrupt check, which Ctrl-C and max_execution_time both trip; a
-# test cannot press Ctrl-C, so the deadline stands in for it.
+# own estimate of a search's length, up to an hour, then 15 s between polls; without
+# an API key NCBI spaces its requests 0.4 s apart and BLAST a third of a second.
+# Every wait polls the query's interrupt check, which Ctrl-C and max_execution_time
+# both trip; a test cannot press Ctrl-C, so the deadline stands in for it.
 #
 # Each query below waits, in the wait its comment names, from before its deadline
 # until well after it. Waited out, it fails with an HTTP error, or succeeds,

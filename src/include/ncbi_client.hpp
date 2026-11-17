@@ -39,9 +39,9 @@ public:
 	static constexpr double RATE_LIMIT_WITH_KEY = 10.0;
 	// Requests are spaced this many times the interval the limit allows: at most 2.5 a second
 	// without a key and about 8.3 with one. NCBI counts requests as they arrive, and network
-	// jitter bunches requests sent exactly at the limit: measured on 2026-11-16, back-to-back
-	// queries paced at exactly 3 a second drew 429s, and paced at 1.2 times the interval drew
-	// none.
+	// jitter bunches requests sent exactly at the limit: measured on 2026-11-16 (native, no key,
+	// back-to-back queries through a logging proxy), 3 of 28 requests paced at exactly 3 a second
+	// drew a 429, and none of 48 paced at 1.2 times the interval did.
 	static constexpr double PACING_MARGIN = 1.2;
 
 	// Retry configuration
@@ -106,8 +106,9 @@ public:
 
 	// Waits until this client may send a request to `url`: requests from every client in the
 	// process to the same server with the same API key are spaced to stay under NCBI's limit.
-	// Every request miint sends goes through it, its own retries included; DuckDB's HTTP client
-	// may itself re-send a GET answered 429, after the wait the response's Retry-After names.
+	// Every request NCBIClient sends goes through it, its own retries included. DuckDB's HTTP
+	// client may itself re-send a GET answered 429 or 5xx after its own backoff, which does not
+	// ("Interrupts and max_execution_time" in docs/internals/duckdb-engine-notes.md).
 	void RespectRateLimit(const std::string &url);
 
 private:

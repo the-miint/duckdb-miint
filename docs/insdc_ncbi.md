@@ -60,8 +60,10 @@ and for NCBI:
 
 - `read_ncbi`, `read_ncbi_fasta`, `read_ncbi_annotation` and `read_ncbi_lineage` space their
   requests to stay under NCBI's limits of 3 a second without an API key and 10 with one: they send
-  at most 2.5 a second without a key and about 8.3 with one. Every request the DuckDB process sends
-  to E-utilities with the same key counts, so back-to-back queries stay under the limits together.
+  at most 2.5 a second without a key and about 8.3 with one. Every request these functions send in
+  the DuckDB process to E-utilities with the same key counts, so back-to-back queries stay under
+  the limits together. DuckDB's own re-sends of a request NCBI answers with 429 or 503 (below) are
+  not spaced.
   `read_ncbi_fasta`'s assembly downloads (NCBI's Datasets API) and a mirror set through
   `miint_ncbi_eutils_url` are each paced on their own, and separate processes are not paced
   together.
@@ -121,7 +123,7 @@ Fetch GenBank and RefSeq metadata from NCBI by accession number. This function q
 **Behavior:**
 - Fetches GenBank XML format from E-utilities using the batched `epost` + `efetch` handshake (one POST + one GET per `batch_size` accessions)
 - Automatically detects accession type (RefSeq NC_/NM_/NP_, GenBank, etc.)
-- Rate-limited to respect NCBI guidelines (3 req/s without key, 10 req/s with key)
+- Paced below NCBI's limits (3 req/s without key, 10 req/s with key); see [Requests: waits and where they go](#requests-waits-and-where-they-go)
 - Retry logic for transient failures (400, 408, 429, 500, 502, 503, 504) with exponential backoff up to 6 retries
 - Accessions silently omitted by NCBI (e.g. invalid IDs) are reported via `miint_warnings()` and a stderr `WARNING`; the function does **not** throw, so one bad accession in a batch never aborts the rest of the query
 

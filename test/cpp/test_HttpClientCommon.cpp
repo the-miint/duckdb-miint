@@ -87,11 +87,27 @@ TEST_CASE("NCBIClient paces requests to one server and API key across clients an
 	// make it later.
 	CHECK(std::chrono::steady_clock::now() - start >= 2 * NO_KEY_INTERVAL);
 
-	// With a key, the same at the keyed interval.
+	// With a key, the same at the keyed interval, and no slower: a key buys NCBI's higher limit.
 	start = std::chrono::steady_clock::now();
-	miint::NCBIClient(*con1.context, "pacing-shared-key").RespectRateLimit(base + "/epost.fcgi");
-	miint::NCBIClient(*con2.context, "pacing-shared-key").RespectRateLimit(base + "/efetch.fcgi?db=nuccore");
-	CHECK(std::chrono::steady_clock::now() - start >= KEYED_INTERVAL);
+	for (int i = 0; i < 4; i++) {
+		Connection &con = i % 2 ? con2 : con1;
+		miint::NCBIClient(*con.context, "pacing-shared-key").RespectRateLimit(base + "/efetch.fcgi?db=nuccore");
+	}
+	const auto keyed_elapsed = std::chrono::steady_clock::now() - start;
+	CHECK(keyed_elapsed >= 3 * KEYED_INTERVAL);
+	CHECK(keyed_elapsed < 3 * NO_KEY_INTERVAL);
+}
+
+TEST_CASE("NCBIClient paces a URL without a scheme by its host", "[http_client]") {
+	// DuckDB sends such a URL as http, so it shares the pacing of the host it names, whatever
+	// its path and query.
+	DuckDB db(nullptr);
+	Connection con(db);
+	const std::string base = "pacing-schemeless.invalid/entrez/eutils";
+	const auto start = std::chrono::steady_clock::now();
+	miint::NCBIClient(*con.context).RespectRateLimit(base + "/epost.fcgi");
+	miint::NCBIClient(*con.context).RespectRateLimit(base + "/efetch.fcgi?db=nuccore&query_key=1&WebEnv=MCID_c");
+	CHECK(std::chrono::steady_clock::now() - start >= NO_KEY_INTERVAL);
 }
 
 TEST_CASE("NCBIClient lets one waiting query at a time take an opening", "[http_client]") {
@@ -120,11 +136,13 @@ TEST_CASE("NCBIClient paces each server and API key on its own", "[http_client]"
 	miint::NCBIClient(*con.context).RespectRateLimit("http://pacing-b.invalid/entrez/eutils/epost.fcgi");
 	CHECK(std::chrono::steady_clock::now() - start < NO_KEY_INTERVAL);
 
+	// Three keys: if any two shared a pacing, the three would take at least two keyed intervals.
 	const std::string efetch = "http://pacing-a.invalid/entrez/eutils/efetch.fcgi";
 	start = std::chrono::steady_clock::now();
 	miint::NCBIClient(*con.context, "pacing-key-1").RespectRateLimit(efetch);
 	miint::NCBIClient(*con.context, "pacing-key-2").RespectRateLimit(efetch);
-	CHECK(std::chrono::steady_clock::now() - start < KEYED_INTERVAL);
+	miint::NCBIClient(*con.context, "pacing-key-3").RespectRateLimit(efetch);
+	CHECK(std::chrono::steady_clock::now() - start < 2 * KEYED_INTERVAL);
 }
 
 TEST_CASE("NCBIClient leaves no wait behind when Ctrl-C ends one", "[http_client]") {

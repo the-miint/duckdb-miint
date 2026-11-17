@@ -16,8 +16,8 @@ namespace {
 // reset between queries. Each statement builds its own NCBIClient, so the pacing lives here,
 // one pacer per server and API key for the whole process: kept in the client, back-to-back
 // statements exceed the quota, and the 429 NCBI then sends carries no CORS header, so in a
-// browser the request fails instead of being retried. A slot goes to whichever waiter takes
-// the lock first, not to the one that has waited longest.
+// browser the request fails instead of being retried. A slot goes to whichever request takes
+// the lock first once it is open, not to the one that has waited longest.
 struct RequestPacer {
 	std::mutex lock;
 	std::chrono::steady_clock::time_point next_slot; // when the next request may go
@@ -60,9 +60,9 @@ void NCBIClient::RespectRateLimit(const std::string &url) {
 			}
 			wait = pacer.next_slot - now;
 		}
-		// Wait holding neither the lock nor a slot: Ctrl-C ends this query's wait within a tenth
-		// of a second, and a query that stops waiting leaves nothing for the next one to wait
-		// out. Rounded up, so a request never goes before the slot opens.
+		// Wait holding neither the lock nor a slot: Ctrl-C ends this query's wait within one
+		// INTERRUPT_POLL_INTERVAL, and a query that stops waiting leaves nothing for the next one
+		// to wait out. Rounded up, so a request never goes before the slot opens.
 		SleepUnlessInterrupted(context, std::chrono::ceil<std::chrono::milliseconds>(wait));
 	}
 }
