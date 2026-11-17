@@ -103,6 +103,8 @@ public:
 
 private:
 	TreeIndex tree_;
+	// The node at each preorder position.
+	std::vector<uint32_t> node_at_;
 	// Over preorder positions: entry p counts the tips (informative tips) at positions less than p.
 	std::vector<uint32_t> tip_prefix_;
 	std::vector<uint32_t> informative_prefix_;

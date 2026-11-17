@@ -39,12 +39,12 @@ CladeCountIndex::CladeCountIndex(TreeIndex tree, const TaxonomyStore &store,
 		throw std::invalid_argument("CladeCountIndex: row_of_node has " + std::to_string(row_of_node.size()) +
 		                            " entries for a tree of " + std::to_string(n) + " nodes");
 	}
-	// The node at each preorder position, so that tips are visited in preorder below and each
-	// name's occurrences come out ascending.
-	std::vector<uint32_t> node_at(n);
+	// Tips are visited in preorder below, through node_at_, so each name's occurrences come out
+	// ascending.
+	node_at_.resize(n);
 	size_t tips = 0;
 	for (uint32_t v = 0; v < n; v++) {
-		node_at[tree_.pre(v)] = v;
+		node_at_[tree_.pre(v)] = v;
 		tips += tree_.is_tip(v);
 		const auto &row = row_of_node[v];
 		if (!row) {
@@ -88,7 +88,7 @@ CladeCountIndex::CladeCountIndex(TreeIndex tree, const TaxonomyStore &store,
 		offsets_[r].assign(store.NameCount(r) + 1, 0);
 	}
 	for (uint32_t p = 0; p < n; p++) {
-		const uint32_t v = node_at[p];
+		const uint32_t v = node_at_[p];
 		tip_prefix_[p + 1] = tip_prefix_[p] + tree_.is_tip(v);
 		informative_prefix_[p + 1] = informative_prefix_[p] + informative(v);
 		for_each_name(v, [&](size_t r, NameId name) { offsets_[r][name + 1]++; });
@@ -102,7 +102,7 @@ CladeCountIndex::CladeCountIndex(TreeIndex tree, const TaxonomyStore &store,
 		next[r].assign(offsets_[r].begin(), offsets_[r].end() - 1);
 	}
 	for (uint32_t p = 0; p < n; p++) {
-		for_each_name(node_at[p], [&](size_t r, NameId name) { occurrences_[r][next[r][name]++] = p; });
+		for_each_name(node_at_[p], [&](size_t r, NameId name) { occurrences_[r][next[r][name]++] = p; });
 	}
 }
 
@@ -130,20 +130,59 @@ uint32_t CladeCountIndex::Total(size_t rank, NameId name) const {
 	return offsets_[rank][name + 1] - offsets_[rank][name];
 }
 
-size_t CladeCountIndex::NameCount(size_t) const {
-	return 0;
+size_t CladeCountIndex::NameCount(size_t rank) const {
+	return offsets_[rank].size() - 1;
 }
 
-std::span<const uint32_t> CladeCountIndex::Occurrences(size_t, NameId) const {
-	return {};
+std::span<const uint32_t> CladeCountIndex::Occurrences(size_t rank, NameId name) const {
+	return std::span<const uint32_t>(occurrences_[rank]).subspan(offsets_[rank][name], Total(rank, name));
 }
 
-uint32_t CladeCountIndex::NodeAtPreorder(uint32_t) const {
-	return 0;
+uint32_t CladeCountIndex::NodeAtPreorder(uint32_t p) const {
+	return node_at_[p];
 }
 
-std::vector<uint32_t> LowestEligibleNodes(const CladeCountIndex &, size_t, NameId, uint32_t) {
-	return {};
+std::vector<uint32_t> LowestEligibleNodes(const CladeCountIndex &index, size_t rank, NameId name, uint32_t threshold) {
+	// An eligible node holds at least threshold >= ceil(t/2) of the name's t tips, and they are a
+	// contiguous run of its occurrences, so the run contains the middle one (odd t) or one of the
+	// middle two (even t). Every eligible node is therefore an ancestor-or-self of a middle tip,
+	// and since eligibility is closed upward, the lowest are among the deepest eligible ancestors
+	// of the middle tips. Another tip's deepest eligible ancestor need not be lowest: it can hold
+	// an eligible node that does not contain that tip.
+	const TreeIndex &tree = index.Tree();
+	auto deepest_eligible = [&](uint32_t position) -> std::optional<uint32_t> {
+		for (uint32_t v = index.NodeAtPreorder(position);; v = tree.parent(v)) {
+			if (index.CladeCount(v, rank, name) >= threshold) {
+				return v;
+			}
+			if (v == tree.root()) {
+				return std::nullopt;
+			}
+		}
+	};
+	const auto occ = index.Occurrences(rank, name);
+	const size_t t = occ.size();
+	if (t == 0) {
+		return {};
+	}
+	const auto a = deepest_eligible(occ[(t - 1) / 2]);
+	if (!a) {
+		return {};
+	}
+	if (t % 2 == 1) {
+		return {*a};
+	}
+	// b exists, since a does only when the root is eligible. a's tip precedes b's in preorder.
+	// Nested results keep the deeper; disjoint ones are the two halves of a 50/50 split, and a's
+	// subtree, holding the earlier tip, comes first.
+	const auto b = deepest_eligible(occ[t / 2]);
+	if (tree.is_ancestor_or_self(*a, *b)) {
+		return {*b};
+	}
+	if (tree.is_ancestor_or_self(*b, *a)) {
+		return {*a};
+	}
+	return {*a, *b};
 }
 
 } // namespace miint
