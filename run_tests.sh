@@ -332,7 +332,7 @@ if [ ! -f "$MZML_FILE" ]; then
         echo "Warning: MassQL test data download failed, skipping MassQL tests"
     fi
 fi
-if echo "$EXPECTED_SHA  $MZML_FILE" | sha256sum -c --quiet 2>/dev/null; then
+if [ -f "$MZML_FILE" ] && [ "$(sha256sum "$MZML_FILE" | awk '{print $1}')" = "$EXPECTED_SHA" ]; then
     export MASSQL_TEST_DATA="$MZML_FILE"
 fi
 
@@ -359,11 +359,11 @@ if [ ! -f "$MZXML_FILE" ]; then
         echo "Warning: mzXML test data download failed, skipping mzXML real data tests"
     fi
 fi
-if echo "$MZXML_EXPECTED_SHA  $MZXML_FILE" | sha256sum -c --quiet 2>/dev/null; then
+if [ -f "$MZXML_FILE" ] && [ "$(sha256sum "$MZXML_FILE" | awk '{print $1}')" = "$MZXML_EXPECTED_SHA" ]; then
     export MZXML_REAL_DATA="$MZXML_FILE"
 fi
 
-# Download and cache the two real SRA runs whose fasterq-dump md5s are committed in
+# Download and cache the real SRA runs whose fasterq-dump md5s are committed in
 # data/sra/real_oracles.csv, which also records their sha256s. Each is downloaded to a .part file
 # and only renamed once whole, so an interrupted download is retried rather than kept.
 SRA_CACHE_DIR="$CACHE_DIR/sra"
@@ -380,7 +380,7 @@ while [ "$SRA_CAN_CHECK" = 1 ] && read -r SRA_RUN SRA_SHA; do
     SRA_FILE="$SRA_CACHE_DIR/$SRA_RUN.sra"
     if [ ! -f "$SRA_FILE" ]; then
         echo "Downloading SRA run $SRA_RUN..."
-        if wget -q -O "$SRA_FILE.part" "https://sra-pub-run-odp.s3.amazonaws.com/sra/$SRA_RUN/$SRA_RUN"; then
+        if curl -sSfL -o "$SRA_FILE.part" "https://sra-pub-run-odp.s3.amazonaws.com/sra/$SRA_RUN/$SRA_RUN"; then
             mv "$SRA_FILE.part" "$SRA_FILE"
         else
             echo "Warning: SRA run $SRA_RUN download failed, skipping SRA real data tests"

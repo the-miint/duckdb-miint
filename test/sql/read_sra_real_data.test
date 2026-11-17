@@ -4,13 +4,13 @@
 
 require miint
 
-# run_tests.sh downloads DRR274142 and SRR31286609 from NCBI's bucket and sets this only when both
-# match the sha256s recorded with their oracles.
+# run_tests.sh downloads the runs from NCBI's bucket and sets this only when every one matches the
+# sha256 recorded with its oracles.
 require-env SRA_REAL_DATA
 
-# The committed fixtures are a few hundred spots each; these runs are whole (42k and 76k spots),
+# The committed fixtures are a few hundred spots each; these runs are whole (42k, 76k and 10k spots),
 # so they cross many blobs of every column, many skey keys, and (DRR274142) unpaired spots among
-# pairs. fasterq-dump 3.4.1's output for them is too large to commit; its md5s are.
+# pairs. SRR27387037 keeps its blobs in the idx0 journal, which no committed fixture does. fasterq-dump 3.4.1's output for them is too large to commit; its md5s are.
 
 statement ok
 CREATE TABLE expected AS
@@ -28,7 +28,7 @@ CREATE MACRO r2_comment(cmt, seq) AS regexp_replace(cmt, 'length=[0-9]+$', 'leng
 statement ok
 CREATE TABLE split3 AS
 SELECT row_number() OVER () AS pos, split_part(read_id, '.', 1) AS run, *
-FROM read_sra(['{SRA_REAL_DATA}/DRR274142.sra', '{SRA_REAL_DATA}/SRR31286609.sra']);
+FROM read_sra(['{SRA_REAL_DATA}/DRR274142.sra', '{SRA_REAL_DATA}/SRR31286609.sra', '{SRA_REAL_DATA}/SRR27387037.sra']);
 
 statement ok
 CREATE TABLE rendered (run VARCHAR, mode VARCHAR, file VARCHAR, md5 VARCHAR);
@@ -51,17 +51,17 @@ SELECT run, mode, run || '.fastq',
        md5(string_agg(fq(read_id || '/' || read_number, comment, sequence1, qual1), '' ORDER BY pos))
 FROM (
     SELECT 'split_spot' AS mode, row_number() OVER () AS pos, split_part(read_id, '.', 1) AS run, *
-    FROM read_sra(['{SRA_REAL_DATA}/DRR274142.sra', '{SRA_REAL_DATA}/SRR31286609.sra'], split := 'spot')
+    FROM read_sra(['{SRA_REAL_DATA}/DRR274142.sra', '{SRA_REAL_DATA}/SRR31286609.sra', '{SRA_REAL_DATA}/SRR27387037.sra'], split := 'spot')
     UNION ALL
     SELECT 'split_spot_tech' AS mode, row_number() OVER () AS pos, split_part(read_id, '.', 1) AS run, *
-    FROM read_sra(['{SRA_REAL_DATA}/DRR274142.sra', '{SRA_REAL_DATA}/SRR31286609.sra'],
+    FROM read_sra(['{SRA_REAL_DATA}/DRR274142.sra', '{SRA_REAL_DATA}/SRR31286609.sra', '{SRA_REAL_DATA}/SRR27387037.sra'],
                   split := 'spot', include_technical := true))
 GROUP BY run, mode;
 
 query I
 SELECT count(*) FROM expected JOIN rendered USING (run, mode, file);
 ----
-9
+12
 
 query III
 SELECT coalesce(e.run, r.run), coalesce(e.mode, r.mode), coalesce(e.file, r.file)

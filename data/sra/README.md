@@ -16,7 +16,7 @@ repository runs it.
 | `oracle/<RUN>/split_spot/<RUN>.fastq.gz` | `fasterq-dump --split-spot` output, gzipped |
 | `oracle/<RUN>/README.md` | Provenance for that run's oracles: tool version, exact commands, md5s |
 | `oracle/oracle_md5.csv` | Per oracle file: run, mode, file, md5, size and record count of the **uncompressed** FASTQ |
-| `real_oracles.csv` | The same for DRR274142 and SRR31286609, whose `.sra` and oracles are not committed (see below) |
+| `real_oracles.csv` | The same for DRR274142, SRR31286609 and SRR27387037, whose `.sra` and oracles are not committed (see below) |
 
 The oracles are gzipped (`gzip -9 -n`) to keep the repository small: about 3 MB rather than 14 MB. The gzip stream
 is not part of the contract. The bytes it decompresses to are, and their md5 is in `oracle_md5.csv`.
@@ -78,7 +78,8 @@ oracle. What it wrote is recorded so that the refusal is a decision, not an acci
 
 DRR274142 (latf-load, 42,008 spots, 233 of them unpaired under split-3) and SRR31286609 (sharq, 76,368 spots) are
 whole runs: they cross many blobs of every column and, for SRR31286609, many skey keys. At 15 MB and 30 MB, with 100–200 MB of FASTQ each, they are too large to
-commit. `real_oracles.csv` records each object's md5, sha256 and size and the md5, size and record count of every
+commit. SRR27387037 (Nanopore, general-loader 3.0.8, 10,279 single-end spots, 5 MB) keeps its blobs in idx0, which
+no committed fixture does; its oracles were generated on 2026-11-17 with the same tool and commands. `real_oracles.csv` records each object's md5, sha256 and size and the md5, size and record count of every
 oracle file, generated the same way as the committed oracles. `run_tests.sh` downloads the objects into
 `data/cache/sra` and checks them against the sha256s recorded there: the tests that use them skip when a download
 fails, and the run fails when an object does not match, since the oracles would no longer apply to it.
@@ -138,7 +139,7 @@ column encodings and blob headers. Findings that shape what miint must support:
 - **Blob checksums** are CRC32 (1,997 columns) or none (1,030). None is MD5.
 - **Non-empty idx0.** 9 of the first 370 runs (about 2.4%) keep blobs in idx0, with nothing in idx1/idx2 for those
   columns. Every one of them was a SARS-CoV-2 or influenza surveillance run from a clinical sample. The 298 non-viral
-  runs had none. No idx0 fixture is committed.
+  runs had none. No idx0 fixture is committed; SRR27387037, among the real runs below, is one.
 - **Not seen in any of the 668 runs:** big-endian archives, chunked or linked TOC entries, and `RNA_FLAG='1'`.
 - **Technical reads.** No small run of an accepted table type has a technical read with any bases: every technical
   read found was empty (latf-load's placeholder second read). Technical reads with content occur in the legacy 454
