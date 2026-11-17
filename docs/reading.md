@@ -733,7 +733,7 @@ SELECT * FROM read_sra('SRR4424282.sra');
   - Remote paths (`https://`, `s3://`) are read by byte range through `httpfs`
   - **Stdin not supported**: an `.sra` file is read at random positions
 - `split` (VARCHAR, optional, default `'split_3'`): How reads are laid out, matching `fasterq-dump`'s modes
-  - `'split_3'` (`--split-3`): one row per spot. A spot with two biological reads fills `sequence1`/`qual1` and `sequence2`/`qual2`; a spot with fewer (what `fasterq-dump` writes to its unpaired file) fills `sequence1` only. Technical reads (barcodes, indexes) are always skipped.
+  - `'split_3'` (`--split-3`): one row per spot. A spot with two biological reads fills `sequence1`/`qual1` and `sequence2`/`qual2`; a spot with fewer (what `fasterq-dump` writes to its unpaired file) fills `sequence1` only. Technical reads (barcodes, indexes) are always skipped. A run described as paired, by its archive or by ENA, can hold some or only such spots, so filtering on `sequence2 IS NOT NULL` keeps the pairs and drops the rest.
   - `'spot'` (`--split-spot`): one row per read, with its position in the spot in `read_number`
 - `include_technical` (BOOLEAN, optional, default false): With `split => 'spot'`, also return technical reads (`--include-technical`). Combined with `'split_3'` it is an error: `fasterq-dump` switches to another layout in that case, with only a notice on stderr.
 - `include_filepath` (BOOLEAN, optional, default false): Add a `filepath` column
@@ -751,16 +751,17 @@ SELECT * FROM read_sra('SRR4424282.sra');
 
 **Behavior:**
 - Runs are returned in the order given (globs sorted), spots in ascending order, decoded in parallel across threads. The unit of parallel work is a range of spots, 131072 by default; `SET miint_sra_spots_per_unit = n` changes it (0 restores the default)
-- Every stored checksum is verified, and the archive's structure is checked as it is read; a damaged file raises an `IOException` naming the run
+- Every stored checksum is verified, and the archive's structure is checked as it is read: a blob that fails its checksum, or damage that breaks the structure, raises an `IOException` naming the run. Not every column stores checksums and the spot-name index has none, so some damage changes reads without an error, as it does for `fasterq-dump`. To check a downloaded file whole, compare its md5 with the one NCBI's SRA Data Locator gives (`https://locate.ncbi.nlm.nih.gov/sdl/2/retrieve?acc=<run>`)
+- Opening a run reads its indexes into memory, its spot-name index included, before any of its spots are returned; DuckDB's `memory_limit` does not count them
 - `read_fastx` over `fasterq-dump`'s output returns the same rows: for split-3, `read_fastx('x_1.fastq', sequence2 => 'x_2.fastq')` plus the unpaired `x.fastq`
 
 **What is read and what is refused:**
 
-Supported are runs submitted as reads, without alignments: Illumina runs, runs loaded from FASTQ on any platform (PacBio and Nanopore included), and runs loaded from unaligned BAM. These cover nearly all public runs. Each other kind fails with an `InvalidInputException` saying what the run is, whether or not other files are being read:
+Supported are runs submitted as reads, without alignments: Illumina runs, runs loaded from FASTQ on any platform (PacBio and Nanopore included), and runs loaded from unaligned BAM. Runs stored with their alignments (cSRA) are not: they are common among SARS-CoV-2 and influenza surveillance runs, and occur among other kinds of run too. Each other kind fails with an `InvalidInputException` saying what the run is, whether or not other files are being read:
 - cSRA: reads stored against alignments (a `PRIMARY_ALIGNMENT` table, or reads compressed against a reference)
 - SRA Lite (`.sralite`, or a run converted to it): original qualities removed
 - PacBio or Nanopore databases with a `CONSENSUS`, `ZMW_METRICS` or `PASSES` table
-- Runs from older loaders (e.g. 454, Ion Torrent, Helicos), and storage features not seen in current public runs
+- Tables written by older platform-specific loaders (e.g. the 454, Ion Torrent and Helicos loaders), and storage features not seen in current public runs. Data from those platforms loaded from FASTQ or BAM is read like any other
 - Archives with storage far outside what public runs use: a table of contents over 64 MiB, or a block of values that would decode to more than 2 GiB
 - Spot names that are not valid UTF-8 (a run storing Latin-1 names, for example)
 - Under `'split_3'`, a spot with more than two biological reads, which a paired row cannot hold: use `split => 'spot'`
@@ -777,9 +778,16 @@ FROM read_sra('SRR6016450.sra', split => 'spot', include_technical => true);
 -- Several runs
 SELECT * FROM read_sra(['SRR4424282.sra', 'DRR501055.sra'], include_filepath => true);
 
--- Write the pairs back out as FASTQ, one file per mate
-COPY (SELECT * FROM read_sra('SRR4424282.sra')) TO 'SRR4424282_{ORIENTATION}.fastq' (FORMAT FASTQ);
+-- Write the pairs back out as FASTQ, one file per mate, and the unpaired spots to a third file,
+-- as fasterq-dump --split-3 does. One COPY cannot take both: it refuses a mix of paired and
+-- single-end rows.
+COPY (SELECT * FROM read_sra('SRR24770212.sra') WHERE sequence2 IS NOT NULL)
+TO 'SRR24770212_{ORIENTATION}.fastq' (FORMAT FASTQ);
+COPY (SELECT * FROM read_sra('SRR24770212.sra') WHERE sequence2 IS NULL)
+TO 'SRR24770212.fastq' (FORMAT FASTQ);
 ```
+
+COPY's deflines carry `read_id` only, not the spot name and `length=` of `fasterq-dump`'s.
 
 **Notes:**
 - Cite the SRA as: Leinonen R, Sugawara H, Shumway M. The Sequence Read Archive. *Nucleic Acids Res.* 2011;39:D19–D21. doi:10.1093/nar/gkq1019
