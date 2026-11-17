@@ -60,6 +60,40 @@ TEST_CASE("SleepUnlessInterrupted ends at Ctrl-C", "[http_client]") {
 	CHECK(std::chrono::steady_clock::now() - start < std::chrono::seconds(10));
 }
 
+// NCBI's quota is per IP address without an API key and per key with one, and it does not
+// reset between queries. Each statement builds its own NCBIClient, so pacing kept per client
+// let back-to-back statements exceed the quota. NCBI then answers 429. Natively that is
+// retried, but in a browser the 429 carries no CORS header, so duckdb-wasm sees a failed
+// request and the statement fails (the-miint/duckdb-miint#459).
+TEST_CASE("NCBIClient paces requests across clients that share an API key", "[http_client]") {
+	DuckDB db(nullptr);
+	Connection con1(db);
+	Connection con2(db);
+	// A key no other test uses, so no earlier request counts against it. With a key the quota
+	// is 10 requests a second: one every 100 ms.
+	const std::string key = "test-http-client-common-shared-pacer";
+	const auto interval = std::chrono::milliseconds(static_cast<int>(1000.0 / miint::NCBIClient::RATE_LIMIT_WITH_KEY));
+	const auto start = std::chrono::steady_clock::now();
+	miint::NCBIClient(*con1.context, key).RespectRateLimit();
+	miint::NCBIClient(*con2.context, key).RespectRateLimit();
+	miint::NCBIClient(*con1.context, key).RespectRateLimit();
+	// The first request may go at once and each later one an interval after the one before, so
+	// the third goes no sooner than two intervals after the start. A loaded machine can only
+	// make it later.
+	CHECK(std::chrono::steady_clock::now() - start >= 2 * interval);
+}
+
+TEST_CASE("NCBIClient paces each API key on its own", "[http_client]") {
+	// Two keys are two quotas: one key's requests never wait for another's.
+	DuckDB db(nullptr);
+	Connection con(db);
+	const auto interval = std::chrono::milliseconds(static_cast<int>(1000.0 / miint::NCBIClient::RATE_LIMIT_WITH_KEY));
+	const auto start = std::chrono::steady_clock::now();
+	miint::NCBIClient(*con.context, "test-http-client-common-key-a").RespectRateLimit();
+	miint::NCBIClient(*con.context, "test-http-client-common-key-b").RespectRateLimit();
+	CHECK(std::chrono::steady_clock::now() - start < interval);
+}
+
 // read_ncbi_taxdump fetches an http(s) source with an HTTP GET and opens any other through
 // DuckDB's file systems. The scheme is DuckDB's parse of it, and schemes ignore case
 // (RFC 3986, section 3.1).

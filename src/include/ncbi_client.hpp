@@ -4,8 +4,6 @@
 #include "duckdb/common/http_util.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
-#include <chrono>
-#include <mutex>
 #include <string>
 
 namespace miint {
@@ -17,7 +15,9 @@ namespace miint {
 // Rate Limiting Behavior:
 // - Without API key: Limited to 3 requests/second
 // - With API key: Limited to 10 requests/second
-// - Rate limiting is enforced per NCBIClient instance
+// - Requests are paced PACING_MARGIN further apart than those limits
+// - Rate limiting is shared by every NCBIClient in the process that uses the same API key,
+//   so back-to-back statements stay under the quota together
 // - Thread-safe: Multiple threads can share a single client instance
 //
 // Retry Behavior:
@@ -37,6 +37,12 @@ public:
 	// Rate limits (requests per second)
 	static constexpr double RATE_LIMIT_NO_KEY = 3.0;
 	static constexpr double RATE_LIMIT_WITH_KEY = 10.0;
+	// Requests go this much further apart than the limit allows. NCBI counts requests as they
+	// arrive, and network jitter bunches requests sent exactly 1/limit apart: in back-to-back
+	// queries paced at 3 a second, 3 of 28 requests got a 429, and 20% wider, none of 48 did
+	// (2026-11-16). Natively a 429 costs a retry; in a browser it fails the request, because
+	// NCBI sends it without CORS headers.
+	static constexpr double PACING_MARGIN = 1.2;
 
 	// Retry configuration
 	// 6 retries with exponential backoff (1s, 2s, 4s, 8s, 16s, 32s) gives ~63s of
@@ -98,13 +104,16 @@ public:
 		return NCBIParser::ParseFasta(fasta_text);
 	}
 
+	// Waits until NCBI's quota lets this client send its next request; the quota is shared
+	// with every client in the process that uses the same API key. Every request, retries
+	// included, goes through it.
+	void RespectRateLimit();
+
 private:
 	duckdb::ClientContext &context;
 	duckdb::DatabaseInstance &db;
 	std::string eutils_base;
 	std::string api_key;
-	std::chrono::steady_clock::time_point last_request_time;
-	mutable std::mutex rate_limit_mutex; // Protects last_request_time
 
 	// HTTP request helper with retry logic
 	std::string MakeRequest(const std::string &url, bool use_api_key_header = false);
@@ -119,7 +128,6 @@ private:
 	static bool IsRetryableStatus(int status);
 
 	// Rate limiting (thread-safe)
-	void RespectRateLimit();
 	double GetRateLimit() const;
 };
 

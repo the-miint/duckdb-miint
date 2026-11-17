@@ -2,13 +2,37 @@
 #include "http_client_common.hpp"
 #include "zip_utils.hpp"
 #include "duckdb/common/exception/http_exception.hpp"
+#include <algorithm>
+#include <chrono>
+#include <map>
+#include <mutex>
 #include <sstream>
 
 namespace miint {
 
+namespace {
+
+// NCBI's quota is per IP address without an API key and per key with one, and it does not
+// reset between queries. Each statement builds its own NCBIClient, so the pacing lives here,
+// one pacer per API key for the whole process: kept in the client, back-to-back statements
+// exceed the quota, and the 429 NCBI then sends carries no CORS header, so in a browser the
+// request fails instead of being retried.
+struct RequestPacer {
+	std::mutex lock;
+	std::chrono::steady_clock::time_point next_slot; // when the next request may go
+};
+
+RequestPacer &PacerFor(const std::string &api_key) {
+	static std::mutex pacers_lock;
+	static std::map<std::string, RequestPacer> pacers; // a pacer's address survives later inserts
+	std::lock_guard<std::mutex> guard(pacers_lock);
+	return pacers[api_key];
+}
+
+} // namespace
+
 NCBIClient::NCBIClient(duckdb::ClientContext &context, const std::string &api_key)
-    : context(context), db(*context.db), eutils_base(UrlSetting(context, "miint_ncbi_eutils_url")), api_key(api_key),
-      last_request_time(std::chrono::steady_clock::now() - std::chrono::seconds(1)) {
+    : context(context), db(*context.db), eutils_base(UrlSetting(context, "miint_ncbi_eutils_url")), api_key(api_key) {
 }
 
 double NCBIClient::GetRateLimit() const {
@@ -16,20 +40,20 @@ double NCBIClient::GetRateLimit() const {
 }
 
 void NCBIClient::RespectRateLimit() {
-	std::lock_guard<std::mutex> lock(rate_limit_mutex);
-
-	auto now = std::chrono::steady_clock::now();
-	auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_request_time);
-
-	// Calculate minimum interval between requests
-	double rate_limit = GetRateLimit();
-	auto min_interval = std::chrono::milliseconds(static_cast<int>(1000.0 / rate_limit));
-
-	if (elapsed < min_interval) {
-		SleepUnlessInterrupted(context, min_interval - elapsed);
+	const auto min_interval = std::chrono::milliseconds(static_cast<int>(1000.0 * PACING_MARGIN / GetRateLimit()));
+	auto &pacer = PacerFor(api_key);
+	std::chrono::steady_clock::time_point slot;
+	{
+		std::lock_guard<std::mutex> guard(pacer.lock);
+		slot = std::max(std::chrono::steady_clock::now(), pacer.next_slot);
+		pacer.next_slot = slot + min_interval;
 	}
-
-	last_request_time = std::chrono::steady_clock::now();
+	// Wait outside the lock, so one query's Ctrl-C never waits behind another query's turn.
+	// Rounded up: a request never goes before its slot.
+	const auto now = std::chrono::steady_clock::now();
+	if (slot > now) {
+		SleepUnlessInterrupted(context, std::chrono::ceil<std::chrono::milliseconds>(slot - now));
+	}
 }
 
 bool NCBIClient::IsRetryableStatus(int status) {

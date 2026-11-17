@@ -114,7 +114,7 @@ Fetch GenBank and RefSeq metadata from NCBI by accession number. This function q
 **Behavior:**
 - Fetches GenBank XML format from E-utilities using the batched `epost` + `efetch` handshake (one POST + one GET per `batch_size` accessions)
 - Automatically detects accession type (RefSeq NC_/NM_/NP_, GenBank, etc.)
-- Rate-limited to respect NCBI guidelines (3 req/s without key, 10 req/s with key)
+- Paced to stay under NCBI's limits (3 req/s without key, 10 req/s with key), with a 20% margin, counted across every NCBI query in the process, so back-to-back queries stay under them too
 - Retry logic for transient failures (400, 408, 429, 500, 502, 503, 504) with exponential backoff up to 6 retries
 - Accessions silently omitted by NCBI (e.g. invalid IDs) are reported via `miint_warnings()` and a stderr `WARNING`; the function does **not** throw, so one bad accession in a batch never aborts the rest of the query
 
