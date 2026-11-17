@@ -185,16 +185,59 @@ std::vector<uint32_t> LowestEligibleNodes(const CladeCountIndex &index, size_t r
 	return {*a, *b};
 }
 
-uint32_t MinCountAt(size_t, uint32_t) {
-	return 0;
+uint32_t MinCountAt(size_t rank, uint32_t min_count) {
+	return rank == kRanks - 1 ? 1 : min_count;
 }
 
-std::vector<uint8_t> RankSafeMasks(const CladeCountIndex &index, uint32_t) {
-	return std::vector<uint8_t>(index.Tree().size(), 0);
+std::vector<uint8_t> RankSafeMasks(const CladeCountIndex &index, uint32_t min_count) {
+	static_assert(kRanks <= 8, "a rank mask is one byte");
+	if (min_count == 0) {
+		throw std::invalid_argument("RankSafeMasks: min_count must be at least 1");
+	}
+	const TreeIndex &tree = index.Tree();
+	const uint32_t n = static_cast<uint32_t>(tree.size());
+	std::vector<uint8_t> masks(n, 0);
+	// Per preorder position, the number of names eligible at that node. Eligibility is closed
+	// upward, so that is the number of names with a lowest eligible node at or below it: each
+	// lowest node adds 1, and a name with two takes 1 back at their LCA, so it counts once from
+	// there up. Before the accumulation a count can wrap below 0; unsigned arithmetic is modular,
+	// and every accumulated count, at most the tree's tips, is exact. Counts are never capped: one
+	// capped at 2 below an LCA would come out 1 there, and call the rank safe.
+	std::vector<uint32_t> eligible(n);
+	for (size_t r = 0; r < kRanks; r++) {
+		std::fill(eligible.begin(), eligible.end(), 0);
+		const uint32_t rank_min_count = MinCountAt(r, min_count);
+		for (NameId name = 0; name < index.NameCount(r); name++) {
+			const uint32_t threshold = F1Score::Threshold(index.Total(r, name), rank_min_count);
+			const auto lowest = LowestEligibleNodes(index, r, name, threshold);
+			for (uint32_t v : lowest) {
+				eligible[tree.pre(v)]++;
+			}
+			if (lowest.size() == 2) {
+				eligible[tree.pre(tree.lca(lowest[0], lowest[1]))]--;
+			}
+		}
+		// A node follows its parent in preorder, so in reverse preorder each count is complete
+		// before it is added to the parent's. Position 0 is the root.
+		for (uint32_t p = n; p-- > 1;) {
+			eligible[tree.pre(tree.parent(index.NodeAtPreorder(p)))] += eligible[p];
+		}
+		for (uint32_t p = 0; p < n; p++) {
+			const uint32_t v = index.NodeAtPreorder(p);
+			if (eligible[p] == 1 && !tree.is_tip(v)) {
+				masks[v] |= uint8_t(1) << r;
+			}
+		}
+	}
+	return masks;
 }
 
-uint8_t PickedRanks(uint8_t) {
-	return 0;
+uint8_t PickedRanks(uint8_t safe_mask) {
+	// Adding the lowest set bit carries through the run of set bits that starts there, clearing
+	// it, so the bits that m has and m + low lacks are that run.
+	const uint32_t m = safe_mask;
+	const uint32_t low = m & (~m + 1);
+	return static_cast<uint8_t>(m & ~(m + low));
 }
 
 } // namespace miint
