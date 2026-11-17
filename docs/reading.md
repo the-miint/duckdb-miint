@@ -82,7 +82,7 @@ SELECT * FROM read_fastx('some_file.fasta');
 - `include_filepath` (BOOLEAN, optional, default false): Add filepath column to output
 - `qual_offset` (INTEGER, optional, default 33): Quality score offset (33 for Phred+33, 64 for Phred+64)
 - `allow_empty` (BOOLEAN, optional, default false): Read an empty file as no records instead of failing, for tools that write a file whether or not they have records for it. A pair with exactly one empty mate still fails: the other mate's records would have no mates.
-- `max_batch_bytes` (VARCHAR, optional, default `'512MiB'`): Soft cap on the uncompressed sequence+quality bytes buffered per output chunk, given as a formatted byte size (e.g. `'256MiB'`, `'2GB'`). The reader stops adding records to a chunk once their combined bytes reach this budget, which bounds memory when individual records are very large (e.g. assembled genomes at multiple MB each). Short-read data is unaffected — a chunk fills to the standard vector size long before the cap. Must be greater than 0.
+- `max_batch_bytes` (VARCHAR, optional, default `'64MiB'`): Soft cap on the bytes of the records `read_fastx` produces at a time, given as a formatted byte size (e.g. `'256MiB'`, `'2GB'`). Rows come out in groups of up to 2,048 records, and a group closes early once the uncompressed bytes of its read IDs, comments, sequences and qualities reach this cap, which bounds memory when individual records are very large (e.g. assembled genomes at multiple MB each). When several files are read on more than one thread with insertion order kept, a consumer that keeps the order, such as `CREATE TABLE ... AS`, holds whole groups until the ones before them arrive, so its memory follows this cap too. Short-read data is unaffected: a group reaches 2,048 records long before the cap. Must be greater than 0.
 
 **Output schema:**
 - `sequence_index` (BIGINT): 1-based sequential index per file (resets to 1 for each file when reading multiple files)
@@ -90,20 +90,22 @@ SELECT * FROM read_fastx('some_file.fasta');
 - `comment` (VARCHAR, nullable): Comment line after identifier
 - `sequence1` (VARCHAR): DNA/RNA sequence (R1 for paired-end)
 - `sequence2` (VARCHAR, nullable): Second sequence for paired-end reads
-- `qual1` (UINT8[], nullable): Quality scores as array of integers (NULL for FASTA)
-- `qual2` (UINT8[], nullable): Quality scores for R2 (NULL for FASTA or single-end)
+- `qual1` (UINT8[], nullable): Quality scores as array of integers (NULL for FASTA; an empty list for a FASTQ record with no bases)
+- `qual2` (UINT8[], nullable): Quality scores for R2 (NULL for FASTA or single-end; an empty list for a FASTQ record with no bases)
 - `filepath` (VARCHAR, optional): File path when include_filepath=true
 
 **Behavior:**
-- Detects FASTA (`>` headers) or FASTQ (`@` headers) from the file's content, whatever its extension. Both files of a pair must be the same format: a FASTA file paired with a FASTQ file fails the query
+- Detects FASTA (`>` headers) or FASTQ (`@` headers) from the file's first header, whatever its extension. Every record of a FASTA file has a NULL `qual1`, and every record of a FASTQ file a list, even a record with no bases. A file that mixes the two fails the query, naming its first record of the other format. Both files of a pair must be the same format: a FASTA file paired with a FASTQ file fails the query
 - Reads gzip-compressed files. A local file is recognized as gzip by its content, whatever its name; a remote file (`s3://`, `https://`) only by a `.gz` extension
 - Supports stdin input using `-` or `/dev/stdin` (single file only, no paired-end)
 - Quality scores converted to integers using specified offset (Phred+33 or Phred+64)
 - FASTQ records, those whose header starts with `@`, must be four lines each: header, sequence, `+`, quality, with the quality as long as the sequence. Blank lines, including lines of nothing but whitespace, may come before the first record and between records, and are ignored. Wrapped (multi-line) FASTQ is rejected; FASTA sequences may span any number of lines, and text before the first FASTA header (such as `;` comments) is skipped
 - A malformed record, a file that ends inside a FASTQ record, a truncated or corrupt gzip file, or NUL bytes where a record should start (such as the zero-filled block a crash can leave) fail the query rather than returning the records before it. The error names the file, and either the malformed record or how many records were read before the read failed; for damaged gzip data that count can stop short of the damage, since the data is inflated in blocks
 - Reads files in parallel, one thread per file (per pair of files for paired input), up to DuckDB's `threads` setting; stdin is read on one thread
+- Under the default `preserve_insertion_order`, rows come out file by file, in the order the files are given (a glob's sorted by name), and each file's records in order. `CREATE TABLE ... AS`, `INSERT` and `COPY` to CSV or Parquet keep that order and still read the files in parallel. With insertion order kept, `COPY ... (FORMAT FASTQ)` and `(FORMAT FASTA)` write on one thread, and read on it too ([Writing](writing.md))
+- Reading several files in parallel with insertion order kept costs memory. Each file is read whole by one thread, and the rows of later files wait in memory until the files before them are done; for a few large files that is most of the input. DuckDB bounds the wait by holding back the later files once it passes a share of `memory_limit`, and the read then slows toward one thread's speed ([engine notes](internals/duckdb-engine-notes.md#output-order-costs-threads-and-memory) have the measurements). Where record order does not matter, `SET preserve_insertion_order = false` (or `PRESERVE_ORDER false` on a `COPY`) avoids the wait. A single file is read on one thread, so nothing waits
 - An `http://` or `https://` file whose connection drops while it opens or partway through is retried by DuckDB's HTTP settings, `http_retries`, `http_retry_wait_ms` and `http_retry_backoff`. A retried read asks for the same byte range again, not the whole file. An HTTP error status DuckDB does not treat as transient, such as a 404, or a file whose ETag changed since it opened, fails at once. The defaults give up within a few seconds, which a long download will outlast; for one, raise them, for example `SET http_retries = 8; SET http_retry_wait_ms = 500; SET http_retry_backoff = 2;`. DuckDB also limits retries per host, so once many requests to one host have failed, later drops to that host can fail at once, even on a file that would have recovered
-- Each local regular file can be decompressed and parsed on a thread of its own, ahead of the rows being produced. This is decided once for the whole scan: it happens only if every file in the scan, each taking one of DuckDB's threads plus one more thread (two for a pair), fits in `threads` at once. With `SET threads = 8` that is up to four single-end files or two pairs. The count covers every file even when DuckDB reads them one at a time, as it does for a sink that keeps insertion order (a `CREATE TABLE ... AS` under the default `preserve_insertion_order`). Each read-ahead stops once it holds 4 MiB of records, or `max_batch_bytes` if that is smaller, passing it by about a record (by up to sixteen where record lengths jump). Remote files and pipes (stdin from a pipe included) are read without it, as is everything in DuckDB-Wasm
+- Each local regular file can be decompressed and parsed on a thread of its own, ahead of the rows being produced. This is decided once for the whole scan: it happens only if every file in the scan, each taking one of DuckDB's threads plus one more thread (two for a pair), fits in `threads` at once. With `SET threads = 8` that is up to four single-end files or two pairs. The count covers every file even when DuckDB reads them one at a time, as it does for `COPY ... (FORMAT FASTQ)` with insertion order kept. Each read-ahead stops once it holds 4 MiB of records, or `max_batch_bytes` if that is smaller, passing it by about a record (by up to sixteen where record lengths jump). Remote files and pipes (stdin from a pipe included) are read without it, as is everything in DuckDB-Wasm
 - For paired-end data, reads are matched by position in files (not by ID)
 
 **Examples:**
@@ -181,12 +183,11 @@ HAVING AVG(q) >= 30;
 ```
 
 **Performance:**
-- Streaming I/O minimizes memory usage
+- Records are streamed from each file rather than loaded whole; reading several files with insertion order kept holds more (see above)
 - Quality scores stored as efficient UINT8 arrays
 
 **Notes:**
 - Read IDs must match between R1 and R2 files for paired-end data (not validated, matched by position)
-- For FASTA files, `qual1` and `qual2` are NULL
 - The `sequence_index` resets to 1 for each file. To distinguish sequences from different files, use `include_filepath=true` and order by `filepath, sequence_index`
 - Comment field is NULL if no comment is present in the sequence header
 

@@ -296,7 +296,10 @@ Verified on DuckDB 2.0 (`d54cbbe`).
   and `PARTITION_BY`, `PER_THREAD_OUTPUT`, `FILE_SIZE_BYTES` and `ORDER_BY` force it off
   (`PhysicalPlanGenerator::PreserveInsertionOrder`, called from `plan_copy_to_file.cpp`). `EXPLAIN` does not show which mode
   ran.
-- **An order-kept COPY still runs its source on one thread.** A table function with heavy
+- **An order-kept COPY in REGULAR mode still runs its source on one thread.** That covers
+  FASTA and FASTQ, and CSV or Parquet over a source without a batch index
+  ([Output order](#output-order-costs-threads-and-memory)); over one with a batch index, CSV and
+  Parquet run in BATCH mode. A table function with heavy
   per-row work does that work on its own jobs and only emits from `Execute` (`rype_filter`
   maps reads on async jobs). Time such a function through the sink its users write to: a CTAS
   of a source that declares `NO_ORDER` is a parallel sink, so it does not show the problem.
@@ -344,10 +347,72 @@ Verified on DuckDB 2.0 (`d54cbbe`). Under the default `preserve_insertion_order`
   (`PhysicalResultSink::ParallelSink`), and a CTAS gets a single-threaded insert
   (`plan_create_table.cpp`). Its own threads then go unused. A function whose rows come out
   in no fixed order sets `order_preservation_type = OrderPreservationType::NO_ORDER`.
+- **A batch index lets the consumer run on every thread and still keep the order.**
+  - **Setting `get_partition_data` is all it takes.** DuckDB does not check what the request
+    asks for (`PhysicalTableScan::SupportsPartitioning`, a FIXME).
+  - **The consumers.** `PhysicalPlanGenerator::UseBatchIndex` admits a plan when there is more
+    than one thread and every source has a batch index, whatever the sources' own thread counts.
+    With order kept, these then use the index:
+    - CREATE TABLE AS and INSERT (`PhysicalBatchInsert`; `plan_create_table.cpp`,
+      `plan_insert.cpp`);
+    - COPY to a format with a batch mode, CSV and Parquet (`plan_copy_to_file.cpp`);
+    - a query's result, materialized or streamed (`ResultOrdering::BATCH_INDEX_ORDERED`,
+      `physical_result_collector.cpp`);
+    - a materialized CTE (`plan_cte.cpp`);
+    - a LIMIT, with a constant limit and offset of at most 10,000 rows, over anything but a bare
+      scan, which includes a table function's own (`UseBatchLimit`, `plan_limit.cpp`): so
+      `FROM read_fastx(glob) LIMIT 10` gets the streaming limit;
+    - a `USING SAMPLE n ROWS (system)`; the default row-count sample is a reservoir sample, which
+      uses no batch index (`plan_sample.cpp`).
+
+    `EXPLAIN` names the batch operators "Batch Create Table As", "Batch Insert" and
+    "Batch Copy To File".
+  - `read_fastx` declares one through `ScanBatchIndex`
+    ([architecture.md](architecture.md#output-order)).
+- **The batch-index contract:**
+  - `get_partition_data` runs after each non-empty chunk, so the local state must still describe
+    the chunk `Execute` just returned (`PipelineExecutor::NextBatch`).
+  - A source's index is below `PipelineBuildState::BATCH_INCREMENT - 2` (10^13 - 2)
+    (`PipelineExecutor::ToPipelinePartitionData`).
+  - On a thread, indexes never decrease (`PipelineExecutor::NextBatch`). A thread starts from the
+    lowest index any thread holds when it starts, and no new index may fall below the lowest one
+    any thread still holds (`Pipeline::UpdateBatchIndex`). Indexes may repeat (the chunks then
+    form one batch), and gaps are fine.
+  - Two threads never share an index: the sinks reject it (`PhysicalBatchInsert::AddCollection`,
+    `PhysicalBatchCopyToFile`).
+
+  A source that breaks the contract fails the query with an `InternalException`, which in
+  DuckDB 2.0 invalidates the database. A source whose indexes rise with the work units it hands
+  out keeps it; `ScanBatchIndex` does so for readers that claim whole files.
 - **Order-keeping sinks hold every batch until enough follow it.** `PhysicalBatchInsert`
   keeps each batch unmerged, at a cost of its own even when it holds a few rows, until
   consecutive batches add up to a row group. A batch index per small work unit made 60k rows
-  in 7-row batches run out of memory under a 64 MB limit at 8 threads.
+  in 7-row batches run out of memory under a 64 MB limit at 8 threads. Each thread holds whole
+  batches, so their memory also follows a batch's bytes: a reader of large records caps a
+  chunk's bytes, as `read_fastx`'s `max_batch_bytes` does.
+- **A reader that gives each thread a whole file makes the sink hold most of the input.**
+  - Batches from later files wait until the file with the lowest index is done. For a few large
+    files that is nearly everything.
+  - The batch sinks' `BatchMemoryManager` reserves memory for them, at most a quarter of the
+    operator memory limit at a time (`BatchMemoryManager::SetMemorySize`). Past its reservation,
+    it blocks every task whose batch index is above the lowest until that index advances, trading
+    speed for memory. RSS counts more than the reservation (the readers' buffers, the output), so
+    it can pass `memory_limit`.
+  - Measured with `read_fastx` on DuckDB 2.0, 8 threads pinned to 8 cores, medians of 3 runs,
+    peak RSS from `/usr/bin/time`, for
+    `COPY (SELECT read_id, sequence1 FROM read_fastx(<eight 75 MB FASTQ files>)) TO '/dev/null' (FORMAT CSV)`:
+    1.1 GB and 0.10 s under an 8 GB `memory_limit`; 425 MB and 0.61 s under 256 MB; and before
+    `read_fastx` had a batch index, on one thread, 102 MB and 0.57 s.
+  - DuckDB's own readers split a file across threads, which keeps that window small.
+- **A one-thread source gains nothing from a batch index, and it costs a CREATE TABLE AS.**
+  A one-thread source with a batch index still gets `PhysicalBatchInsert` (the consumers, above).
+  - From a one-file `read_fastx` of 604 MB of short reads (8 threads pinned to 8 cores, medians
+    of 3 to 5 runs), it merged one 2,048-row batch per chunk into row groups: 1.86 s, against
+    1.16 s before `read_fastx` had a batch index, about 60% slower (and 1.12 s for the regular
+    insert of the same build with order off).
+  - A table function's `Bind` can withhold the index per scan, because the bound copy of the
+    function is writable (`input.table_function.get_partition_data = nullptr`);
+    `ScanBatchIndex::KeepForSeveralFiles` does so for a one-file scan.
 - **A thread that never emits holds the minimum batch index**, so no later batch can be
   flushed past it. A task that waits on background work without emitting stalls an
   order-keeping sink; finish the task (return FINISHED) once it has nothing left to claim.

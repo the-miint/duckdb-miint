@@ -35,6 +35,19 @@ SELECT * FROM read_fastx('data/fastq/malformed_qual_shorter_overshoot.fq');
 ----
 malformed_qual_shorter_overshoot.fq: record 'b' (record 2): sequence length 5 does not match quality length 3
 
+# A file that mixes FASTA and FASTQ records. Whether qual1 is NULL is decided for the whole file, by its first
+# header, so a FASTQ record in a FASTA file would lose its qualities, and a FASTA record in a FASTQ file would get an
+# empty list beside a non-empty sequence. Both are errors, naming the first record of the other format.
+statement error
+SELECT * FROM read_fastx('data/fastq/malformed_mixed_fasta_first.fa');
+----
+malformed_mixed_fasta_first.fa: record 'q1' (record 2): a FASTQ record ('@' header) in a FASTA file; a file must be all FASTA or all FASTQ
+
+statement error
+SELECT * FROM read_fastx('data/fastq/malformed_mixed_fastq_first.fq');
+----
+malformed_mixed_fastq_first.fq: record 's1' (record 2): a FASTA record ('>' header) in a FASTQ file; a file must be all FASTA or all FASTQ
+
 # A gzip file cut in half: 496 complete records, and part of a 497th, come back before the cut,
 # which is not the file.
 statement error

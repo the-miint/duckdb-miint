@@ -28,6 +28,19 @@ All table functions follow a similar structure:
 
 `MaxThreads()` controls parallelism per function (e.g. `read_fastx` uses 1 for stdin and one per file, or per pair of files, otherwise). It returns the most threads the scan can use, and DuckDB's `threads` setting bounds it. A file reader therefore returns its file count, that count capped (several readers stop at 8), or a fixed number (`read_biom` returns 4), and does not cap it at `std::thread::hardware_concurrency()`: that can return 0, and it would hold the scan below a `threads` setting larger than the core count.
 
+<a name="output-order"></a>
+**Output order.** Under the default `preserve_insertion_order`, a consumer that keeps order runs on one thread unless its source says how its rows are ordered; [duckdb-engine-notes.md](duckdb-engine-notes.md#output-order-costs-threads-and-memory) lists those consumers, DuckDB's rules for a batch index, and what a batch index costs in memory. A reader that can run on several threads (a `MaxThreads()` above 1) declares one of two things:
+- **Rows in no fixed order** (an aligner's output, or rows from async jobs): `order_preservation_type = OrderPreservationType::NO_ORDER`.
+- **Rows with an order** (a file's records, files in the order given): a batch index, set through `get_partition_data`. A reader that claims whole files in increasing order under its lock, and never puts two files in one chunk, uses `ScanBatchIndex` (`src/include/scan_batch_index.hpp`), with `read_fastx` as the example:
+  - the global state computes `ScanBatchIndex::Stride` once, from the file count;
+  - the local state counts the chunks emitted from the claimed file, resetting the count at each claim;
+  - `Execute` sets the chunk's index with `ScanBatchIndex::Index`;
+  - `get_partition_data` returns it through `ScanBatchIndex::PartitionData`;
+  - `Bind` calls `ScanBatchIndex::KeepForSeveralFiles`, which withholds the index from a one-file scan;
+  - a chunk's bytes are capped as well as its rows, as `read_fastx`'s `max_batch_bytes` does.
+
+A reader that runs on one thread needs neither: its consumer runs on one thread anyway.
+
 ### Record Abstraction
 Each file format has a record struct (SAMRecord, SequenceRecord, etc.) that:
 - Wraps underlying C library objects (HTSlib `bam1_t`, kseq record)
@@ -155,6 +168,7 @@ Currently used by `align_minimap2` + `save_minimap2_index` (both sides), `copy_s
 6. If the function should run per-sample (partitioning an input relation by a column), follow `docs/internals/per-sample-pattern.md`
 7. If an argument names a relation to read, follow `docs/internals/reading-tables-views.md`, including its [CTE guard](reading-tables-views.md#ctes-reject-them-in-bind) and the matching `cte_relation_name_guard` test case
 8. If it reads a file format, add a row to `FORMAT_READERS` in `src/file_suffix_scan.cpp` with the format's suffixes and only the compressions the reader opens, so `FROM 'x.<suffix>'` reads with it; in `test/sql/file_suffix_scan.test`, read each suffix once and test the row once per compression (read where it claims it, refused where it does not), and add the row to the table in [reading.md](../reading.md#reading-a-file-by-its-name). A reader built only with an optional library goes under its `MIINT_HAS_*` guard, with its cases in a test file that has the matching `require-env`, as `.biom` does.
+9. If it can run on several threads, declare its output order ([Output order](#output-order)): `NO_ORDER`, or a batch index through `get_partition_data` (with `ScanBatchIndex` for a reader that claims whole files). Without either, its order-keeping consumers run on one thread. Test the order at 1 and at 8 threads, and check with `EXPLAIN` that the batch operators run (`test/sql/read_fastx_batch_index.test`).
 
 <a name="no-work-in-bind"></a>
 ### Do the work in `InitGlobal` / `Execute` — never in `Bind`

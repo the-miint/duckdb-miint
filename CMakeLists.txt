@@ -571,6 +571,7 @@ list(
   test/cpp/test_sam_style_tags.cpp
   test/cpp/test_SAMReader.cpp
   test/cpp/test_ScCooBuilder.cpp
+  test/cpp/test_ScanBatchIndex.cpp
   test/cpp/test_SequenceReader.cpp
   test/cpp/test_SFFReader.cpp
   test/cpp/test_ShardProgress.cpp
@@ -691,9 +692,16 @@ endif()
 if(BUILD_UNITTESTS)
   add_executable(
     tests_duckdb
-    test/cpp/test_RypeInputStream.cpp test/cpp/test_RypeFilterParallel.cpp
-    test/cpp/test_RypeFilterSchedule.cpp test/cpp/test_HttpClientCommon.cpp
-    test/cpp/test_CopySequenceDeferral.cpp)
+    test/cpp/test_RypeInputStream.cpp
+    test/cpp/test_RypeFilterParallel.cpp
+    test/cpp/test_RypeFilterSchedule.cpp
+    test/cpp/test_HttpClientCommon.cpp
+    test/cpp/test_CopySequenceDeferral.cpp
+    test/cpp/test_ReadFastxBatchIndex.cpp)
+  # It includes SequenceReader.hpp, whose members depend on MIINT_STATIC_BUILD:
+  # compiled as the miint it links was, or the two disagree on the class.
+  set_source_files_properties(test/cpp/test_ReadFastxBatchIndex.cpp
+                              PROPERTIES COMPILE_DEFINITIONS MIINT_STATIC_BUILD)
   target_link_libraries(tests_duckdb Catch2::Catch2WithMain duckdb_static)
   link_extension_libraries(tests_duckdb "")
   # Sets RLIMIT_FSIZE, so POSIX only
