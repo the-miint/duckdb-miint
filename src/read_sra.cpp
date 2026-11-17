@@ -75,6 +75,25 @@ bool IsFetchFailure(const std::exception &e) {
 	return type == ExceptionType::IO || type == ExceptionType::HTTP;
 }
 
+// Runs fn, rewording what it throws as the run's error: damage and refusals as ThrowForRun does,
+// and a fetch that failed (when opening the run, or partway through it after its first rows were
+// returned) as an I/O error naming the run. Anything else is the query's failure and passes as is.
+template <typename Fn>
+void WithRunErrors(const SraScanData &bind, const std::string &accession, Fn &&fn) {
+	try {
+		fn();
+	} catch (const SraFormatError &e) {
+		ThrowForRun(bind, accession, e);
+	} catch (const SraUnsupportedError &e) {
+		ThrowForRun(bind, accession, e);
+	} catch (const std::exception &e) {
+		if (!IsFetchFailure(e)) {
+			throw;
+		}
+		throw IOException(bind.function + ": " + accession + ": " + ErrorData(e).RawMessage());
+	}
+}
+
 struct OpenRun {
 	std::string location;
 	std::string accession;
@@ -117,6 +136,10 @@ struct GlobalState : public GlobalTableFunctionState {
 
 	// Hands out the next unit, in run and spot order, opening the next run when the current one
 	// is used up. The order of claims is the order of batch indexes, hence of the output.
+	//
+	// The next run is opened under the lock: its table of contents, metadata, column indexes and
+	// name index are read before any of its units can be handed out, so a thread waiting here has
+	// no other work to take. Threads still decoding the previous run's units carry on meanwhile.
 	bool Claim(ClientContext &context, const SraScanData &bind, WorkUnit &unit) {
 		std::lock_guard<std::mutex> guard(lock);
 		while (!current || next_row >= end_row) {
@@ -128,23 +151,14 @@ struct GlobalState : public GlobalTableFunctionState {
 			auto run = std::make_shared<OpenRun>();
 			run->location = input.location;
 			run->accession = input.accession;
-			try {
+			WithRunErrors(bind, run->accession, [&] {
 				run->table = OpenTable(context, input.location);
 				ClassifyRun(GatherRunFacts(*run->table));
 				run->prefetcher = std::make_unique<SpotReader>(run->table);
+				// The READ column's range, which ColumnIndex checked ends within int64.
 				next_row = run->prefetcher->FirstRow();
 				end_row = next_row + int64_t(run->prefetcher->RowCount());
-			} catch (const SraFormatError &e) {
-				ThrowForRun(bind, run->accession, e);
-			} catch (const SraUnsupportedError &e) {
-				ThrowForRun(bind, run->accession, e);
-			} catch (const std::exception &e) {
-				if (!IsFetchFailure(e)) {
-					throw;
-				}
-				// The run could not be opened: the error names it.
-				throw IOException(bind.function + ": " + run->accession + ": " + ErrorData(e).RawMessage());
-			}
+			});
 			current = std::move(run);
 		}
 		unit.run = current;
@@ -310,11 +324,13 @@ void Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &outp
 	auto &gs = data_p.global_state->Cast<GlobalState>();
 	auto &ls = data_p.local_state->Cast<LocalState>();
 
+	// Checked on every call, not only between units: a unit is many chunks, and over a remote run
+	// many range requests.
+	context.BlockingInterruptCheck();
 	std::vector<SraRow> rows;
 	rows.reserve(STANDARD_VECTOR_SIZE);
 	while (rows.empty()) {
 		if (!ls.has_unit && ls.pending_pos >= ls.pending.size()) {
-			context.BlockingInterruptCheck();
 			if (!gs.Claim(context, bind, ls.unit)) {
 				output.SetChildCardinality(0);
 				return;
@@ -323,31 +339,15 @@ void Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &outp
 			ls.batch_index = ls.unit.batch_index;
 			ls.next_row = ls.unit.first_row;
 			if (ls.reader_run != ls.unit.run) {
-				try {
+				WithRunErrors(bind, ls.unit.run->accession, [&] {
 					// The run's name index is shared with the reader Claim made, not read again.
 					ls.reader = std::make_unique<SpotReader>(ls.unit.run->table, ls.unit.run->prefetcher.get());
-				} catch (const SraFormatError &e) {
-					ThrowForRun(bind, ls.unit.run->accession, e);
-				} catch (const SraUnsupportedError &e) {
-					ThrowForRun(bind, ls.unit.run->accession, e);
-				}
+				});
 				ls.reader_run = ls.unit.run;
 			}
 		}
-		try {
-			FillRows(ls, bind, STANDARD_VECTOR_SIZE, rows);
-		} catch (const SraFormatError &e) {
-			ThrowForRun(bind, ls.unit.run->accession, e);
-		} catch (const SraUnsupportedError &e) {
-			ThrowForRun(bind, ls.unit.run->accession, e);
-		} catch (const std::exception &e) {
-			// A run that fails partway (a fetch the network refused) fails the query: its rows so
-			// far are already out. The error names the run.
-			if (!IsFetchFailure(e)) {
-				throw;
-			}
-			throw IOException(bind.function + ": " + ls.unit.run->accession + ": " + ErrorData(e).RawMessage());
-		}
+		// A run that fails partway fails the query: its rows so far are already out.
+		WithRunErrors(bind, ls.unit.run->accession, [&] { FillRows(ls, bind, STANDARD_VECTOR_SIZE, rows); });
 	}
 
 	const idx_t n = rows.size();
