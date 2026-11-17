@@ -187,12 +187,6 @@ public:
 		count = length;
 	}
 
-	void PrefetchRows(int64_t first, int64_t end) const {
-		if (physical_) {
-			physical_->PrefetchRows(first, end);
-		}
-	}
-
 	// The row's cell as text (an ascii column).
 	std::string Text(int64_t row) {
 		const uint8_t *data;
@@ -367,16 +361,6 @@ void SpotReader::Impl::ResolveNaming(const SraTable &t, const Impl *share_from) 
 }
 
 SpotReader::~SpotReader() = default;
-
-void SpotReader::PrefetchRows(int64_t first, int64_t end) {
-	Impl &m = *impl_;
-	for (auto *col : {m.read.get(), m.altread.get(), m.quality.get(), m.read_start.get(), m.read_len.get(),
-	                  m.read_type.get(), m.name_fmt.get(), m.x.get(), m.y.get(), m.spot_name.get()}) {
-		if (col) {
-			col->PrefetchRows(first, end);
-		}
-	}
-}
 
 int64_t SpotReader::FirstRow() const {
 	return impl_->first;

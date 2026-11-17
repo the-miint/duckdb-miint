@@ -98,10 +98,10 @@ struct OpenRun {
 	std::string location;
 	std::string accession;
 	std::shared_ptr<const SraTable> table;
-	// Hints each claimed unit's blobs to the byte source, under the global lock. Execute also
-	// passes it, outside the lock, as share_from to the readers of this run: that reads only what
-	// its constructor wrote (the table and the name index), which PrefetchRows does not touch.
-	mutable std::unique_ptr<SpotReader> prefetcher;
+	// Made when the run is opened, for its row range and its name index. Each thread's reader of
+	// the run takes the name index from it (share_from) rather than reading it again; that reads
+	// only what its constructor wrote.
+	std::unique_ptr<const SpotReader> first_reader;
 };
 
 struct WorkUnit {
@@ -154,10 +154,10 @@ struct GlobalState : public GlobalTableFunctionState {
 			WithRunErrors(bind, run->accession, [&] {
 				run->table = OpenTable(context, input.location);
 				ClassifyRun(GatherRunFacts(*run->table));
-				run->prefetcher = std::make_unique<SpotReader>(run->table);
+				run->first_reader = std::make_unique<const SpotReader>(run->table);
 				// The READ column's range, which ColumnIndex checked ends within int64.
-				next_row = run->prefetcher->FirstRow();
-				end_row = next_row + int64_t(run->prefetcher->RowCount());
+				next_row = run->first_reader->FirstRow();
+				end_row = next_row + int64_t(run->first_reader->RowCount());
 			});
 			current = std::move(run);
 		}
@@ -166,10 +166,6 @@ struct GlobalState : public GlobalTableFunctionState {
 		unit.end_row = std::min<int64_t>(end_row, next_row + int64_t(spots_per_unit));
 		unit.batch_index = next_batch++;
 		next_row = unit.end_row;
-		// A thread's read-ahead follows its position, but each claim jumps it ahead of the other
-		// threads: fetch the unit's blobs, and the next unit's, before a thread arrives at them.
-		current->prefetcher->PrefetchRows(unit.first_row,
-		                                  std::min<int64_t>(end_row, unit.end_row + int64_t(spots_per_unit)));
 		return true;
 	}
 };
@@ -341,7 +337,7 @@ void Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &outp
 			if (ls.reader_run != ls.unit.run) {
 				WithRunErrors(bind, ls.unit.run->accession, [&] {
 					// The run's name index is shared with the reader Claim made, not read again.
-					ls.reader = std::make_unique<SpotReader>(ls.unit.run->table, ls.unit.run->prefetcher.get());
+					ls.reader = std::make_unique<SpotReader>(ls.unit.run->table, ls.unit.run->first_reader.get());
 				});
 				ls.reader_run = ls.unit.run;
 			}

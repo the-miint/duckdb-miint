@@ -140,8 +140,6 @@ public:
 	// checksum mismatch, SraUnsupportedError for MD5 checksums.
 	std::vector<uint8_t> ReadBlob(const BlobLoc &loc) const;
 	VdbBlob ReadVdbBlob(const BlobLoc &loc) const;
-	// Hints to the byte source that the blobs holding rows [first, end) will be read soon.
-	void PrefetchRows(int64_t first, int64_t end) const;
 
 private:
 	const KarArchive *archive_;

@@ -189,28 +189,6 @@ TEST_CASE("A v2 blob with variable row lengths and padding bits", "[sra]") {
 	CHECK(blob.page_map.ElementsSpanned() * 2 == blob.payload_bits);
 }
 
-TEST_CASE("PrefetchRows hints the bytes of the blobs holding the rows", "[sra]") {
-	// On S3 the scan hints a work unit's blobs when the unit is claimed, so they are fetched
-	// before the thread reaches them. The hint must name the blobs' bytes in the file.
-	struct HintRecorder : SraFileSource {
-		using SraFileSource::SraFileSource;
-		void Prefetch(uint64_t pos, uint64_t n) const override {
-			hints.emplace_back(pos, n);
-		}
-		mutable std::vector<std::pair<uint64_t, uint64_t>> hints;
-	};
-	auto source = std::make_shared<HintRecorder>("data/sra/SRR4424282.sra");
-	SraTable t(std::make_shared<const KarArchive>(source));
-	PhysicalColumn read(t, "READ");
-	read.PrefetchRows(1, 4);
-	// READ/data starts at 2612; its one blob holds all three rows in 382 bytes.
-	REQUIRE(source->hints.size() == 1);
-	CHECK(source->hints[0] == std::make_pair<uint64_t, uint64_t>(2612, 382));
-	source->hints.clear();
-	read.PrefetchRows(4, 9); // past the last row: nothing
-	CHECK(source->hints.empty());
-}
-
 TEST_CASE("ReadBlob rejects a blob whose CRC32 does not match", "[sra]") {
 	auto bytes = SlurpBytes("data/sra/SRR4424282.sra");
 	// READ/data starts at 2612; flip one base inside its only blob.

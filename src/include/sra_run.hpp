@@ -73,9 +73,6 @@ public:
 	// it would stop: READ_START and READ_LEN counts differ, a read runs past the spot, or the
 	// spot's bases and qualities differ in length.
 	void Read(int64_t row_id, Spot &out);
-	// Hints to the byte source that rows [first, end) will be read soon: on S3 the blocks of a
-	// work unit are fetched before a thread reaches them.
-	void PrefetchRows(int64_t first, int64_t end);
 
 private:
 	struct Impl;

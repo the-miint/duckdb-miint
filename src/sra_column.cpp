@@ -882,35 +882,6 @@ std::vector<uint8_t> PhysicalColumn::ReadBlob(const BlobLoc &loc) const {
 	return bytes;
 }
 
-void PhysicalColumn::PrefetchRows(int64_t first, int64_t end) const {
-	const KarEntry *data = archive_->Find(dir_ + "/data");
-	if (data == nullptr || first >= end) {
-		return;
-	}
-	const auto &blobs = index_.blobs;
-	auto it = std::upper_bound(blobs.begin(), blobs.end(), first,
-	                           [](int64_t id, const BlobLoc &b) { return id < b.start_id; });
-	if (it != blobs.begin() && std::prev(it)->start_id + int64_t(std::prev(it)->id_count) > first) {
-		--it;
-	}
-	// Blobs of consecutive rows usually lie end to end: hint them as one range.
-	uint64_t run_start = 0, run_end = 0;
-	for (; it != blobs.end() && it->start_id < end; ++it) {
-		uint64_t at = it->pg * index_.page_size;
-		if (run_end != run_start && at != run_end) {
-			archive_->Source().Prefetch(data->offset + run_start, run_end - run_start);
-			run_start = run_end = at;
-		}
-		if (run_end == run_start) {
-			run_start = run_end = at;
-		}
-		run_end = at + it->size;
-	}
-	if (run_end > run_start) {
-		archive_->Source().Prefetch(data->offset + run_start, run_end - run_start);
-	}
-}
-
 VdbBlob PhysicalColumn::ReadVdbBlob(const BlobLoc &loc) const {
 	return ParseVdbBlob(ReadBlob(loc), loc.id_count, ElementBits(type_));
 }
