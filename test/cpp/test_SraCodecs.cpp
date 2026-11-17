@@ -305,3 +305,57 @@ TEST_CASE("Iunzip refuses widths it cannot decode before dividing by them", "[sr
 	    },
 	    "2-bit"));
 }
+
+TEST_CASE("A zip blob is refused past the decoded-size cap before its buffer is sized", "[sra]") {
+	// 4 MB of input may inflate to 4 GB by deflate's ratio, so that bound alone would allocate and
+	// zero 4 GB per decoding thread. The cap izip blobs have applies here too.
+	std::vector<uint8_t> src(size_t(4) << 20, 0);
+	HeaderFrame zip;
+	zip.version = 1;
+	zip.osize = int64_t(4) << 30;
+	uint64_t bits = 0;
+	CHECK(ThrowsTypeMentioning<SraUnsupportedError>([&] { Unzip(zip, src.data(), src.size(), bits); }, "GiB"));
+}
+
+TEST_CASE("An izip blob with no byte planes decodes only the elements its rows address", "[sra]") {
+	// Nothing in such a blob's bytes bounds the count its header claims: a few bytes claiming 2 GiB
+	// of elements would allocate that, twice, per decoding thread. Its rows address three.
+	VdbBlob blob;
+	blob.frames = {IzipFrame(2, 0, {7, 2})};
+	blob.frames[0].osize = (int64_t(2) << 30) - 4;
+	blob.page_map = PackedRows({3});
+	DecodedBlob d = DecodeBlob(blob, "izip_encoding#1", U32);
+	CHECK(d.elem_count == 3);
+	CHECK(As<uint32_t>(d.data) == std::vector<uint32_t> {7, 9, 11});
+}
+
+TEST_CASE("An izip blob claiming a negative size is damage", "[sra]") {
+	// A size below zero cannot be what a writer recorded; it is not a refused variant.
+	VdbBlob blob;
+	blob.frames = {IzipFrame(2, 0, {0, 0})};
+	blob.frames[0].osize = -4;
+	blob.page_map = PackedRows({1});
+	CHECK(ThrowsTypeMentioning<SraFormatError>([&] { DecodeBlob(blob, "izip_encoding#1", U32); }, "-4 bytes"));
+}
+
+TEST_CASE("One parser decides which encodings are read", "[sra]") {
+	// Classification and decoding both use it, so a run is never accepted with an encoding the
+	// decoder would then refuse, or the reverse.
+	CHECK(ParseEncoding("") == Encoding::Raw);
+	CHECK(ParseEncoding("izip_encoding#1") == Encoding::Izip);
+	CHECK(ParseEncoding("<U32> izip_encoding#1") == Encoding::Izip);
+	CHECK(ParseEncoding("zip_encoding#1") == Encoding::Zip);
+	CHECK(ParseEncoding("<INSDC:2na:packed>zip_encoding#1<Z_DEFAULT_STRATEGY,Z_BEST_SPEED>") == Encoding::Zip);
+	// A version that only starts with a supported one is another encoding.
+	CHECK_FALSE(ParseEncoding("zip_encoding#10").has_value());
+	CHECK_FALSE(ParseEncoding("izip_encoding#2").has_value());
+	CHECK_FALSE(ParseEncoding("zip_encoding#1<a>b").has_value());
+	CHECK_FALSE(ParseEncoding("<U32 izip_encoding#1").has_value());
+	CHECK(ThrowsTypeMentioning<SraUnsupportedError>(
+	    [] {
+		    VdbBlob blob;
+		    blob.page_map = PackedRows({0});
+		    DecodeBlob(blob, "zip_encoding#10", ElementType {8, false});
+	    },
+	    "zip_encoding#10"));
+}

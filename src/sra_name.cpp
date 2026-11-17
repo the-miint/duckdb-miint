@@ -184,8 +184,14 @@ SkeyIndex::SkeyIndex(std::vector<uint8_t> bytes) : bytes_(std::move(bytes)) {
 	count_ = LoadU32(&b[trie_end]);
 	ord2node_ = trie_end + sizeof(uint32_t);
 	rest -= sizeof(uint32_t);
-	if (last_ - first_ < int64_t(count_) * DENSE_PROJECTION_FACTOR) {
-		count_ = uint32_t(last_ - first_ + 1);
+	// The rows the index covers, 0 when its last row is the one before its first. Unsigned, so
+	// any two row ids from the file give their span without overflow.
+	if (last_ < first_ && uint64_t(first_) - uint64_t(last_) != 1) {
+		Damaged("the index's last row precedes its first");
+	}
+	const uint64_t rows = uint64_t(last_) - uint64_t(first_) + 1;
+	if (rows <= uint64_t(count_) * DENSE_PROJECTION_FACTOR) {
+		count_ = uint32_t(rows);
 		if (rest != size_t(count_) * NODE_ID_SIZE) {
 			Damaged("the projection does not have one node per row");
 		}
@@ -218,7 +224,7 @@ uint32_t SkeyIndex::Ordinal(int64_t row_id) const {
 	if (count_ == 0 || row_id < first_ || row_id > last_) {
 		return 0;
 	}
-	uint64_t id = uint64_t(row_id - first_);
+	uint64_t id = uint64_t(row_id) - uint64_t(first_);
 	if (id2ord_.empty()) {
 		return uint32_t(id + 1);
 	}
@@ -255,7 +261,7 @@ std::string SkeyIndex::KeyOfNode(uint32_t node_id) const {
 	const uint32_t idx_width = WidthFor(width_);
 	const uint32_t tid_width = WidthFor(num_trans_);
 	auto read = [&](size_t at, uint32_t w) -> uint32_t {
-		if (at + w > b.size()) {
+		if (at > b.size() || w > b.size() - at) {
 			Damaged("a trie node runs past the file");
 		}
 		return w == sizeof(uint8_t) ? b[at] : w == sizeof(uint16_t) ? LoadU16(&b[at]) : LoadU32(&b[at]);

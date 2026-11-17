@@ -30,34 +30,6 @@ bool SupportedTableType(const std::string &type) {
 	return TYPES.count(type.substr(0, type.find('#'))) > 0;
 }
 
-// Raw, zip_encoding#1 (with optional deflate parameters) and izip_encoding#1: the only encodings
-// the surveyed runs used on the columns that are read. The element type in angle brackets and
-// any spacing are not part of the encoding.
-bool SupportedEncoding(const std::string &expr) {
-	std::string e;
-	for (char c : expr) {
-		if (c != ' ') {
-			e += c;
-		}
-	}
-	if (!e.empty() && e[0] == '<') {
-		auto close = e.find('>');
-		if (close == std::string::npos) {
-			return false;
-		}
-		e = e.substr(close + 1);
-	}
-	if (e.empty() || e == "izip_encoding#1") {
-		return true;
-	}
-	const std::string zip = "zip_encoding#1";
-	if (e.compare(0, zip.size(), zip) != 0) {
-		return false;
-	}
-	std::string params = e.substr(zip.size());
-	return params.empty() || (params.front() == '<' && params.back() == '>' && params.find('>') == params.size() - 1);
-}
-
 bool Has(const std::vector<std::string> &v, const std::string &x) {
 	return std::find(v.begin(), v.end(), x) != v.end();
 }
@@ -125,7 +97,7 @@ void ClassifyRun(const RunFacts &f) {
 		throw SraUnsupportedError("table type '" + f.table_type + "' is not supported");
 	}
 	for (const auto &kv : f.encodings) {
-		if (ColumnsRead().count(kv.first) && !SupportedEncoding(kv.second)) {
+		if (ColumnsRead().count(kv.first) && !ParseEncoding(kv.second)) {
 			throw SraUnsupportedError("column '" + kv.first + "' uses encoding '" + kv.second +
 			                          "', which is not supported");
 		}
@@ -181,15 +153,17 @@ public:
 			count = 0;
 			return;
 		}
+		// ColumnIndex checked that the last blob's end is representable; the span is taken
+		// unsigned, which holds any difference of two row ids.
 		first = blobs.front().start_id;
-		count = uint64_t(blobs.back().start_id + int64_t(blobs.back().id_count) - first);
+		count = uint64_t(blobs.back().start_id) + blobs.back().id_count - uint64_t(first);
 	}
 
 	// The row's elements: `count` elements of the column's width, starting `offset` elements
 	// into `data` (bit-packed below 8 bits).
 	void Cell(int64_t row, const uint8_t *&data, uint64_t &offset, uint64_t &count) {
 		if (static_) {
-			if (row < static_->start_id || uint64_t(row - static_->start_id) >= static_->row_count) {
+			if (row < static_->start_id || uint64_t(row) - uint64_t(static_->start_id) >= static_->row_count) {
 				throw SraFormatError("static column '" + name_ + "' has no row " + std::to_string(row));
 			}
 			data = reinterpret_cast<const uint8_t *>(static_->row.data());

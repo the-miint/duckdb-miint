@@ -163,3 +163,79 @@ TEST_CASE("An archive's table of contents is refused past a sane size", "[sra]")
 	std::memcpy(bytes.data() + 16, &data_offset, 8);
 	CHECK(ThrowsTypeMentioning<SraUnsupportedError>([&] { SraArchiveFromBytes(bytes); }, "table of contents"));
 }
+
+namespace {
+// A table of contents built node by node: a PBSTree of entries, each a directory (whose body is the
+// tree of its children) or an empty file.
+std::vector<uint8_t> PbsTree(const std::vector<std::vector<uint8_t>> &nodes) {
+	std::vector<uint8_t> payload;
+	std::vector<uint32_t> offsets;
+	for (const auto &n : nodes) {
+		offsets.push_back(uint32_t(payload.size()));
+		payload.insert(payload.end(), n.begin(), n.end());
+	}
+	auto put = [](std::vector<uint8_t> &v, uint64_t x, size_t width) {
+		for (size_t i = 0; i < width; i++) {
+			v.push_back(uint8_t(x >> (8 * i)));
+		}
+	};
+	const size_t width = payload.size() <= 256 ? 1 : payload.size() <= 65536 ? 2 : 4;
+	std::vector<uint8_t> out;
+	put(out, nodes.size(), 4);
+	put(out, payload.size(), 4);
+	for (auto o : offsets) {
+		put(out, o, width);
+	}
+	out.insert(out.end(), payload.begin(), payload.end());
+	return out;
+}
+std::vector<uint8_t> TocNode(const std::string &name, uint8_t type, const std::vector<uint8_t> &body) {
+	std::vector<uint8_t> out {uint8_t(name.size()), uint8_t(name.size() >> 8)};
+	out.insert(out.end(), name.begin(), name.end());
+	out.resize(out.size() + 12, 0); // mtime and mode
+	out.push_back(type);
+	out.insert(out.end(), body.begin(), body.end());
+	return out;
+}
+constexpr uint8_t DIRECTORY = 1, EMPTY_FILE = 6;
+std::vector<uint8_t> ArchiveWithToc(const std::vector<uint8_t> &toc) {
+	std::vector<uint8_t> bytes(24, 0);
+	std::memcpy(bytes.data(), "NCBI.sra", 8);
+	const uint32_t order = 0x05031988, version = 1;
+	std::memcpy(bytes.data() + 8, &order, 4);
+	std::memcpy(bytes.data() + 12, &version, 4);
+	const uint64_t data_offset = 24 + toc.size();
+	std::memcpy(bytes.data() + 16, &data_offset, 8);
+	bytes.insert(bytes.end(), toc.begin(), toc.end());
+	return bytes;
+}
+} // namespace
+
+TEST_CASE("A table of contents nesting past any real path is refused", "[sra]") {
+	// Each entry records its full path, so nesting N deep in a small file would take memory in
+	// N squared. Real paths are about five deep (tbl/SEQUENCE/col/READ/data).
+	auto nested = [](int depth) {
+		std::vector<uint8_t> tree = PbsTree({TocNode("f", EMPTY_FILE, {})});
+		for (int i = 0; i < depth; i++) {
+			tree = PbsTree({TocNode("d", DIRECTORY, tree)});
+		}
+		return ArchiveWithToc(tree);
+	};
+	std::string deepest;
+	for (int i = 0; i < 31; i++) {
+		deepest += "d/";
+	}
+	CHECK(SraArchiveFromBytes(nested(31))->Find(deepest + "f") != nullptr);
+	CHECK(ThrowsTypeMentioning<SraFormatError>([&] { SraArchiveFromBytes(nested(200)); }, "nests"));
+}
+
+TEST_CASE("A table of contents whose paths would outgrow its bound is refused", "[sra]") {
+	// Within the depth bound, one long directory name repeated in every child's path would still
+	// multiply the table's size: 1200 children of a 60000-byte name take 72 MB of paths from 80 KB.
+	std::vector<std::vector<uint8_t>> children;
+	for (int i = 0; i < 1200; i++) {
+		children.push_back(TocNode(std::to_string(i), EMPTY_FILE, {}));
+	}
+	auto toc = PbsTree({TocNode(std::string(60000, 'd'), DIRECTORY, PbsTree(children))});
+	CHECK(ThrowsTypeMentioning<SraFormatError>([&] { SraArchiveFromBytes(ArchiveWithToc(toc)); }, "paths"));
+}

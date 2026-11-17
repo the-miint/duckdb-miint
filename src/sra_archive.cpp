@@ -28,6 +28,11 @@ constexpr size_t KAR_HEADER_SIZE = 24;
 constexpr uint32_t KAR_VERSION = 1;
 // Public archives' tables of contents are a few KB.
 constexpr uint64_t KAR_MAX_TOC = uint64_t(64) << 20;
+// Each entry records its full path, so nesting, or a long directory name shared by many entries,
+// multiplies a table's size in memory. Public archives' paths are about five deep
+// (tbl/SEQUENCE/col/READ/data) and a few KB in all.
+constexpr size_t KAR_MAX_TOC_DEPTH = 32;
+constexpr uint64_t KAR_MAX_TOC_PATH_BYTES = KAR_MAX_TOC;
 
 // A TOC node: a 2-byte name length, the name, then an 8-byte mtime, a 4-byte mode and a 1-byte
 // entry type, then the type's body. A file's body is its offset and size, 8 bytes each.
@@ -103,6 +108,14 @@ std::string ParentOf(const std::string &path) {
 
 } // namespace
 
+int64_t RowRangeEnd(int64_t start, uint64_t count, const char *what) {
+	// INT64_MAX - start computed unsigned: exact for every start, negative ones included.
+	if (count > uint64_t(INT64_MAX) - uint64_t(start)) {
+		throw SraFormatError(std::string(what) + " covers rows past the largest row id");
+	}
+	return int64_t(uint64_t(start) + count);
+}
+
 void CheckByteOrder(uint32_t tag, const std::string &what) {
 	if (tag == ORDER_SWAPPED) {
 		throw SraUnsupportedError(what + " is big-endian, which no public run surveyed was");
@@ -143,11 +156,21 @@ KarArchive::KarArchive(std::shared_ptr<const SraByteSource> source) : source_(st
 	}
 	auto toc = source_->Read(KAR_HEADER_SIZE, size_t(data_offset_ - KAR_HEADER_SIZE));
 	// A directory's body is another tree, holding its children.
-	std::vector<std::pair<Span, std::string>> pending; // (tree bytes, parent path)
-	pending.push_back({Span {toc.data(), toc.size()}, std::string()});
+	struct Pending {
+		Span tree;
+		std::string parent;
+		size_t depth;
+	};
+	std::vector<Pending> pending;
+	pending.push_back({Span {toc.data(), toc.size()}, std::string(), 0});
+	uint64_t path_bytes = 0;
 	while (!pending.empty()) {
-		auto [tree, parent] = pending.back();
+		auto [tree, parent, depth] = pending.back();
 		pending.pop_back();
+		if (depth > KAR_MAX_TOC_DEPTH) {
+			throw SraFormatError("the archive's table of contents nests more than " +
+			                     std::to_string(KAR_MAX_TOC_DEPTH) + " directories deep");
+		}
 		std::vector<Span> nodes;
 		ParsePbstree(tree.data, tree.size, nodes, "the archive's table of contents");
 		for (const auto &node : nodes) {
@@ -168,10 +191,15 @@ KarArchive::KarArchive(std::shared_ptr<const SraByteSource> source) : source_(st
 			left -= fixed;
 			KarEntry entry;
 			entry.path = parent.empty() ? name : parent + "/" + name;
+			path_bytes += entry.path.size();
+			if (path_bytes > KAR_MAX_TOC_PATH_BYTES) {
+				throw SraFormatError("the archive's table of contents holds more than " +
+				                     std::to_string(KAR_MAX_TOC_PATH_BYTES >> 20) + " MiB of paths");
+			}
 			switch (type) {
 			case TOC_DIRECTORY:
 				entry.type = KarEntry::Type::Directory;
-				pending.push_back({Span {p, left}, entry.path});
+				pending.push_back({Span {p, left}, entry.path, depth + 1});
 				break;
 			case TOC_FILE: {
 				need(TOC_FILE_BODY_SIZE);
@@ -424,6 +452,7 @@ SraTable::SraTable(std::shared_ptr<const KarArchive> archive) : archive_(std::mo
 			const MetadataNode *start_id = node.Find("start_id");
 			sc.start_id = start_id ? start_id->ValueAsI64() : VDB_FIRST_ROW_ID;
 			sc.row_count = row_count->ValueAsU64();
+			RowRangeEnd(sc.start_id, sc.row_count, "a static column");
 			if (const MetadataNode *size = node.Find("size")) {
 				sc.size_bits = size->ValueAsU64();
 			}

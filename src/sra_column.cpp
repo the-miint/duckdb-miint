@@ -53,7 +53,8 @@ void CheckKdbHeader(const std::vector<uint8_t> &file, const std::string &what) {
 }
 
 std::string RowsText(int64_t start, uint64_t count) {
-	return std::to_string(start) + ".." + std::to_string(start + int64_t(count) - 1);
+	// Unsigned, so a range not yet checked can still be named in an error.
+	return std::to_string(start) + ".." + std::to_string(int64_t(uint64_t(start) + count - 1));
 }
 
 // idx2 block types: how a block stores its blobs' row ids and data offsets. Only Magnitude (2)
@@ -79,6 +80,7 @@ void DecodeBlock(const std::vector<uint8_t> &idx1, size_t at, const std::vector<
 	if (id_range == 0) {
 		throw SraFormatError("an idx2 block covers no rows");
 	}
+	const int64_t end_id = RowRangeEnd(start_id, id_range, "an idx2 block");
 
 	uint64_t count;
 	const uint8_t *blk;
@@ -127,7 +129,7 @@ void DecodeBlock(const std::vector<uint8_t> &idx1, size_t at, const std::vector<
 		for (uint64_t i = 0; i < count; i++) {
 			blobs[i].start_id = next;
 			blobs[i].id_count = LoadU32(id_s + BLOCK_MAGNITUDE_ENTRY_SIZE * i);
-			next += int64_t(blobs[i].id_count);
+			next = RowRangeEnd(next, blobs[i].id_count, "an idx2 block's blob");
 		}
 	} else {
 		if (id_range % count != 0) {
@@ -157,7 +159,7 @@ void DecodeBlock(const std::vector<uint8_t> &idx1, size_t at, const std::vector<
 		}
 	}
 	if (blobs.front().start_id != start_id ||
-	    blobs.back().start_id + int64_t(blobs.back().id_count) != start_id + int64_t(id_range)) {
+	    RowRangeEnd(blobs.back().start_id, blobs.back().id_count, "an idx2 block's blob") != end_id) {
 		throw SraFormatError("an idx2 block's blobs do not cover rows " + RowsText(start_id, id_range));
 	}
 	out.insert(out.end(), blobs.begin(), blobs.end());
@@ -220,7 +222,7 @@ ColumnIndex ColumnIndex::Parse(const std::vector<uint8_t> &idx, const std::vecto
 			throw SraFormatError("an idx0 entry covers no rows");
 		}
 		// Entries never overlap one another unless they cover exactly the same rows.
-		int64_t end = loc.start_id + int64_t(loc.id_count);
+		int64_t end = RowRangeEnd(loc.start_id, loc.id_count, "an idx0 entry");
 		auto next = journal.lower_bound(loc.start_id);
 		const BlobLoc *neighbours[] = {next != journal.end() ? &next->second : nullptr,
 		                               next != journal.begin() ? &std::prev(next)->second : nullptr};
@@ -257,6 +259,9 @@ ColumnIndex ColumnIndex::Parse(const std::vector<uint8_t> &idx, const std::vecto
 	          [](const BlobLoc &a, const BlobLoc &b) { return a.start_id < b.start_id; });
 	for (size_t i = 0; i < ix.blobs.size(); i++) {
 		const BlobLoc &b = ix.blobs[i];
+		// Every blob's end is representable from here on, so Locate and the readers can add a
+		// blob's start and count.
+		RowRangeEnd(b.start_id, b.id_count, "a blob");
 		if (i > 0) {
 			const BlobLoc &prev = ix.blobs[i - 1];
 			if (prev.start_id + int64_t(prev.id_count) > b.start_id) {
@@ -265,8 +270,8 @@ ColumnIndex ColumnIndex::Parse(const std::vector<uint8_t> &idx, const std::vecto
 				                          RowsText(b.start_id, b.id_count) + " overlap");
 			}
 		}
-		uint64_t at = b.pg * ix.page_size;
-		if (at > ix.data_eof || b.size > ix.data_eof - at) {
+		// Bounded before multiplying, so a huge page number cannot wrap back into the data.
+		if (b.pg > ix.data_eof / ix.page_size || b.size > ix.data_eof - b.pg * ix.page_size) {
 			throw SraFormatError("the blob for rows " + RowsText(b.start_id, b.id_count) +
 			                     " lies past the column's data");
 		}
@@ -350,6 +355,14 @@ int64_t ReadVlenS(const uint8_t *p, size_t len, size_t &pos, const char *what) {
 		}
 		b = p[pos++];
 		v = (v << VLEN_GROUP_BITS) | (b & VLEN_GROUP_MASK);
+	}
+	// Ten bytes hold more than 63 bits of magnitude: past INT64_MAX, only -2^63 is a value.
+	constexpr uint64_t INT64_MIN_MAGNITUDE = uint64_t(INT64_MAX) + 1;
+	if (negative && v == INT64_MIN_MAGNITUDE) {
+		return INT64_MIN;
+	}
+	if (v > uint64_t(INT64_MAX)) {
+		throw SraFormatError(std::string(what) + " holds an integer past 64 bits");
 	}
 	return negative ? -int64_t(v) : int64_t(v);
 }

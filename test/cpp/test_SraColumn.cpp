@@ -452,3 +452,62 @@ TEST_CASE("A page map that inflates past what its values can need is damage", "[
 	CHECK(ThrowsTypeMentioning<SraFormatError>([&] { ParseVdbBlob(V2Blob(pm, std::vector<uint8_t>(4)), 1, 8); },
 	                                           "inflates past"));
 }
+
+TEST_CASE("Row ranges from the file cannot overflow a row id", "[sra]") {
+	// A range's end is computed from the file's start and count; past INT64_MAX the addition
+	// would be undefined, and every later comparison with it meaningless.
+	CHECK(RowRangeEnd(INT64_MAX - 2, 2, "a blob") == INT64_MAX);
+	CHECK(RowRangeEnd(-5, 10, "a blob") == 5);
+	CHECK(ThrowsTypeMentioning<SraFormatError>([] { RowRangeEnd(INT64_MAX - 2, 3, "a blob"); }, "a blob"));
+	CHECK(ThrowsTypeMentioning<SraFormatError>([] { RowRangeEnd(INT64_MIN + 1, UINT64_MAX, "a blob"); }, "a blob"));
+	CHECK(RowRangeEnd(INT64_MIN, UINT64_MAX, "a blob") == INT64_MAX);
+
+	SECTION("an idx0 entry") {
+		std::vector<uint8_t> idx0;
+		PutLoc(idx0, 0, 100, 10, INT64_MAX - 5);
+		CHECK(ThrowsTypeMentioning<SraFormatError>(
+		    [&] { ColumnIndex::Parse(ColumnHeader(300, 0, 1, 0, 0), idx0, Idx1Empty(), {}); }, "idx0 entry"));
+	}
+	SECTION("a Magnitude idx2 block's running row id") {
+		// One block: rows from INT64_MAX - 5, blob spans of 4 and 4 summed onto it.
+		std::vector<uint8_t> idx2;
+		PutU64(idx2, uint64_t(INT64_MAX - 5)); // first row id
+		PutU64(idx2, 0);                       // first data offset
+		PutU32(idx2, 4);                       // blob 1: rows
+		PutU32(idx2, 4);                       // blob 2: rows
+		PutU32(idx2, 10);                      // blob 1: bytes
+		PutU32(idx2, 10);                      // blob 2: bytes
+		std::vector<uint8_t> idx1 = Idx1Empty();
+		PutLoc(idx1, 0, uint32_t(idx2.size()) | (2u << 27) | (2u << 29), 5, INT64_MAX - 5);
+		CHECK(ThrowsTypeMentioning<SraFormatError>(
+		    [&] { ColumnIndex::Parse(ColumnHeader(20, idx2.size(), 0, 1, 0), {}, idx1, idx2); }, "row id"));
+	}
+}
+
+TEST_CASE("A blob's page number is bounded before it is multiplied", "[sra]") {
+	// With 2-byte pages, page 2^63 + 50 times 2 wraps to byte 100, inside a 300-byte column: the
+	// blob would be read from the wrong place.
+	std::vector<uint8_t> idx = ColumnHeader(300, 0, 1, 0, 0);
+	idx[32] = 2; // page size
+	std::vector<uint8_t> idx0;
+	PutLoc(idx0, (uint64_t(1) << 63) + 50, 10, 1, 1);
+	CHECK(ThrowsTypeMentioning<SraFormatError>([&] { ColumnIndex::Parse(idx, idx0, Idx1Empty(), {}); },
+	                                           "past the column's data"));
+}
+
+TEST_CASE("A signed header integer is read up to -2^63, and no further", "[sra]") {
+	// Ten vlen bytes hold 69 bits. -2^63 is a value; its magnitude as a positive number is not,
+	// and negating it as a signed number would be undefined.
+	auto blob_with_arg = [](uint8_t sign) {
+		std::vector<uint8_t> hdr {0, 0, 1, 0, 0, 0, 1}; // stack version; flags, version; fmt, osize, 0 ops, 1 arg
+		hdr.push_back(uint8_t(0x80 | sign | 0x01));     // magnitude 2^63: its top bit, then 63 zero bits
+		hdr.insert(hdr.end(), 8, 0x80);
+		hdr.push_back(0);
+		std::vector<uint8_t> b {0x80, uint8_t(hdr.size()), 0};
+		b.insert(b.end(), hdr.begin(), hdr.end());
+		return b;
+	};
+	// Headers parse, then the blob is refused for having no page map.
+	CHECK(ThrowsTypeMentioning<SraUnsupportedError>([&] { ParseVdbBlob(blob_with_arg(0x40), 1, 8); }, "page map"));
+	CHECK(ThrowsTypeMentioning<SraFormatError>([&] { ParseVdbBlob(blob_with_arg(0), 1, 8); }, "64 bits"));
+}

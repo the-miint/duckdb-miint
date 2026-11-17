@@ -1,5 +1,6 @@
 #include "sra_codecs.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <stdexcept>
@@ -216,34 +217,43 @@ void ByteSwap(std::vector<uint8_t> &data, uint32_t width) {
 	}
 }
 
-enum class Encoding { Raw, Zip, Izip };
-// The physical encodings read, as a column's expression names them. zip_encoding may carry
-// template arguments after its name.
+// The physical encodings read, as a column's expression names them.
 constexpr char IZIP_ENCODING[] = "izip_encoding#1";
 constexpr char ZIP_ENCODING[] = "zip_encoding#1";
 
-Encoding EncodingOf(const std::string &expr) {
-	if (expr.empty()) {
-		return Encoding::Raw;
-	}
+} // namespace
+
+std::optional<Encoding> ParseEncoding(const std::string &expr) {
 	std::string e;
 	for (char c : expr) {
 		if (c != ' ') {
 			e += c;
 		}
 	}
-	auto close = e.find('>');
-	std::string name = e[0] == '<' && close != std::string::npos ? e.substr(close + 1) : e;
-	if (name == IZIP_ENCODING) {
+	if (!e.empty() && e[0] == '<') {
+		auto close = e.find('>');
+		if (close == std::string::npos) {
+			return std::nullopt;
+		}
+		e = e.substr(close + 1);
+	}
+	if (e.empty()) {
+		return Encoding::Raw;
+	}
+	if (e == IZIP_ENCODING) {
 		return Encoding::Izip;
 	}
-	if (name.compare(0, sizeof(ZIP_ENCODING) - 1, ZIP_ENCODING) == 0) {
+	const std::string zip = ZIP_ENCODING;
+	if (e.compare(0, zip.size(), zip) != 0) {
+		return std::nullopt;
+	}
+	// zip_encoding's deflate parameters, if any, are one bracketed list.
+	std::string params = e.substr(zip.size());
+	if (params.empty() || (params.front() == '<' && params.find('>') == params.size() - 1)) {
 		return Encoding::Zip;
 	}
-	throw SraUnsupportedError("encoding '" + expr + "'");
+	return std::nullopt;
 }
-
-} // namespace
 
 namespace {
 // A zip header's version: 1 decodes to whole bytes, 2 records the significant bits of the last.
@@ -264,6 +274,10 @@ std::vector<uint8_t> Unzip(const HeaderFrame &frame, const uint8_t *src, size_t 
 	if (frame.osize < 0 || uint64_t(frame.osize) > uint64_t(n) * MAX_DEFLATE_RATIO) {
 		throw SraFormatError("a zip blob claims " + std::to_string(frame.osize) + " bytes from " + std::to_string(n) +
 		                     ", more than deflate can inflate");
+	}
+	if (uint64_t(frame.osize) > MAX_DECODED_BLOB) {
+		throw SraUnsupportedError("a zip blob that decodes to " + std::to_string(frame.osize) + " bytes, more than " +
+		                          std::to_string(MAX_DECODED_BLOB >> GIB_SHIFT) + " GiB");
 	}
 	std::vector<uint8_t> out(size_t(frame.osize));
 	InflateExact(src, n, out.data(), out.size(), "a zip blob");
@@ -326,7 +340,11 @@ std::vector<uint8_t> Iunzip(const HeaderFrame &frame, const uint8_t *src, size_t
 // is (x86_64, arm64, wasm32): a big-endian blob is swapped, a little-endian one is not.
 DecodedBlob DecodeBlob(VdbBlob blob, const std::string &encoding, ElementType type) {
 	DecodedBlob out;
-	Encoding enc = EncodingOf(encoding);
+	auto parsed = ParseEncoding(encoding);
+	if (!parsed) {
+		throw SraUnsupportedError("encoding '" + encoding + "'");
+	}
+	const Encoding enc = *parsed;
 	const bool skipped = !blob.frames.empty() && (blob.frames[0].flags & HEADER_FLAG_SKIPPED);
 	if (enc == Encoding::Raw && !blob.frames.empty() && !skipped) {
 		// The column records no encoding, so an encoded blob cannot be decoded as what it says it
@@ -359,10 +377,17 @@ DecodedBlob DecodeBlob(VdbBlob blob, const std::string &encoding, ElementType ty
 				throw SraUnsupportedError("izip_encoding on a column of " + std::to_string(type.bits) +
 				                          "-bit elements");
 			}
-			if (frame.osize % (type.bits / BITS_PER_BYTE) != 0) {
-				throw SraFormatError("an izip blob's size is not a whole number of elements");
+			if (frame.osize < 0 || frame.osize % (type.bits / BITS_PER_BYTE) != 0) {
+				throw SraFormatError("an izip blob's size, " + std::to_string(frame.osize) +
+				                     " bytes, is not a whole number of elements");
 			}
 			uint64_t count = uint64_t(frame.osize) / (type.bits / BITS_PER_BYTE);
+			// A blob with no byte planes is all offset and slope, so nothing in its bytes bounds the
+			// count it claims. Only the elements its rows address are decoded: the reconstruction
+			// runs in order, so these are the claimed blob's first elements either way.
+			if (frame.ops.empty() || frame.ops[0] == 0) {
+				count = std::min(count, blob.page_map.ElementsSpanned());
+			}
 			out.data = Iunzip(frame, blob.Payload(), blob.PayloadSize(), type, count);
 			bits = count * type.bits;
 		}

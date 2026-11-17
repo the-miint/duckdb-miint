@@ -33,6 +33,10 @@ constexpr size_t PBST_HEADER_SIZE = 8;
 // Throws SraUnsupportedError for a big-endian tag, SraFormatError for any other than native.
 void CheckByteOrder(uint32_t tag, const std::string &what);
 
+// The end of rows [start, start + count), whose bounds come from the file. Throws SraFormatError
+// naming `what` when the end is past INT64_MAX, so arithmetic on a checked range cannot overflow.
+int64_t RowRangeEnd(int64_t start, uint64_t count, const char *what);
+
 // One entry of a KAR archive's table of contents. `path` is the full path inside the archive
 // ("tbl/SEQUENCE/col/READ/data"). For a file, `offset` is absolute in the .sra file.
 struct KarEntry {

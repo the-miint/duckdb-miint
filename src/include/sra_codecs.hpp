@@ -3,6 +3,7 @@
 #include "sra_column.hpp"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -53,6 +54,14 @@ struct DecodedBlob {
 	uint64_t elem_count = 0;
 	PageMap page_map;
 };
+
+// The encodings read: none, zip_encoding#1 (with optional deflate parameters) and
+// izip_encoding#1, the only ones the surveyed runs used on the columns read.
+enum class Encoding { Raw, Zip, Izip };
+
+// Parses a column's encoding expression (empty when unencoded). The element type in angle brackets
+// and any spacing are not part of the encoding. Returns nothing for an encoding outside the set.
+std::optional<Encoding> ParseEncoding(const std::string &expr);
 
 // Decodes a blob of a column stored with `encoding` (empty when unencoded). Throws
 // SraUnsupportedError for an encoding outside the supported set.
