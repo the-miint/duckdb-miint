@@ -604,3 +604,190 @@ TEST_CASE("LowestEligibleNodes matches the brute-force lowest eligible nodes", "
 	CHECK(saw_tip);
 	CHECK(saw_none);
 }
+
+// tax2tree applies min_count at every rank. Here strain uses 1: a strain is about one genome, and
+// under a threshold of 2 it could never be assigned.
+TEST_CASE("MinCountAt is min_count, except 1 at strain", "[taxonomy_decorator]") {
+	const size_t strain = kRankCount - 1;
+	for (size_t r = 0; r < strain; r++) {
+		INFO("rank " << r);
+		CHECK(MinCountAt(r, 1) == 1);
+		CHECK(MinCountAt(r, 2) == 2);
+		CHECK(MinCountAt(r, 5) == 5);
+	}
+	CHECK(MinCountAt(strain, 1) == 1);
+	CHECK(MinCountAt(strain, 2) == 1);
+	CHECK(MinCountAt(strain, 5) == 1);
+}
+
+namespace {
+// Masks are compared as unsigned, which Catch prints as numbers; it prints uint8_t as characters.
+std::vector<unsigned> Widen(const std::vector<uint8_t> &masks) {
+	return std::vector<unsigned>(masks.begin(), masks.end());
+}
+
+std::vector<unsigned> SafeMasks(const CladeCountIndex &index, uint32_t min_count) {
+	return Widen(RankSafeMasks(index, min_count));
+}
+
+// Per-node masks, from (node, mask) pairs; unlisted nodes are 0.
+std::vector<unsigned> MasksOf(size_t n, std::initializer_list<std::pair<uint32_t, unsigned>> masks) {
+	std::vector<unsigned> out(n, 0);
+	for (const auto &[node, mask] : masks) {
+		out[node] = mask;
+	}
+	return out;
+}
+
+constexpr unsigned kDomainBit = 1u << kDomain, kPhylumBit = 1u << kPhylum;
+} // namespace
+
+// Two names are eligible at v and at c1, so the phylum is unsafe there. Counting each name's
+// lowest eligible nodes up the tree gives v 3 (X's two halves and Y), less 1 at X's LCA, so 2.
+// A count capped at 2 on the way up would give 2 - 1 = 1 and call v safe.
+TEST_CASE("RankSafeMasks counts a 50/50 name and another name exactly", "[taxonomy_decorator]") {
+	// v(0) +-- c1(1) +-- xa(3) +-- t6, t7   X
+	//      |         +-- ya(4) +-- t8, t9   Y
+	//      |         +-- t5                 Y
+	//      +-- c2(2) +-- t10, t11           X
+	// Phylum: X's lowest nodes are xa and c2 (2 of 4 each), Y's is ya (2 of 3).
+	// Domain: D1 is on all 7 tips, so it needs 4, which v and c1 hold.
+	Lineages lineages;
+	for (uint32_t tip : {6, 7, 10, 11}) {
+		lineages.push_back({tip, {"D1", "X"}});
+	}
+	for (uint32_t tip : {5, 8, 9}) {
+		lineages.push_back({tip, {"D1", "Y"}});
+	}
+	auto c = MakeCase({kNoParent, 0, 0, 1, 1, 1, 3, 3, 4, 4, 2, 2}, lineages);
+	CHECK(SafeMasks(c.index, 2) ==
+	      MasksOf(12, {{0, kDomainBit}, {1, kDomainBit}, {2, kPhylumBit}, {3, kPhylumBit}, {4, kPhylumBit}}));
+}
+
+// A name split 50/50 is still one name at, and above, the LCA of its halves: without the
+// correction there, root and v would count X twice and call the phylum unsafe. D1 splits 4 of 5,
+// so its lowest node is v, and Z, on one tip, is eligible nowhere under min_count 2.
+TEST_CASE("RankSafeMasks counts a 50/50 name once at the LCA of its halves", "[taxonomy_decorator]") {
+	// root(0) +-- v(1) +-- c1(3) +-- t5, t6   X
+	//         |        +-- c2(4) +-- t7, t8   X
+	//         +-- t2   Z
+	Lineages lineages = {{2, {"D1", "Z"}}};
+	for (uint32_t tip : {5, 6, 7, 8}) {
+		lineages.push_back({tip, {"D1", "X"}});
+	}
+	auto c = MakeCase({kNoParent, 0, 0, 1, 1, 3, 3, 4, 4}, lineages);
+	const unsigned both = kDomainBit | kPhylumBit;
+	CHECK(SafeMasks(c.index, 2) == MasksOf(9, {{0, both}, {1, both}, {3, kPhylumBit}, {4, kPhylumBit}}));
+}
+
+// Each strain is on one genome, under its own one-child holder. Strain uses a min_count of 1, so
+// each holder is safe at strain, while the root holds both strains and is not. Every shallower
+// rank needs 2, which only the root holds. A tip, eligible for its strain, is never safe.
+TEST_CASE("RankSafeMasks makes a singleton strain safe at its holder", "[taxonomy_decorator]") {
+	// root(0) +-- h1(1) --- t3   ... S1; T1
+	//         +-- h2(2) --- t4   ... S1; T2
+	const std::vector<std::string> shared {"D1", "P1", "C1", "O1", "F1", "G1", "S1"};
+	auto lineage = [&](std::string strain) {
+		auto out = shared;
+		out.push_back(std::move(strain));
+		return out;
+	};
+	auto c = MakeCase({kNoParent, 0, 0, 1, 2}, {{3, lineage("T1")}, {4, lineage("T2")}});
+	const unsigned strain_bit = 1u << (kRankCount - 1);
+	const unsigned shallower = strain_bit - 1;
+	CHECK(SafeMasks(c.index, 2) == MasksOf(5, {{0, shallower}, {1, strain_bit}, {2, strain_bit}}));
+	// Under min_count 1 every shared name needs only ceil(2/2) = 1, so each holder is safe at
+	// every rank: why min_count stays 2 above strain.
+	CHECK(SafeMasks(c.index, 1) == MasksOf(5, {{0, shallower}, {1, 0xFF}, {2, 0xFF}}));
+}
+
+// min_count 0 would let a node with no informative tips be eligible, with precision 0/0.
+TEST_CASE("RankSafeMasks rejects a min_count of 0", "[taxonomy_decorator]") {
+	auto c = MakeCase({kNoParent, 0, 0}, WithN({1, 2}));
+	CHECK_THROWS_AS(RankSafeMasks(c.index, 0), std::invalid_argument);
+}
+
+// Against brute force: at each internal node, count the names whose naive count reaches their
+// threshold, with strain's min_count of 1 written out here rather than taken from MinCountAt.
+TEST_CASE("RankSafeMasks matches brute-force rank safety", "[taxonomy_decorator]") {
+	std::mt19937 rng(20261121);
+	bool saw_safe = false, saw_unsafe = false, saw_split_safe = false;
+	for (int trial = 0; trial < 300; trial++) {
+		const uint32_t n = std::uniform_int_distribution<uint32_t>(1, 40)(rng);
+		const auto c = random_taxonomy_case(rng, n);
+		TaxonomyStore store(c.rows);
+		const auto naive = naive_counts(c, store);
+		const auto index = build_index(c, store);
+		const uint32_t root = root_of(c.tree);
+		const auto internal = has_child(c.tree);
+		INFO("trial " << trial << ", " << n << " nodes");
+		for (uint32_t min_count = 1; min_count <= 3; min_count++) {
+			std::vector<unsigned> expected(n, 0);
+			for (size_t r = 0; r < kRankCount; r++) {
+				const uint32_t rank_min_count = r == kRankCount - 1 ? 1 : min_count;
+				std::vector<uint32_t> eligible_names(n, 0);
+				std::vector<std::vector<uint32_t>> split_lowest;
+				for (NameId name = 0; name < store.NameCount(r); name++) {
+					const uint32_t threshold = F1Score::Threshold(naive.Total(r, name, root), rank_min_count);
+					for (uint32_t v = 0; v < n; v++) {
+						eligible_names[v] += naive.clade[r][name][v] >= threshold;
+					}
+					auto lowest = naive_lowest_eligible(c, naive, r, name, threshold);
+					if (lowest.size() == 2) {
+						split_lowest.push_back(std::move(lowest));
+					}
+				}
+				for (uint32_t v = 0; v < n; v++) {
+					if (internal[v] && eligible_names[v] == 1) {
+						expected[v] |= 1u << r;
+					}
+					saw_safe |= internal[v] && eligible_names[v] == 1;
+					saw_unsafe |= internal[v] && eligible_names[v] >= 2;
+				}
+				// The LCA correction must matter somewhere: a 50/50 name alone at its halves' LCA.
+				for (const auto &lowest : split_lowest) {
+					const uint32_t lca = naive_lca(c.tree, lowest[0], lowest[1]);
+					saw_split_safe |= eligible_names[lca] == 1;
+				}
+			}
+			INFO("min_count " << min_count);
+			REQUIRE(SafeMasks(index, min_count) == expected);
+		}
+	}
+	CHECK(saw_safe);
+	CHECK(saw_unsafe);
+	CHECK(saw_split_safe);
+}
+
+// tax2tree's pick_names walks the ranks from domain down, assigning at each safe rank and
+// stopping at the first unsafe rank after an assignment; unsafe ranks before the first safe one
+// are skipped.
+TEST_CASE("PickedRanks takes the run of safe ranks from the shallowest", "[taxonomy_decorator]") {
+	auto picked = [](unsigned mask) {
+		return unsigned(PickedRanks(static_cast<uint8_t>(mask)));
+	};
+	CHECK(picked(0) == 0);
+	CHECK(picked(0b0000'0110) == 0b0000'0110);
+	CHECK(picked(0b0000'1011) == 0b0000'0011);
+	CHECK(picked(0b1010'1010) == 0b0000'0010);
+	CHECK(picked(0b1111'0000) == 0b1111'0000);
+	CHECK(picked(0b1111'1111) == 0b1111'1111);
+	CHECK(picked(0b1000'0000) == 0b1000'0000);
+	CHECK(picked(0b0000'0001) == 0b0000'0001);
+
+	// Every mask, against pick_names' loop written out.
+	for (unsigned mask = 0; mask < 256; mask++) {
+		unsigned expected = 0;
+		bool assigned = false;
+		for (size_t r = 0; r < kRankCount; r++) {
+			if (mask >> r & 1) {
+				expected |= 1u << r;
+				assigned = true;
+			} else if (assigned) {
+				break;
+			}
+		}
+		INFO("mask " << mask);
+		REQUIRE(picked(mask) == expected);
+	}
+}

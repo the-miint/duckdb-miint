@@ -120,4 +120,18 @@ private:
 // of at least 1 and at least ceil(Total/2), as F1Score::Threshold gives.
 std::vector<uint32_t> LowestEligibleNodes(const CladeCountIndex &index, size_t rank, NameId name, uint32_t threshold);
 
+// The min_count rank `rank` uses: `min_count`, except 1 at strain, the last rank. A strain is
+// about one genome, so the only node that can hold it alone spans one tip, and a threshold of 2
+// would leave it eligible nowhere.
+uint32_t MinCountAt(size_t rank, uint32_t min_count);
+
+// Per node, bit r is set when rank r is safe there: exactly one name is eligible at rank r, each
+// name's threshold being F1Score::Threshold(Total, MinCountAt(r, min_count)). Tips get 0, since
+// no name is assigned to a tip. Throws std::invalid_argument when min_count is 0.
+std::vector<uint8_t> RankSafeMasks(const CladeCountIndex &index, uint32_t min_count);
+
+// The ranks a node takes names at, from its safe mask: the run of safe ranks that starts at its
+// shallowest safe rank and stops at the first unsafe rank after it (tax2tree's pick_names).
+uint8_t PickedRanks(uint8_t safe_mask);
+
 } // namespace miint

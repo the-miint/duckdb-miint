@@ -185,4 +185,16 @@ std::vector<uint32_t> LowestEligibleNodes(const CladeCountIndex &index, size_t r
 	return {*a, *b};
 }
 
+uint32_t MinCountAt(size_t, uint32_t) {
+	return 0;
+}
+
+std::vector<uint8_t> RankSafeMasks(const CladeCountIndex &index, uint32_t) {
+	return std::vector<uint8_t>(index.Tree().size(), 0);
+}
+
+uint8_t PickedRanks(uint8_t) {
+	return 0;
+}
+
 } // namespace miint
