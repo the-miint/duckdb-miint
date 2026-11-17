@@ -155,15 +155,15 @@ struct GlobalState : public GlobalTableFunctionState {
 				run->table = OpenTable(context, input.location);
 				ClassifyRun(GatherRunFacts(*run->table));
 				run->first_reader = std::make_unique<const SpotReader>(run->table);
-				// The READ column's range, which ColumnIndex checked ends within int64.
 				next_row = run->first_reader->FirstRow();
-				end_row = next_row + int64_t(run->first_reader->RowCount());
+				end_row = RowRangeEnd(next_row, run->first_reader->RowCount(), "the READ column");
 			});
 			current = std::move(run);
 		}
 		unit.run = current;
 		unit.first_row = next_row;
-		unit.end_row = std::min<int64_t>(end_row, next_row + int64_t(spots_per_unit));
+		// Bounded by the rows left first, so a unit near the largest row id cannot overflow.
+		unit.end_row = next_row + int64_t(std::min<uint64_t>(spots_per_unit, uint64_t(end_row) - uint64_t(next_row)));
 		unit.batch_index = next_batch++;
 		next_row = unit.end_row;
 		return true;

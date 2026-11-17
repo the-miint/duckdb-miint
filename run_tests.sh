@@ -319,6 +319,12 @@ if [ "${MIINT_LOAD_RACE_TEST:-0}" = "1" ]; then
     fi
 fi
 
+# A file's sha256, compared by the downloads below. Not `sha256sum -c`: macOS's reads a
+# checklist from stdin only when given `-`.
+sha256_of() {
+    sha256sum "$1" | awk '{print $1}'
+}
+
 # Download and cache MassQL test data if not present
 CACHE_DIR="data/cache"
 mkdir -p "$CACHE_DIR"
@@ -332,7 +338,7 @@ if [ ! -f "$MZML_FILE" ]; then
         echo "Warning: MassQL test data download failed, skipping MassQL tests"
     fi
 fi
-if [ -f "$MZML_FILE" ] && [ "$(sha256sum "$MZML_FILE" | awk '{print $1}')" = "$EXPECTED_SHA" ]; then
+if [ -f "$MZML_FILE" ] && [ "$(sha256_of "$MZML_FILE")" = "$EXPECTED_SHA" ]; then
     export MASSQL_TEST_DATA="$MZML_FILE"
 fi
 
@@ -359,7 +365,7 @@ if [ ! -f "$MZXML_FILE" ]; then
         echo "Warning: mzXML test data download failed, skipping mzXML real data tests"
     fi
 fi
-if [ -f "$MZXML_FILE" ] && [ "$(sha256sum "$MZXML_FILE" | awk '{print $1}')" = "$MZXML_EXPECTED_SHA" ]; then
+if [ -f "$MZXML_FILE" ] && [ "$(sha256_of "$MZXML_FILE")" = "$MZXML_EXPECTED_SHA" ]; then
     export MZXML_REAL_DATA="$MZXML_FILE"
 fi
 
@@ -388,10 +394,9 @@ while [ "$SRA_CAN_CHECK" = 1 ] && read -r SRA_RUN SRA_SHA; do
             continue
         fi
     fi
-    # Compared directly: macOS's sha256sum -c does not read a checklist from stdin.
     # A mismatch is not a network failure: NCBI replaced the object, or the file is
     # damaged, and the oracles in real_oracles.csv no longer apply to it.
-    if [ "$(sha256sum "$SRA_FILE" | awk '{print $1}')" != "$SRA_SHA" ]; then
+    if [ "$(sha256_of "$SRA_FILE")" != "$SRA_SHA" ]; then
         echo "ERROR: $SRA_FILE does not match the sha256 in data/sra/real_oracles.csv. Remove it to download it again; if it still differs, NCBI replaced the object." >&2
         exit 1
     fi

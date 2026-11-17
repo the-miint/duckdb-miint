@@ -168,8 +168,8 @@ KarArchive::KarArchive(std::shared_ptr<const SraByteSource> source) : source_(st
 		auto [tree, parent, depth] = pending.back();
 		pending.pop_back();
 		if (depth > KAR_MAX_TOC_DEPTH) {
-			throw SraFormatError("the archive's table of contents nests more than " +
-			                     std::to_string(KAR_MAX_TOC_DEPTH) + " directories deep");
+			throw SraUnsupportedError("a table of contents nesting more than " + std::to_string(KAR_MAX_TOC_DEPTH) +
+			                          " directories deep (public archives' are about 5)");
 		}
 		std::vector<Span> nodes;
 		ParsePbstree(tree.data, tree.size, nodes, "the archive's table of contents");
@@ -193,8 +193,9 @@ KarArchive::KarArchive(std::shared_ptr<const SraByteSource> source) : source_(st
 			entry.path = parent.empty() ? name : parent + "/" + name;
 			path_bytes += entry.path.size();
 			if (path_bytes > KAR_MAX_TOC_PATH_BYTES) {
-				throw SraFormatError("the archive's table of contents holds more than " +
-				                     std::to_string(KAR_MAX_TOC_PATH_BYTES >> 20) + " MiB of paths");
+				throw SraUnsupportedError("a table of contents holding more than " +
+				                          std::to_string(KAR_MAX_TOC_PATH_BYTES >> 20) +
+				                          " MiB of paths (public archives' are a few KB)");
 			}
 			switch (type) {
 			case TOC_DIRECTORY:

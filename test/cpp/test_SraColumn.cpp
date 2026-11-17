@@ -488,4 +488,23 @@ TEST_CASE("A signed header integer is read up to -2^63, and no further", "[sra]"
 	// Headers parse, then the blob is refused for having no page map.
 	CHECK(ThrowsTypeMentioning<SraUnsupportedError>([&] { ParseVdbBlob(blob_with_arg(0x40), 1, 8); }, "page map"));
 	CHECK(ThrowsTypeMentioning<SraFormatError>([&] { ParseVdbBlob(blob_with_arg(0), 1, 8); }, "64 bits"));
+	// A magnitude of 2^64 + 5 would lose its top bit to the shift and read as 5.
+	std::vector<uint8_t> hdr {0, 0, 1, 0, 0, 0, 1, 0x80 | 0x02};
+	hdr.insert(hdr.end(), 8, 0x80);
+	hdr.push_back(0x05);
+	std::vector<uint8_t> b {0x80, uint8_t(hdr.size()), 0};
+	b.insert(b.end(), hdr.begin(), hdr.end());
+	CHECK(ThrowsTypeMentioning<SraFormatError>([&] { ParseVdbBlob(b, 1, 8); }, "64 bits"));
+}
+
+TEST_CASE("An idx2 block's blob offsets cannot wrap past 2^64", "[sra]") {
+	// Predictable: the first offset near 2^64 plus one blob's size wraps to a small offset, which
+	// would pass the bound against the column's data and read some other blob's bytes.
+	std::vector<uint8_t> idx2;
+	PutU64(idx2, UINT64_MAX - 5); // first data offset
+	PutU32(idx2, 10);             // each blob's bytes
+	std::vector<uint8_t> idx1 = Idx1Empty();
+	PutLoc(idx1, 0, 2u | (3u << 27) | (3u << 29), 10, 1); // two blobs, 5 rows each
+	CHECK(ThrowsTypeMentioning<SraFormatError>(
+	    [&] { ColumnIndex::Parse(ColumnHeader(300, idx2.size(), 0, 1, 0), {}, idx1, idx2); }, "2^64"));
 }

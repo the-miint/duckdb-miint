@@ -58,8 +58,8 @@ FROM local_rows l FULL JOIN (SELECT rowid + 1 AS pos, * FROM remote_units) r USI
 ----
 4386	0
 
-# A missing remote file fails, naming the run.
+# A missing remote file fails, naming the run (the URL alone would also contain the accession).
 statement error
 SELECT count(*) FROM read_sra('{MIINT_HTTPS_TEST_URL}/sra/SRR0000000.sra');
 ----
-SRR0000000
+read_sra: SRR0000000:

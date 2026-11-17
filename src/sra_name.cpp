@@ -184,10 +184,11 @@ SkeyIndex::SkeyIndex(std::vector<uint8_t> bytes) : bytes_(std::move(bytes)) {
 	count_ = LoadU32(&b[trie_end]);
 	ord2node_ = trie_end + sizeof(uint32_t);
 	rest -= sizeof(uint32_t);
-	// The rows the index covers, 0 when its last row is the one before its first. Unsigned, so
-	// any two row ids from the file give their span without overflow.
-	if (last_ < first_ && uint64_t(first_) - uint64_t(last_) != 1) {
-		Damaged("the index's last row precedes its first");
+	// The rows the index covers, 0 when its last row is the one before its first. Taken unsigned,
+	// which holds the span of any two row ids; only the whole int64 range has more rows than that.
+	if ((last_ < first_ && uint64_t(first_) - uint64_t(last_) != 1) ||
+	    uint64_t(last_) - uint64_t(first_) == UINT64_MAX) {
+		Damaged("the index's rows " + std::to_string(first_) + ".." + std::to_string(last_) + " are not a range");
 	}
 	const uint64_t rows = uint64_t(last_) - uint64_t(first_) + 1;
 	if (rows <= uint64_t(count_) * DENSE_PROJECTION_FACTOR) {

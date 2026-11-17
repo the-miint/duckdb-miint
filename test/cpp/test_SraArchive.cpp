@@ -221,12 +221,13 @@ TEST_CASE("A table of contents nesting past any real path is refused", "[sra]") 
 		}
 		return ArchiveWithToc(tree);
 	};
+	// The bound is 32 levels below the top: a file under 32 directories is read, one under 33 is not.
 	std::string deepest;
-	for (int i = 0; i < 31; i++) {
+	for (int i = 0; i < 32; i++) {
 		deepest += "d/";
 	}
-	CHECK(SraArchiveFromBytes(nested(31))->Find(deepest + "f") != nullptr);
-	CHECK(ThrowsTypeMentioning<SraFormatError>([&] { SraArchiveFromBytes(nested(200)); }, "nests"));
+	CHECK(SraArchiveFromBytes(nested(32))->Find(deepest + "f") != nullptr);
+	CHECK(ThrowsTypeMentioning<SraUnsupportedError>([&] { SraArchiveFromBytes(nested(33)); }, "nesting"));
 }
 
 TEST_CASE("A table of contents whose paths would outgrow its bound is refused", "[sra]") {
@@ -237,5 +238,5 @@ TEST_CASE("A table of contents whose paths would outgrow its bound is refused", 
 		children.push_back(TocNode(std::to_string(i), EMPTY_FILE, {}));
 	}
 	auto toc = PbsTree({TocNode(std::string(60000, 'd'), DIRECTORY, PbsTree(children))});
-	CHECK(ThrowsTypeMentioning<SraFormatError>([&] { SraArchiveFromBytes(ArchiveWithToc(toc)); }, "paths"));
+	CHECK(ThrowsTypeMentioning<SraUnsupportedError>([&] { SraArchiveFromBytes(ArchiveWithToc(toc)); }, "paths"));
 }

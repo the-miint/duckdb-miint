@@ -143,16 +143,23 @@ void DecodeBlock(const std::vector<uint8_t> &idx1, size_t at, const std::vector<
 	}
 	// Data offsets: Magnitude stores the first offset and each blob's size; Predictable has one
 	// size for every blob.
+	// Offsets are checked as they are summed, so one past 2^64 cannot wrap back into the data.
 	if (pg_type == MAGNITUDE) {
 		uint64_t next = LoadU64(blk + id_hdr);
 		for (uint64_t i = 0; i < count; i++) {
 			blobs[i].pg = next;
 			blobs[i].size = LoadU32(pg_s + BLOCK_MAGNITUDE_ENTRY_SIZE * i);
+			if (blobs[i].size > UINT64_MAX - next) {
+				throw SraFormatError("an idx2 block's blob offsets run past 2^64");
+			}
 			next += blobs[i].size;
 		}
 	} else {
 		uint64_t first = LoadU64(blk + id_hdr);
 		uint32_t each = LoadU32(blk + id_hdr + sizeof(uint64_t));
+		if (each != 0 && count - 1 > (UINT64_MAX - first) / each) {
+			throw SraFormatError("an idx2 block's blob offsets run past 2^64");
+		}
 		for (uint64_t i = 0; i < count; i++) {
 			blobs[i].pg = first + i * each;
 			blobs[i].size = each;
@@ -259,9 +266,6 @@ ColumnIndex ColumnIndex::Parse(const std::vector<uint8_t> &idx, const std::vecto
 	          [](const BlobLoc &a, const BlobLoc &b) { return a.start_id < b.start_id; });
 	for (size_t i = 0; i < ix.blobs.size(); i++) {
 		const BlobLoc &b = ix.blobs[i];
-		// Every blob's end is representable from here on, so Locate and the readers can add a
-		// blob's start and count.
-		RowRangeEnd(b.start_id, b.id_count, "a blob");
 		if (i > 0) {
 			const BlobLoc &prev = ix.blobs[i - 1];
 			if (prev.start_id + int64_t(prev.id_count) > b.start_id) {
@@ -334,6 +338,10 @@ uint64_t ReadVlenU(const uint8_t *p, size_t len, size_t &pos, const char *what) 
 			throw SraFormatError(std::string(what) + " is truncated");
 		}
 		uint8_t b = p[pos++];
+		// Ten groups hold 70 bits: the bits a shift would push past 64 must be zero.
+		if (v >> (64 - VLEN_GROUP_BITS)) {
+			throw SraFormatError(std::string(what) + " holds an integer past 64 bits");
+		}
 		v = (v << VLEN_GROUP_BITS) | (b & VLEN_GROUP_MASK);
 		if (!(b & VLEN_CONTINUES)) {
 			return v;
@@ -354,6 +362,9 @@ int64_t ReadVlenS(const uint8_t *p, size_t len, size_t &pos, const char *what) {
 			throw SraFormatError(std::string(what) + " holds a bad integer");
 		}
 		b = p[pos++];
+		if (v >> (64 - VLEN_GROUP_BITS)) {
+			throw SraFormatError(std::string(what) + " holds an integer past 64 bits");
+		}
 		v = (v << VLEN_GROUP_BITS) | (b & VLEN_GROUP_MASK);
 	}
 	// Ten bytes hold more than 63 bits of magnitude: past INT64_MAX, only -2^63 is a value.
