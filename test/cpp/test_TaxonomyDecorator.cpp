@@ -7,13 +7,16 @@
 #include "TreeIndex.hpp"
 #include "taxonomy_decorator_fixtures.hpp"
 
+#include <algorithm>
 #include <compare>
 #include <cstdint>
+#include <functional>
 #include <numeric>
 #include <optional>
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -362,4 +365,242 @@ TEST_CASE("F1Score::Compare agrees with exact fractions", "[taxonomy_decorator]"
 	CHECK(saw_tie);
 	CHECK(saw_less);
 	CHECK(saw_greater);
+}
+
+// LowestEligibleNodes walks up from a name's middle tip in preorder, so it needs each name's
+// tips by preorder position and the node at a position.
+TEST_CASE("CladeCountIndex lists a hand-built tree's names in preorder", "[taxonomy_decorator]") {
+	auto store = HandStore();
+	const NameId d1 = store.Name(0, kDomain), p1 = store.Name(0, kPhylum), p2 = store.Name(2, kPhylum);
+	const NameId p3 = store.Name(4, kPhylum);
+	CladeCountIndex index(HandTree(), store, HandRows());
+
+	// Children are visited in ascending index, so n2(0) comes before n1(7).
+	std::vector<uint32_t> node_at(kNodes);
+	for (uint32_t p = 0; p < kNodes; p++) {
+		node_at[p] = index.NodeAtPreorder(p);
+	}
+	CHECK(node_at == std::vector<uint32_t> {kRoot, kN2, kN3, kT6, kT7, kT8, kN1, kT4, kT5});
+
+	auto occurrences = [&](size_t rank, NameId name) {
+		const auto occ = index.Occurrences(rank, name);
+		return std::vector<uint32_t>(occ.begin(), occ.end());
+	};
+	// t6, t4 and t5 are at positions 3, 7 and 8. The wiped t7 and the rowless t8 carry nothing.
+	CHECK(occurrences(kDomain, d1) == std::vector<uint32_t> {3, 7, 8});
+	CHECK(occurrences(kPhylum, p1) == std::vector<uint32_t> {7, 8});
+	CHECK(occurrences(kPhylum, p2) == std::vector<uint32_t> {3});
+	CHECK(occurrences(kPhylum, p3).empty());
+
+	// Every name in the store has an id, including P3, which is on no tip.
+	CHECK(index.NameCount(kDomain) == 1);
+	CHECK(index.NameCount(kPhylum) == 3);
+	CHECK(index.NameCount(kClass) == 3);
+	CHECK(index.NameCount(kOrder) == 1);
+	CHECK(index.NameCount(kRankCount - 1) == 0);
+}
+
+// The same on random trees: each name's list must be exactly the informative tips carrying it,
+// strictly ascending.
+TEST_CASE("CladeCountIndex lists each name's tips in preorder", "[taxonomy_decorator]") {
+	std::mt19937 rng(20261119);
+	for (int trial = 0; trial < 300; trial++) {
+		const uint32_t n = std::uniform_int_distribution<uint32_t>(1, 40)(rng);
+		const auto c = random_taxonomy_case(rng, n);
+		TaxonomyStore store(c.rows);
+		const auto naive = naive_counts(c, store);
+		const auto index = build_index(c, store);
+		const uint32_t root = root_of(c.tree);
+		INFO("trial " << trial << ", " << n << " nodes");
+		for (uint32_t v = 0; v < n; v++) {
+			REQUIRE(index.NodeAtPreorder(index.Tree().pre(v)) == v);
+		}
+		for (size_t r = 0; r < kRankCount; r++) {
+			REQUIRE(index.NameCount(r) == store.NameCount(r));
+			for (NameId name = 0; name < store.NameCount(r); name++) {
+				INFO("rank " << r << ", name " << name);
+				const auto occ = index.Occurrences(r, name);
+				REQUIRE(occ.size() == naive.Total(r, name, root));
+				REQUIRE(std::adjacent_find(occ.begin(), occ.end(), std::greater_equal<>()) == occ.end());
+				for (uint32_t p : occ) {
+					const uint32_t v = index.NodeAtPreorder(p);
+					REQUIRE(index.Tree().is_tip(v));
+					REQUIRE(naive.clade[r][name][v] == 1);
+				}
+			}
+		}
+	}
+}
+
+namespace {
+// An index over a tree given by parent pointers, where each listed tip carries its lineage
+// (domain first) and every other tip carries no row.
+struct HandCase {
+	TaxonomyStore store;
+	CladeCountIndex index;
+
+	NameId Name(size_t rank, std::string_view text) const {
+		for (NameId k = 0; k < store.NameCount(rank); k++) {
+			if (store.NameText(rank, k) == text) {
+				return k;
+			}
+		}
+		throw std::logic_error("HandCase: no name " + std::string(text));
+	}
+};
+
+using Lineages = std::vector<std::pair<uint32_t, std::vector<std::string>>>;
+
+HandCase MakeCase(const std::vector<uint32_t> &parent, const Lineages &lineage_of) {
+	std::vector<TaxonomyRow> rows;
+	std::vector<std::optional<size_t>> row_of_node(parent.size());
+	for (const auto &[tip, lineage] : lineage_of) {
+		TaxonomyRow row {"T" + std::to_string(tip), {}};
+		std::copy(lineage.begin(), lineage.end(), row.ranks.begin());
+		row_of_node[tip] = rows.size();
+		rows.push_back(std::move(row));
+	}
+	TaxonomyStore store(rows);
+	CladeCountIndex index(TreeIndex::Build(parent, std::vector<double>(parent.size(), 1.0)), store, row_of_node);
+	return {std::move(store), std::move(index)};
+}
+
+// Each of `tips` carries the lineage (D1; N), so N is a phylum.
+Lineages WithN(std::initializer_list<uint32_t> tips) {
+	Lineages out;
+	for (uint32_t tip : tips) {
+		out.push_back({tip, {"D1", "N"}});
+	}
+	return out;
+}
+
+std::vector<uint32_t> LowestOf(const HandCase &c, std::string_view phylum, uint32_t min_count) {
+	const NameId name = c.Name(kPhylum, phylum);
+	return LowestEligibleNodes(c.index, kPhylum, name, F1Score::Threshold(c.index.Total(kPhylum, name), min_count));
+}
+} // namespace
+
+// Only a middle tip of a name, in preorder, is sure to lie below a lowest eligible node; every
+// eligible ancestor of another tip can be above one. Here a walk up from the name's first tip,
+// a, stops at the root, yet B holds 9 of the 10 and is eligible below it. A name found only at
+// the root would be assigned to the wrong node. The mirror puts a last, against a walk up from
+// the last tip.
+TEST_CASE("LowestEligibleNodes finds a clade below the first tip's eligible ancestor", "[taxonomy_decorator]") {
+	// root(0) +-- a(1)
+	//         +-- B(2) --- tips 3..11
+	std::vector<uint32_t> parent(12, 2);
+	parent[0] = kNoParent;
+	parent[1] = 0;
+	parent[2] = 0;
+	auto first = MakeCase(parent, WithN({1, 3, 4, 5, 6, 7, 8, 9, 10, 11}));
+	REQUIRE(first.index.Total(kPhylum, first.Name(kPhylum, "N")) == 10);
+	CHECK(LowestOf(first, "N", 2) == std::vector<uint32_t> {2});
+
+	// root(0) +-- B(1) --- tips 2..10
+	//         +-- a(11)
+	std::vector<uint32_t> mirror(12, 1);
+	mirror[0] = kNoParent;
+	mirror[1] = 0;
+	mirror[11] = 0;
+	auto last = MakeCase(mirror, WithN({2, 3, 4, 5, 6, 7, 8, 9, 10, 11}));
+	CHECK(LowestOf(last, "N", 2) == std::vector<uint32_t> {1});
+}
+
+// A name split evenly between two disjoint clades has both as lowest eligible nodes: neither
+// holds more of it. They come in preorder, which here is not index order, and the one-child p
+// above x is eligible too but holds x.
+TEST_CASE("LowestEligibleNodes returns both halves of a 50/50 split, in preorder", "[taxonomy_decorator]") {
+	// root(0) +-- p(1) --- x(5) +-- t6(6)  N
+	//         |                 +-- t7(7)  N
+	//         +-- y(2) +-- t3(3)  N
+	//                  +-- t4(4)  N
+	const std::vector<uint32_t> parent {kNoParent, 0, 0, 2, 2, 1, 5, 5};
+	auto c = MakeCase(parent, WithN({3, 4, 6, 7}));
+	CHECK(LowestOf(c, "N", 2) == std::vector<uint32_t> {5, 2});
+	CHECK(LowestOf(c, "N", 1) == std::vector<uint32_t> {5, 2});
+}
+
+// With an even total the middle of the name's tips is two tips. When the walks up from them end
+// at nested nodes, only the deeper is lowest: the other holds it. Both orders are checked, so
+// neither walk's result is kept just for being first or second.
+TEST_CASE("LowestEligibleNodes keeps the deeper of two nested results", "[taxonomy_decorator]") {
+	// root(0) +-- q(1) +-- r(2) +-- t4(4)  N
+	//         |        |        +-- t5(5)  N
+	//         |        +-- t3(3)  N
+	//         +-- t6(6)  N
+	// The middle tips are t5, whose walk ends at r, and t3, whose walk ends at q.
+	auto deeper_first = MakeCase({kNoParent, 0, 1, 1, 2, 2, 0}, WithN({3, 4, 5, 6}));
+	CHECK(LowestOf(deeper_first, "N", 2) == std::vector<uint32_t> {2});
+
+	// root(0) +-- t1(1)  N
+	//         +-- q(2) +-- t3(3)  N
+	//                  +-- r(4) +-- t5(5)  N
+	//                           +-- t6(6)  N
+	// The middle tips are t3, whose walk ends at q, and t5, whose walk ends at r.
+	auto deeper_second = MakeCase({kNoParent, 0, 0, 2, 2, 4, 4}, WithN({1, 3, 5, 6}));
+	CHECK(LowestOf(deeper_second, "N", 2) == std::vector<uint32_t> {4});
+}
+
+// An odd total has one lowest node. A name on fewer tips than min_count, or on no tip, is
+// eligible nowhere. With min_count 1 a name on one tip is eligible at that tip, which no
+// internal node can hold alone.
+TEST_CASE("LowestEligibleNodes with an odd total, too few tips, or none", "[taxonomy_decorator]") {
+	// root(0) +-- s(1) +-- t3(3)  N
+	//         |        +-- t4(4)  N
+	//         |        +-- t5(5)  (D1; O)
+	//         +-- t2(2)  N
+	//         +-- h(6) --- t7(7)  (D1; M)
+	Lineages lineages = WithN({2, 3, 4});
+	lineages.push_back({5, {"D1", "O"}});
+	lineages.push_back({7, {"D1", "M"}});
+	auto c = MakeCase({kNoParent, 0, 0, 1, 1, 1, 0, 6}, lineages);
+	CHECK(LowestOf(c, "N", 2) == std::vector<uint32_t> {1});
+	CHECK(LowestOf(c, "M", 2).empty());
+	CHECK(LowestOf(c, "M", 1) == std::vector<uint32_t> {7});
+
+	// P3 sits on a row no tip carries, so its total is 0.
+	auto store = HandStore();
+	const NameId p3 = store.Name(4, kPhylum);
+	CladeCountIndex index(HandTree(), store, HandRows());
+	REQUIRE(index.Total(kPhylum, p3) == 0);
+	CHECK(LowestEligibleNodes(index, kPhylum, p3, F1Score::Threshold(0, 1)).empty());
+}
+
+// Against the brute-force set, over counts made by walking up from every tip, on random trees
+// with chains, multifurcations and 50/50 splits, and min_count 1 to 3.
+TEST_CASE("LowestEligibleNodes matches the brute-force lowest eligible nodes", "[taxonomy_decorator]") {
+	std::mt19937 rng(20261120);
+	bool saw_two = false, saw_tip = false, saw_none = false;
+	for (int trial = 0; trial < 300; trial++) {
+		const uint32_t n = std::uniform_int_distribution<uint32_t>(1, 40)(rng);
+		const auto c = random_taxonomy_case(rng, n);
+		TaxonomyStore store(c.rows);
+		const auto naive = naive_counts(c, store);
+		const auto index = build_index(c, store);
+		const uint32_t root = root_of(c.tree);
+		const auto internal = has_child(c.tree);
+		auto by_preorder = [&](uint32_t a, uint32_t b) {
+			return index.Tree().pre(a) < index.Tree().pre(b);
+		};
+		INFO("trial " << trial << ", " << n << " nodes");
+		for (uint32_t min_count = 1; min_count <= 3; min_count++) {
+			for (size_t r = 0; r < kRankCount; r++) {
+				for (NameId name = 0; name < store.NameCount(r); name++) {
+					const uint32_t total = naive.Total(r, name, root);
+					const uint32_t threshold = F1Score::Threshold(total, min_count);
+					auto expected = naive_lowest_eligible(c, naive, r, name, threshold);
+					std::sort(expected.begin(), expected.end(), by_preorder);
+					INFO("min_count " << min_count << ", rank " << r << ", name " << name << ", total " << total);
+					REQUIRE(LowestEligibleNodes(index, r, name, threshold) == expected);
+					saw_two |= expected.size() == 2;
+					saw_tip |= expected.size() == 1 && !internal[expected[0]];
+					saw_none |= expected.empty();
+				}
+			}
+		}
+	}
+	// Each kind of result must occur, or this test proves nothing about it.
+	CHECK(saw_two);
+	CHECK(saw_tip);
+	CHECK(saw_none);
 }

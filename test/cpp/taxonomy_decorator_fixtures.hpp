@@ -131,4 +131,25 @@ inline NaiveCounts naive_counts(const TaxonomyCase &c, const TaxonomyStore &stor
 	return out;
 }
 
+// A name's lowest eligible nodes by brute force: the nodes whose naive count reaches
+// `threshold` while no child's does, in node order.
+inline std::vector<uint32_t> naive_lowest_eligible(const TaxonomyCase &c, const NaiveCounts &naive, size_t rank,
+                                                   NameId name, uint32_t threshold) {
+	const auto &count = naive.clade[rank][name];
+	const uint32_t n = static_cast<uint32_t>(c.tree.parent.size());
+	std::vector<bool> has_eligible_child(n, false);
+	for (uint32_t v = 0; v < n; v++) {
+		if (count[v] >= threshold && c.tree.parent[v] != kNoParent) {
+			has_eligible_child[c.tree.parent[v]] = true;
+		}
+	}
+	std::vector<uint32_t> out;
+	for (uint32_t v = 0; v < n; v++) {
+		if (count[v] >= threshold && !has_eligible_child[v]) {
+			out.push_back(v);
+		}
+	}
+	return out;
+}
+
 } // namespace miint::test

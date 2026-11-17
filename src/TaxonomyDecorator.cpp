@@ -130,4 +130,20 @@ uint32_t CladeCountIndex::Total(size_t rank, NameId name) const {
 	return offsets_[rank][name + 1] - offsets_[rank][name];
 }
 
+size_t CladeCountIndex::NameCount(size_t) const {
+	return 0;
+}
+
+std::span<const uint32_t> CladeCountIndex::Occurrences(size_t, NameId) const {
+	return {};
+}
+
+uint32_t CladeCountIndex::NodeAtPreorder(uint32_t) const {
+	return 0;
+}
+
+std::vector<uint32_t> LowestEligibleNodes(const CladeCountIndex &, size_t, NameId, uint32_t) {
+	return {};
+}
+
 } // namespace miint

@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <vector>
 
 namespace miint {
@@ -92,6 +93,14 @@ public:
 	// Informative tips in the tree carrying `name` at `rank`: the denominator of recall.
 	uint32_t Total(size_t rank, NameId name) const;
 
+	// The number of names at `rank` in the store the index was built from; NameIds at that
+	// rank are 0..NameCount-1.
+	size_t NameCount(size_t rank) const;
+	// The preorder positions of the informative tips carrying `name` at `rank`, ascending.
+	std::span<const uint32_t> Occurrences(size_t rank, NameId name) const;
+	// The node at preorder position `p`.
+	uint32_t NodeAtPreorder(uint32_t p) const;
+
 private:
 	TreeIndex tree_;
 	// Over preorder positions: entry p counts the tips (informative tips) at positions less than p.
@@ -102,5 +111,11 @@ private:
 	std::array<std::vector<uint32_t>, kLineageRanks.size()> offsets_;
 	std::array<std::vector<uint32_t>, kLineageRanks.size()> occurrences_;
 };
+
+// A name's lowest eligible nodes at `rank`: the nodes whose count reaches `threshold` while no
+// child's does, in ascending preorder. There are none when even the root falls short of
+// `threshold`, and two only when each holds exactly half of an even total. Requires a threshold
+// of at least 1 and at least ceil(Total/2), as F1Score::Threshold gives.
+std::vector<uint32_t> LowestEligibleNodes(const CladeCountIndex &index, size_t rank, NameId name, uint32_t threshold);
 
 } // namespace miint
