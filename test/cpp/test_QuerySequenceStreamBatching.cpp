@@ -220,15 +220,22 @@ TEST_CASE("QuerySequenceStream raises on every call after a chunk fails", "[sequ
 				auto batch = stream.FetchSubBatch();
 				REQUIRE(batch.size() > 0);
 				delivered += batch.size();
-			} catch (const std::exception &) {
+			} catch (const std::exception &e) {
+				// The quality failure itself, not some other early error standing in for it.
+				REQUIRE_THAT(std::string(e.what()), ContainsSubstring("Invalid quality score"));
 				raised = true;
 			}
 		}
-		// Only rows from the first chunk were handed out.
+		// Rows from the first chunk were handed out before it, and only those: the failure comes
+		// with rows already consumed, the state the drop and the flag meet in.
+		REQUIRE(delivered > 0);
 		REQUIRE(delivered <= v);
-		// And nothing after: neither rows nor an empty batch, which would read as a clean end.
-		REQUIRE_THROWS_WITH(stream.FetchSubBatch(), ContainsSubstring("earlier batch"));
-		REQUIRE_THROWS_WITH(stream.FetchSubBatch(), ContainsSubstring("earlier batch"));
+		// And nothing after: neither rows nor an empty batch, which would read as a clean end. Each
+		// later call names the cause, since under several threads it may be the error reported.
+		for (int call = 0; call < 2; call++) {
+			REQUIRE_THROWS_WITH(stream.FetchSubBatch(),
+			                    ContainsSubstring("earlier batch") && ContainsSubstring("Invalid quality score"));
+		}
 	}
 	con.Rollback();
 }

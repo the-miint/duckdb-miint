@@ -1,6 +1,7 @@
 #include "sequence_table_reader.hpp"
 #include "catalog_utils.hpp"
 #include "id_column_utils.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/appender.hpp"
 #include "duckdb/main/connection.hpp"
@@ -666,9 +667,12 @@ bool QuerySequenceStream::NextBatchEnd(idx_t &end) {
 miint::SequenceRecordBatch QuerySequenceStream::FetchSubBatch() {
 	std::lock_guard<std::mutex> lock(mutex_);
 	// A row that failed to convert (an out-of-range quality score) leaves the
-	// held columns uneven, so nothing after it may be read.
+	// held columns uneven, so nothing after it may be read. The cause is
+	// repeated because another thread can reach here before the failing thread's
+	// own error is reported, and DuckDB reports whichever arrives first.
 	if (failed_) {
-		throw InvalidInputException("Failed to read sequences: an earlier batch of this scan raised an error");
+		throw InvalidInputException("Failed to read sequences: an earlier batch of this scan raised an error: %s",
+		                            failed_message_);
 	}
 
 	// Fetch chunks from the stream until the next batch is complete or the
@@ -701,8 +705,9 @@ miint::SequenceRecordBatch QuerySequenceStream::FetchSubBatch() {
 		}
 		try {
 			ProcessSingleChunk(*chunk, schema_, partial_, temp_read_ids_, temp_seq1_, temp_seq2_);
-		} catch (...) {
+		} catch (const std::exception &e) {
 			failed_ = true;
+			failed_message_ = ErrorData(e).RawMessage();
 			throw;
 		}
 	}

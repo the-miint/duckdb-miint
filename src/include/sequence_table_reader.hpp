@@ -256,7 +256,8 @@ private:
 	// fit in it and hold scan_bases_ bases of sequence1.
 	idx_t scan_end_ = 0;
 	idx_t scan_bases_ = 0;
-	bool failed_ = false; // A chunk failed to convert; partial_'s columns may be uneven
+	bool failed_ = false;        // A chunk failed to convert; partial_'s columns may be uneven
+	std::string failed_message_; // That failure's message, repeated on every later call
 	bool exhausted_ = false;
 	idx_t rows_delivered_ = 0;
 	mutable std::mutex mutex_;
