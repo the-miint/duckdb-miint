@@ -468,11 +468,16 @@ HandCase MakeCase(const std::vector<uint32_t> &parent, const Lineages &lineage_o
 }
 
 // Each of `tips` carries the lineage (D1; N), so N is a phylum.
+// Gives each of `tips` the lineage `lineage`.
+void Add(Lineages &lineages, const std::vector<std::string> &lineage, std::initializer_list<uint32_t> tips) {
+	for (uint32_t tip : tips) {
+		lineages.push_back({tip, lineage});
+	}
+}
+
 Lineages WithN(std::initializer_list<uint32_t> tips) {
 	Lineages out;
-	for (uint32_t tip : tips) {
-		out.push_back({tip, {"D1", "N"}});
-	}
+	Add(out, {"D1", "N"}, tips);
 	return out;
 }
 
@@ -655,12 +660,8 @@ TEST_CASE("RankSafeMasks counts a 50/50 name and another name exactly", "[taxono
 	// Phylum: X's lowest nodes are xa and c2 (2 of 4 each), Y's is ya (2 of 3).
 	// Domain: D1 is on all 7 tips, so it needs 4, which v and c1 hold.
 	Lineages lineages;
-	for (uint32_t tip : {6, 7, 10, 11}) {
-		lineages.push_back({tip, {"D1", "X"}});
-	}
-	for (uint32_t tip : {5, 8, 9}) {
-		lineages.push_back({tip, {"D1", "Y"}});
-	}
+	Add(lineages, {"D1", "X"}, {6, 7, 10, 11});
+	Add(lineages, {"D1", "Y"}, {5, 8, 9});
 	auto c = MakeCase({kNoParent, 0, 0, 1, 1, 1, 3, 3, 4, 4, 2, 2}, lineages);
 	CHECK(SafeMasks(c.index, 2) ==
 	      MasksOf(12, {{0, kDomainBit}, {1, kDomainBit}, {2, kPhylumBit}, {3, kPhylumBit}, {4, kPhylumBit}}));
@@ -674,9 +675,7 @@ TEST_CASE("RankSafeMasks counts a 50/50 name once at the LCA of its halves", "[t
 	//         |        +-- c2(4) +-- t7, t8   X
 	//         +-- t2   Z
 	Lineages lineages = {{2, {"D1", "Z"}}};
-	for (uint32_t tip : {5, 6, 7, 8}) {
-		lineages.push_back({tip, {"D1", "X"}});
-	}
+	Add(lineages, {"D1", "X"}, {5, 6, 7, 8});
 	auto c = MakeCase({kNoParent, 0, 0, 1, 1, 3, 3, 4, 4}, lineages);
 	const unsigned both = kDomainBit | kPhylumBit;
 	CHECK(SafeMasks(c.index, 2) == MasksOf(9, {{0, both}, {1, both}, {3, kPhylumBit}, {4, kPhylumBit}}));
@@ -851,12 +850,8 @@ TEST_CASE("AssignNames breaks a 50/50 tie toward the node later in postorder", "
 	//      +-- b(2) +-- t4, t5              X
 	//      +-- c(3) +-- t6, t7, t8          Y
 	Lineages lineages;
-	for (uint32_t tip : {4, 5, 10, 11}) {
-		lineages.push_back({tip, {"D1", "X"}});
-	}
-	for (uint32_t tip : {6, 7, 8}) {
-		lineages.push_back({tip, {"D1", "Y"}});
-	}
+	Add(lineages, {"D1", "X"}, {4, 5, 10, 11});
+	Add(lineages, {"D1", "Y"}, {6, 7, 8});
 	auto c = MakeCase({kNoParent, 0, 0, 0, 2, 2, 3, 3, 3, 1, 9, 9}, lineages);
 	const NameId d1 = c.Name(kDomain, "D1"), x = c.Name(kPhylum, "X"), y = c.Name(kPhylum, "Y");
 	const auto assignment = AssignNames(c.index, 2);
@@ -873,13 +868,9 @@ TEST_CASE("AssignNames prefers a higher F1 to a later node", "[taxonomy_decorato
 	//      +-- b(2) +-- t6, t7  X;  t8  Z
 	//      +-- c(3) +-- t9, t10, t11       Y
 	Lineages lineages;
-	for (uint32_t tip : {4, 5, 6, 7}) {
-		lineages.push_back({tip, {"D1", "X"}});
-	}
+	Add(lineages, {"D1", "X"}, {4, 5, 6, 7});
 	lineages.push_back({8, {"D1", "Z"}});
-	for (uint32_t tip : {9, 10, 11}) {
-		lineages.push_back({tip, {"D1", "Y"}});
-	}
+	Add(lineages, {"D1", "Y"}, {9, 10, 11});
 	auto c = MakeCase({kNoParent, 0, 0, 0, 1, 1, 2, 2, 2, 3, 3, 3}, lineages);
 	const NameId d1 = c.Name(kDomain, "D1"), x = c.Name(kPhylum, "X"), y = c.Name(kPhylum, "Y");
 	const NameId z = c.Name(kPhylum, "Z");
@@ -897,12 +888,8 @@ TEST_CASE("AssignNames breaks an F1 tie toward fewer tips", "[taxonomy_decorator
 	//      +-- b(2) +-- t6, t7  X;  t8  no row
 	//      +-- c(3) +-- t9, t10, t11       Y
 	Lineages lineages;
-	for (uint32_t tip : {4, 5, 6, 7}) {
-		lineages.push_back({tip, {"D1", "X"}});
-	}
-	for (uint32_t tip : {9, 10, 11}) {
-		lineages.push_back({tip, {"D1", "Y"}});
-	}
+	Add(lineages, {"D1", "X"}, {4, 5, 6, 7});
+	Add(lineages, {"D1", "Y"}, {9, 10, 11});
 	auto c = MakeCase({kNoParent, 0, 0, 0, 1, 1, 2, 2, 2, 3, 3, 3}, lineages);
 	const NameId d1 = c.Name(kDomain, "D1"), x = c.Name(kPhylum, "X"), y = c.Name(kPhylum, "Y");
 	REQUIRE(c.index.TipCount(2) == 3);
@@ -940,11 +927,8 @@ TEST_CASE("AssignNames gives the deepest surviving name as preliminary", "[taxon
 TEST_CASE("AssignNames reports why each unassigned name went nowhere", "[taxonomy_decorator]") {
 	// root(0) --- t1, t2, t3 (D1; PA; C1);  t4, t5 (D1; PB);  t6 (D1; PC)
 	Lineages lineages;
-	for (uint32_t tip : {1, 2, 3}) {
-		lineages.push_back({tip, {"D1", "PA", "C1"}});
-	}
-	lineages.push_back({4, {"D1", "PB"}});
-	lineages.push_back({5, {"D1", "PB"}});
+	Add(lineages, {"D1", "PA", "C1"}, {1, 2, 3});
+	Add(lineages, {"D1", "PB"}, {4, 5});
 	lineages.push_back({6, {"D1", "PC"}});
 	auto c = MakeCase({kNoParent, 0, 0, 0, 0, 0, 0}, lineages);
 	const NameId d1 = c.Name(kDomain, "D1"), c1 = c.Name(kClass, "C1");

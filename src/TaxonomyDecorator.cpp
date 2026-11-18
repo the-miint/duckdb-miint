@@ -10,12 +10,18 @@ namespace miint {
 
 namespace {
 constexpr size_t kRanks = kLineageRanks.size();
+static_assert(kRanks <= 8, "a rank mask is one byte");
+
+// min_count 0 would let a node with no informative tips be eligible, with precision 0/0.
+void RequireMinCount(const char *caller, uint32_t min_count) {
+	if (min_count == 0) {
+		throw std::invalid_argument(std::string(caller) + ": min_count must be at least 1");
+	}
+}
 } // namespace
 
 uint32_t F1Score::Threshold(uint32_t total, uint32_t min_count) {
-	if (min_count == 0) {
-		throw std::invalid_argument("F1Score: min_count must be at least 1");
-	}
+	RequireMinCount("F1Score", min_count);
 	return std::max(min_count, total / 2 + total % 2);
 }
 
@@ -111,10 +117,9 @@ const TreeIndex &CladeCountIndex::Tree() const {
 }
 
 uint32_t CladeCountIndex::CladeCount(uint32_t node, size_t rank, NameId name) const {
-	const auto first = occurrences_[rank].begin() + offsets_[rank][name];
-	const auto last = occurrences_[rank].begin() + offsets_[rank][name + 1];
-	const auto lo = std::lower_bound(first, last, tree_.pre(node));
-	const auto hi = std::upper_bound(lo, last, tree_.last(node));
+	const auto occ = Occurrences(rank, name);
+	const auto lo = std::lower_bound(occ.begin(), occ.end(), tree_.pre(node));
+	const auto hi = std::upper_bound(lo, occ.end(), tree_.last(node));
 	return static_cast<uint32_t>(hi - lo);
 }
 
@@ -208,7 +213,6 @@ LowestByName FindLowest(const CladeCountIndex &index, uint32_t min_count) {
 }
 
 std::vector<uint8_t> SafeMasks(const CladeCountIndex &index, const LowestByName &lowest) {
-	static_assert(kRanks <= 8, "a rank mask is one byte");
 	const TreeIndex &tree = index.Tree();
 	const uint32_t n = static_cast<uint32_t>(tree.size());
 	std::vector<uint8_t> masks(n, 0);
@@ -216,8 +220,9 @@ std::vector<uint8_t> SafeMasks(const CladeCountIndex &index, const LowestByName 
 	// upward, so that is the number of names with a lowest eligible node at or below it: each
 	// lowest node adds 1, and a name with two takes 1 back at their LCA, so it counts once from
 	// there up. Before the accumulation a count can wrap below 0; unsigned arithmetic is modular,
-	// and every accumulated count, at most the tree's tips, is exact. Counts are never capped: one
-	// capped at 2 below an LCA would come out 1 there, and call the rank safe.
+	// and every accumulated count, at most the tree's tips, is exact. Counts are not capped at 2:
+	// a sum capped before an LCA takes its 1 back would give 1 where two names are eligible, and
+	// call the rank safe.
 	std::vector<uint32_t> eligible(n);
 	for (size_t r = 0; r < kRanks; r++) {
 		std::fill(eligible.begin(), eligible.end(), 0);
@@ -247,9 +252,7 @@ std::vector<uint8_t> SafeMasks(const CladeCountIndex &index, const LowestByName 
 } // namespace
 
 std::vector<uint8_t> RankSafeMasks(const CladeCountIndex &index, uint32_t min_count) {
-	if (min_count == 0) {
-		throw std::invalid_argument("RankSafeMasks: min_count must be at least 1");
-	}
+	RequireMinCount("RankSafeMasks", min_count);
 	return SafeMasks(index, FindLowest(index, min_count));
 }
 
@@ -259,6 +262,22 @@ uint8_t PickedRanks(uint8_t safe_mask) {
 	const uint32_t m = safe_mask;
 	const uint32_t low = m & (~m + 1);
 	return static_cast<uint8_t>(m & ~(m + low));
+}
+
+NameAssignment::NameAssignment(std::vector<NameScore> scores, std::vector<NotPlacedName> not_placed,
+                               uint32_t node_count)
+    : scores_(std::move(scores)), not_placed_(std::move(not_placed)), node_offsets_(node_count + 1, 0) {
+	// scores_ is by (rank, name), so a stable counting sort by node keeps each node's names by
+	// ascending rank.
+	for (const auto &score : scores_) {
+		node_offsets_[score.node + 1]++;
+	}
+	std::partial_sum(node_offsets_.begin(), node_offsets_.end(), node_offsets_.begin());
+	by_node_.resize(scores_.size());
+	std::vector<uint32_t> next(node_offsets_.begin(), node_offsets_.end() - 1);
+	for (const auto &score : scores_) {
+		by_node_[next[score.node]++] = score;
+	}
 }
 
 std::span<const NameScore> NameAssignment::NamesAt(uint32_t node) const {
@@ -280,11 +299,8 @@ const std::vector<NotPlacedName> &NameAssignment::NotPlaced() const {
 }
 
 NameAssignment AssignNames(const CladeCountIndex &index, uint32_t min_count) {
-	if (min_count == 0) {
-		throw std::invalid_argument("AssignNames: min_count must be at least 1");
-	}
+	RequireMinCount("AssignNames", min_count);
 	const TreeIndex &tree = index.Tree();
-	const uint32_t n = static_cast<uint32_t>(tree.size());
 	const auto lowest = FindLowest(index, min_count);
 	const auto masks = SafeMasks(index, lowest);
 
@@ -305,7 +321,8 @@ NameAssignment AssignNames(const CladeCountIndex &index, uint32_t min_count) {
 		return tree.pre(a.node) > tree.pre(b.node);
 	};
 
-	NameAssignment out;
+	std::vector<NameScore> scores;
+	std::vector<NotPlacedName> not_placed;
 	for (size_t r = 0; r < kRanks; r++) {
 		const uint8_t bit = uint8_t(1) << r;
 		for (NameId name = 0; name < index.NameCount(r); name++) {
@@ -315,7 +332,7 @@ NameAssignment AssignNames(const CladeCountIndex &index, uint32_t min_count) {
 			}
 			const auto &nodes = lowest[r][name];
 			if (nodes.empty()) {
-				out.not_placed_.push_back({r, name, total, NotPlacedReason::kNeverEligible});
+				not_placed.push_back({r, name, total, NotPlacedReason::kNeverEligible});
 				continue;
 			}
 			// The nodes where the name is eligible are the lowest ones and their ancestors. At such
@@ -349,28 +366,15 @@ NameAssignment AssignNames(const CladeCountIndex &index, uint32_t min_count) {
 				walk(nodes[1], tree.lca(nodes[0], nodes[1]));
 			}
 			if (best) {
-				out.scores_.push_back(*best);
+				scores.push_back(*best);
 			} else {
-				out.not_placed_.push_back(
+				not_placed.push_back(
 				    {r, name, total,
 				     ever_safe ? NotPlacedReason::kBlockedByContiguity : NotPlacedReason::kNeverRankSafe});
 			}
 		}
 	}
-
-	// Group by node. scores_ is by rank within each node already, so a stable counting sort
-	// keeps each node's names by ascending rank.
-	out.node_offsets_.assign(n + 1, 0);
-	for (const auto &score : out.scores_) {
-		out.node_offsets_[score.node + 1]++;
-	}
-	std::partial_sum(out.node_offsets_.begin(), out.node_offsets_.end(), out.node_offsets_.begin());
-	out.by_node_.resize(out.scores_.size());
-	std::vector<uint32_t> next(out.node_offsets_.begin(), out.node_offsets_.end() - 1);
-	for (const auto &score : out.scores_) {
-		out.by_node_[next[score.node]++] = score;
-	}
-	return out;
+	return NameAssignment(std::move(scores), std::move(not_placed), static_cast<uint32_t>(tree.size()));
 }
 
 } // namespace miint

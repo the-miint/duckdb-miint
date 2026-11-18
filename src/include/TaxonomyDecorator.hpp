@@ -182,7 +182,8 @@ public:
 
 private:
 	friend NameAssignment AssignNames(const CladeCountIndex &index, uint32_t min_count);
-	NameAssignment() = default;
+	// Keeps `scores` and `not_placed`, both by (rank, name), and groups the scores by node.
+	NameAssignment(std::vector<NameScore> scores, std::vector<NotPlacedName> not_placed, uint32_t node_count);
 
 	std::vector<NameScore> scores_;
 	std::vector<NotPlacedName> not_placed_;
