@@ -319,6 +319,7 @@ list(
   src/ncbi_parser.cpp
   src/NearestTip.cpp
   src/NewickTree.cpp
+  src/openmp_runtime_keepalive.cpp
   src/paf_parser.cpp
   src/parse_lineage.cpp
   src/per_run_reader.cpp
@@ -710,5 +711,13 @@ if(BUILD_UNITTESTS)
   if(MIINT_ENABLE_KREPP)
     target_sources(tests_duckdb
                    PRIVATE test/cpp/test_PlaceKreppParallelSink.cpp)
+  endif()
+  # Only where libomp is linked statically, the one runtime that can fail it. It
+  # compiles its own `omp critical`, so it needs the flag Apple Clang accepts.
+  if(MIINT_OPENMP_STATIC_LIBOMP)
+    target_sources(tests_duckdb PRIVATE test/cpp/test_OpenMPRuntimeLifetime.cpp)
+    set_source_files_properties(
+      test/cpp/test_OpenMPRuntimeLifetime.cpp
+      PROPERTIES COMPILE_OPTIONS "-Xpreprocessor;-fopenmp")
   endif()
 endif()

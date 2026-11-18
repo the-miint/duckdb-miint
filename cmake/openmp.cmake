@@ -14,11 +14,18 @@
 # Exposes a single INTERFACE target `miint_openmp` so link sites don't need to
 # know which platform-specific dance produced it.
 #
+# A static libomp shuts down when the last thread that used it exits, which
+# leaves `omp critical` locks dangling in the callers' binaries (#482).
+# MIINT_OPENMP_STATIC_LIBOMP (set below whenever libomp.a is the one linked, and
+# passed to the sources as a definition) makes src/openmp_runtime_keepalive.cpp
+# keep one such thread alive for the life of the process.
+#
 # krepp wants it too, to build indexes on more than one core. Unlike UniFrac it
 # can do without: compiled with _WOPENMP=0 its pragmas are ignored and the build
 # stays serial, which is what every release before this did. So a missing
 # runtime is fatal only when UniFrac is the one asking, and
 # MIINT_OPENMP_AVAILABLE is what cmake/deps/krepp.cmake consults.
+set(MIINT_OPENMP_STATIC_LIBOMP OFF)
 if((MIINT_ENABLE_UNIFRAC OR MIINT_ENABLE_KREPP) AND NOT EMSCRIPTEN)
   set(MIINT_OPENMP_AVAILABLE ON)
   if(APPLE)
@@ -69,6 +76,7 @@ if((MIINT_ENABLE_UNIFRAC OR MIINT_ENABLE_KREPP) AND NOT EMSCRIPTEN)
         set_property(
           TARGET miint_openmp PROPERTY INTERFACE_LINK_LIBRARIES
                                        "${MIINT_LIBOMP_PREFIX}/lib/libomp.a")
+        set(MIINT_OPENMP_STATIC_LIBOMP ON)
       elseif(EXISTS "${MIINT_LIBOMP_PREFIX}/lib/libomp.dylib")
         # Dynamic (conda-forge llvm-openmp ships no .a): link the dylib and
         # record an RPATH to it. Fine for a local build; not the shape we
@@ -142,6 +150,7 @@ if((MIINT_ENABLE_UNIFRAC OR MIINT_ENABLE_KREPP) AND NOT EMSCRIPTEN)
           TARGET miint_openmp
           PROPERTY INTERFACE_LINK_LIBRARIES
                    "${MIINT_LIBOMP_FOUND_PREFIX}/lib/libomp.a")
+        set(MIINT_OPENMP_STATIC_LIBOMP ON)
       endif()
     endif()
   else()
@@ -160,4 +169,7 @@ if((MIINT_ENABLE_UNIFRAC OR MIINT_ENABLE_KREPP) AND NOT EMSCRIPTEN)
       set(MIINT_OPENMP_AVAILABLE OFF)
     endif()
   endif()
+endif()
+if(MIINT_OPENMP_AVAILABLE AND MIINT_OPENMP_STATIC_LIBOMP)
+  list(APPEND MIINT_DEFINITIONS MIINT_OPENMP_STATIC_LIBOMP)
 endif()
