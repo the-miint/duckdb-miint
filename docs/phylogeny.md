@@ -428,7 +428,7 @@ Requires an index built beforehand, either by [`krepp_index_create`](#build-a-kr
 
 **Function signature**:
 
-`place_krepp(query_table, index_path [, newick_path, hdist_th, tau, chisq, multi, filter])`
+`place_krepp(query_table, index_path [, newick_path, hdist_th, tau, chisq, multi, filter, batch_size, batch_bases])`
 
 **Parameters:**
 - `query_table` (VARCHAR, required): Name of a table or view holding the query sequences. Requires `read_id` and `sequence1` columns, the same contract as the aligners; `read_id` may be VARCHAR, BIGINT or UUID.
@@ -467,6 +467,13 @@ Requires an index built beforehand, either by [`krepp_index_create`](#build-a-kr
 - `chisq` (DOUBLE, default 2.706): Chi-square cutoff for distinguishing candidate edges. Must be positive, and is rejected at bind time if it is not (krepp's CLI applies the same constraint); a non-positive cutoff discards every candidate and returns nothing. The default is the 90th percentile of the chi-square distribution with 1 degree of freedom, i.e. a significance level of 0.10. (krepp's own help text calls this "alpha = 90%"; alpha conventionally names the significance level, so read it as the percentile.)
 - `multi` (BOOLEAN, default true): Report every candidate edge rather than only the best one. `multi=false` is markedly less reproducible than the default — see **Reproducibility** below.
 - `filter` (BOOLEAN, default true): Drop placements without enough *k*-mer support.
+- `batch_size` (BIGINT, default 2048, the DuckDB vector size): Queries per unit of work. Each thread places one batch at a time, so a call whose queries fit in fewer batches than there are threads leaves the rest idle. Lower it for a few thousand long queries, such as assembled contigs. Must be at least 1. It changes how the work is split, not the placements.
+- `batch_bases` (BIGINT, default none): Also close a batch once its queries hold this many bases; the query that reaches the limit is in the batch it closes, so one longer than the limit is a batch of its own. Placement time follows bases rather than query count, so this spreads long queries across threads without shrinking batches of short reads. Must be at least 1. When both are given, a batch closes at whichever limit it reaches first.
+
+  ```sql
+  -- 3,000 contigs of 30 kb (90 Mbp): about 90 batches of 1 Mbp, where batch_size alone gives 2.
+  SELECT * FROM place_krepp(query_table := 'contigs', index_path := 'idx', batch_bases := 1000000);
+  ```
 
 **Output schema:**
 - `fragment` (same type as the query relation's `read_id`: VARCHAR, BIGINT or UUID): The `read_id` of the placed query, so it joins back to `query_table` without a cast

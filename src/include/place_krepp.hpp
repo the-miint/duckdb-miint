@@ -25,6 +25,10 @@ public:
 		std::string newick_path;
 		miint::KreppConfig config;
 		SequenceTableSchema schema;
+		// The unit of work a thread claims: batch_size queries, or fewer once
+		// they hold batch_bases bases (0: rows only). See QuerySequenceStream.
+		idx_t batch_size = STANDARD_VECTOR_SIZE;
+		idx_t batch_bases = 0;
 
 		vector<std::string> names;
 		vector<LogicalType> types;

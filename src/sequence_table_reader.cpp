@@ -194,6 +194,26 @@ static miint::SequenceRecordBatch MakeSubBatch(bool is_paired, idx_t capacity) {
 	return batch;
 }
 
+// Rows to reserve for a sub-batch: at most one chunk's worth. A sub-batch size
+// can be a caller's own number (place_krepp's batch_size), and reserving that
+// many strings up front would fail on a large one; past one chunk the vectors
+// grow as rows arrive.
+static idx_t ReserveRows(idx_t sub_batch_size) {
+	return std::min<idx_t>(sub_batch_size, STANDARD_VECTOR_SIZE);
+}
+
+// Bases in rows [begin, end) of `batch`, both mates.
+static idx_t BatchBases(const miint::SequenceRecordBatch &batch, idx_t begin, idx_t end) {
+	idx_t bases = 0;
+	for (idx_t i = begin; i < end; i++) {
+		bases += batch.sequences1[i].size();
+		if (batch.is_paired) {
+			bases += batch.sequences2[i].size();
+		}
+	}
+	return bases;
+}
+
 // Process a single DataChunk into a SequenceRecordBatch.
 // Handles two-pass extraction (strings first, then quals) to avoid pointer corruption.
 // temp_* vectors are caller-owned and reused across calls to avoid re-allocation.
@@ -590,10 +610,10 @@ std::string MaterializeReadToShard(Connection &conn, const std::string &read_to_
 
 QuerySequenceStream::QuerySequenceStream(ClientContext &context, const std::string &select_sql,
                                          const std::string &source, const SequenceTableSchema &schema,
-                                         idx_t sub_batch_size, std::shared_ptr<void> source_keepalive)
+                                         idx_t sub_batch_size, std::shared_ptr<void> source_keepalive, idx_t max_bases)
     : owned_conn_(make_uniq<Connection>(DatabaseInstance::GetDatabase(context))), conn_ptr_(owned_conn_.get()),
       source_keepalive_(std::move(source_keepalive)), schema_(schema), sub_batch_size_(sub_batch_size),
-      partial_(schema.has_sequence2) {
+      max_bases_(max_bases), partial_(schema.has_sequence2) {
 	// Before InitStream: the stream's own SELECT must be able to resolve a TEMP
 	// relation. This constructor owns its connection and creates nothing on it, so
 	// inheriting is safe — the Connection& overload below deliberately does not,
@@ -603,11 +623,11 @@ QuerySequenceStream::QuerySequenceStream(ClientContext &context, const std::stri
 }
 
 QuerySequenceStream::QuerySequenceStream(ClientContext &context, const std::string &table_name,
-                                         const SequenceTableSchema &schema, idx_t sub_batch_size)
+                                         const SequenceTableSchema &schema, idx_t sub_batch_size, idx_t max_bases)
     // Same projection the snapshot was built with, so replaying a snapshot binds
     // against exactly the columns it holds.
     : QuerySequenceStream(context, BuildQueryReadsSelect(table_name, schema), "query table '" + table_name + "'",
-                          schema, sub_batch_size) {
+                          schema, sub_batch_size, nullptr, max_bases) {
 }
 
 QuerySequenceStream::QuerySequenceStream(Connection &conn, const std::string &table_name,
@@ -629,7 +649,7 @@ QuerySequenceStream::~QuerySequenceStream() {
 }
 
 void QuerySequenceStream::InitStream(const std::string &select_sql, const std::string &source) {
-	partial_.reserve(sub_batch_size_);
+	partial_.reserve(ReserveRows(sub_batch_size_));
 
 	stream_ = SubmitStream(*conn_ptr_, select_sql);
 	if (stream_->HasError()) {
@@ -645,7 +665,10 @@ miint::SequenceRecordBatch QuerySequenceStream::FetchSubBatch() {
 	}
 
 	// Fetch chunks from stream until we have a full sub-batch or stream is exhausted
-	while (!exhausted_ && partial_.size() < sub_batch_size_) {
+	auto full = [&]() {
+		return partial_.size() >= sub_batch_size_ || (max_bases_ > 0 && partial_bases_ >= max_bases_);
+	};
+	while (!exhausted_ && !full()) {
 		auto chunk = stream_->Fetch();
 		if (!chunk || chunk->size() == 0) {
 			// Fetch() returns null for both a clean end-of-stream AND a mid-stream
@@ -657,29 +680,43 @@ miint::SequenceRecordBatch QuerySequenceStream::FetchSubBatch() {
 			exhausted_ = true;
 			break;
 		}
+		const idx_t before = partial_.size();
 		ProcessSingleChunk(*chunk, schema_, partial_, temp_read_ids_, temp_seq1_, temp_seq2_);
+		if (max_bases_ > 0) {
+			partial_bases_ += BatchBases(partial_, before, partial_.size());
+		}
 	}
 
-	if (partial_.size() >= sub_batch_size_) {
-		if (partial_.size() == sub_batch_size_) {
-			// Exact fit — return as-is
-			miint::SequenceRecordBatch result = std::move(partial_);
-			partial_ = MakeSubBatch(schema_.has_sequence2, sub_batch_size_);
-			rows_delivered_ += result.size();
-			return result;
+	// Where this sub-batch ends: sub_batch_size_ rows, or sooner, at the row
+	// whose bases reach max_bases_. That row is included, so the batch is never
+	// empty while rows remain - an empty batch is what callers read as the end.
+	idx_t cut = std::min<idx_t>(partial_.size(), sub_batch_size_);
+	idx_t cut_bases = 0;
+	if (max_bases_ > 0) {
+		for (idx_t i = 0; i < cut; i++) {
+			cut_bases += BatchBases(partial_, i, i + 1);
+			if (cut_bases >= max_bases_) {
+				cut = i + 1;
+				break;
+			}
 		}
-		// Chunk pushed partial_ past sub_batch_size_ — split: return exactly
-		// sub_batch_size_ rows and keep the remainder for the next call.
-		miint::SequenceRecordBatch result = partial_.SubRange(0, sub_batch_size_);
-		miint::SequenceRecordBatch remainder = partial_.SubRange(sub_batch_size_, partial_.size() - sub_batch_size_);
-		partial_ = std::move(remainder);
+	}
+
+	if (cut == partial_.size()) {
+		// Everything held goes out: a batch that exactly fills, or the last one.
+		miint::SequenceRecordBatch result = std::move(partial_);
+		partial_ = exhausted_ ? miint::SequenceRecordBatch(schema_.has_sequence2)
+		                      : MakeSubBatch(schema_.has_sequence2, ReserveRows(sub_batch_size_));
+		partial_bases_ = 0;
 		rows_delivered_ += result.size();
 		return result;
 	}
-
-	// Stream exhausted — return whatever remains
-	miint::SequenceRecordBatch result = std::move(partial_);
-	partial_ = miint::SequenceRecordBatch(schema_.has_sequence2);
+	// A chunk pushed partial_ past the cut - split: return the first `cut` rows
+	// and keep the remainder, with its bases, for the next call.
+	miint::SequenceRecordBatch result = partial_.SubRange(0, cut);
+	miint::SequenceRecordBatch remainder = partial_.SubRange(cut, partial_.size() - cut);
+	partial_ = std::move(remainder);
+	partial_bases_ -= cut_bases;
 	rows_delivered_ += result.size();
 	return result;
 }

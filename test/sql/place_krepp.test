@@ -72,6 +72,44 @@ SELECT * FROM place_krepp(query_table='reads', index_path='data/no_such_index', 
 ----
 krepp index directory does not exist
 
+# batch_size and batch_bases size the unit of work a thread claims. A batch of
+# zero rows is what the scan reads as end-of-input, so a limit of zero would
+# end the call before it placed anything, and a negative one has no meaning;
+# both are refused rather than read as "no limit".
+
+statement error
+SELECT * FROM place_krepp(query_table='reads', index_path='data/no_such_index', batch_size=0);
+----
+batch_size must be at least 1
+
+statement error
+SELECT * FROM place_krepp(query_table='reads', index_path='data/no_such_index', batch_size=-1);
+----
+batch_size must be at least 1
+
+statement error
+SELECT * FROM place_krepp(query_table='reads', index_path='data/no_such_index', batch_bases=0);
+----
+batch_bases must be at least 1
+
+statement error
+SELECT * FROM place_krepp(query_table='reads', index_path='data/no_such_index', batch_bases=-1);
+----
+batch_bases must be at least 1
+
+# One of each is the smallest valid value, and NULL means the parameter was not
+# given. These fail on the index, which proves the parameter checks passed.
+
+statement error
+SELECT * FROM place_krepp(query_table='reads', index_path='data/no_such_index', batch_size=1, batch_bases=1);
+----
+krepp index directory does not exist
+
+statement error
+SELECT * FROM place_krepp(query_table='reads', index_path='data/no_such_index', batch_size=NULL, batch_bases=NULL);
+----
+krepp index directory does not exist
+
 # The query table must exist and carry the aligner contract (read_id +
 # sequence1). Both are checked at bind, before any index is loaded.
 

@@ -29,6 +29,21 @@ void ReadOptional(const named_argument_map_t &params, const char *key, T &target
 	}
 }
 
+// batch_size or batch_bases, when given. Zero would make the first batch empty,
+// which the scan reads as end-of-input, so it is refused rather than taken to
+// mean "no limit"; NULL means not given.
+void ReadBatchLimit(const named_argument_map_t &params, const char *key, idx_t &target) {
+	auto it = params.find(key);
+	if (it == params.end() || it->second.IsNull()) {
+		return;
+	}
+	const auto value = it->second.GetValue<int64_t>();
+	if (value < 1) {
+		throw BinderException("place_krepp: %s must be at least 1 (got %d)", key, value);
+	}
+	target = NumericCast<idx_t>(value);
+}
+
 } // namespace
 
 unique_ptr<FunctionData> PlaceKreppTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
@@ -60,6 +75,10 @@ unique_ptr<FunctionData> PlaceKreppTableFunction::Bind(ClientContext &context, T
 	                   [](const Value &v) { return BooleanValue::Get(v); });
 	ReadOptional<bool>(input.named_parameters, "filter", data->config.filter,
 	                   [](const Value &v) { return BooleanValue::Get(v); });
+	// A thread places one batch at a time, so a call over a few long queries
+	// that fit in one default-sized batch runs on one thread.
+	ReadBatchLimit(input.named_parameters, "batch_size", data->batch_size);
+	ReadBatchLimit(input.named_parameters, "batch_bases", data->batch_bases);
 
 	// Both of these re-do a validation krepp performs in its CLI layer, which
 	// this build excludes (ext/krepp/src/krepp.hpp holds
@@ -154,7 +173,8 @@ unique_ptr<GlobalTableFunctionState> PlaceKreppTableFunction::InitGlobal(ClientC
 		                                " backbone tree tips are present in the index; placements can only land "
 		                                "on the matched part of the tree");
 	}
-	gstate->stream = make_uniq<QuerySequenceStream>(context, bind_data.query_table, bind_data.schema);
+	gstate->stream = make_uniq<QuerySequenceStream>(context, bind_data.query_table, bind_data.schema,
+	                                                bind_data.batch_size, bind_data.batch_bases);
 	gstate->max_threads = NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads());
 	return std::move(gstate);
 }
@@ -250,6 +270,8 @@ void PlaceKreppTableFunction::Register(ExtensionLoader &loader) {
 	AddNamedParameter(place, "chisq", LogicalType::DOUBLE);
 	AddNamedParameter(place, "multi", LogicalType::BOOLEAN);
 	AddNamedParameter(place, "filter", LogicalType::BOOLEAN);
+	AddNamedParameter(place, "batch_size", LogicalType::BIGINT);
+	AddNamedParameter(place, "batch_bases", LogicalType::BIGINT);
 	// Threads claim query chunks as they free up, so rows come out in no fixed
 	// order. Without NO_ORDER, preserve_insertion_order gives this source a
 	// single-threaded result sink, and a SELECT or CTAS runs on one thread.

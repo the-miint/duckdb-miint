@@ -1,0 +1,115 @@
+# name: test/sql/place_krepp_batching.test
+# description: place_krepp's batch_size and batch_bases change how work is split, not what is placed
+# group: [sql]
+
+require miint
+
+require-env KREPP_AVAILABLE
+
+require-env MIINT_KREPP_TOY_REFS
+
+# batch_size and batch_bases decide how the query relation is cut into the
+# units of work place_krepp's threads claim. That is all they may decide: a
+# read's placements depend on the read and the index, so every way of cutting
+# the same reads has to return the same rows. If a batch boundary lost a read,
+# placed one twice, or let one read's state leak into the next, the rows would
+# differ here.
+#
+# How the batches are cut is asserted directly, against QuerySequenceStream, in
+# test/cpp/test_QuerySequenceStreamBatching.cpp. That threads then claim them
+# in parallel is the scan's design, and is not observable from SQL: the rows
+# are the same on one thread as on many.
+#
+# The index is built here from krepp's toy references rather than taken from
+# MIINT_KREPP_TOY_INDEX, which needs a krepp CLI build.
+#
+# like_weight_ratio is left out of every comparison. It is not reproducible
+# from one place_krepp call to the next even with identical arguments: each
+# call loads its own index, and krepp normalises through hash maps keyed by
+# tree-node pointer (docs/phylogeny.md, "Reproducibility"). Two default calls
+# measured differing in 109 of 404 rows on it, and in no other column. Every
+# column the docs record as stable is compared exactly.
+
+statement ok
+SET threads = 4;
+
+statement ok
+CREATE TABLE toy_refs AS
+SELECT regexp_extract(filepath, '([^/]+)\.fna$', 1) AS read_id, sequence1
+FROM read_fastx('{MIINT_KREPP_TOY_REFS}/*.fna', include_filepath := true);
+
+statement ok
+CREATE TABLE toy_tree AS
+SELECT node_index, parent_index, name, branch_length, node_index AS edge_id, is_tip
+FROM read_newick('ext/krepp/test/tree_toy.nwk');
+
+query I
+SELECT status
+FROM krepp_index_create('toy_refs', '{TEST_DIR}/toy_index',
+                        tree_table := 'toy_tree', k := 27, w := 35, h := 11);
+----
+ok
+
+statement ok
+CREATE TABLE toy_reads AS SELECT read_id, sequence1 FROM read_fastx('ext/krepp/test/query_toy.fq');
+
+statement ok
+CREATE TABLE baseline AS
+SELECT * EXCLUDE (like_weight_ratio) FROM place_krepp(query_table='toy_reads', index_path='{TEST_DIR}/toy_index');
+
+# Something is placed, so the comparisons below are not two empty sets agreeing.
+# More than one read is, so a cut between reads can matter.
+query I
+SELECT count(DISTINCT fragment) > 1 FROM baseline;
+----
+true
+
+# One read per batch: as many batches as reads, every boundary exercised.
+statement ok
+CREATE TABLE one_row AS
+SELECT * EXCLUDE (like_weight_ratio) FROM place_krepp(query_table='toy_reads', index_path='{TEST_DIR}/toy_index', batch_size := 1);
+
+# One base per batch closes every batch on its first read, by the bases rule.
+statement ok
+CREATE TABLE one_base AS
+SELECT * EXCLUDE (like_weight_ratio) FROM place_krepp(query_table='toy_reads', index_path='{TEST_DIR}/toy_index', batch_bases := 1);
+
+# Both limits given. Every toy read is 150 bases, so 400 bases is reached on the
+# third read, before the row limit of 5: batches of 3, the last of 1.
+statement ok
+CREATE TABLE mixed AS
+SELECT * EXCLUDE (like_weight_ratio) FROM place_krepp(query_table='toy_reads', index_path='{TEST_DIR}/toy_index',
+                          batch_size := 5, batch_bases := 400);
+
+# The largest batch_size there is: every read in one batch. The stream must not
+# try to reserve that many rows up front.
+statement ok
+CREATE TABLE one_batch AS
+SELECT * EXCLUDE (like_weight_ratio) FROM place_krepp(query_table='toy_reads', index_path='{TEST_DIR}/toy_index',
+                          batch_size := 9223372036854775807);
+
+# Each variant against the baseline, both directions, with duplicates counted:
+# EXCEPT ALL keeps a row placed twice from hiding behind its first copy.
+query I
+SELECT (SELECT count(*) FROM (FROM baseline EXCEPT ALL FROM one_row))
+     + (SELECT count(*) FROM (FROM one_row EXCEPT ALL FROM baseline));
+----
+0
+
+query I
+SELECT (SELECT count(*) FROM (FROM baseline EXCEPT ALL FROM one_base))
+     + (SELECT count(*) FROM (FROM one_base EXCEPT ALL FROM baseline));
+----
+0
+
+query I
+SELECT (SELECT count(*) FROM (FROM baseline EXCEPT ALL FROM mixed))
+     + (SELECT count(*) FROM (FROM mixed EXCEPT ALL FROM baseline));
+----
+0
+
+query I
+SELECT (SELECT count(*) FROM (FROM baseline EXCEPT ALL FROM one_batch))
+     + (SELECT count(*) FROM (FROM one_batch EXCEPT ALL FROM baseline));
+----
+0

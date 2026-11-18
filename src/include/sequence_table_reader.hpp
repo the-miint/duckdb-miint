@@ -171,11 +171,18 @@ LoadedSingleEndSequences LoadSingleEndSequences(Connection &conn, const std::str
 // Streaming query sequence reader for lazy sub-batching.
 // Produces sub-batches on demand from a streaming query result.
 // Thread-safe: multiple threads can call FetchSubBatch() concurrently.
+//
+// A sub-batch closes at `sub_batch_size` rows or, when `max_bases` is non-zero,
+// once its rows hold `max_bases` bases (both mates counted), whichever comes
+// first. The row that reaches `max_bases` is part of the batch it closes, so a
+// row longer than the limit is a batch of its own. `max_bases` is for callers
+// whose work per row scales with its length, where a row count alone puts a few
+// long rows in one batch and leaves the other threads idle.
 class QuerySequenceStream {
 public:
 	// Owns an internal Connection — convenient for single-pipeline readers.
 	QuerySequenceStream(ClientContext &context, const std::string &table_name, const SequenceTableSchema &schema,
-	                    idx_t sub_batch_size = STANDARD_VECTOR_SIZE);
+	                    idx_t sub_batch_size = STANDARD_VECTOR_SIZE, idx_t max_bases = 0);
 
 	// Uses a caller-owned Connection. Required when the stream needs to see TEMP
 	// objects (e.g. views) created by the caller on the same connection — per-sample
@@ -230,7 +237,7 @@ private:
 	// lives here once. `source` names what is being read, for error messages.
 	QuerySequenceStream(ClientContext &context, const std::string &select_sql, const std::string &source,
 	                    const SequenceTableSchema &schema, idx_t sub_batch_size,
-	                    std::shared_ptr<void> source_keepalive = nullptr);
+	                    std::shared_ptr<void> source_keepalive = nullptr, idx_t max_bases = 0);
 
 	// Only one of these two is populated: owned_conn_ for the ClientContext&
 	// constructor, nullptr for the Connection& constructor. conn_ptr_ always
@@ -242,7 +249,9 @@ private:
 	unique_ptr<StreamingQuery> stream_;
 	SequenceTableSchema schema_;
 	idx_t sub_batch_size_;
+	idx_t max_bases_ = 0;                // 0: close by rows only
 	miint::SequenceRecordBatch partial_; // Partially-filled sub-batch carried across Fetch() calls
+	idx_t partial_bases_ = 0;            // Bases held in partial_
 	bool exhausted_ = false;
 	idx_t rows_delivered_ = 0;
 	mutable std::mutex mutex_;
