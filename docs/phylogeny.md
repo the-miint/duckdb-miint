@@ -537,7 +537,7 @@ SELECT * FROM tree_resolve_placement('ref_tree', 'placements');
 **Availability:** built when `MIINT_ENABLE_KREPP` is on, which excludes WASM and Windows. Check with `SELECT * FROM miint_versions() WHERE library = 'krepp';`, which reports the `git describe --tags --dirty --always` output that the build records for the submodule: `v0.9.1-11-g3120503` for the current pin when the checkout has the v0.9.1 tag and the commits from it to the pin, `3120503` when it lacks either, and `-dirty` appended when the submodule has local changes. krepp's own version string for this pin is v0.10.0; upstream has no tag after v0.9.1. That string is the `krepp-version` row, and it is what an index records as `krepp version:` in each partial's `metadata*.txt`, so a caller loading a prebuilt index can compare the two before placing:
 
 ```sql
-SELECT regexp_extract(content, '(?m)^krepp version: (.*)$', 1) AS index_version,
+SELECT regexp_extract(content, '(?m)^krepp version: ([^\r\n]*)', 1) AS index_version,
        (SELECT version FROM miint_versions() WHERE library = 'krepp-version') AS miint_krepp_version
 FROM read_text('/path/to/index/metadata*.txt');
 ```

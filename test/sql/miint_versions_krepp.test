@@ -38,7 +38,7 @@ ok
 
 statement ok
 CREATE TABLE recorded AS
-SELECT regexp_extract(content, '(?m)^krepp version: (.*)$', 1) AS version
+SELECT regexp_extract(content, '(?m)^krepp version: ([^\r\n]*)', 1) AS version
 FROM read_text('{TEST_DIR}/idx_version/metadata*.txt');
 
 # A sidecar was read and the line was found in it, so the comparison below is
@@ -56,6 +56,6 @@ SELECT count(*) FROM miint_versions() WHERE library = 'krepp-version';
 
 query I
 SELECT count(*) FROM recorded
-WHERE version <> (SELECT version FROM miint_versions() WHERE library = 'krepp-version');
+WHERE version IS DISTINCT FROM (SELECT version FROM miint_versions() WHERE library = 'krepp-version');
 ----
 0
