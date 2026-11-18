@@ -315,8 +315,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// pool it can actually run (the calling thread); elsewhere it does nothing.
 	miint_rust_glue_init();
 
-	// Before anything can enter OpenMP: with libomp linked statically, the runtime
-	// must outlive every thread DuckDB runs miint on (#482).
+	// Before anything can enter OpenMP: a static libomp must outlive every thread
+	// DuckDB runs miint on.
 	miint::KeepOpenMPRuntimeAlive();
 
 	miint::RegisterMiintLogType(loader.GetDatabaseInstance());

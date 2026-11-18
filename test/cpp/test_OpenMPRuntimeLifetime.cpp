@@ -1,15 +1,8 @@
-// An OpenMP critical section keeps working after the thread that first used OpenMP has exited
-// (the-miint/duckdb-miint#482).
+// An OpenMP critical section keeps working after the thread that first used OpenMP has exited.
 //
-// Built only where libomp is linked statically (cmake/openmp.cmake, MIINT_OPENMP_STATIC_LIBOMP).
-// That runtime shuts down when the last thread that used it exits and initializes again on the next
-// call; the shutdown frees the lock an `omp critical` left in a variable in the caller's binary, the
-// variable keeps the stale pointer, and the next critical section segfaults. DuckDB runs table
-// functions on threads that exit when their database closes, so krepp's criticals hit exactly this.
-// Loading miint has to keep the runtime up (src/openmp_runtime_keepalive.cpp).
-//
-// The critical section here is the test's own, so the test does not depend on which libraries in
-// miint happen to use one.
+// Built only where libomp is linked statically (MIINT_OPENMP_STATIC_LIBOMP), the one runtime that
+// fails this: why, in docs/internals/embedded-tools.md, "The OpenMP runtime". The critical section
+// is the test's own, so the test does not depend on which libraries in miint use one.
 //
 // It needs a process of its own. Once any thread that stays alive has used OpenMP, the runtime never
 // shuts down and the sequence below cannot fail, and other tests in this binary may already have
@@ -57,7 +50,7 @@ TEST_CASE("an OpenMP critical section works again after the first OpenMP thread 
 	const std::string self = ExecutablePath();
 	std::string test_spec = "[openmp_runtime_child]";
 	std::vector<char *> argv {const_cast<char *>(self.c_str()), test_spec.data(), nullptr};
-	// fork + execv, as src/gpl_boundary/process.cpp does: the exec gives the child a fresh runtime.
+	// The exec gives the child a runtime of its own.
 	const pid_t child = fork();
 	REQUIRE(child >= 0);
 	if (child == 0) {

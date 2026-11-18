@@ -14,11 +14,10 @@
 # Exposes a single INTERFACE target `miint_openmp` so link sites don't need to
 # know which platform-specific dance produced it.
 #
-# A static libomp shuts down when the last thread that used it exits, which
-# leaves `omp critical` locks dangling in the callers' binaries (#482).
-# MIINT_OPENMP_STATIC_LIBOMP (set below whenever libomp.a is the one linked, and
-# passed to the sources as a definition) makes src/openmp_runtime_keepalive.cpp
-# keep one such thread alive for the life of the process.
+# MIINT_OPENMP_STATIC_LIBOMP is set below whenever libomp.a is the runtime
+# linked, and passed to the sources as a definition: a static libomp has to be
+# kept from shutting down (docs/internals/embedded-tools.md, "The OpenMP
+# runtime").
 #
 # krepp wants it too, to build indexes on more than one core. Unlike UniFrac it
 # can do without: compiled with _WOPENMP=0 its pragmas are ignored and the build

@@ -6,11 +6,7 @@
 #include <mutex>
 #include <thread>
 
-// Declared rather than pulled in from <omp.h>: miint's own TUs are compiled
-// without the OpenMP flag, so omp.h is not on their include path. The symbol
-// comes from the libomp.a cmake/openmp.cmake links, and its signature is fixed by
-// the OpenMP ABI.
-extern "C" int omp_get_max_threads(void);
+#include <omp.h>
 #endif
 
 namespace miint {
