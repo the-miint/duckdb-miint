@@ -1,0 +1,61 @@
+# name: test/sql/miint_versions_krepp.test
+# description: miint_versions() reports the krepp VERSION string a krepp index records
+# group: [sql]
+
+require miint
+
+require-env KREPP_AVAILABLE
+
+# Why this row exists: krepp's index layout is version-specific, and an index
+# written by a different krepp is misread rather than rejected. A caller that
+# loads a prebuilt index has to compare the version the index recorded with the
+# krepp it will be read by. The 'krepp' row cannot serve: it is `git describe`
+# of the submodule, which matches krepp's VERSION only on a tagged checkout.
+#
+# So the assertion is against what an index actually records, not a literal:
+# build one, read the `krepp version:` line krepp writes into each partial's
+# metadata<suffix>.txt, and require the row to equal it. A literal here would
+# pass for a row that reported the wrong macro as long as the two happened to
+# agree at this pin.
+
+statement ok
+CREATE TABLE refs AS SELECT * FROM (VALUES
+    ('A', 'ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT'),
+    ('B', 'TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA')
+) AS t(read_id, sequence1);
+
+statement ok
+CREATE TABLE backbone AS SELECT * FROM (VALUES
+    (0, NULL, '', NULL, 0, false),
+    (1, 0, 'A', 0.1, 1, true),
+    (2, 0, 'B', 0.1, 2, true)
+) AS t(node_index, parent_index, name, branch_length, edge_id, is_tip);
+
+query I
+SELECT status FROM krepp_index_create('refs', '{TEST_DIR}/idx_version', tree_table := 'backbone');
+----
+ok
+
+statement ok
+CREATE TABLE recorded AS
+SELECT regexp_extract(content, '(?m)^krepp version: (.*)$', 1) AS version
+FROM read_text('{TEST_DIR}/idx_version/metadata*.txt');
+
+# A sidecar was read and the line was found in it, so the comparison below is
+# not an empty set agreeing with itself.
+query I
+SELECT count(*) > 0 AND bool_and(version <> '') FROM recorded;
+----
+true
+
+# Exactly one row, so a caller can select it without a LIMIT.
+query I
+SELECT count(*) FROM miint_versions() WHERE library = 'krepp-version';
+----
+1
+
+query I
+SELECT count(*) FROM recorded
+WHERE version <> (SELECT version FROM miint_versions() WHERE library = 'krepp-version');
+----
+0

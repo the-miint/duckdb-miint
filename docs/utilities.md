@@ -370,13 +370,13 @@ SELECT miint_version();
 
 ### `miint_versions()`
 
-Returns a table of the pinned versions of miint and every embedded library, one row per component. Which rows appear depends on the build's compile-time features (HDF5, vsearch, mafft, abpoa, sylph, st3, krepp, unifrac, sortmerna, parasail, libcurl, libdeflate are conditional). The `krepp-openmp` row, whose version is `enabled`, appears only when krepp's OpenMP regions are compiled in, which is what lets [`krepp_index_create`](phylogeny.md#build-a-krepp-index) accept `threads` > 1.
+Returns a table of the pinned versions of miint and every embedded library, one row per component. Which rows appear depends on the build's compile-time features (HDF5, vsearch, mafft, abpoa, sylph, st3, krepp, unifrac, sortmerna, parasail, libcurl, libdeflate are conditional). The `krepp-openmp` row, whose version is `enabled`, appears only when krepp's OpenMP regions are compiled in, which is what lets [`krepp_index_create`](phylogeny.md#build-a-krepp-index) accept `threads` > 1. The `krepp-version` row, present whenever `krepp` is, is krepp's own `VERSION` string, the one a krepp index records as `krepp version:` in each `metadata*.txt`; the `krepp` row is `git describe` of the submodule and agrees with it only on a tagged checkout. See the [`place_krepp` Availability note](phylogeny.md#phylogenetic-placement-krepp) for comparing it against a prebuilt index.
 
 **Output schema:**
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `library` | VARCHAR | Component name (`miint`, `htslib`, `minimap2`, `kseq++`, `LBFGS++`, `WFA2-lib`, `zlib`, `rype`, and conditionally `HDF5`, `libdeflate`, `libcurl`, `vsearch`, `mafft`, `abpoa`, `sylph`, `st3`, `krepp`, `krepp-openmp`, `unifrac`, `scikit-bio-binaries`, `sortmerna`, `parasail`) |
+| `library` | VARCHAR | Component name (`miint`, `htslib`, `minimap2`, `kseq++`, `LBFGS++`, `WFA2-lib`, `zlib`, `rype`, and conditionally `HDF5`, `libdeflate`, `libcurl`, `vsearch`, `mafft`, `abpoa`, `sylph`, `st3`, `krepp`, `krepp-version`, `krepp-openmp`, `unifrac`, `scikit-bio-binaries`, `sortmerna`, `parasail`) |
 | `version` | VARCHAR | Version / git description for that component |
 
 ```sql
