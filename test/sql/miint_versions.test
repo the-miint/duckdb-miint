@@ -49,10 +49,18 @@ SELECT (SELECT COUNT(*) FROM miint_versions() WHERE library = 'st3')
 ----
 true
 
+# HMMER and the Easel library inside it: built everywhere except Windows, which
+# no lane that runs these tests builds (the read_hmm tests are unguarded too).
+# Each version is the pinned commit of the-miint fork.
+query I
+SELECT COUNT(*) FROM miint_versions() WHERE library IN ('hmmer', 'easel');
+----
+2
+
 # Every row matches either a core or optional library name
 query I
 SELECT COUNT(*) FROM miint_versions()
-WHERE library NOT IN ('miint', 'htslib', 'minimap2', 'kseq++', 'LBFGS++', 'WFA2-lib', 'HDF5', 'zlib', 'libdeflate', 'libcurl', 'rype', 'sc', 'vsearch', 'mafft', 'abpoa', 'sylph', 'st3', 'unifrac', 'scikit-bio-binaries', 'krepp', 'krepp-openmp', 'sortmerna', 'parasail');
+WHERE library NOT IN ('miint', 'htslib', 'minimap2', 'kseq++', 'LBFGS++', 'WFA2-lib', 'HDF5', 'zlib', 'libdeflate', 'libcurl', 'rype', 'sc', 'vsearch', 'mafft', 'abpoa', 'sylph', 'st3', 'unifrac', 'scikit-bio-binaries', 'krepp', 'krepp-openmp', 'sortmerna', 'parasail', 'hmmer', 'easel');
 ----
 0
 

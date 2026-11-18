@@ -186,7 +186,8 @@ message(STATUS "HMMER SIMD implementation: ${HMMER_SIMD}")
 # SIMD implementation's header, so under Emscripten these need the library's
 # SIMD flags too. The include path is scoped to these files, not added for every
 # target: HMMER's src/ directory holds generically named headers.
-set(HMMER_MIINT_SOURCES test/cpp/test_HmmerConfig.cpp)
+set(HMMER_MIINT_SOURCES src/HmmerProfile.cpp test/cpp/test_HmmerConfig.cpp
+                        test/cpp/test_HmmerProfile.cpp)
 set_source_files_properties(
   ${HMMER_MIINT_SOURCES} PROPERTIES INCLUDE_DIRECTORIES "${HMMER_INCLUDE_DIRS}")
 if(EMSCRIPTEN)
@@ -198,7 +199,8 @@ endif()
 miint_git_version(HMMER ext/hmmer)
 miint_git_version(EASEL ext/hmmer/easel)
 list(APPEND MIINT_DEFINITIONS MIINT_HAS_HMMER)
-list(APPEND MIINT_TEST_SOURCES test/cpp/test_HmmerConfig.cpp)
+list(APPEND MIINT_TEST_SOURCES src/HmmerProfile.cpp
+     test/cpp/test_HmmerConfig.cpp test/cpp/test_HmmerProfile.cpp)
 # Linked by archive path, not target name: miint_extension goes into DuckDB's
 # install(EXPORT) set, which rejects link dependencies on targets outside it.
 list(APPEND MIINT_LINK_LIBRARIES $<TARGET_FILE:hmmer>)
