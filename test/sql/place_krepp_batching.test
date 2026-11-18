@@ -26,7 +26,7 @@ require-env MIINT_KREPP_TOY_REFS
 # The comparison is per read, not row for row, because krepp itself does not
 # return the same rows from one place_krepp call to the next, even with
 # identical arguments (docs/phylogeny.md, "Reproducibility"). like_weight_ratio
-# moves in every call, so it is left out. The set of candidate edges can also
+# moves between calls, so it is left out. The set of candidate edges can also
 # differ by one between calls with identical arguments, so an exact row-for-row
 # match can fail with no batching involved. What stayed stable in every call
 # measured, and so what is asserted here: which reads place, no
