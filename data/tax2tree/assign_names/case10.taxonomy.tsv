@@ -1,9 +1,0 @@
-feature_id	domain	phylum	class	order	family	genus	species	strain
-T5	N0_0	N1_0						
-T13	N0_0	N1_0						
-T18	N0_0	N1_0	N2_0	N3_0	N4_0	N5_4		
-T24	N0_0	N1_0	N2_2	N3_3				
-T25	N0_0	N1_0	N2_0	N3_0	N4_0	N5_4		
-T28	N0_0	N1_0	N2_0	N3_1	N4_2			
-T31	N0_0	N1_0	N2_0	N3_0	N4_0	N5_0	N6_1	
-T32	N0_0	N1_0	N2_0	N3_0	N4_0	N5_0	N6_1	

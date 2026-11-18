@@ -25,8 +25,10 @@
 #include "TreeIndex.hpp"
 #include "taxonomy_lineage.hpp"
 
+#include <zlib.h>
+
 #include <cstdint>
-#include <fstream>
+#include <map>
 #include <optional>
 #include <string>
 #include <utility>
@@ -38,30 +40,51 @@ namespace {
 
 const std::string kDir = "data/tax2tree/assign_names/";
 
-// A tab-separated file's rows after its header, every field kept, empty ones included. A line's
-// trailing carriage return, as a Windows checkout can leave, is dropped.
-std::vector<std::vector<std::string>> ReadTsv(const std::string &path) {
-	std::ifstream in(path);
+using Rows = std::vector<std::vector<std::string>>;
+
+// A gzip-compressed tab-separated file's rows after its header, every field kept, empty ones
+// included. zlib reports a file cut short only when it is closed, so the close is checked too.
+Rows ReadTsvGz(const std::string &path) {
 	INFO(path);
-	REQUIRE(in.is_open());
-	std::string line;
-	REQUIRE(std::getline(in, line));
-	std::vector<std::vector<std::string>> rows;
-	while (std::getline(in, line)) {
-		if (!line.empty() && line.back() == '\r') {
-			line.pop_back();
-		}
-		std::vector<std::string> fields(1);
-		for (char ch : line) {
-			if (ch == '\t') {
-				fields.emplace_back();
-			} else {
-				fields.back() += ch;
-			}
-		}
-		rows.push_back(std::move(fields));
+	gzFile in = gzopen(path.c_str(), "rb");
+	REQUIRE(in != nullptr);
+	std::string text;
+	char buffer[1 << 14];
+	int n;
+	while ((n = gzread(in, buffer, sizeof(buffer))) > 0) {
+		text.append(buffer, static_cast<size_t>(n));
 	}
+	const int closed = gzclose(in);
+	REQUIRE(n == 0);
+	REQUIRE(closed == Z_OK);
+	REQUIRE(!text.empty());
+	REQUIRE(text.back() == '\n');
+
+	Rows rows;
+	std::vector<std::string> fields(1);
+	for (char ch : text) {
+		if (ch == '\t') {
+			fields.emplace_back();
+		} else if (ch == '\n') {
+			rows.push_back(std::move(fields));
+			fields.assign(1, std::string());
+		} else {
+			fields.back() += ch;
+		}
+	}
+	rows.erase(rows.begin());
 	return rows;
+}
+
+// A table's rows by their first field, the case, with that field dropped; each case's rows in
+// file order.
+std::map<std::string, Rows> ByCase(const Rows &rows, size_t width) {
+	std::map<std::string, Rows> out;
+	for (const auto &fields : rows) {
+		REQUIRE(fields.size() == width);
+		out[fields[0]].emplace_back(fields.begin() + 1, fields.end());
+	}
+	return out;
 }
 
 uint32_t ToIndex(const std::string &field) {
@@ -76,27 +99,35 @@ std::string Line(uint32_t node, size_t rank, const std::string &name) {
 } // namespace
 
 TEST_CASE("AssignNames matches tax2tree on the committed fixture", "[taxonomy_decorator]") {
-	const auto cases = ReadTsv(kDir + "cases.tsv");
+	const auto cases = ReadTsvGz(kDir + "cases.tsv.gz");
 	REQUIRE(cases.size() == 20);
+	const auto trees = ByCase(ReadTsvGz(kDir + "trees.tsv.gz"), 4);
+	const auto taxonomies = ByCase(ReadTsvGz(kDir + "taxonomy.tsv.gz"), 2 + kLineageRanks.size());
+	const auto expectations = ByCase(ReadTsvGz(kDir + "expected.tsv.gz"), 4);
+	// Every table holds rows for exactly the listed cases.
+	for (const auto *table : {&trees, &taxonomies, &expectations}) {
+		REQUIRE(table->size() == cases.size());
+	}
 	size_t compared = 0, below_root = 0;
 	for (const auto &row : cases) {
 		REQUIRE(row.size() == 2);
 		const std::string &name = row[0];
 		const uint32_t min_count = ToIndex(row[1]);
 		INFO(name << ", min_count " << min_count);
+		REQUIRE(trees.count(name) == 1);
+		REQUIRE(taxonomies.count(name) == 1);
+		REQUIRE(expectations.count(name) == 1);
 
-		const auto tree_rows = ReadTsv(kDir + name + ".tree.tsv");
+		const auto &tree_rows = trees.at(name);
 		std::vector<uint32_t> parent(tree_rows.size());
 		for (uint32_t v = 0; v < tree_rows.size(); v++) {
 			const auto &fields = tree_rows[v];
-			REQUIRE(fields.size() == 3);
 			REQUIRE(ToIndex(fields[0]) == v);
 			parent[v] = fields[1].empty() ? TreeIndex::NO_PARENT : ToIndex(fields[1]);
 		}
 
 		std::vector<TaxonomyRow> rows;
-		for (const auto &fields : ReadTsv(kDir + name + ".taxonomy.tsv")) {
-			REQUIRE(fields.size() == 1 + kLineageRanks.size());
+		for (const auto &fields : taxonomies.at(name)) {
 			TaxonomyRow taxonomy_row {fields[0], {}};
 			for (size_t r = 0; r < kLineageRanks.size(); r++) {
 				if (!fields[1 + r].empty()) {
@@ -126,8 +157,7 @@ TEST_CASE("AssignNames matches tax2tree on the committed fixture", "[taxonomy_de
 		const uint32_t root = index.Tree().root();
 
 		std::vector<std::string> expected;
-		for (const auto &fields : ReadTsv(kDir + name + ".expected.tsv")) {
-			REQUIRE(fields.size() == 3);
+		for (const auto &fields : expectations.at(name)) {
 			expected.push_back(fields[0] + "\t" + fields[1] + "\t" + fields[2]);
 			below_root += ToIndex(fields[0]) != root;
 		}
