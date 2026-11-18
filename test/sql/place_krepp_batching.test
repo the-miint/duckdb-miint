@@ -11,9 +11,9 @@ require-env MIINT_KREPP_TOY_REFS
 # batch_size and batch_bases decide how the query relation is cut into the
 # units of work place_krepp's threads claim. That is all they may decide: a
 # read's placements depend on the read and the index, so every way of cutting
-# the same reads has to return the same rows. If a batch boundary lost a read,
-# placed one twice, or let one read's state leak into the next, the rows would
-# differ here.
+# the same reads has to place the same reads, each once, with the same values.
+# If a batch boundary lost a read, placed one twice, or placed one with another
+# read's sequence, that would show here.
 #
 # How the batches are cut is asserted directly against QuerySequenceStream in
 # the C++ tests. That threads then claim them in parallel is the scan's design,
@@ -26,10 +26,10 @@ require-env MIINT_KREPP_TOY_REFS
 # The comparison is per read, not row for row, because krepp itself does not
 # return the same rows from one place_krepp call to the next, even with
 # identical arguments (docs/phylogeny.md, "Reproducibility"). like_weight_ratio
-# moves in every call, so it is left out. On Linux, one borderline candidate
-# edge also comes and goes between calls, so the row count moves by one and an
-# exact row-for-row match fails with no batching involved. What krepp does keep
-# stable, and so what is asserted here: which reads place, no
+# moves in every call, so it is left out. The set of candidate edges can also
+# differ by one between calls with identical arguments, so an exact row-for-row
+# match can fail with no batching involved. What stayed stable in every call
+# measured, and so what is asserted here: which reads place, no
 # (fragment, edge_num) twice, and identical stable columns on every edge both
 # calls return. A read lost or placed twice at a batch boundary breaks the
 # first two; a read placed with another read's sequence breaks the third.
@@ -93,6 +93,13 @@ SELECT * EXCLUDE (like_weight_ratio) FROM place_krepp(query_table='toy_reads', i
                           batch_size := 9223372036854775807);
 
 # Every call in one table, so each check below covers all of them at once.
+# The variants are listed by name rather than taken from the rows: a variant
+# that placed nothing would have no rows, and would drop out of any list read
+# back from them.
+statement ok
+CREATE TABLE variant_names AS
+SELECT * FROM (VALUES ('baseline'), ('one_row'), ('one_base'), ('mixed'), ('one_batch')) t(variant);
+
 statement ok
 CREATE TABLE variants AS
 SELECT 'baseline' AS variant, * FROM baseline
@@ -105,13 +112,11 @@ UNION ALL SELECT 'one_batch', * FROM one_batch;
 # conjured. Both directions against the baseline.
 query I
 SELECT count(*) FROM (
-    (SELECT v.variant, b.fragment FROM (SELECT DISTINCT variant FROM variants) v,
-                                       (SELECT DISTINCT fragment FROM baseline) b
+    (SELECT v.variant, b.fragment FROM variant_names v, (SELECT DISTINCT fragment FROM baseline) b
      EXCEPT SELECT variant, fragment FROM variants)
     UNION ALL
     (SELECT variant, fragment FROM variants
-     EXCEPT SELECT v.variant, b.fragment FROM (SELECT DISTINCT variant FROM variants) v,
-                                              (SELECT DISTINCT fragment FROM baseline) b));
+     EXCEPT SELECT v.variant, b.fragment FROM variant_names v, (SELECT DISTINCT fragment FROM baseline) b));
 ----
 0
 
@@ -139,6 +144,6 @@ query I
 SELECT (SELECT count(*) FROM (
             SELECT v.variant, v.fragment FROM variants v JOIN baseline b USING (fragment, edge_num)
             GROUP BY ALL))
-     = (SELECT count(DISTINCT variant) FROM variants) * (SELECT count(DISTINCT fragment) FROM baseline);
+     = (SELECT count(*) FROM variant_names) * (SELECT count(DISTINCT fragment) FROM baseline);
 ----
 true
