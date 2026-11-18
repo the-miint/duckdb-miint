@@ -98,6 +98,12 @@ struct KreppIndexOptions {
 // refuses more, rather than accepting a thread count and quietly ignoring it.
 bool KreppIndexThreadsSupported();
 
+// krepp's own VERSION string (ext/krepp/src/common.hpp), the `krepp version:`
+// an index records in each partial's metadata<suffix>.txt. Why it is not
+// KREPP_GIT_VERSION, and why it is reached through this TU: the krepp section
+// of docs/internals/embedded-tools.md.
+const char *KreppVersionString();
+
 // Build the index. Runs krepp's own index pipeline in the order krepp's main
 // runs it, and writes the same files to `index_dir`.
 //

@@ -15,10 +15,8 @@ namespace miint::test {
 // Threads rendezvous with a bounded wait: a timeout degrades the test to "less
 // overlap than intended", never to a hang.
 //
-// Shared by the tests that assert concurrent native-library computes agree with
-// their serial answers (test_SkbbConcurrency.cpp for scikit-bio-binaries,
-// test_UnifracDistance.cpp for libssu) — the overlap window is the whole point
-// of those tests, so both need the same rendezvous rather than approximations.
+// For any test whose point is that the threads overlap: a race it means to
+// provoke, or work it means to see serialized.
 inline void RunConcurrently(size_t n_threads, const std::function<void(size_t)> &body) {
 	std::mutex mu;
 	std::condition_variable cv;

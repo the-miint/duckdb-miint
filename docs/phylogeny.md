@@ -428,7 +428,7 @@ Requires an index built beforehand, either by [`krepp_index_create`](#build-a-kr
 
 **Function signature**:
 
-`place_krepp(query_table, index_path [, newick_path, hdist_th, tau, chisq, multi, filter])`
+`place_krepp(query_table, index_path [, newick_path, hdist_th, tau, chisq, multi, filter, batch_size, batch_bases])`
 
 **Parameters:**
 - `query_table` (VARCHAR, required): Name of a table or view holding the query sequences. Requires `read_id` and `sequence1` columns, the same contract as the aligners; `read_id` may be VARCHAR, BIGINT or UUID.
@@ -467,6 +467,13 @@ Requires an index built beforehand, either by [`krepp_index_create`](#build-a-kr
 - `chisq` (DOUBLE, default 2.706): Chi-square cutoff for distinguishing candidate edges. Must be positive, and is rejected at bind time if it is not (krepp's CLI applies the same constraint); a non-positive cutoff discards every candidate and returns nothing. The default is the 90th percentile of the chi-square distribution with 1 degree of freedom, i.e. a significance level of 0.10. (krepp's own help text calls this "alpha = 90%"; alpha conventionally names the significance level, so read it as the percentile.)
 - `multi` (BOOLEAN, default true): Report every candidate edge rather than only the best one. `multi=false` is markedly less reproducible than the default — see **Reproducibility** below.
 - `filter` (BOOLEAN, default true): Drop placements without enough *k*-mer support.
+- `batch_size` (BIGINT, default 2048, the DuckDB vector size): Queries per unit of work. Each thread places one batch at a time, so a call whose queries fit in fewer batches than there are threads leaves the rest idle. Lower it for a few thousand long queries, such as assembled contigs. Must be at least 1. It changes how the work is split, not the placements. A batch, and its placements, are held in memory while it is placed, so a `batch_size` near the relation's row count holds the whole relation at once.
+- `batch_bases` (BIGINT, default none): Also cap each batch at this many bases of `sequence1`: a query that would take a batch past the limit starts the next one, and a query longer than the limit is a batch of its own. Where query lengths vary widely, a row count alone can put most of the bases in a few batches; this caps them without shrinking batches of short reads. Must be at least 1. When both are given, a batch closes at whichever limit it reaches first.
+
+  ```sql
+  -- 3,000 contigs of 30,000 bases: 91 batches of up to 33 contigs, where batch_size alone gives 2.
+  SELECT * FROM place_krepp(query_table := 'contigs', index_path := 'idx', batch_bases := 1000000);
+  ```
 
 **Output schema:**
 - `fragment` (same type as the query relation's `read_id`: VARCHAR, BIGINT or UUID): The `read_id` of the placed query, so it joins back to `query_table` without a cast
@@ -487,18 +494,21 @@ Requires an index built beforehand, either by [`krepp_index_create`](#build-a-kr
 
 **Reproducibility:** krepp's output is not bit-reproducible, and neither is this function. krepp accumulates and normalizes placements through hash maps keyed by tree-node *pointer*, so iteration order moves with the heap layout. What that costs you, measured on the toy index:
 
-The unit that matters is the **index load**, not the process: each `place_krepp` call loads its own copy in `InitGlobal`, so two calls in one session are already in different regimes. Everything below was re-measured on krepp v0.10.0 (`31205033`) against the toy index that `run_tests.sh` builds, and every figure is an observation on that index rather than a bound.
+The unit that matters is the **index load**, not the process: each `place_krepp` call loads its own copy in `InitGlobal`, so two calls in one session are already in different regimes. Everything below was re-measured on krepp v0.10.0 (`31205033`) against the toy index that `run_tests.sh` builds with krepp's CLI, except the CI-build runs described after the table, which used an index built with `krepp_index_create`. Every figure is an observation on its index rather than a bound.
 
 krepp v0.9.1 added a de-duplication pass to its k-mer match accumulation, described upstream as a consistent tie break. Measured on v0.9.1, it did not make the output reproducible; the figures were essentially unchanged from v0.9.0.
 
 | Quantity | Reproducible? |
 |---|---|
-| Which reads place at all (`fragment` set), and the total row count | Stable in every run measured — 5 separate processes, identical (404 rows over 92 fragments) |
-| `likelihood`, `distance`, `distal_length`, `pendant_length` | Bit-identical across repeated calls, and across 5 separate processes |
-| Which candidate edges appear (the `(fragment, edge_num)` set) | Identical across repeated calls |
+| Which reads place at all (`fragment` set) | Stable in every run measured — 5 separate processes (92 fragments), and in the CI-build runs described below (93 fragments) |
+| The total row count | Stable in the 5 processes above (404 rows). **Not in the CI-build runs below:** 385 or 386 rows from calls with identical arguments |
+| `likelihood`, `distance`, `distal_length`, `pendant_length` | Bit-identical across repeated calls, and across 5 separate processes; in the CI-build runs below, bit-identical on every `(fragment, edge_num)` that both calls return |
+| Which candidate edges appear (the `(fragment, edge_num)` set) | Identical across repeated calls above. **Not in the CI-build runs below:** one edge comes and goes |
 | `like_weight_ratio` | **No.** Three processes were each asked for the same placements twice; the two answers differed in 59, 55 and 73 of 404 rows respectively, by up to 2.5e-4 absolute. Per-fragment sums still come to 1 (measured max deviation 2.2e-16; the test pins 1e-9). |
 | Which candidate edges appear, with `multi` on | Identical across two loads in one process, across 5 separate processes, and across 6 runs of krepp's own CLI |
 | Which single edge is chosen, with `multi=false` | **No.** Over 6 runs of `krepp place --no-multi`, 1 of 92 fragments alternated between two edges. |
+
+The CI-build runs used the x86_64 Linux (Ubuntu 24.04) build that CI produces, at the same krepp commit (`31205033`), against an index built with `krepp_index_create` from the same toy references and tree (`k=27, w=35, h=11`) rather than the CLI-built index above. A macOS build that built its index the same way, with `krepp_index_create` and the same arguments, placed 92 reads in 404 rows, matching the figures above, so the 93 here is not explained by building the index with `krepp_index_create` instead of the CLI. Over 5 processes of 6 calls each, with and without `batch_size`/`batch_bases`, one candidate edge (fragment `||61435-6176`, edge 38) appeared in some calls and not in others, including two calls with identical arguments, so the row count moved between 385 and 386. Three things held in every call: the same reads placed, no `(fragment, edge_num)` appeared twice, and `likelihood`, `distance`, `distal_length` and `pendant_length` were bit-identical on every edge two calls shared. `like_weight_ratio` and `multi=false` were not re-measured in these runs. Compare placements across calls per read, not row for row.
 
 The `multi=false` case is worth understanding rather than just avoiding: krepp ranks candidates with a non-stable `std::sort` over a vector built by iterating a hash map keyed by tree-node *pointer*, then takes the last element. Equal-ranking candidates therefore land in an order that moves with the heap. The observed rate is low, but which read it hits is not something you can predict or pin.
 
@@ -534,7 +544,15 @@ FROM place_krepp(query_table='reads', index_path='index_toy');
 SELECT * FROM tree_resolve_placement('ref_tree', 'placements');
 ```
 
-**Availability:** built when `MIINT_ENABLE_KREPP` is on, which excludes WASM and Windows. Check with `SELECT * FROM miint_versions() WHERE library = 'krepp';`, which reports the `git describe --tags --dirty --always` output that the build records for the submodule: `v0.9.1-11-g3120503` for the current pin when the checkout has the v0.9.1 tag and the commits from it to the pin, `3120503` when it lacks either, and `-dirty` appended when the submodule has local changes. krepp's own version string for this pin is v0.10.0; upstream has no tag after v0.9.1.
+**Availability:** built when `MIINT_ENABLE_KREPP` is on, which excludes WASM and Windows. Check with `SELECT * FROM miint_versions() WHERE library = 'krepp';`, which reports the `git describe --tags --dirty --always` output that the build records for the submodule: `v0.9.1-11-g3120503` for the current pin when the checkout has the v0.9.1 tag and the commits from it to the pin, `3120503` when it lacks either, and `-dirty` appended when the submodule has local changes. krepp's own version string for this pin is v0.10.0; upstream has no tag after v0.9.1. That string is the `krepp-version` row, and it is what an index records as `krepp version:` in each partial's `metadata*.txt`, so a caller loading a prebuilt index can compare the two before placing:
+
+```sql
+SELECT regexp_extract(content, '(?m)^krepp version: ([^\r\n]*)', 1) AS index_version,
+       (SELECT version FROM miint_versions() WHERE library = 'krepp-version') AS miint_krepp_version
+FROM read_text('/path/to/index/metadata*.txt');
+```
+
+A mismatch means the index was written by a different krepp. A match is not proof of compatibility: krepp's `VERSION` does not change with every commit, and two commits reporting the same string have written incompatible indexes (see the krepp section of [`docs/internals/embedded-tools.md`](internals/embedded-tools.md)). The `.txt` is optional to krepp (it loads a partial without one), so a partial missing it has no recorded version and returns no row from the query above.
 
 ### Build a krepp index
 
