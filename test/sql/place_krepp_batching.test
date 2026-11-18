@@ -23,10 +23,16 @@ require-env MIINT_KREPP_TOY_REFS
 # The index is built here from krepp's toy references rather than taken from
 # MIINT_KREPP_TOY_INDEX, which needs a krepp CLI build.
 #
-# like_weight_ratio is left out of every comparison: it is not reproducible
-# from one place_krepp call to the next even with identical arguments
-# (docs/phylogeny.md, "Reproducibility"). Every column that section records as
-# stable is compared exactly.
+# The comparison is per read, not row for row, because krepp itself does not
+# return the same rows from one place_krepp call to the next, even with
+# identical arguments (docs/phylogeny.md, "Reproducibility"). like_weight_ratio
+# moves in every call, so it is left out. On Linux, one borderline candidate
+# edge also comes and goes between calls, so the row count moves by one and an
+# exact row-for-row match fails with no batching involved. What krepp does keep
+# stable, and so what is asserted here: which reads place, no
+# (fragment, edge_num) twice, and identical stable columns on every edge both
+# calls return. A read lost or placed twice at a batch boundary breaks the
+# first two; a read placed with another read's sequence breaks the third.
 
 statement ok
 SET threads = 4;
@@ -86,28 +92,53 @@ CREATE TABLE one_batch AS
 SELECT * EXCLUDE (like_weight_ratio) FROM place_krepp(query_table='toy_reads', index_path='{TEST_DIR}/toy_index',
                           batch_size := 9223372036854775807);
 
-# Each variant against the baseline, both directions, with duplicates counted:
-# EXCEPT ALL keeps a row placed twice from hiding behind its first copy.
+# Every call in one table, so each check below covers all of them at once.
+statement ok
+CREATE TABLE variants AS
+SELECT 'baseline' AS variant, * FROM baseline
+UNION ALL SELECT 'one_row', * FROM one_row
+UNION ALL SELECT 'one_base', * FROM one_base
+UNION ALL SELECT 'mixed', * FROM mixed
+UNION ALL SELECT 'one_batch', * FROM one_batch;
+
+# The same reads place in every call: none lost at a batch boundary, and none
+# conjured. Both directions against the baseline.
 query I
-SELECT (SELECT count(*) FROM (FROM baseline EXCEPT ALL FROM one_row))
-     + (SELECT count(*) FROM (FROM one_row EXCEPT ALL FROM baseline));
+SELECT count(*) FROM (
+    (SELECT v.variant, b.fragment FROM (SELECT DISTINCT variant FROM variants) v,
+                                       (SELECT DISTINCT fragment FROM baseline) b
+     EXCEPT SELECT variant, fragment FROM variants)
+    UNION ALL
+    (SELECT variant, fragment FROM variants
+     EXCEPT SELECT v.variant, b.fragment FROM (SELECT DISTINCT variant FROM variants) v,
+                                              (SELECT DISTINCT fragment FROM baseline) b));
 ----
 0
 
+# No read placed twice: a read handed to two batches would repeat each of its
+# (fragment, edge_num) pairs.
 query I
-SELECT (SELECT count(*) FROM (FROM baseline EXCEPT ALL FROM one_base))
-     + (SELECT count(*) FROM (FROM one_base EXCEPT ALL FROM baseline));
+SELECT count(*) FROM (
+    SELECT variant, fragment, edge_num FROM variants GROUP BY ALL HAVING count(*) > 1);
 ----
 0
 
+# Every edge both calls return carries the same stable columns. A read placed
+# with another read's sequence would change these.
 query I
-SELECT (SELECT count(*) FROM (FROM baseline EXCEPT ALL FROM mixed))
-     + (SELECT count(*) FROM (FROM mixed EXCEPT ALL FROM baseline));
+SELECT count(*)
+FROM variants v JOIN baseline b USING (fragment, edge_num)
+WHERE (v.likelihood, v.distal_length, v.pendant_length, v.distance)
+      IS DISTINCT FROM (b.likelihood, b.distal_length, b.pendant_length, b.distance);
 ----
 0
 
+# And the join above is not vacuous: every variant shares edges with the
+# baseline for every read that places.
 query I
-SELECT (SELECT count(*) FROM (FROM baseline EXCEPT ALL FROM one_batch))
-     + (SELECT count(*) FROM (FROM one_batch EXCEPT ALL FROM baseline));
+SELECT (SELECT count(*) FROM (
+            SELECT v.variant, v.fragment FROM variants v JOIN baseline b USING (fragment, edge_num)
+            GROUP BY ALL))
+     = (SELECT count(DISTINCT variant) FROM variants) * (SELECT count(DISTINCT fragment) FROM baseline);
 ----
-0
+true

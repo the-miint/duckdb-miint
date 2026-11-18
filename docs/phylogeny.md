@@ -500,12 +500,15 @@ krepp v0.9.1 added a de-duplication pass to its k-mer match accumulation, descri
 
 | Quantity | Reproducible? |
 |---|---|
-| Which reads place at all (`fragment` set), and the total row count | Stable in every run measured — 5 separate processes, identical (404 rows over 92 fragments) |
-| `likelihood`, `distance`, `distal_length`, `pendant_length` | Bit-identical across repeated calls, and across 5 separate processes |
-| Which candidate edges appear (the `(fragment, edge_num)` set) | Identical across repeated calls |
+| Which reads place at all (`fragment` set) | Stable in every run measured — 5 separate processes (92 fragments), and 30 calls across 5 processes on Linux (93 fragments; see below) |
+| The total row count | Stable in the 5 processes above (404 rows). **Not on Linux:** 385 or 386 rows from calls with identical arguments (see below) |
+| `likelihood`, `distance`, `distal_length`, `pendant_length` | Bit-identical across repeated calls, and across 5 separate processes; on Linux, bit-identical on every `(fragment, edge_num)` that both calls return |
+| Which candidate edges appear (the `(fragment, edge_num)` set) | Identical across repeated calls above. **Not on Linux:** one edge comes and goes (see below) |
 | `like_weight_ratio` | **No.** Three processes were each asked for the same placements twice; the two answers differed in 59, 55 and 73 of 404 rows respectively, by up to 2.5e-4 absolute. Per-fragment sums still come to 1 (measured max deviation 2.2e-16; the test pins 1e-9). |
-| Which candidate edges appear, with `multi` on | Identical across two loads in one process, across 5 separate processes, and across 6 runs of krepp's own CLI |
+| Which candidate edges appear, with `multi` on | Identical across two loads in one process, across 5 separate processes, and across 6 runs of krepp's own CLI. Not on Linux, as above |
 | Which single edge is chosen, with `multi=false` | **No.** Over 6 runs of `krepp place --no-multi`, 1 of 92 fragments alternated between two edges. |
+
+The Linux figures come from CI's x86_64 Ubuntu 24.04 build, against an index built with `krepp_index_create` from the same toy references and tree (`k=27, w=35, h=11`), not the CLI-built index above. Over 5 processes of 6 calls each, with and without `batch_size`/`batch_bases`, one candidate edge (fragment `||61435-6176`, edge 38) appeared in some calls and not in others, including two calls with identical arguments, so the row count moved between 385 and 386. Everything else in the table held. Compare placements across calls per read, not row for row.
 
 The `multi=false` case is worth understanding rather than just avoiding: krepp ranks candidates with a non-stable `std::sort` over a vector built by iterating a hash map keyed by tree-node *pointer*, then takes the last element. Equal-ranking candidates therefore land in an order that moves with the heap. The observed rate is low, but which read it hits is not something you can predict or pin.
 
