@@ -273,8 +273,6 @@ static unique_ptr<FunctionData> MiintVersionsBind(ClientContext &context, TableF
 #endif
 #ifdef MIINT_HAS_KREPP
 	data->versions.emplace_back("krepp", KREPP_GIT_VERSION);
-	// krepp's own VERSION, the string an index records in its metadata .txt;
-	// the row above is git describe, which differs on an untagged pin.
 	data->versions.emplace_back("krepp-version", miint::KreppVersionString());
 	// A row only when krepp's OpenMP regions are compiled in, which is what
 	// decides whether krepp_index_create accepts threads > 1. Reported rather

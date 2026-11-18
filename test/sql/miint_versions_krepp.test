@@ -9,8 +9,8 @@ require-env KREPP_AVAILABLE
 # Why this row exists: krepp's index layout is version-specific, and an index
 # written by a different krepp is misread rather than rejected. A caller that
 # loads a prebuilt index has to compare the version the index recorded with the
-# krepp it will be read by. The 'krepp' row cannot serve: it is `git describe`
-# of the submodule, which matches krepp's VERSION only on a tagged checkout.
+# krepp it will be read by. The 'krepp' row cannot serve (docs/utilities.md,
+# miint_versions()).
 #
 # So the assertion is against what an index actually records, not a literal:
 # build one, read the `krepp version:` line krepp writes into each partial's
