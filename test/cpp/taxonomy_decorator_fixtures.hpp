@@ -5,15 +5,33 @@
 #include "TreeIndex.hpp"
 #include "tree_test_util.hpp"
 
+#include <algorithm>
 #include <array>
+#include <compare>
 #include <cstdint>
 #include <optional>
+#include <ostream>
 #include <random>
 #include <string>
 #include <vector>
 
 // Random trees with random taxonomies on their tips, and the counts CladeCountIndex should
 // give for them, found by walking parents.
+
+namespace miint {
+
+// So Catch prints assignments it compares.
+inline std::ostream &operator<<(std::ostream &os, const NameScore &s) {
+	return os << "{rank " << s.rank << ", name " << s.name << ", node " << s.node << ", c " << s.c << ", m " << s.m
+	          << ", total " << s.total << "}";
+}
+
+inline std::ostream &operator<<(std::ostream &os, const NotPlacedName &s) {
+	return os << "{rank " << s.rank << ", name " << s.name << ", total " << s.total << ", reason "
+	          << static_cast<int>(s.reason) << "}";
+}
+
+} // namespace miint
 
 namespace miint::test {
 
@@ -147,6 +165,133 @@ inline std::vector<uint32_t> naive_lowest_eligible(const TaxonomyCase &c, const 
 	for (uint32_t v = 0; v < n; v++) {
 		if (count[v] >= threshold && !has_eligible_child[v]) {
 			out.push_back(v);
+		}
+	}
+	return out;
+}
+
+// What AssignNames should give, by brute force over naive counts: every rule applied at every
+// node directly, with no lowest-node search, no counting up the tree and no path walk.
+struct NaiveAssignment {
+	// By (rank, name).
+	std::vector<NameScore> scores;
+	std::vector<NotPlacedName> not_placed;
+	// How many names' nodes were decided by each tie-break, so a test can require that both occur.
+	size_t won_on_tip_count = 0;
+	size_t won_on_postorder = 0;
+};
+
+inline NaiveAssignment naive_assign(const TaxonomyCase &c, const TaxonomyStore &store, const NaiveCounts &naive,
+                                    uint32_t min_count) {
+	const uint32_t n = static_cast<uint32_t>(c.tree.parent.size());
+	const uint32_t root = root_of(c.tree);
+	const auto internal = has_child(c.tree);
+
+	// Each node's position in postorder, children visited in ascending index.
+	std::vector<std::vector<uint32_t>> children(n);
+	for (uint32_t v = 0; v < n; v++) {
+		if (c.tree.parent[v] != kNoParent) {
+			children[c.tree.parent[v]].push_back(v);
+		}
+	}
+	std::vector<uint32_t> post(n);
+	uint32_t next = 0;
+	auto visit = [&](auto &&self, uint32_t v) -> void {
+		for (uint32_t child : children[v]) {
+			self(self, child);
+		}
+		post[v] = next++;
+	};
+	visit(visit, root);
+
+	// safe_name[r][v]: the one name eligible at internal node v and rank r, else kMissingName.
+	std::array<std::vector<NameId>, kRankCount> safe_name;
+	std::array<std::vector<bool>, kRankCount> ever_eligible;
+	std::vector<uint32_t> picked(n, 0);
+	for (size_t r = 0; r < kRankCount; r++) {
+		const uint32_t rank_min_count = r == kRankCount - 1 ? 1 : min_count;
+		std::vector<uint32_t> eligible_names(n, 0);
+		std::vector<NameId> eligible_name(n, kMissingName);
+		ever_eligible[r].assign(store.NameCount(r), false);
+		for (NameId name = 0; name < store.NameCount(r); name++) {
+			const uint32_t threshold = F1Score::Threshold(naive.Total(r, name, root), rank_min_count);
+			for (uint32_t v = 0; v < n; v++) {
+				if (naive.clade[r][name][v] >= threshold) {
+					eligible_names[v]++;
+					eligible_name[v] = name;
+					ever_eligible[r][name] = true;
+				}
+			}
+		}
+		safe_name[r].assign(n, kMissingName);
+		for (uint32_t v = 0; v < n; v++) {
+			if (internal[v] && eligible_names[v] == 1) {
+				safe_name[r][v] = eligible_name[v];
+			}
+		}
+	}
+	// tax2tree's pick_names: from domain down, take each safe rank, and stop at the first unsafe
+	// rank after one was taken.
+	for (uint32_t v = 0; v < n; v++) {
+		bool taken = false;
+		for (size_t r = 0; r < kRankCount; r++) {
+			if (safe_name[r][v] != kMissingName) {
+				picked[v] |= 1u << r;
+				taken = true;
+			} else if (taken) {
+				break;
+			}
+		}
+	}
+
+	NaiveAssignment out;
+	for (size_t r = 0; r < kRankCount; r++) {
+		for (NameId name = 0; name < store.NameCount(r); name++) {
+			const uint32_t total = naive.Total(r, name, root);
+			if (total == 0) {
+				continue;
+			}
+			std::vector<NameScore> candidates;
+			bool ever_safe = false;
+			for (uint32_t v = 0; v < n; v++) {
+				if (safe_name[r][v] != name) {
+					continue;
+				}
+				ever_safe = true;
+				if (picked[v] >> r & 1) {
+					candidates.push_back({r, name, v, naive.clade[r][name][v], naive.informative_tip_count[v], total});
+				}
+			}
+			if (candidates.empty()) {
+				const auto reason = !ever_eligible[r][name] ? NotPlacedReason::kNeverEligible
+				                    : !ever_safe            ? NotPlacedReason::kNeverRankSafe
+				                                            : NotPlacedReason::kBlockedByContiguity;
+				out.not_placed.push_back({r, name, total, reason});
+				continue;
+			}
+			// F1 = 2c/(total+m), compared by cross-multiplying; then fewer tips; then later in
+			// postorder.
+			auto f1_cmp = [&](const NameScore &a, const NameScore &b) {
+				return uint64_t(a.c) * (uint64_t(total) + b.m) <=> uint64_t(b.c) * (uint64_t(total) + a.m);
+			};
+			auto better = [&](const NameScore &a, const NameScore &b) {
+				if (const auto f = f1_cmp(a, b); f != 0) {
+					return f > 0;
+				}
+				if (naive.tip_count[a.node] != naive.tip_count[b.node]) {
+					return naive.tip_count[a.node] < naive.tip_count[b.node];
+				}
+				return post[a.node] > post[b.node];
+			};
+			std::sort(candidates.begin(), candidates.end(), better);
+			if (candidates.size() > 1 && f1_cmp(candidates[0], candidates[1]) == 0) {
+				if (naive.tip_count[candidates[0].node] != naive.tip_count[candidates[1].node]) {
+					out.won_on_tip_count++;
+				} else {
+					out.won_on_postorder++;
+				}
+			}
+			out.scores.push_back(candidates[0]);
 		}
 	}
 	return out;

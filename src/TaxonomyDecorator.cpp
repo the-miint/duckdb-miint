@@ -240,4 +240,24 @@ uint8_t PickedRanks(uint8_t safe_mask) {
 	return static_cast<uint8_t>(m & ~(m + low));
 }
 
+std::span<const NameScore> NameAssignment::NamesAt(uint32_t) const {
+	return {};
+}
+
+const NameScore *NameAssignment::Preliminary(uint32_t) const {
+	return nullptr;
+}
+
+const std::vector<NameScore> &NameAssignment::Scores() const {
+	return scores_;
+}
+
+const std::vector<NotPlacedName> &NameAssignment::NotPlaced() const {
+	return not_placed_;
+}
+
+NameAssignment AssignNames(const CladeCountIndex &, uint32_t) {
+	return NameAssignment();
+}
+
 } // namespace miint

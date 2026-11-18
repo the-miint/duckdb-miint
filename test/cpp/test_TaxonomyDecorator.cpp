@@ -8,6 +8,7 @@
 #include "taxonomy_decorator_fixtures.hpp"
 
 #include <algorithm>
+#include <array>
 #include <compare>
 #include <cstdint>
 #include <functional>
@@ -17,6 +18,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -789,5 +791,277 @@ TEST_CASE("PickedRanks takes the run of safe ranks from the shallowest", "[taxon
 		}
 		INFO("mask " << mask);
 		REQUIRE(picked(mask) == expected);
+	}
+}
+
+namespace {
+std::vector<NameScore> NamesAt(const NameAssignment &assignment, uint32_t node) {
+	const auto names = assignment.NamesAt(node);
+	return std::vector<NameScore>(names.begin(), names.end());
+}
+
+// Per-node names, from (node, names) pairs; unlisted nodes have none.
+std::vector<std::vector<NameScore>> NamesOf(size_t n,
+                                            std::initializer_list<std::pair<uint32_t, std::vector<NameScore>>> names) {
+	std::vector<std::vector<NameScore>> out(n);
+	for (const auto &[node, scores] : names) {
+		out[node] = scores;
+	}
+	return out;
+}
+
+std::vector<std::vector<NameScore>> AllNames(const NameAssignment &assignment, size_t n) {
+	std::vector<std::vector<NameScore>> out(n);
+	for (uint32_t v = 0; v < n; v++) {
+		out[v] = NamesAt(assignment, v);
+	}
+	return out;
+}
+
+std::vector<NotPlacedName> ByRankAndName(std::vector<NotPlacedName> names) {
+	std::sort(names.begin(), names.end(), [](const NotPlacedName &a, const NotPlacedName &b) {
+		return std::tie(a.rank, a.name) < std::tie(b.rank, b.name);
+	});
+	return names;
+}
+} // namespace
+
+// N is 2 of 2 tips at both u and its one child w, so they tie on every count: the shallower u,
+// later in postorder, keeps it. The root also holds N but scores lower (2 of 3 tips), while for
+// D1 the root scores higher than u or w (3 of 3 against 2 of 2 of a total of 3): a strict win
+// each way. Z, on one tip, is eligible nowhere under min_count 2.
+TEST_CASE("AssignNames breaks a unary-chain tie toward the shallower node", "[taxonomy_decorator]") {
+	// root(0) +-- u(1) --- w(2) +-- t3  N
+	//         |                 +-- t4  N
+	//         +-- t5  Z
+	Lineages lineages = WithN({3, 4});
+	lineages.push_back({5, {"D1", "Z"}});
+	auto c = MakeCase({kNoParent, 0, 1, 2, 2, 0}, lineages);
+	const NameId d1 = c.Name(kDomain, "D1"), n = c.Name(kPhylum, "N"), z = c.Name(kPhylum, "Z");
+	const auto assignment = AssignNames(c.index, 2);
+	CHECK(AllNames(assignment, 6) == NamesOf(6, {{0, {{kDomain, d1, 0, 3, 3, 3}}}, {1, {{kPhylum, n, 1, 2, 2, 2}}}}));
+	CHECK(assignment.NotPlaced() == std::vector<NotPlacedName> {{kPhylum, z, 1, NotPlacedReason::kNeverEligible}});
+}
+
+// X splits 2 and 2 between a and b, and Y makes v unsafe at the phylum, so X's candidates are a,
+// its one-child parent p, and b, all at 2 of 2 tips: the latest in postorder, b, keeps it. b's
+// index is below a's, so this is not index order.
+TEST_CASE("AssignNames breaks a 50/50 tie toward the node later in postorder", "[taxonomy_decorator]") {
+	// v(0) +-- p(1) --- a(9) +-- t10, t11   X
+	//      +-- b(2) +-- t4, t5              X
+	//      +-- c(3) +-- t6, t7, t8          Y
+	Lineages lineages;
+	for (uint32_t tip : {4, 5, 10, 11}) {
+		lineages.push_back({tip, {"D1", "X"}});
+	}
+	for (uint32_t tip : {6, 7, 8}) {
+		lineages.push_back({tip, {"D1", "Y"}});
+	}
+	auto c = MakeCase({kNoParent, 0, 0, 0, 2, 2, 3, 3, 3, 1, 9, 9}, lineages);
+	const NameId d1 = c.Name(kDomain, "D1"), x = c.Name(kPhylum, "X"), y = c.Name(kPhylum, "Y");
+	const auto assignment = AssignNames(c.index, 2);
+	CHECK(AllNames(assignment, 12) == NamesOf(12, {{0, {{kDomain, d1, 0, 7, 7, 7}}},
+	                                               {2, {{kPhylum, x, 2, 2, 2, 4}}},
+	                                               {3, {{kPhylum, y, 3, 3, 3, 3}}}}));
+	CHECK(assignment.NotPlaced().empty());
+}
+
+// The tie-breaks apply only to equal scores. X splits 2 and 2 between a and b, but b also holds
+// an informative Z tip, so a's F1 (4/6) beats b's (4/7) though b is later in postorder.
+TEST_CASE("AssignNames prefers a higher F1 to a later node", "[taxonomy_decorator]") {
+	// v(0) +-- a(1) +-- t4, t5             X
+	//      +-- b(2) +-- t6, t7  X;  t8  Z
+	//      +-- c(3) +-- t9, t10, t11       Y
+	Lineages lineages;
+	for (uint32_t tip : {4, 5, 6, 7}) {
+		lineages.push_back({tip, {"D1", "X"}});
+	}
+	lineages.push_back({8, {"D1", "Z"}});
+	for (uint32_t tip : {9, 10, 11}) {
+		lineages.push_back({tip, {"D1", "Y"}});
+	}
+	auto c = MakeCase({kNoParent, 0, 0, 0, 1, 1, 2, 2, 2, 3, 3, 3}, lineages);
+	const NameId d1 = c.Name(kDomain, "D1"), x = c.Name(kPhylum, "X"), y = c.Name(kPhylum, "Y");
+	const NameId z = c.Name(kPhylum, "Z");
+	const auto assignment = AssignNames(c.index, 2);
+	CHECK(AllNames(assignment, 12) == NamesOf(12, {{0, {{kDomain, d1, 0, 9, 9, 9}}},
+	                                               {1, {{kPhylum, x, 1, 2, 2, 4}}},
+	                                               {3, {{kPhylum, y, 3, 3, 3, 3}}}}));
+	CHECK(assignment.NotPlaced() == std::vector<NotPlacedName> {{kPhylum, z, 1, NotPlacedReason::kNeverEligible}});
+}
+
+// With equal F1, the node with fewer tips keeps the name, counting every tip: b holds the same 2
+// of 2 informative tips as a, plus a tip with no row, so a keeps X though b is later in postorder.
+TEST_CASE("AssignNames breaks an F1 tie toward fewer tips", "[taxonomy_decorator]") {
+	// v(0) +-- a(1) +-- t4, t5             X
+	//      +-- b(2) +-- t6, t7  X;  t8  no row
+	//      +-- c(3) +-- t9, t10, t11       Y
+	Lineages lineages;
+	for (uint32_t tip : {4, 5, 6, 7}) {
+		lineages.push_back({tip, {"D1", "X"}});
+	}
+	for (uint32_t tip : {9, 10, 11}) {
+		lineages.push_back({tip, {"D1", "Y"}});
+	}
+	auto c = MakeCase({kNoParent, 0, 0, 0, 1, 1, 2, 2, 2, 3, 3, 3}, lineages);
+	const NameId d1 = c.Name(kDomain, "D1"), x = c.Name(kPhylum, "X"), y = c.Name(kPhylum, "Y");
+	REQUIRE(c.index.TipCount(2) == 3);
+	REQUIRE(c.index.InformativeTipCount(2) == 2);
+	const auto assignment = AssignNames(c.index, 2);
+	CHECK(AllNames(assignment, 12) == NamesOf(12, {{0, {{kDomain, d1, 0, 8, 8, 8}}},
+	                                               {1, {{kPhylum, x, 1, 2, 2, 4}}},
+	                                               {3, {{kPhylum, y, 3, 3, 3, 3}}}}));
+}
+
+// A node's preliminary name is its deepest surviving one, not its deepest picked one: the root
+// picks domain, phylum and class, but C1 scores higher at q (2 of 2) than at the root (2 of 3),
+// so the root's preliminary name is P1.
+TEST_CASE("AssignNames gives the deepest surviving name as preliminary", "[taxonomy_decorator]") {
+	// root(0) +-- q(1) +-- t3, t4  (D1; P1; C1)
+	//         +-- t2   (D1; P1; C2)
+	auto c =
+	    MakeCase({kNoParent, 0, 0, 1, 1}, {{2, {"D1", "P1", "C2"}}, {3, {"D1", "P1", "C1"}}, {4, {"D1", "P1", "C1"}}});
+	const NameId d1 = c.Name(kDomain, "D1"), p1 = c.Name(kPhylum, "P1");
+	const NameId c1 = c.Name(kClass, "C1"), c2 = c.Name(kClass, "C2");
+	const auto assignment = AssignNames(c.index, 2);
+	const NameScore root_p1 {kPhylum, p1, 0, 3, 3, 3}, q_c1 {kClass, c1, 1, 2, 2, 2};
+	CHECK(AllNames(assignment, 5) == NamesOf(5, {{0, {{kDomain, d1, 0, 3, 3, 3}, root_p1}}, {1, {q_c1}}}));
+	REQUIRE(assignment.Preliminary(0) != nullptr);
+	CHECK(*assignment.Preliminary(0) == root_p1);
+	REQUIRE(assignment.Preliminary(1) != nullptr);
+	CHECK(*assignment.Preliminary(1) == q_c1);
+	CHECK(assignment.Preliminary(2) == nullptr);
+	CHECK(assignment.NotPlaced() == std::vector<NotPlacedName> {{kClass, c2, 1, NotPlacedReason::kNeverEligible}});
+}
+
+// A name with tips that goes nowhere is reported with why. On this star, PA and PB are both
+// eligible only at the root, so neither is ever the one eligible phylum; PC is on one tip; and C1
+// is safe at the root, but the root's run of ranks stops at the unsafe phylum.
+TEST_CASE("AssignNames reports why each unassigned name went nowhere", "[taxonomy_decorator]") {
+	// root(0) --- t1, t2, t3 (D1; PA; C1);  t4, t5 (D1; PB);  t6 (D1; PC)
+	Lineages lineages;
+	for (uint32_t tip : {1, 2, 3}) {
+		lineages.push_back({tip, {"D1", "PA", "C1"}});
+	}
+	lineages.push_back({4, {"D1", "PB"}});
+	lineages.push_back({5, {"D1", "PB"}});
+	lineages.push_back({6, {"D1", "PC"}});
+	auto c = MakeCase({kNoParent, 0, 0, 0, 0, 0, 0}, lineages);
+	const NameId d1 = c.Name(kDomain, "D1"), c1 = c.Name(kClass, "C1");
+	const auto assignment = AssignNames(c.index, 2);
+	CHECK(AllNames(assignment, 7) == NamesOf(7, {{0, {{kDomain, d1, 0, 6, 6, 6}}}}));
+	CHECK(assignment.NotPlaced() == ByRankAndName({{kPhylum, c.Name(kPhylum, "PA"), 3, NotPlacedReason::kNeverRankSafe},
+	                                               {kPhylum, c.Name(kPhylum, "PB"), 2, NotPlacedReason::kNeverRankSafe},
+	                                               {kPhylum, c.Name(kPhylum, "PC"), 1, NotPlacedReason::kNeverEligible},
+	                                               {kClass, c1, 3, NotPlacedReason::kBlockedByContiguity}}));
+}
+
+// min_count 0 would let a node with no informative tips be eligible, with precision 0/0.
+TEST_CASE("AssignNames rejects a min_count of 0", "[taxonomy_decorator]") {
+	auto c = MakeCase({kNoParent, 0, 0}, WithN({1, 2}));
+	CHECK_THROWS_AS(AssignNames(c.index, 0), std::invalid_argument);
+}
+
+// Two genomes of species S1, each under a one-child holder, beside two of S2. Strain uses a
+// min_count of 1, so each strain lands on its holder. Under min_count 2 the species needs both
+// genomes, and the root holds both species, so S1 goes nowhere for either genome: both are
+// treated the same. Under min_count 1 each holder is a candidate for S1 at an equal score, and
+// the tie gives S1 to h2 alone, so h1's genome loses its species.
+TEST_CASE("AssignNames puts singleton strains on their holders, the same for both genomes", "[taxonomy_decorator]") {
+	// root(0) +-- h1(1) --- t3  ...; G1; S1; T1
+	//         +-- h2(2) --- t4  ...; G1; S1; T2
+	//         +-- t5, t6        ...; G1; S2
+	const std::vector<std::string> shared {"D1", "P1", "C1", "O1", "F1", "G1"};
+	auto lineage = [&](std::vector<std::string> deeper) {
+		auto out = shared;
+		out.insert(out.end(), deeper.begin(), deeper.end());
+		return out;
+	};
+	auto c =
+	    MakeCase({kNoParent, 0, 0, 1, 2, 0, 0},
+	             {{3, lineage({"S1", "T1"})}, {4, lineage({"S1", "T2"})}, {5, lineage({"S2"})}, {6, lineage({"S2"})}});
+	const size_t species = kRankCount - 2, strain = kRankCount - 1;
+	const NameId s1 = c.Name(species, "S1"), s2 = c.Name(species, "S2");
+	const NameId t1 = c.Name(strain, "T1"), t2 = c.Name(strain, "T2");
+	std::vector<NameScore> root_names;
+	for (size_t r = 0; r < shared.size(); r++) {
+		root_names.push_back({r, c.Name(r, shared[r]), 0, 4, 4, 4});
+	}
+
+	const auto at_two = AssignNames(c.index, 2);
+	CHECK(AllNames(at_two, 7) ==
+	      NamesOf(7, {{0, root_names}, {1, {{strain, t1, 1, 1, 1, 1}}}, {2, {{strain, t2, 2, 1, 1, 1}}}}));
+	CHECK(at_two.NotPlaced() == ByRankAndName({{species, s1, 2, NotPlacedReason::kNeverRankSafe},
+	                                           {species, s2, 2, NotPlacedReason::kNeverRankSafe}}));
+
+	const auto at_one = AssignNames(c.index, 1);
+	CHECK(AllNames(at_one, 7) == NamesOf(7, {{0, root_names},
+	                                         {1, {{strain, t1, 1, 1, 1, 1}}},
+	                                         {2, {{species, s1, 2, 1, 1, 2}, {strain, t2, 2, 1, 1, 1}}}}));
+	CHECK(at_one.NotPlaced() == std::vector<NotPlacedName> {{species, s2, 2, NotPlacedReason::kNeverRankSafe}});
+}
+
+// Against brute force (naive_assign): eligibility, safety, contiguity and the fold applied at
+// every node directly, on random trees with chains, multifurcations, 50/50 splits and strains.
+// The brute force runs first over every case, so the coverage it requires is checked even
+// while AssignNames fails.
+TEST_CASE("AssignNames matches the brute-force assignment", "[taxonomy_decorator]") {
+	std::mt19937 rng(20261122);
+	struct Trial {
+		TaxonomyCase c;
+		uint32_t min_count;
+		NaiveAssignment expected;
+	};
+	std::vector<Trial> trials;
+	size_t won_on_tip_count = 0, won_on_postorder = 0;
+	std::array<size_t, 3> reasons {};
+	for (int k = 0; k < 300; k++) {
+		const uint32_t n = std::uniform_int_distribution<uint32_t>(1, 40)(rng);
+		auto c = random_taxonomy_case(rng, n);
+		TaxonomyStore store(c.rows);
+		const auto naive = naive_counts(c, store);
+		for (uint32_t min_count = 1; min_count <= 3; min_count++) {
+			auto expected = naive_assign(c, store, naive, min_count);
+			won_on_tip_count += expected.won_on_tip_count;
+			won_on_postorder += expected.won_on_postorder;
+			for (const auto &name : expected.not_placed) {
+				reasons[static_cast<size_t>(name.reason)]++;
+			}
+			trials.push_back({c, min_count, std::move(expected)});
+		}
+	}
+	// Each tie-break and each reason must occur, or this test proves nothing about it.
+	CHECK(won_on_tip_count > 0);
+	CHECK(won_on_postorder > 0);
+	CHECK(reasons[static_cast<size_t>(NotPlacedReason::kNeverEligible)] > 0);
+	CHECK(reasons[static_cast<size_t>(NotPlacedReason::kNeverRankSafe)] > 0);
+	CHECK(reasons[static_cast<size_t>(NotPlacedReason::kBlockedByContiguity)] > 0);
+
+	for (size_t k = 0; k < trials.size(); k++) {
+		const auto &[c, min_count, expected] = trials[k];
+		TaxonomyStore store(c.rows);
+		const auto index = build_index(c, store);
+		const uint32_t n = static_cast<uint32_t>(c.tree.parent.size());
+		INFO("trial " << k / 3 << ", " << n << " nodes, min_count " << min_count);
+		const auto assignment = AssignNames(index, min_count);
+		REQUIRE(assignment.Scores() == expected.scores);
+		REQUIRE(assignment.NotPlaced() == expected.not_placed);
+		std::vector<std::vector<NameScore>> by_node(n);
+		for (const auto &score : expected.scores) {
+			by_node[score.node].push_back(score);
+		}
+		for (uint32_t v = 0; v < n; v++) {
+			INFO("node " << v);
+			std::sort(by_node[v].begin(), by_node[v].end(),
+			          [](const NameScore &a, const NameScore &b) { return a.rank < b.rank; });
+			REQUIRE(NamesAt(assignment, v) == by_node[v]);
+			const NameScore *preliminary = assignment.Preliminary(v);
+			if (by_node[v].empty()) {
+				REQUIRE(preliminary == nullptr);
+			} else {
+				REQUIRE(preliminary != nullptr);
+				REQUIRE(*preliminary == by_node[v].back());
+			}
+		}
 	}
 }

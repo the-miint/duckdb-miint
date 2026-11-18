@@ -134,4 +134,64 @@ std::vector<uint8_t> RankSafeMasks(const CladeCountIndex &index, uint32_t min_co
 // shallowest safe rank and stops at the first unsafe rank after it (tax2tree's pick_names).
 uint8_t PickedRanks(uint8_t safe_mask);
 
+// A name assigned to a node, and the counts its score came from: c of the node's m informative
+// tips carry the name, of `total` in the tree.
+struct NameScore {
+	size_t rank;
+	NameId name;
+	uint32_t node;
+	uint32_t c;
+	uint32_t m;
+	uint32_t total;
+
+	bool operator==(const NameScore &) const = default;
+};
+
+// Why a name some informative tip carries was assigned to no node.
+enum class NotPlacedReason {
+	// Fewer tips carry it than its rank's min_count.
+	kNeverEligible,
+	// Eligible, but at every internal node where it is, so is another name at its rank.
+	kNeverRankSafe,
+	// Its rank is safe somewhere, but at each such node an unsafe shallower rank ended the
+	// node's run of picked ranks first.
+	kBlockedByContiguity,
+};
+
+struct NotPlacedName {
+	size_t rank;
+	NameId name;
+	uint32_t total;
+	NotPlacedReason reason;
+
+	bool operator==(const NotPlacedName &) const = default;
+};
+
+// Each internal node's names, as AssignNames left them: the one artifact the stages after it
+// read, so none of them goes back to the index.
+class NameAssignment {
+public:
+	// The names assigned to `node`, by ascending rank; empty for most nodes and every tip.
+	std::span<const NameScore> NamesAt(uint32_t node) const;
+	// The deepest of NamesAt(node), or nullptr when it is empty.
+	const NameScore *Preliminary(uint32_t node) const;
+	// Every assigned name, by (rank, name).
+	const std::vector<NameScore> &Scores() const;
+	// Every name with an informative tip that was assigned nowhere, by (rank, name).
+	const std::vector<NotPlacedName> &NotPlaced() const;
+
+private:
+	friend NameAssignment AssignNames(const CladeCountIndex &index, uint32_t min_count);
+
+	std::vector<NameScore> scores_;
+	std::vector<NotPlacedName> not_placed_;
+};
+
+// Assigns each name to the node that scores best for it (tax2tree's primary placement). A
+// node's candidates are its picked ranks (PickedRanks of its RankSafeMasks entry), each for the
+// one name eligible there. A name's best candidate has the highest F1 (F1Score::Compare), then
+// the fewest tips (TipCount), then is the latest in postorder, children visited in ascending
+// index. Throws std::invalid_argument when min_count is 0.
+NameAssignment AssignNames(const CladeCountIndex &index, uint32_t min_count);
+
 } // namespace miint
