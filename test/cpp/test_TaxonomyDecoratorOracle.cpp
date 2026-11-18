@@ -169,9 +169,13 @@ WHERE NOT EXISTS (SELECT 1 FROM winners w WHERE w.rank = t.rank AND w.name = t.n
 ORDER BY t.rank, t.name
 )";
 
+// kAssign with its one MIN_COUNT replaced.
 std::string WithMinCount(std::string sql, uint32_t min_count) {
 	const std::string token = "MIN_COUNT";
-	sql.replace(sql.find(token), token.size(), std::to_string(min_count));
+	const auto at = sql.find(token);
+	REQUIRE(at != std::string::npos);
+	REQUIRE(sql.find(token, at + 1) == std::string::npos);
+	sql.replace(at, token.size(), std::to_string(min_count));
 	return sql;
 }
 

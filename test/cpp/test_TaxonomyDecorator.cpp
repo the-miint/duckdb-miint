@@ -511,6 +511,36 @@ TEST_CASE("LowestEligibleNodes finds a clade below the first tip's eligible ance
 	mirror[11] = 0;
 	auto last = MakeCase(mirror, WithN({2, 3, 4, 5, 6, 7, 8, 9, 10, 11}));
 	CHECK(LowestOf(last, "N", 2) == std::vector<uint32_t> {1});
+
+	// An odd total has one middle tip and one walk, so a first walk from a fails here even if an
+	// even total's second walk, from the upper middle tip, would have found B.
+	// root(0) +-- a(1)
+	//         +-- B(2) --- tips 3..12
+	std::vector<uint32_t> odd(13, 2);
+	odd[0] = kNoParent;
+	odd[1] = 0;
+	odd[2] = 0;
+	auto odd_case = MakeCase(odd, WithN({1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}));
+	REQUIRE(odd_case.index.Total(kPhylum, odd_case.Name(kPhylum, "N")) == 11);
+	CHECK(LowestOf(odd_case, "N", 2) == std::vector<uint32_t> {2});
+}
+
+// The search walks up from the middle tips only, which finds every lowest eligible node only
+// when the threshold is at least 1 and at least half the name's total. Below that it would
+// return wrong nodes, so it throws instead.
+TEST_CASE("LowestEligibleNodes rejects a threshold below 1 or below half the total", "[taxonomy_decorator]") {
+	// root(0) +-- x(1) +-- t3, t4  N
+	//         +-- y(2) +-- t5, t6  N
+	auto c = MakeCase({kNoParent, 0, 0, 1, 1, 2, 2}, WithN({3, 4, 5, 6}));
+	const NameId n = c.Name(kPhylum, "N");
+	REQUIRE(c.index.Total(kPhylum, n) == 4);
+	CHECK_THROWS_AS(LowestEligibleNodes(c.index, kPhylum, n, 0), std::invalid_argument);
+	CHECK_THROWS_AS(LowestEligibleNodes(c.index, kPhylum, n, 1), std::invalid_argument);
+	CHECK(LowestEligibleNodes(c.index, kPhylum, n, 2) == std::vector<uint32_t> {1, 2});
+	// A name on no tip still needs a threshold of at least 1.
+	auto store = HandStore();
+	CladeCountIndex index(HandTree(), store, HandRows());
+	CHECK_THROWS_AS(LowestEligibleNodes(index, kPhylum, store.Name(4, kPhylum), 0), std::invalid_argument);
 }
 
 // A name split evenly between two disjoint clades has both as lowest eligible nodes: neither

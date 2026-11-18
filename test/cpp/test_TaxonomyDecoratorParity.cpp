@@ -108,10 +108,20 @@ TEST_CASE("AssignNames matches tax2tree's placement on the committed fixture", "
 		}
 		TaxonomyStore store(rows);
 		std::vector<std::optional<size_t>> row_of_node(tree_rows.size());
+		size_t rows_on_tips = 0;
 		for (uint32_t v = 0; v < tree_rows.size(); v++) {
 			if (!tree_rows[v][2].empty()) {
 				row_of_node[v] = store.FindRow(tree_rows[v][2]);
+				rows_on_tips += row_of_node[v].has_value();
 			}
+		}
+		// Every taxonomy row is a tip's, and cleaning keeps every lineage whole (divergence 3).
+		// Otherwise a fixture that drifted from its tree, or a cleaning rule that differs from
+		// tax2tree's, would only lose tips, and could still agree on what was left.
+		REQUIRE(rows_on_tips == store.RowCount());
+		REQUIRE(store.Truncations().empty());
+		for (size_t row = 0; row < store.RowCount(); row++) {
+			REQUIRE(store.IsInformative(row));
 		}
 		CladeCountIndex index(TreeIndex::Build(parent, std::vector<double>(parent.size(), 1.0)), store, row_of_node);
 

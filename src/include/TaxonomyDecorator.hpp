@@ -116,8 +116,9 @@ private:
 
 // A name's lowest eligible nodes at `rank`: the nodes whose count reaches `threshold` while no
 // child's does, in ascending preorder. There are none when even the root falls short of
-// `threshold`, and two only when each holds exactly half of an even total. Requires a threshold
-// of at least 1 and at least ceil(Total/2), as F1Score::Threshold gives.
+// `threshold`, and two only when each holds exactly half of an even total. Throws
+// std::invalid_argument for a threshold below 1 or below ceil(Total/2), which
+// F1Score::Threshold never gives.
 std::vector<uint32_t> LowestEligibleNodes(const CladeCountIndex &index, size_t rank, NameId name, uint32_t threshold);
 
 // The min_count rank `rank` uses: `min_count`, except 1 at strain, the last rank. A strain is
@@ -197,7 +198,7 @@ private:
 // node's candidates are its picked ranks (PickedRanks of its RankSafeMasks entry), each for the
 // one name eligible there. A name's best candidate has the highest F1 (F1Score::Compare), then
 // the fewest tips (TipCount), then is the latest in postorder, children visited in ascending
-// index. Throws std::invalid_argument when min_count is 0.
+// index as TreeIndex visits them. Throws std::invalid_argument when min_count is 0.
 NameAssignment AssignNames(const CladeCountIndex &index, uint32_t min_count);
 
 } // namespace miint

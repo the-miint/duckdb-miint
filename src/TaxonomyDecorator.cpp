@@ -148,6 +148,15 @@ uint32_t CladeCountIndex::NodeAtPreorder(uint32_t p) const {
 }
 
 std::vector<uint32_t> LowestEligibleNodes(const CladeCountIndex &index, size_t rank, NameId name, uint32_t threshold) {
+	const uint32_t total = index.Total(rank, name);
+	if (threshold == 0 || threshold < total / 2 + total % 2) {
+		throw std::invalid_argument("LowestEligibleNodes: threshold " + std::to_string(threshold) +
+		                            " is below 1 or below half of the name's " + std::to_string(total) + " tips");
+	}
+	// The root holds every tip carrying the name.
+	if (total < threshold) {
+		return {};
+	}
 	// An eligible node holds at least threshold >= ceil(t/2) of the name's t tips, and they are a
 	// contiguous run of its occurrences, so the run contains the middle one (odd t) or one of the
 	// middle two (even t). Every eligible node is therefore an ancestor-or-self of a middle tip,
@@ -155,39 +164,30 @@ std::vector<uint32_t> LowestEligibleNodes(const CladeCountIndex &index, size_t r
 	// of the middle tips. Another tip's deepest eligible ancestor need not be lowest: it can hold
 	// an eligible node that does not contain that tip.
 	const TreeIndex &tree = index.Tree();
-	auto deepest_eligible = [&](uint32_t position) -> std::optional<uint32_t> {
-		for (uint32_t v = index.NodeAtPreorder(position);; v = tree.parent(v)) {
-			if (index.CladeCount(v, rank, name) >= threshold) {
-				return v;
-			}
-			if (v == tree.root()) {
-				return std::nullopt;
-			}
+	// The root is eligible, so every walk ends.
+	auto deepest_eligible = [&](uint32_t position) {
+		uint32_t v = index.NodeAtPreorder(position);
+		while (index.CladeCount(v, rank, name) < threshold) {
+			v = tree.parent(v);
 		}
+		return v;
 	};
 	const auto occ = index.Occurrences(rank, name);
 	const size_t t = occ.size();
-	if (t == 0) {
-		return {};
-	}
-	const auto a = deepest_eligible(occ[(t - 1) / 2]);
-	if (!a) {
-		return {};
-	}
+	const uint32_t a = deepest_eligible(occ[(t - 1) / 2]);
 	if (t % 2 == 1) {
-		return {*a};
+		return {a};
 	}
-	// b exists, since a does only when the root is eligible. a's tip precedes b's in preorder.
-	// Nested results keep the deeper; disjoint ones are the two halves of a 50/50 split, and a's
-	// subtree, holding the earlier tip, comes first.
-	const auto b = deepest_eligible(occ[t / 2]);
-	if (tree.is_ancestor_or_self(*a, *b)) {
-		return {*b};
+	// a's tip precedes b's in preorder. Nested results keep the deeper; disjoint ones are the two
+	// halves of a 50/50 split, and a's subtree, holding the earlier tip, comes first.
+	const uint32_t b = deepest_eligible(occ[t / 2]);
+	if (tree.is_ancestor_or_self(a, b)) {
+		return {b};
 	}
-	if (tree.is_ancestor_or_self(*b, *a)) {
-		return {*a};
+	if (tree.is_ancestor_or_self(b, a)) {
+		return {a};
 	}
-	return {*a, *b};
+	return {a, b};
 }
 
 uint32_t MinCountAt(size_t rank, uint32_t min_count) {
@@ -337,8 +337,9 @@ NameAssignment AssignNames(const CladeCountIndex &index, uint32_t min_count) {
 			}
 			// The nodes where the name is eligible are the lowest ones and their ancestors. At such
 			// a node with rank r safe, this name is the one eligible there, so its candidates are
-			// the ones that also pick rank r. The second walk stops below the LCA, which the first
-			// walk reached.
+			// the ones that also pick rank r. At an internal one with rank r unsafe, another name is
+			// eligible too, and so at every ancestor, so the walk stops. The second walk also stops
+			// below the LCA, which the first walk reached.
 			std::optional<NameScore> best;
 			bool ever_safe = false;
 			auto walk = [&](uint32_t from, std::optional<uint32_t> stop) {
@@ -355,6 +356,8 @@ NameAssignment AssignNames(const CladeCountIndex &index, uint32_t min_count) {
 								best = candidate;
 							}
 						}
+					} else if (!tree.is_tip(v)) {
+						return;
 					}
 					if (v == tree.root()) {
 						return;
