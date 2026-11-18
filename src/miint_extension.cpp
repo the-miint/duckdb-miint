@@ -77,6 +77,9 @@
 #ifdef MIINT_HAS_MAFFT
 #include <align_mafft.hpp>
 #endif
+#ifdef MIINT_HAS_HMMER
+#include "HmmerProfile.hpp"
+#endif
 #ifdef MIINT_HAS_KREPP
 #include "krepp_index_create.hpp"
 #include "place_krepp.hpp"
@@ -254,6 +257,10 @@ static unique_ptr<FunctionData> MiintVersionsBind(ClientContext &context, TableF
 	data->versions.emplace_back("sc", SC_GIT_VERSION);
 #ifdef MIINT_HAS_VSEARCH
 	data->versions.emplace_back("vsearch", VSEARCH_GIT_VERSION);
+#endif
+#ifdef MIINT_HAS_HMMER
+	data->versions.emplace_back("hmmer", HMMER_GIT_VERSION);
+	data->versions.emplace_back("easel", EASEL_GIT_VERSION);
 #endif
 #ifdef MIINT_HAS_MAFFT
 	data->versions.emplace_back("mafft", MAFFT_GIT_VERSION);
@@ -504,6 +511,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 #ifdef MIINT_HAS_SORTMERNA
 	AlignSortMeRNATableFunction::Register(loader);
 	AlignSortMeRNARRNATableFunction::Register(loader);
+#endif
+#ifdef MIINT_HAS_HMMER
+	// Before any HMMER call can happen. Easel's exception handler is one
+	// process-global pointer, read without a lock, so installing it later -
+	// once a query might already be inside HMMER - would be a data race; the
+	// default handler aborts the process. Also fills HMMER's logsum table,
+	// which HMMER would otherwise fill on first use, racing.
+	miint::hmmer::Initialize();
 #endif
 #ifdef MIINT_HAS_KREPP
 	// Before any krepp call can happen, which is what krepp's set_error_handler
