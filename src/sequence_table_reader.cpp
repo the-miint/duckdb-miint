@@ -1,6 +1,7 @@
 #include "sequence_table_reader.hpp"
 #include "catalog_utils.hpp"
 #include "id_column_utils.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/appender.hpp"
 #include "duckdb/main/connection.hpp"
@@ -185,13 +186,11 @@ static miint::QualScore ExtractQualScore(DataChunk &chunk, idx_t qual_col_idx, U
 	return miint::QualScore(qual_vec_data);
 }
 
-// Helper to create a new sub-batch with reserved capacity.
-static miint::SequenceRecordBatch MakeSubBatch(bool is_paired, idx_t capacity) {
-	miint::SequenceRecordBatch batch(is_paired);
-	if (capacity > 0) {
-		batch.reserve(capacity);
-	}
-	return batch;
+// Rows to reserve for the held rows: at most one chunk's worth. A sub-batch
+// size can come from a caller's user, and reserving that many strings up front
+// would fail on a large one; past one chunk the vectors grow as rows arrive.
+static idx_t ReserveRows(idx_t sub_batch_size) {
+	return std::min<idx_t>(sub_batch_size, STANDARD_VECTOR_SIZE);
 }
 
 // Process a single DataChunk into a SequenceRecordBatch.
@@ -590,10 +589,10 @@ std::string MaterializeReadToShard(Connection &conn, const std::string &read_to_
 
 QuerySequenceStream::QuerySequenceStream(ClientContext &context, const std::string &select_sql,
                                          const std::string &source, const SequenceTableSchema &schema,
-                                         idx_t sub_batch_size, std::shared_ptr<void> source_keepalive)
+                                         idx_t sub_batch_size, std::shared_ptr<void> source_keepalive, idx_t max_bases)
     : owned_conn_(make_uniq<Connection>(DatabaseInstance::GetDatabase(context))), conn_ptr_(owned_conn_.get()),
       source_keepalive_(std::move(source_keepalive)), schema_(schema), sub_batch_size_(sub_batch_size),
-      partial_(schema.has_sequence2) {
+      max_bases_(max_bases), partial_(schema.has_sequence2) {
 	// Before InitStream: the stream's own SELECT must be able to resolve a TEMP
 	// relation. This constructor owns its connection and creates nothing on it, so
 	// inheriting is safe — the Connection& overload below deliberately does not,
@@ -603,11 +602,11 @@ QuerySequenceStream::QuerySequenceStream(ClientContext &context, const std::stri
 }
 
 QuerySequenceStream::QuerySequenceStream(ClientContext &context, const std::string &table_name,
-                                         const SequenceTableSchema &schema, idx_t sub_batch_size)
+                                         const SequenceTableSchema &schema, idx_t sub_batch_size, idx_t max_bases)
     // Same projection the snapshot was built with, so replaying a snapshot binds
     // against exactly the columns it holds.
     : QuerySequenceStream(context, BuildQueryReadsSelect(table_name, schema), "query table '" + table_name + "'",
-                          schema, sub_batch_size) {
+                          schema, sub_batch_size, nullptr, max_bases) {
 }
 
 QuerySequenceStream::QuerySequenceStream(Connection &conn, const std::string &table_name,
@@ -629,7 +628,12 @@ QuerySequenceStream::~QuerySequenceStream() {
 }
 
 void QuerySequenceStream::InitStream(const std::string &select_sql, const std::string &source) {
-	partial_.reserve(sub_batch_size_);
+	// A zero row limit would make every batch empty, which callers read as the
+	// end of the stream.
+	if (sub_batch_size_ == 0) {
+		throw InternalException("QuerySequenceStream: sub_batch_size must be at least 1");
+	}
+	partial_.reserve(ReserveRows(sub_batch_size_));
 
 	stream_ = SubmitStream(*conn_ptr_, select_sql);
 	if (stream_->HasError()) {
@@ -637,15 +641,49 @@ void QuerySequenceStream::InitStream(const std::string &select_sql, const std::s
 	}
 }
 
+bool QuerySequenceStream::NextBatchEnd(idx_t &end) {
+	// The bases limit: extend the scan over rows that arrived since the last
+	// call, stopping before the row that would take the batch past max_bases_.
+	// A row alone in the batch is taken whatever its length, so a row longer
+	// than the limit is a batch of its own rather than an empty one.
+	if (max_bases_ > 0) {
+		while (scan_end_ < partial_.size() && scan_end_ - consumed_ < sub_batch_size_) {
+			const idx_t row_bases = partial_.sequences1[scan_end_].size();
+			if (scan_end_ > consumed_ && scan_bases_ + row_bases > max_bases_) {
+				end = scan_end_;
+				return true;
+			}
+			scan_bases_ += row_bases;
+			scan_end_++;
+		}
+	}
+	if (partial_.size() - consumed_ >= sub_batch_size_) {
+		end = consumed_ + sub_batch_size_;
+		return true;
+	}
+	return false;
+}
+
 miint::SequenceRecordBatch QuerySequenceStream::FetchSubBatch() {
 	std::lock_guard<std::mutex> lock(mutex_);
-
-	if (exhausted_ && partial_.empty()) {
-		return miint::SequenceRecordBatch(schema_.has_sequence2);
+	// A row that failed to convert (an out-of-range quality score) leaves the
+	// held columns uneven, so nothing after it may be read. The cause is
+	// repeated because another thread can reach here before the failing thread's
+	// own error is reported, and DuckDB reports whichever arrives first.
+	if (failed_) {
+		throw InvalidInputException("Failed to read sequences: an earlier batch of this scan raised an error: %s",
+		                            failed_message_);
 	}
 
-	// Fetch chunks from stream until we have a full sub-batch or stream is exhausted
-	while (!exhausted_ && partial_.size() < sub_batch_size_) {
+	// Fetch chunks from the stream until the next batch is complete or the
+	// stream is exhausted. Rows [consumed_, partial_.size()) are held and not
+	// yet handed out.
+	idx_t end = 0;
+	while (!NextBatchEnd(end)) {
+		if (exhausted_) {
+			end = partial_.size();
+			break;
+		}
 		auto chunk = stream_->Fetch();
 		if (!chunk || chunk->size() == 0) {
 			// Fetch() returns null for both a clean end-of-stream AND a mid-stream
@@ -655,31 +693,36 @@ miint::SequenceRecordBatch QuerySequenceStream::FetchSubBatch() {
 				throw InvalidInputException("Failed to read sequences mid-stream: %s", stream_->GetError());
 			}
 			exhausted_ = true;
-			break;
+			continue;
 		}
-		ProcessSingleChunk(*chunk, schema_, partial_, temp_read_ids_, temp_seq1_, temp_seq2_);
+		// Drop the rows already handed out before appending, so the held rows
+		// stay within about one batch plus one chunk.
+		D_ASSERT(consumed_ <= scan_end_ && scan_end_ <= partial_.size());
+		if (consumed_ > 0) {
+			partial_.DropFront(consumed_);
+			scan_end_ -= consumed_;
+			consumed_ = 0;
+		}
+		try {
+			ProcessSingleChunk(*chunk, schema_, partial_, temp_read_ids_, temp_seq1_, temp_seq2_);
+		} catch (const std::exception &e) {
+			failed_ = true;
+			failed_message_ = ErrorData(e).RawMessage();
+			throw;
+		}
 	}
 
-	if (partial_.size() >= sub_batch_size_) {
-		if (partial_.size() == sub_batch_size_) {
-			// Exact fit — return as-is
-			miint::SequenceRecordBatch result = std::move(partial_);
-			partial_ = MakeSubBatch(schema_.has_sequence2, sub_batch_size_);
-			rows_delivered_ += result.size();
-			return result;
-		}
-		// Chunk pushed partial_ past sub_batch_size_ — split: return exactly
-		// sub_batch_size_ rows and keep the remainder for the next call.
-		miint::SequenceRecordBatch result = partial_.SubRange(0, sub_batch_size_);
-		miint::SequenceRecordBatch remainder = partial_.SubRange(sub_batch_size_, partial_.size() - sub_batch_size_);
-		partial_ = std::move(remainder);
-		rows_delivered_ += result.size();
-		return result;
+	// Moved out rather than copied, so cutting one chunk into many small
+	// batches costs no more than handing it out whole.
+	miint::SequenceRecordBatch result = partial_.MoveRange(consumed_, end - consumed_);
+	consumed_ = end;
+	scan_end_ = end;
+	scan_bases_ = 0;
+	if (consumed_ == partial_.size()) {
+		partial_.clear();
+		consumed_ = 0;
+		scan_end_ = 0;
 	}
-
-	// Stream exhausted — return whatever remains
-	miint::SequenceRecordBatch result = std::move(partial_);
-	partial_ = miint::SequenceRecordBatch(schema_.has_sequence2);
 	rows_delivered_ += result.size();
 	return result;
 }

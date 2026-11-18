@@ -171,11 +171,18 @@ LoadedSingleEndSequences LoadSingleEndSequences(Connection &conn, const std::str
 // Streaming query sequence reader for lazy sub-batching.
 // Produces sub-batches on demand from a streaming query result.
 // Thread-safe: multiple threads can call FetchSubBatch() concurrently.
+//
+// A sub-batch holds at most `sub_batch_size` rows (at least 1) and, when
+// `max_bases` is non-zero, at most `max_bases` bases of sequence1, the same rule
+// as predict_genes' kBatchBases: a row that would take the batch past the limit
+// starts the next one, and a row longer than the limit is a batch of its own.
+// Only sequence1 counts; a caller that processes both mates and wants them
+// counted has to say so here first.
 class QuerySequenceStream {
 public:
 	// Owns an internal Connection — convenient for single-pipeline readers.
 	QuerySequenceStream(ClientContext &context, const std::string &table_name, const SequenceTableSchema &schema,
-	                    idx_t sub_batch_size = STANDARD_VECTOR_SIZE);
+	                    idx_t sub_batch_size = STANDARD_VECTOR_SIZE, idx_t max_bases = 0);
 
 	// Uses a caller-owned Connection. Required when the stream needs to see TEMP
 	// objects (e.g. views) created by the caller on the same connection — per-sample
@@ -230,7 +237,7 @@ private:
 	// lives here once. `source` names what is being read, for error messages.
 	QuerySequenceStream(ClientContext &context, const std::string &select_sql, const std::string &source,
 	                    const SequenceTableSchema &schema, idx_t sub_batch_size,
-	                    std::shared_ptr<void> source_keepalive = nullptr);
+	                    std::shared_ptr<void> source_keepalive = nullptr, idx_t max_bases = 0);
 
 	// Only one of these two is populated: owned_conn_ for the ClientContext&
 	// constructor, nullptr for the Connection& constructor. conn_ptr_ always
@@ -242,7 +249,15 @@ private:
 	unique_ptr<StreamingQuery> stream_;
 	SequenceTableSchema schema_;
 	idx_t sub_batch_size_;
-	miint::SequenceRecordBatch partial_; // Partially-filled sub-batch carried across Fetch() calls
+	idx_t max_bases_ = 0;                // 0: close by rows only
+	miint::SequenceRecordBatch partial_; // Rows fetched from the stream; [consumed_, size()) not yet handed out
+	idx_t consumed_ = 0;                 // Rows of partial_ already handed out (moved-from)
+	// The bases limit's scan over the next batch: rows [consumed_, scan_end_)
+	// fit in it and hold scan_bases_ bases of sequence1.
+	idx_t scan_end_ = 0;
+	idx_t scan_bases_ = 0;
+	bool failed_ = false;        // A chunk failed to convert; partial_'s columns may be uneven
+	std::string failed_message_; // That failure's message, repeated on every later call
 	bool exhausted_ = false;
 	idx_t rows_delivered_ = 0;
 	mutable std::mutex mutex_;
@@ -253,6 +268,10 @@ private:
 
 	// `source` names what is being read, for error messages only.
 	void InitStream(const std::string &select_sql, const std::string &source);
+
+	// True once the held rows complete the next batch, with `end` set to its
+	// end in partial_; false while it needs more rows from the stream.
+	bool NextBatchEnd(idx_t &end);
 };
 
 } // namespace duckdb
