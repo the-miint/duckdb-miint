@@ -14,10 +14,10 @@
 # Exposes a single INTERFACE target `miint_openmp` so link sites don't need to
 # know which platform-specific dance produced it.
 #
-# MIINT_OPENMP_STATIC_LIBOMP is set below whenever libomp.a is the runtime
-# linked, and passed to the sources as a definition: a static libomp has to be
-# kept from shutting down (docs/internals/embedded-tools.md, "The OpenMP
-# runtime").
+# MIINT_OPENMP_STATIC_LIBOMP is set below whenever miint_openmp is libomp.a. A
+# static libomp has to be kept from shutting down (docs/internals/
+# embedded-tools.md, "The OpenMP runtime"); CMakeLists.txt passes it to the
+# sources once the features have decided whether miint_openmp is linked at all.
 #
 # krepp wants it too, to build indexes on more than one core. Unlike UniFrac it
 # can do without: compiled with _WOPENMP=0 its pragmas are ignored and the build
@@ -168,11 +168,4 @@ if((MIINT_ENABLE_UNIFRAC OR MIINT_ENABLE_KREPP) AND NOT EMSCRIPTEN)
       set(MIINT_OPENMP_AVAILABLE OFF)
     endif()
   endif()
-endif()
-# A prefix can hold libomp.a without omp.h; then nothing is linked after all.
-if(NOT MIINT_OPENMP_AVAILABLE)
-  set(MIINT_OPENMP_STATIC_LIBOMP OFF)
-endif()
-if(MIINT_OPENMP_STATIC_LIBOMP)
-  list(APPEND MIINT_DEFINITIONS MIINT_OPENMP_STATIC_LIBOMP)
 endif()

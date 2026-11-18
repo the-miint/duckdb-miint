@@ -152,6 +152,14 @@ foreach(
   endif()
 endforeach()
 
+# Only now is it known whether any feature links miint_openmp: a static libomp
+# that nothing links needs no keepalive, and its omp.h is not on the path.
+if(MIINT_OPENMP_STATIC_LIBOMP AND miint_openmp IN_LIST MIINT_LINK_LIBRARIES)
+  list(APPEND MIINT_DEFINITIONS MIINT_OPENMP_STATIC_LIBOMP)
+else()
+  set(MIINT_OPENMP_STATIC_LIBOMP OFF)
+endif()
+
 # Libraries that the archives above depend on go last.
 list(APPEND MIINT_LINK_LIBRARIES ZLIB::ZLIB expat::expat Threads::Threads)
 list(APPEND MIINT_WASM_LIBS "$<TARGET_FILE:ZLIB::ZLIB>"
