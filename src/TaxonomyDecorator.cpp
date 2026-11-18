@@ -309,9 +309,13 @@ NameAssignment AssignNames(const CladeCountIndex &index, uint32_t min_count) {
 	const auto lowest = FindLowest(index, min_count);
 	const auto masks = SafeMasks(index, lowest);
 
+	// v's position in postorder. The nodes before it are its descendants, last(v) - pre(v) of
+	// them, and the nodes before it in preorder that are not its ancestors, pre(v) - depth(v).
+	auto postorder = [&](uint32_t v) {
+		return tree.last(v) - tree.depth(v);
+	};
 	// Whether candidate a beats candidate b for one name: higher F1, then fewer tips, then later
-	// in postorder. An ancestor comes after its descendants in postorder, and of two disjoint
-	// nodes the one later in preorder comes later in postorder too.
+	// in postorder.
 	auto beats = [&](const NameScore &a, const NameScore &b) {
 		if (const auto f1 = F1Score::Compare(a.c, a.m, b.c, b.m, a.total); f1 != 0) {
 			return f1 > 0;
@@ -320,10 +324,7 @@ NameAssignment AssignNames(const CladeCountIndex &index, uint32_t min_count) {
 		if (tips_a != tips_b) {
 			return tips_a < tips_b;
 		}
-		if (tree.is_ancestor_or_self(a.node, b.node) || tree.is_ancestor_or_self(b.node, a.node)) {
-			return tree.is_ancestor_or_self(a.node, b.node);
-		}
-		return tree.pre(a.node) > tree.pre(b.node);
+		return postorder(a.node) > postorder(b.node);
 	};
 
 	std::vector<NameScore> scores;
