@@ -186,43 +186,10 @@ static miint::QualScore ExtractQualScore(DataChunk &chunk, idx_t qual_col_idx, U
 }
 
 // Rows to reserve for the held rows: at most one chunk's worth. A sub-batch
-// size can be a caller's own number (place_krepp's batch_size), and reserving
-// that many strings up front would fail on a large one; past one chunk the
-// vectors grow as rows arrive.
+// size can come from a caller's user, and reserving that many strings up front
+// would fail on a large one; past one chunk the vectors grow as rows arrive.
 static idx_t ReserveRows(idx_t sub_batch_size) {
 	return std::min<idx_t>(sub_batch_size, STANDARD_VECTOR_SIZE);
-}
-
-// Moves rows [begin, begin + count) of `from` into a new batch. The rows left
-// behind in `from` are moved-from and are dropped by DropFront.
-static miint::SequenceRecordBatch MoveRange(miint::SequenceRecordBatch &from, idx_t begin, idx_t count) {
-	miint::SequenceRecordBatch out(from.is_paired);
-	out.reserve(count);
-	for (idx_t i = begin; i < begin + count; i++) {
-		out.read_ids.push_back(std::move(from.read_ids[i]));
-		out.comments.push_back(std::move(from.comments[i]));
-		out.sequences1.push_back(std::move(from.sequences1[i]));
-		out.quals1.push_back(std::move(from.quals1[i]));
-		if (from.is_paired) {
-			out.sequences2.push_back(std::move(from.sequences2[i]));
-			out.quals2.push_back(std::move(from.quals2[i]));
-		}
-	}
-	return out;
-}
-
-// Drops the first `count` rows of `batch`.
-static void DropFront(miint::SequenceRecordBatch &batch, idx_t count) {
-	auto drop = [count](auto &column) {
-		column.erase(column.begin(),
-		             column.begin() + static_cast<std::ptrdiff_t>(std::min<idx_t>(count, column.size())));
-	};
-	drop(batch.read_ids);
-	drop(batch.comments);
-	drop(batch.sequences1);
-	drop(batch.sequences2);
-	drop(batch.quals1);
-	drop(batch.quals2);
 }
 
 // Process a single DataChunk into a SequenceRecordBatch.
@@ -660,6 +627,11 @@ QuerySequenceStream::~QuerySequenceStream() {
 }
 
 void QuerySequenceStream::InitStream(const std::string &select_sql, const std::string &source) {
+	// A zero row limit would make every batch empty, which callers read as the
+	// end of the stream.
+	if (sub_batch_size_ == 0) {
+		throw InternalException("QuerySequenceStream: sub_batch_size must be at least 1");
+	}
 	partial_.reserve(ReserveRows(sub_batch_size_));
 
 	stream_ = SubmitStream(*conn_ptr_, select_sql);
@@ -693,6 +665,11 @@ bool QuerySequenceStream::NextBatchEnd(idx_t &end) {
 
 miint::SequenceRecordBatch QuerySequenceStream::FetchSubBatch() {
 	std::lock_guard<std::mutex> lock(mutex_);
+	// A row that failed to convert (an out-of-range quality score) leaves the
+	// held columns uneven, so nothing after it may be read.
+	if (failed_) {
+		throw InvalidInputException("Failed to read sequences: an earlier batch of this scan raised an error");
+	}
 
 	// Fetch chunks from the stream until the next batch is complete or the
 	// stream is exhausted. Rows [consumed_, partial_.size()) are held and not
@@ -716,17 +693,23 @@ miint::SequenceRecordBatch QuerySequenceStream::FetchSubBatch() {
 		}
 		// Drop the rows already handed out before appending, so the held rows
 		// stay within about one batch plus one chunk.
+		D_ASSERT(consumed_ <= scan_end_ && scan_end_ <= partial_.size());
 		if (consumed_ > 0) {
-			DropFront(partial_, consumed_);
+			partial_.DropFront(consumed_);
 			scan_end_ -= consumed_;
 			consumed_ = 0;
 		}
-		ProcessSingleChunk(*chunk, schema_, partial_, temp_read_ids_, temp_seq1_, temp_seq2_);
+		try {
+			ProcessSingleChunk(*chunk, schema_, partial_, temp_read_ids_, temp_seq1_, temp_seq2_);
+		} catch (...) {
+			failed_ = true;
+			throw;
+		}
 	}
 
 	// Moved out rather than copied, so cutting one chunk into many small
 	// batches costs no more than handing it out whole.
-	miint::SequenceRecordBatch result = MoveRange(partial_, consumed_, end - consumed_);
+	miint::SequenceRecordBatch result = partial_.MoveRange(consumed_, end - consumed_);
 	consumed_ = end;
 	scan_end_ = end;
 	scan_bases_ = 0;

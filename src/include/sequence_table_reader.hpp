@@ -172,14 +172,12 @@ LoadedSingleEndSequences LoadSingleEndSequences(Connection &conn, const std::str
 // Produces sub-batches on demand from a streaming query result.
 // Thread-safe: multiple threads can call FetchSubBatch() concurrently.
 //
-// A sub-batch holds at most `sub_batch_size` rows and, when `max_bases` is
-// non-zero, at most `max_bases` bases of sequence1, the same rule as
-// predict_genes' kBatchBases: a row that would take the batch past the limit
+// A sub-batch holds at most `sub_batch_size` rows (at least 1) and, when
+// `max_bases` is non-zero, at most `max_bases` bases of sequence1, the same rule
+// as predict_genes' kBatchBases: a row that would take the batch past the limit
 // starts the next one, and a row longer than the limit is a batch of its own.
-// Only sequence1 counts because the one caller, place_krepp, places only
-// sequence1. `max_bases` is for callers whose work per row scales with its
-// length, where a row count alone puts a few long rows in one batch and leaves
-// the other threads idle.
+// Only sequence1 counts; a caller that processes both mates and wants them
+// counted has to say so here first.
 class QuerySequenceStream {
 public:
 	// Owns an internal Connection — convenient for single-pipeline readers.
@@ -258,6 +256,7 @@ private:
 	// fit in it and hold scan_bases_ bases of sequence1.
 	idx_t scan_end_ = 0;
 	idx_t scan_bases_ = 0;
+	bool failed_ = false; // A chunk failed to convert; partial_'s columns may be uneven
 	bool exhausted_ = false;
 	idx_t rows_delivered_ = 0;
 	mutable std::mutex mutex_;

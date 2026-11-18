@@ -15,20 +15,18 @@ require-env MIINT_KREPP_TOY_REFS
 # placed one twice, or let one read's state leak into the next, the rows would
 # differ here.
 #
-# How the batches are cut is asserted directly, against QuerySequenceStream, in
-# test/cpp/test_QuerySequenceStreamBatching.cpp. That threads then claim them
-# in parallel is the scan's design, and is not observable from SQL: the rows
-# are the same on one thread as on many.
+# How the batches are cut is asserted directly against QuerySequenceStream in
+# the C++ tests. That threads then claim them in parallel is the scan's design,
+# and is not observable from SQL: the rows are the same on one thread as on
+# many.
 #
 # The index is built here from krepp's toy references rather than taken from
 # MIINT_KREPP_TOY_INDEX, which needs a krepp CLI build.
 #
-# like_weight_ratio is left out of every comparison. It is not reproducible
-# from one place_krepp call to the next even with identical arguments: each
-# call loads its own index, and krepp normalises through hash maps keyed by
-# tree-node pointer (docs/phylogeny.md, "Reproducibility"). Two default calls
-# measured differing in 109 of 404 rows on it, and in no other column. Every
-# column the docs record as stable is compared exactly.
+# like_weight_ratio is left out of every comparison: it is not reproducible
+# from one place_krepp call to the next even with identical arguments
+# (docs/phylogeny.md, "Reproducibility"). Every column that section records as
+# stable is compared exactly.
 
 statement ok
 SET threads = 4;

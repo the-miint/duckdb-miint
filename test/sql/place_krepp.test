@@ -72,10 +72,12 @@ SELECT * FROM place_krepp(query_table='reads', index_path='data/no_such_index', 
 ----
 krepp index directory does not exist
 
-# batch_size and batch_bases size the unit of work a thread claims. A batch of
-# zero rows is what the scan reads as end-of-input, so a limit of zero would
-# end the call before it placed anything, and a negative one has no meaning;
-# both are refused rather than read as "no limit".
+# batch_size and batch_bases size the unit of work a thread claims. A
+# batch_size of zero would make the first batch empty, which the scan reads as
+# end-of-input, so the call would place nothing and say nothing. A batch_bases
+# of zero is refused too: leaving the parameter out is how a caller asks for no
+# bases limit, so an explicit zero is more likely a mistake. Negative values
+# have no meaning for either.
 
 statement error
 SELECT * FROM place_krepp(query_table='reads', index_path='data/no_such_index', batch_size=0);

@@ -29,9 +29,11 @@ void ReadOptional(const named_argument_map_t &params, const char *key, T &target
 	}
 }
 
-// batch_size or batch_bases, when given. Zero would make the first batch empty,
-// which the scan reads as end-of-input, so it is refused rather than taken to
-// mean "no limit"; NULL means not given.
+// batch_size or batch_bases, when given; NULL means not given. A batch_size of
+// zero would make the first batch empty, which the scan reads as end-of-input.
+// For batch_bases, zero is the stream's own "no bases limit", but a caller who
+// wants that leaves the parameter out, so an explicit zero is refused as the
+// likelier mistake.
 void ReadBatchLimit(const named_argument_map_t &params, const char *key, idx_t &target) {
 	auto it = params.find(key);
 	if (it == params.end() || it->second.IsNull()) {
@@ -75,8 +77,6 @@ unique_ptr<FunctionData> PlaceKreppTableFunction::Bind(ClientContext &context, T
 	                   [](const Value &v) { return BooleanValue::Get(v); });
 	ReadOptional<bool>(input.named_parameters, "filter", data->config.filter,
 	                   [](const Value &v) { return BooleanValue::Get(v); });
-	// A thread places one batch at a time, so a call over a few long queries
-	// that fit in one default-sized batch runs on one thread.
 	ReadBatchLimit(input.named_parameters, "batch_size", data->batch_size);
 	ReadBatchLimit(input.named_parameters, "batch_bases", data->batch_bases);
 

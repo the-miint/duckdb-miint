@@ -468,10 +468,10 @@ Requires an index built beforehand, either by [`krepp_index_create`](#build-a-kr
 - `multi` (BOOLEAN, default true): Report every candidate edge rather than only the best one. `multi=false` is markedly less reproducible than the default — see **Reproducibility** below.
 - `filter` (BOOLEAN, default true): Drop placements without enough *k*-mer support.
 - `batch_size` (BIGINT, default 2048, the DuckDB vector size): Queries per unit of work. Each thread places one batch at a time, so a call whose queries fit in fewer batches than there are threads leaves the rest idle. Lower it for a few thousand long queries, such as assembled contigs. Must be at least 1. It changes how the work is split, not the placements. A batch, and its placements, are held in memory while it is placed, so a `batch_size` near the relation's row count holds the whole relation at once.
-- `batch_bases` (BIGINT, default none): Also cap each batch at this many bases of `sequence1`: a query that would take a batch past the limit starts the next one, and a query longer than the limit is a batch of its own. Placement time follows bases rather than query count, so this spreads long queries across threads without shrinking batches of short reads. Must be at least 1. When both are given, a batch closes at whichever limit it reaches first.
+- `batch_bases` (BIGINT, default none): Also cap each batch at this many bases of `sequence1`: a query that would take a batch past the limit starts the next one, and a query longer than the limit is a batch of its own. Where query lengths vary widely, a row count alone can put most of the bases in a few batches; this caps them without shrinking batches of short reads. Must be at least 1. When both are given, a batch closes at whichever limit it reaches first.
 
   ```sql
-  -- 3,000 contigs of 30 kb (90 Mbp): about 90 batches of 1 Mbp, where batch_size alone gives 2.
+  -- 3,000 contigs of 30,000 bases: 91 batches of up to 33 contigs, where batch_size alone gives 2.
   SELECT * FROM place_krepp(query_table := 'contigs', index_path := 'idx', batch_bases := 1000000);
   ```
 
