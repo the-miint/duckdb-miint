@@ -12,7 +12,7 @@ namespace {
 constexpr size_t kRanks = kLineageRanks.size();
 static_assert(kRanks <= 8, "a rank mask is one byte");
 
-// min_count 0 would let a node with no informative tips be eligible, with precision 0/0.
+// See F1Score::Threshold for why min_count 0 is rejected.
 void RequireMinCount(const char *caller, uint32_t min_count) {
 	if (min_count == 0) {
 		throw std::invalid_argument(std::string(caller) + ": min_count must be at least 1");
@@ -149,7 +149,7 @@ uint32_t CladeCountIndex::NodeAtPreorder(uint32_t p) const {
 
 std::vector<uint32_t> LowestEligibleNodes(const CladeCountIndex &index, size_t rank, NameId name, uint32_t threshold) {
 	const uint32_t total = index.Total(rank, name);
-	if (threshold == 0 || threshold < total / 2 + total % 2) {
+	if (threshold < F1Score::Threshold(total, 1)) {
 		throw std::invalid_argument("LowestEligibleNodes: threshold " + std::to_string(threshold) +
 		                            " is below 1 or below half of the name's " + std::to_string(total) + " tips");
 	}
@@ -338,8 +338,9 @@ NameAssignment AssignNames(const CladeCountIndex &index, uint32_t min_count) {
 			// The nodes where the name is eligible are the lowest ones and their ancestors. At such
 			// a node with rank r safe, this name is the one eligible there, so its candidates are
 			// the ones that also pick rank r. At an internal one with rank r unsafe, another name is
-			// eligible too, and so at every ancestor, so the walk stops. The second walk also stops
-			// below the LCA, which the first walk reached.
+			// eligible too, and so at every ancestor, so the walk stops. The second walk stops below
+			// the LCA too: the LCA and its ancestors are on the first walk's path, which either went
+			// through them or stopped below them at a node where every ancestor is unsafe.
 			std::optional<NameScore> best;
 			bool ever_safe = false;
 			auto walk = [&](uint32_t from, std::optional<uint32_t> stop) {

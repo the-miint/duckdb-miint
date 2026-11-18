@@ -15,6 +15,7 @@
 #include "duckdb/main/database.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <map>
 #include <random>
@@ -75,41 +76,43 @@ void Load(duckdb::Connection &con, const TaxonomyCase &c, const TaxonomyStore &s
 	}
 }
 
-// Every informative tip (one with a tip_name row) paired with itself and each of its
-// ancestors.
-const char *kUp = R"(
+// The counts both tests read, as CTEs: every informative tip (one with a tip_name row) paired
+// with itself and each of its ancestors (up), the same for every tip, informative or not, a tip
+// being a node that is no node's parent (every_up), and from them each node's count of each name
+// (counts), of informative tips (informative) and of all tips (tips), and each name's total
+// (totals).
+const char *kCounts = R"(
 WITH RECURSIVE up(tip, node) AS (
     SELECT DISTINCT node, node FROM tip_name
     UNION ALL
     SELECT up.tip, tree.parent FROM up JOIN tree ON tree.node = up.node WHERE tree.parent IS NOT NULL
-)
-)";
-
-// The same for every tip, informative or not: a node that is no node's parent.
-const char *kUpFromEveryTip = R"(
-WITH RECURSIVE up(tip, node) AS (
-    SELECT node, node FROM tree WHERE node NOT IN (SELECT parent FROM tree WHERE parent IS NOT NULL)
-    UNION ALL
-    SELECT up.tip, tree.parent FROM up JOIN tree ON tree.node = up.node WHERE tree.parent IS NOT NULL
-)
-)";
-
-// After kUp: rank safety, the contiguity rule and the fold, from the counts. MIN_COUNT is
-// replaced by the case's min_count. Strain is rank 7.
-//
-// The fold orders by F1 as a double, which is exact here: 2c and total + m are small integers,
-// division is correctly rounded, so equal fractions give equal doubles, and two different
-// fractions with denominators below 2^26 differ by far more than a rounding error.
-const char *kAssign = R"(
-, every_up(tip, node) AS (
+),
+every_up(tip, node) AS (
     SELECT node, node FROM tree WHERE node NOT IN (SELECT parent FROM tree WHERE parent IS NOT NULL)
     UNION ALL
     SELECT every_up.tip, tree.parent FROM every_up JOIN tree ON tree.node = every_up.node
     WHERE tree.parent IS NOT NULL
 ),
+counts AS (
+    SELECT up.node, t.rank, t.name, count(*) AS c FROM up JOIN tip_name t ON t.node = up.tip
+    GROUP BY up.node, t.rank, t.name
+),
+informative AS (SELECT node, count(*) AS m FROM up GROUP BY node),
+tips AS (SELECT node, count(*) AS tip_count FROM every_up GROUP BY node),
+totals AS (SELECT rank, name, count(*) AS total FROM tip_name GROUP BY rank, name)
+)";
+
+// After kCounts: rank safety, the contiguity rule and the fold. MIN_COUNT is replaced by the
+// case's min_count. Strain is rank 7.
+//
+// The fold orders by F1 as a double, which is exact here: 2c and total + m are integers of at
+// most about 100, division is correctly rounded, so equal fractions give equal doubles, and two
+// different fractions with denominators that small differ by at least 1/10^4, far more than a
+// rounding error.
+const char *kAssign = R"(
 -- Postorder, children in ascending index: a node's path of zero-padded indices from the root,
 -- ended by '~', sorts after every descendant's path and before a later sibling's.
-paths(node, path) AS (
+, paths(node, path) AS (
     SELECT node, lpad(node::VARCHAR, 6, '0') FROM tree WHERE parent IS NULL
     UNION ALL
     SELECT tree.node, paths.path || '/' || lpad(tree.node::VARCHAR, 6, '0')
@@ -117,13 +120,6 @@ paths(node, path) AS (
 ),
 post AS (SELECT node, row_number() OVER (ORDER BY path || '~') AS post_rank FROM paths),
 internal AS (SELECT DISTINCT parent AS node FROM tree WHERE parent IS NOT NULL),
-counts AS (
-    SELECT up.node, t.rank, t.name, count(*) AS c FROM up JOIN tip_name t ON t.node = up.tip
-    GROUP BY up.node, t.rank, t.name
-),
-informative AS (SELECT node, count(*) AS m FROM up GROUP BY node),
-tips AS (SELECT node, count(*) AS tip_count FROM every_up GROUP BY node),
-totals AS (SELECT rank, name, count(*) AS total FROM tip_name GROUP BY rank, name),
 eligible AS (
     SELECT counts.node, counts.rank, counts.name, counts.c, totals.total
     FROM counts JOIN totals USING (rank, name)
@@ -201,21 +197,18 @@ TEST_CASE("CladeCountIndex agrees with recursive-CTE counts", "[taxonomy_decorat
 		Load(con, c, store);
 		INFO("trial " << trial << ", " << n << " nodes");
 
+		const std::string counts = kCounts;
 		std::map<std::tuple<uint32_t, size_t, NameId>, uint32_t> clade;
-		ForEachRow(con, std::string(kUp) + R"(
-            SELECT up.node, t.rank, t.name, count(*) FROM up JOIN tip_name t ON t.node = up.tip
-            GROUP BY up.node, t.rank, t.name)",
-		           [&](auto col) {
-			           clade[{col(0), col(1), col(2)}] = col(3);
-		           });
+		ForEachRow(con, counts + "SELECT node, rank, name, c FROM counts", [&](auto col) {
+			clade[{col(0), col(1), col(2)}] = col(3);
+		});
 		std::map<uint32_t, uint32_t> informative_tip_count;
-		ForEachRow(con, std::string(kUp) + "SELECT node, count(*) FROM up GROUP BY node",
+		ForEachRow(con, counts + "SELECT node, m FROM informative",
 		           [&](auto col) { informative_tip_count[col(0)] = col(1); });
 		std::map<uint32_t, uint32_t> tip_count;
-		ForEachRow(con, std::string(kUpFromEveryTip) + "SELECT node, count(*) FROM up GROUP BY node",
-		           [&](auto col) { tip_count[col(0)] = col(1); });
+		ForEachRow(con, counts + "SELECT node, tip_count FROM tips", [&](auto col) { tip_count[col(0)] = col(1); });
 		std::map<std::pair<size_t, NameId>, uint32_t> total;
-		ForEachRow(con, "SELECT rank, name, count(*) FROM tip_name GROUP BY rank, name", [&](auto col) {
+		ForEachRow(con, counts + "SELECT rank, name, total FROM totals", [&](auto col) {
 			total[{col(0), col(1)}] = col(2);
 		});
 		compared += clade.size();
@@ -262,7 +255,8 @@ TEST_CASE("AssignNames agrees with a relational assignment", "[taxonomy_decorato
 	};
 	std::vector<Trial> trials;
 	std::mt19937 rng(20261123);
-	size_t compared = 0, not_placed = 0;
+	size_t compared = 0, not_placed = 0, won_on_tip_count = 0, won_on_postorder = 0;
+	std::array<size_t, 3> reasons {};
 	for (int k = 0; k < 40; k++) {
 		const uint32_t n = std::uniform_int_distribution<uint32_t>(1, 50)(rng);
 		const auto c = random_taxonomy_case(rng, n);
@@ -271,7 +265,7 @@ TEST_CASE("AssignNames agrees with a relational assignment", "[taxonomy_decorato
 		Load(con, c, store);
 		for (uint32_t min_count = 1; min_count <= 3; min_count++) {
 			INFO("trial " << k << ", " << n << " nodes, min_count " << min_count);
-			const std::string ctes = std::string(kUp) + WithMinCount(kAssign, min_count);
+			const std::string ctes = std::string(kCounts) + WithMinCount(kAssign, min_count);
 			Trial trial {c, min_count, {}, {}};
 			ForEachRow(con, ctes + kWinners, [&](auto col) {
 				trial.winners.push_back({col(0), col(1), col(2), col(3), col(4), col(5)});
@@ -284,12 +278,23 @@ TEST_CASE("AssignNames agrees with a relational assignment", "[taxonomy_decorato
 			REQUIRE(trial.unassigned == expected.not_placed);
 			compared += trial.winners.size();
 			not_placed += trial.unassigned.size();
+			won_on_tip_count += expected.won_on_tip_count;
+			won_on_postorder += expected.won_on_postorder;
+			for (const auto &name : expected.not_placed) {
+				reasons[static_cast<size_t>(name.reason)]++;
+			}
 			trials.push_back(std::move(trial));
 		}
 	}
-	// The cases must have assigned names, and left some unassigned, or agreement proves little.
+	// The cases must have assigned names, left some unassigned for each reason, and needed each
+	// tie-break, or agreement proves little about them.
 	CHECK(compared > 500);
 	CHECK(not_placed > 100);
+	CHECK(won_on_tip_count > 0);
+	CHECK(won_on_postorder > 0);
+	CHECK(reasons[static_cast<size_t>(NotPlacedReason::kNeverEligible)] > 0);
+	CHECK(reasons[static_cast<size_t>(NotPlacedReason::kNeverRankSafe)] > 0);
+	CHECK(reasons[static_cast<size_t>(NotPlacedReason::kBlockedByContiguity)] > 0);
 
 	for (size_t k = 0; k < trials.size(); k++) {
 		const auto &trial = trials[k];

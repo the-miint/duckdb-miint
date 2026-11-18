@@ -399,7 +399,7 @@ TEST_CASE("CladeCountIndex lists a hand-built tree's names in preorder", "[taxon
 	CHECK(index.NameCount(kPhylum) == 3);
 	CHECK(index.NameCount(kClass) == 3);
 	CHECK(index.NameCount(kOrder) == 1);
-	CHECK(index.NameCount(kRankCount - 1) == 0);
+	CHECK(index.NameCount(kStrainRank) == 0);
 }
 
 // The same on random trees: each name's list must be exactly the informative tips carrying it,
@@ -467,7 +467,6 @@ HandCase MakeCase(const std::vector<uint32_t> &parent, const Lineages &lineage_o
 	return {std::move(store), std::move(index)};
 }
 
-// Each of `tips` carries the lineage (D1; N), so N is a phylum.
 // Gives each of `tips` the lineage `lineage`.
 void Add(Lineages &lineages, const std::vector<std::string> &lineage, std::initializer_list<uint32_t> tips) {
 	for (uint32_t tip : tips) {
@@ -475,6 +474,7 @@ void Add(Lineages &lineages, const std::vector<std::string> &lineage, std::initi
 	}
 }
 
+// Each of `tips` carries the lineage (D1; N), so N is a phylum.
 Lineages WithN(std::initializer_list<uint32_t> tips) {
 	Lineages out;
 	Add(out, {"D1", "N"}, tips);
@@ -537,6 +537,14 @@ TEST_CASE("LowestEligibleNodes rejects a threshold below 1 or below half the tot
 	CHECK_THROWS_AS(LowestEligibleNodes(c.index, kPhylum, n, 0), std::invalid_argument);
 	CHECK_THROWS_AS(LowestEligibleNodes(c.index, kPhylum, n, 1), std::invalid_argument);
 	CHECK(LowestEligibleNodes(c.index, kPhylum, n, 2) == std::vector<uint32_t> {1, 2});
+	// With an odd total, half rounds up: 5 tips need 3.
+	// root(0) +-- x(1) +-- t2, t3, t4  N
+	//         +-- t5, t6  N
+	auto odd = MakeCase({kNoParent, 0, 1, 1, 1, 0, 0}, WithN({2, 3, 4, 5, 6}));
+	const NameId odd_n = odd.Name(kPhylum, "N");
+	REQUIRE(odd.index.Total(kPhylum, odd_n) == 5);
+	CHECK_THROWS_AS(LowestEligibleNodes(odd.index, kPhylum, odd_n, 2), std::invalid_argument);
+	CHECK(LowestEligibleNodes(odd.index, kPhylum, odd_n, 3) == std::vector<uint32_t> {1});
 	// A name on no tip still needs a threshold of at least 1.
 	auto store = HandStore();
 	CladeCountIndex index(HandTree(), store, HandRows());
@@ -579,8 +587,8 @@ TEST_CASE("LowestEligibleNodes keeps the deeper of two nested results", "[taxono
 }
 
 // An odd total has one lowest node. A name on fewer tips than min_count, or on no tip, is
-// eligible nowhere. With min_count 1 a name on one tip is eligible at that tip, which no
-// internal node can hold alone.
+// eligible nowhere. With min_count 1 a name on one tip is eligible at that tip, and the tip is
+// its lowest node, not its one-child parent h, which holds it too.
 TEST_CASE("LowestEligibleNodes with an odd total, too few tips, or none", "[taxonomy_decorator]") {
 	// root(0) +-- s(1) +-- t3(3)  N
 	//         |        +-- t4(4)  N
@@ -642,10 +650,9 @@ TEST_CASE("LowestEligibleNodes matches the brute-force lowest eligible nodes", "
 	CHECK(saw_none);
 }
 
-// tax2tree applies min_count at every rank. Here strain uses 1: a strain is about one genome, and
-// under a threshold of 2 it could never be assigned.
+// tax2tree applies min_count at every rank. Here strain uses 1 (MinCountAt says why).
 TEST_CASE("MinCountAt is min_count, except 1 at strain", "[taxonomy_decorator]") {
-	const size_t strain = kRankCount - 1;
+	const size_t strain = kStrainRank;
 	for (size_t r = 0; r < strain; r++) {
 		INFO("rank " << r);
 		CHECK(MinCountAt(r, 1) == 1);
@@ -667,13 +674,19 @@ std::vector<unsigned> SafeMasks(const CladeCountIndex &index, uint32_t min_count
 	return Widen(RankSafeMasks(index, min_count));
 }
 
-// Per-node masks, from (node, mask) pairs; unlisted nodes are 0.
-std::vector<unsigned> MasksOf(size_t n, std::initializer_list<std::pair<uint32_t, unsigned>> masks) {
-	std::vector<unsigned> out(n, 0);
-	for (const auto &[node, mask] : masks) {
-		out[node] = mask;
+// Per-node values, from (node, value) pairs; unlisted nodes get T's default.
+template <class T>
+std::vector<T> PerNode(size_t n, std::initializer_list<std::pair<uint32_t, T>> values) {
+	std::vector<T> out(n);
+	for (const auto &[node, value] : values) {
+		out[node] = value;
 	}
 	return out;
+}
+
+// Per-node masks; unlisted nodes are 0.
+std::vector<unsigned> MasksOf(size_t n, std::initializer_list<std::pair<uint32_t, unsigned>> masks) {
+	return PerNode(n, masks);
 }
 
 constexpr unsigned kDomainBit = 1u << kDomain, kPhylumBit = 1u << kPhylum;
@@ -724,11 +737,11 @@ TEST_CASE("RankSafeMasks makes a singleton strain safe at its holder", "[taxonom
 		return out;
 	};
 	auto c = MakeCase({kNoParent, 0, 0, 1, 2}, {{3, lineage("T1")}, {4, lineage("T2")}});
-	const unsigned strain_bit = 1u << (kRankCount - 1);
+	const unsigned strain_bit = 1u << kStrainRank;
 	const unsigned shallower = strain_bit - 1;
 	CHECK(SafeMasks(c.index, 2) == MasksOf(5, {{0, shallower}, {1, strain_bit}, {2, strain_bit}}));
 	// Under min_count 1 every shared name needs only ceil(2/2) = 1, so each holder is safe at
-	// every rank: why min_count stays 2 above strain.
+	// every rank: why only strain uses 1.
 	CHECK(SafeMasks(c.index, 1) == MasksOf(5, {{0, shallower}, {1, 0xFF}, {2, 0xFF}}));
 }
 
@@ -738,8 +751,9 @@ TEST_CASE("RankSafeMasks rejects a min_count of 0", "[taxonomy_decorator]") {
 	CHECK_THROWS_AS(RankSafeMasks(c.index, 0), std::invalid_argument);
 }
 
-// Against brute force: at each internal node, count the names whose naive count reaches their
-// threshold, with strain's min_count of 1 written out here rather than taken from MinCountAt.
+// Against brute force (naive_eligible): at each internal node, count the names whose naive count
+// reaches their threshold, with strain's min_count of 1 written out rather than taken from
+// MinCountAt.
 TEST_CASE("RankSafeMasks matches brute-force rank safety", "[taxonomy_decorator]") {
 	std::mt19937 rng(20261121);
 	bool saw_safe = false, saw_unsafe = false, saw_split_safe = false;
@@ -753,16 +767,14 @@ TEST_CASE("RankSafeMasks matches brute-force rank safety", "[taxonomy_decorator]
 		const auto internal = has_child(c.tree);
 		INFO("trial " << trial << ", " << n << " nodes");
 		for (uint32_t min_count = 1; min_count <= 3; min_count++) {
+			const auto eligible = naive_eligible(c, store, naive, min_count);
 			std::vector<unsigned> expected(n, 0);
 			for (size_t r = 0; r < kRankCount; r++) {
-				const uint32_t rank_min_count = r == kRankCount - 1 ? 1 : min_count;
-				std::vector<uint32_t> eligible_names(n, 0);
+				const auto &eligible_names = eligible.count[r];
 				std::vector<std::vector<uint32_t>> split_lowest;
 				for (NameId name = 0; name < store.NameCount(r); name++) {
-					const uint32_t threshold = F1Score::Threshold(naive.Total(r, name, root), rank_min_count);
-					for (uint32_t v = 0; v < n; v++) {
-						eligible_names[v] += naive.clade[r][name][v] >= threshold;
-					}
+					const uint32_t threshold =
+					    F1Score::Threshold(naive.Total(r, name, root), naive_min_count(r, min_count));
 					auto lowest = naive_lowest_eligible(c, naive, r, name, threshold);
 					if (lowest.size() == 2) {
 						split_lowest.push_back(std::move(lowest));
@@ -806,20 +818,10 @@ TEST_CASE("PickedRanks takes the run of safe ranks from the shallowest", "[taxon
 	CHECK(picked(0b1000'0000) == 0b1000'0000);
 	CHECK(picked(0b0000'0001) == 0b0000'0001);
 
-	// Every mask, against pick_names' loop written out.
+	// Every mask, against pick_names' loop written out (naive_picked).
 	for (unsigned mask = 0; mask < 256; mask++) {
-		unsigned expected = 0;
-		bool assigned = false;
-		for (size_t r = 0; r < kRankCount; r++) {
-			if (mask >> r & 1) {
-				expected |= 1u << r;
-				assigned = true;
-			} else if (assigned) {
-				break;
-			}
-		}
 		INFO("mask " << mask);
-		REQUIRE(picked(mask) == expected);
+		REQUIRE(picked(mask) == naive_picked(mask));
 	}
 }
 
@@ -829,14 +831,10 @@ std::vector<NameScore> NamesAt(const NameAssignment &assignment, uint32_t node) 
 	return std::vector<NameScore>(names.begin(), names.end());
 }
 
-// Per-node names, from (node, names) pairs; unlisted nodes have none.
+// Per-node names; unlisted nodes have none.
 std::vector<std::vector<NameScore>> NamesOf(size_t n,
                                             std::initializer_list<std::pair<uint32_t, std::vector<NameScore>>> names) {
-	std::vector<std::vector<NameScore>> out(n);
-	for (const auto &[node, scores] : names) {
-		out[node] = scores;
-	}
-	return out;
+	return PerNode(n, names);
 }
 
 std::vector<std::vector<NameScore>> AllNames(const NameAssignment &assignment, size_t n) {
@@ -970,6 +968,30 @@ TEST_CASE("AssignNames reports why each unassigned name went nowhere", "[taxonom
 	                                               {kClass, c1, 3, NotPlacedReason::kBlockedByContiguity}}));
 }
 
+// A node where a name's rank is safe but not picked is not the end of the name's walk. At v the
+// class is safe (C1 alone is eligible) but v picks only the domain: no phylum is eligible there
+// yet, since P1 has 2 of its 5 tips at v, and Pa and Pb one each. At u, P1 is eligible, so u
+// picks domain, phylum and class, and C1 is assigned there.
+TEST_CASE("AssignNames looks past a node that skips the name's rank", "[taxonomy_decorator]") {
+	// u(0) +-- v(1) +-- t2, t3  (D1; P1; C1)
+	//      |        +-- t4  (D1; Pa);  t5  (D1; Pb)
+	//      +-- t6, t7, t8  (D1; P1)
+	Lineages lineages;
+	Add(lineages, {"D1", "P1", "C1"}, {2, 3});
+	Add(lineages, {"D1", "Pa"}, {4});
+	Add(lineages, {"D1", "Pb"}, {5});
+	Add(lineages, {"D1", "P1"}, {6, 7, 8});
+	auto c = MakeCase({kNoParent, 0, 1, 1, 1, 1, 0, 0, 0}, lineages);
+	const NameId d1 = c.Name(kDomain, "D1"), p1 = c.Name(kPhylum, "P1"), c1 = c.Name(kClass, "C1");
+	REQUIRE(SafeMasks(c.index, 2)[1] == (kDomainBit | 1u << kClass));
+	const auto assignment = AssignNames(c.index, 2);
+	CHECK(AllNames(assignment, 9) ==
+	      NamesOf(9, {{0, {{kDomain, d1, 0, 7, 7, 7}, {kPhylum, p1, 0, 5, 7, 5}, {kClass, c1, 0, 2, 7, 2}}}}));
+	CHECK(assignment.NotPlaced() ==
+	      ByRankAndName({{kPhylum, c.Name(kPhylum, "Pa"), 1, NotPlacedReason::kNeverEligible},
+	                     {kPhylum, c.Name(kPhylum, "Pb"), 1, NotPlacedReason::kNeverEligible}}));
+}
+
 // min_count 0 would let a node with no informative tips be eligible, with precision 0/0.
 TEST_CASE("AssignNames rejects a min_count of 0", "[taxonomy_decorator]") {
 	auto c = MakeCase({kNoParent, 0, 0}, WithN({1, 2}));
@@ -981,7 +1003,8 @@ TEST_CASE("AssignNames rejects a min_count of 0", "[taxonomy_decorator]") {
 // genomes, and the root holds both species, so S1 goes nowhere for either genome: both are
 // treated the same. Under min_count 1 each holder is a candidate for S1 at an equal score, and
 // the tie gives S1 to h2 alone, so h1's genome loses its species.
-TEST_CASE("AssignNames puts singleton strains on their holders, the same for both genomes", "[taxonomy_decorator]") {
+TEST_CASE("AssignNames puts singleton strains on their holders, and under min_count 2 treats both genomes alike",
+          "[taxonomy_decorator]") {
 	// root(0) +-- h1(1) --- t3  ...; G1; S1; T1
 	//         +-- h2(2) --- t4  ...; G1; S1; T2
 	//         +-- t5, t6        ...; G1; S2
@@ -994,7 +1017,7 @@ TEST_CASE("AssignNames puts singleton strains on their holders, the same for bot
 	auto c =
 	    MakeCase({kNoParent, 0, 0, 1, 2, 0, 0},
 	             {{3, lineage({"S1", "T1"})}, {4, lineage({"S1", "T2"})}, {5, lineage({"S2"})}, {6, lineage({"S2"})}});
-	const size_t species = kRankCount - 2, strain = kRankCount - 1;
+	const size_t species = kSpeciesRank, strain = kStrainRank;
 	const NameId s1 = c.Name(species, "S1"), s2 = c.Name(species, "S2");
 	const NameId t1 = c.Name(strain, "T1"), t2 = c.Name(strain, "T2");
 	std::vector<NameScore> root_names;

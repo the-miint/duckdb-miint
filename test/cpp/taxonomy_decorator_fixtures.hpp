@@ -15,8 +15,9 @@
 #include <string>
 #include <vector>
 
-// Random trees with random taxonomies on their tips, and the counts CladeCountIndex should
-// give for them, found by walking parents.
+// Random trees with random taxonomies on their tips; the counts CladeCountIndex should give
+// for them, found by walking parents; and, from those counts, brute-force versions of each
+// stage built on the index, which the tests check the stages against.
 
 namespace miint {
 
@@ -36,6 +37,8 @@ inline std::ostream &operator<<(std::ostream &os, const NotPlacedName &s) {
 namespace miint::test {
 
 constexpr size_t kRankCount = kLineageRanks.size();
+constexpr size_t kStrainRank = kRankCount - 1;
+constexpr size_t kSpeciesRank = kRankCount - 2;
 
 // A tree, the taxonomy rows, and the row each node carries (tips only; nullopt for none).
 struct TaxonomyCase {
@@ -170,6 +173,56 @@ inline std::vector<uint32_t> naive_lowest_eligible(const TaxonomyCase &c, const 
 	return out;
 }
 
+// The min_count a rank uses, written out from the rule rather than taken from MinCountAt: 1 at
+// strain.
+inline uint32_t naive_min_count(size_t rank, uint32_t min_count) {
+	return rank == kStrainRank ? 1 : min_count;
+}
+
+// Per rank and node, how many names are eligible there, and the last one found, which is the
+// only one where the count is 1.
+struct NaiveEligible {
+	std::array<std::vector<uint32_t>, kRankCount> count;
+	std::array<std::vector<NameId>, kRankCount> name;
+};
+
+inline NaiveEligible naive_eligible(const TaxonomyCase &c, const TaxonomyStore &store, const NaiveCounts &naive,
+                                    uint32_t min_count) {
+	const uint32_t n = static_cast<uint32_t>(c.tree.parent.size());
+	const uint32_t root = root_of(c.tree);
+	NaiveEligible out;
+	for (size_t r = 0; r < kRankCount; r++) {
+		out.count[r].assign(n, 0);
+		out.name[r].assign(n, kMissingName);
+		for (NameId name = 0; name < store.NameCount(r); name++) {
+			const uint32_t threshold = F1Score::Threshold(naive.Total(r, name, root), naive_min_count(r, min_count));
+			for (uint32_t v = 0; v < n; v++) {
+				if (naive.clade[r][name][v] >= threshold) {
+					out.count[r][v]++;
+					out.name[r][v] = name;
+				}
+			}
+		}
+	}
+	return out;
+}
+
+// tax2tree's pick_names over a safe mask: from domain down, take each safe rank, and stop at the
+// first unsafe rank after one was taken.
+inline unsigned naive_picked(unsigned safe_mask) {
+	unsigned picked = 0;
+	bool taken = false;
+	for (size_t r = 0; r < kRankCount; r++) {
+		if (safe_mask >> r & 1) {
+			picked |= 1u << r;
+			taken = true;
+		} else if (taken) {
+			break;
+		}
+	}
+	return picked;
+}
+
 // What AssignNames should give, by brute force over naive counts: every rule applied at every
 // node directly, with no lowest-node search, no counting up the tree and no path walk.
 struct NaiveAssignment {
@@ -205,41 +258,15 @@ inline NaiveAssignment naive_assign(const TaxonomyCase &c, const TaxonomyStore &
 	visit(visit, root);
 
 	// safe_name[r][v]: the one name eligible at internal node v and rank r, else kMissingName.
+	const auto eligible = naive_eligible(c, store, naive, min_count);
 	std::array<std::vector<NameId>, kRankCount> safe_name;
-	std::array<std::vector<bool>, kRankCount> ever_eligible;
-	std::vector<uint32_t> picked(n, 0);
+	std::vector<unsigned> safe_mask(n, 0);
 	for (size_t r = 0; r < kRankCount; r++) {
-		const uint32_t rank_min_count = r == kRankCount - 1 ? 1 : min_count;
-		std::vector<uint32_t> eligible_names(n, 0);
-		std::vector<NameId> eligible_name(n, kMissingName);
-		ever_eligible[r].assign(store.NameCount(r), false);
-		for (NameId name = 0; name < store.NameCount(r); name++) {
-			const uint32_t threshold = F1Score::Threshold(naive.Total(r, name, root), rank_min_count);
-			for (uint32_t v = 0; v < n; v++) {
-				if (naive.clade[r][name][v] >= threshold) {
-					eligible_names[v]++;
-					eligible_name[v] = name;
-					ever_eligible[r][name] = true;
-				}
-			}
-		}
 		safe_name[r].assign(n, kMissingName);
 		for (uint32_t v = 0; v < n; v++) {
-			if (internal[v] && eligible_names[v] == 1) {
-				safe_name[r][v] = eligible_name[v];
-			}
-		}
-	}
-	// tax2tree's pick_names: from domain down, take each safe rank, and stop at the first unsafe
-	// rank after one was taken.
-	for (uint32_t v = 0; v < n; v++) {
-		bool taken = false;
-		for (size_t r = 0; r < kRankCount; r++) {
-			if (safe_name[r][v] != kMissingName) {
-				picked[v] |= 1u << r;
-				taken = true;
-			} else if (taken) {
-				break;
+			if (internal[v] && eligible.count[r][v] == 1) {
+				safe_name[r][v] = eligible.name[r][v];
+				safe_mask[v] |= 1u << r;
 			}
 		}
 	}
@@ -258,14 +285,17 @@ inline NaiveAssignment naive_assign(const TaxonomyCase &c, const TaxonomyStore &
 					continue;
 				}
 				ever_safe = true;
-				if (picked[v] >> r & 1) {
+				if (naive_picked(safe_mask[v]) >> r & 1) {
 					candidates.push_back({r, name, v, naive.clade[r][name][v], naive.informative_tip_count[v], total});
 				}
 			}
 			if (candidates.empty()) {
-				const auto reason = !ever_eligible[r][name] ? NotPlacedReason::kNeverEligible
-				                    : !ever_safe            ? NotPlacedReason::kNeverRankSafe
-				                                            : NotPlacedReason::kBlockedByContiguity;
+				// The root holds every tip carrying the name, so it is eligible if any node is.
+				const bool ever_eligible =
+				    naive.clade[r][name][root] >= F1Score::Threshold(total, naive_min_count(r, min_count));
+				const auto reason = !ever_eligible ? NotPlacedReason::kNeverEligible
+				                    : !ever_safe   ? NotPlacedReason::kNeverRankSafe
+				                                   : NotPlacedReason::kBlockedByContiguity;
 				out.not_placed.push_back({r, name, total, reason});
 				continue;
 			}

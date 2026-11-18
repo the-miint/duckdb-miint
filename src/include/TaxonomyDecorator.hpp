@@ -121,9 +121,9 @@ private:
 // F1Score::Threshold never gives.
 std::vector<uint32_t> LowestEligibleNodes(const CladeCountIndex &index, size_t rank, NameId name, uint32_t threshold);
 
-// The min_count rank `rank` uses: `min_count`, except 1 at strain, the last rank. A strain is
-// about one genome, so the only node that can hold it alone spans one tip, and a threshold of 2
-// would leave it eligible nowhere.
+// The min_count rank `rank` uses: `min_count`, except 1 at strain, the last rank. A strain on
+// one tip can be held alone only by nodes spanning that tip, and under a min_count of 2 it would
+// be eligible nowhere.
 uint32_t MinCountAt(size_t rank, uint32_t min_count);
 
 // Per node, bit r is set when rank r is safe there: exactly one name is eligible at rank r, each
@@ -168,13 +168,14 @@ struct NotPlacedName {
 	bool operator==(const NotPlacedName &) const = default;
 };
 
-// Each internal node's names, as AssignNames left them: the one artifact the stages after it
-// read, so none of them goes back to the index.
+// The names AssignNames gave each internal node, with the counts each score came from, and the
+// names it gave no node, with why.
 class NameAssignment {
 public:
 	// The names assigned to `node`, by ascending rank; empty for most nodes and every tip.
 	std::span<const NameScore> NamesAt(uint32_t node) const;
-	// The deepest of NamesAt(node), or nullptr when it is empty.
+	// The deepest of NamesAt(node), or nullptr when it is empty (tax2tree's
+	// set_preliminary_name_and_rank).
 	const NameScore *Preliminary(uint32_t node) const;
 	// Every assigned name, by (rank, name).
 	const std::vector<NameScore> &Scores() const;
@@ -194,7 +195,8 @@ private:
 	std::vector<uint32_t> node_offsets_;
 };
 
-// Assigns each name to the node that scores best for it (tax2tree's primary placement). A
+// Assigns each name to the node that scores best for it (tax2tree's pick_names and
+// name_node_score_fold). A
 // node's candidates are its picked ranks (PickedRanks of its RankSafeMasks entry), each for the
 // one name eligible there. A name's best candidate has the highest F1 (F1Score::Compare), then
 // the fewest tips (TipCount), then is the latest in postorder, children visited in ascending

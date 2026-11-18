@@ -1,11 +1,10 @@
-// Parity with tax2tree: AssignNames, run on the committed fixture in data/tax2tree/placement/,
-// must leave every internal node exactly the names tax2tree's own placement stages left it
-// (pick_names, then name_node_score_fold). test/scripts/gen_tax2tree_placement_oracle.py ran
-// tax2tree to make the fixture; provenance.txt records the commit and the command. A missing
-// or unreadable fixture fails this test; nothing skips it.
+// Parity with tax2tree: AssignNames, run on the committed fixture in data/tax2tree/assign_names/,
+// must leave every internal node exactly the names tax2tree's own pick_names and
+// name_node_score_fold left it. test/scripts/gen_tax2tree_assign_names_oracle.py ran tax2tree to
+// make the fixture; provenance.txt records the commit and the command. A missing or unreadable
+// fixture fails this test; nothing skips it.
 //
-// Divergence ledger: where miint deliberately differs from tax2tree, and how the fixture keeps
-// clear of each difference. A new divergence is reviewed before it is added here.
+// Where AssignNames differs from tax2tree, and how the fixture keeps clear of each difference:
 //
 // 1. F1 comparison. AssignNames compares F1 exactly, in integers (F1Score::Compare), so equal F1
 //    from different counts is a tie; tax2tree compares doubles, which can order such a pair by
@@ -37,9 +36,10 @@ using namespace miint;
 
 namespace {
 
-const std::string kDir = "data/tax2tree/placement/";
+const std::string kDir = "data/tax2tree/assign_names/";
 
-// A tab-separated file's rows after its header, every field kept, empty ones included.
+// A tab-separated file's rows after its header, every field kept, empty ones included. A line's
+// trailing carriage return, as a Windows checkout can leave, is dropped.
 std::vector<std::vector<std::string>> ReadTsv(const std::string &path) {
 	std::ifstream in(path);
 	INFO(path);
@@ -48,6 +48,9 @@ std::vector<std::vector<std::string>> ReadTsv(const std::string &path) {
 	REQUIRE(std::getline(in, line));
 	std::vector<std::vector<std::string>> rows;
 	while (std::getline(in, line)) {
+		if (!line.empty() && line.back() == '\r') {
+			line.pop_back();
+		}
 		std::vector<std::string> fields(1);
 		for (char ch : line) {
 			if (ch == '\t') {
@@ -72,7 +75,7 @@ std::string Line(uint32_t node, size_t rank, const std::string &name) {
 
 } // namespace
 
-TEST_CASE("AssignNames matches tax2tree's placement on the committed fixture", "[taxonomy_decorator]") {
+TEST_CASE("AssignNames matches tax2tree on the committed fixture", "[taxonomy_decorator]") {
 	const auto cases = ReadTsv(kDir + "cases.tsv");
 	REQUIRE(cases.size() == 20);
 	size_t compared = 0, below_root = 0;
@@ -84,15 +87,11 @@ TEST_CASE("AssignNames matches tax2tree's placement on the committed fixture", "
 
 		const auto tree_rows = ReadTsv(kDir + name + ".tree.tsv");
 		std::vector<uint32_t> parent(tree_rows.size());
-		uint32_t root = TreeIndex::NO_PARENT;
 		for (uint32_t v = 0; v < tree_rows.size(); v++) {
 			const auto &fields = tree_rows[v];
 			REQUIRE(fields.size() == 3);
 			REQUIRE(ToIndex(fields[0]) == v);
 			parent[v] = fields[1].empty() ? TreeIndex::NO_PARENT : ToIndex(fields[1]);
-			if (fields[1].empty()) {
-				root = v;
-			}
 		}
 
 		std::vector<TaxonomyRow> rows;
@@ -115,7 +114,7 @@ TEST_CASE("AssignNames matches tax2tree's placement on the committed fixture", "
 				rows_on_tips += row_of_node[v].has_value();
 			}
 		}
-		// Every taxonomy row is a tip's, and cleaning keeps every lineage whole (divergence 3).
+		// Every taxonomy row is a tip's, and cleaning keeps every lineage whole (difference 3).
 		// Otherwise a fixture that drifted from its tree, or a cleaning rule that differs from
 		// tax2tree's, would only lose tips, and could still agree on what was left.
 		REQUIRE(rows_on_tips == store.RowCount());
@@ -124,6 +123,7 @@ TEST_CASE("AssignNames matches tax2tree's placement on the committed fixture", "
 			REQUIRE(store.IsInformative(row));
 		}
 		CladeCountIndex index(TreeIndex::Build(parent, std::vector<double>(parent.size(), 1.0)), store, row_of_node);
+		const uint32_t root = index.Tree().root();
 
 		std::vector<std::string> expected;
 		for (const auto &fields : ReadTsv(kDir + name + ".expected.tsv")) {

@@ -1,0 +1,23 @@
+feature_id	domain	phylum	class	order	family	genus	species	strain
+T4	N0_1	N1_0						
+T5	N0_0	N1_1	N2_0	N3_2	N4_1	N5_3		
+T7	N0_1	N1_0						
+T12	N0_1	N1_0						
+T13	N0_1	N1_0						
+T19	N0_0	N1_1	N2_0	N3_2	N4_1	N5_3		
+T22	N0_1	N1_0						
+T24	N0_0	N1_1	N2_0	N3_2				
+T25	N0_0	N1_1	N2_0	N3_2	N4_1			
+T33	N0_1	N1_0						
+T37	N0_0	N1_1	N2_0	N3_2	N4_1	N5_3	N6_1	
+T39	N0_1	N1_0						
+T41	N0_0	N1_1	N2_0	N3_2	N4_1	N5_3		
+T42	N0_0	N1_1	N2_1	N3_1	N4_0			
+T43	N0_1	N1_0						
+T47	N0_0	N1_1	N2_0	N3_2	N4_1	N5_5		
+T52	N0_0	N1_1	N2_0	N3_2	N4_1	N5_3	N6_1	
+T56	N0_0	N1_1						
+T59	N0_0	N1_1	N2_0	N3_2	N4_1	N5_3	N6_1	
+T60	N0_0	N1_1						
+T61	N0_1	N1_0						
+T66	N0_0	N1_1	N2_0	N3_2	N4_1	N5_3	N6_1	

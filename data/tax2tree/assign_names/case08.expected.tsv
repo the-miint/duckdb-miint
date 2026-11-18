@@ -1,0 +1,11 @@
+node_index	rank	name
+6	domain	N0_0
+6	phylum	N1_0
+12	genus	N5_3
+31	family	N4_1
+31	genus	N5_0
+42	order	N3_2
+42	family	N4_2
+57	class	N2_1
+57	order	N3_3
+58	species	N6_1

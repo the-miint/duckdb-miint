@@ -28,8 +28,8 @@ enum class LengthPolicy {
 //
 // Built iteratively, so arbitrarily deep trees cannot overflow the stack. The input's
 // node numbering is not required to be in any order, but preorder visits each node's children
-// in ascending index, so siblings come in index order (callers rely on it; read_newick numbers
-// siblings left to right).
+// in ascending index, so siblings come in index order; read_newick numbers siblings left to
+// right. AssignNames' postorder tie-break relies on this order.
 class TreeIndex {
 public:
 	static constexpr uint32_t NO_PARENT = UINT32_MAX;
