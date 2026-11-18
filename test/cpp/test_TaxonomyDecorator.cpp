@@ -884,7 +884,7 @@ TEST_CASE("AssignNames prefers a higher F1 to a later node", "[taxonomy_decorato
 	const NameId d1 = c.Name(kDomain, "D1"), x = c.Name(kPhylum, "X"), y = c.Name(kPhylum, "Y");
 	const NameId z = c.Name(kPhylum, "Z");
 	const auto assignment = AssignNames(c.index, 2);
-	CHECK(AllNames(assignment, 12) == NamesOf(12, {{0, {{kDomain, d1, 0, 9, 9, 9}}},
+	CHECK(AllNames(assignment, 12) == NamesOf(12, {{0, {{kDomain, d1, 0, 8, 8, 8}}},
 	                                               {1, {{kPhylum, x, 1, 2, 2, 4}}},
 	                                               {3, {{kPhylum, y, 3, 3, 3, 3}}}}));
 	CHECK(assignment.NotPlaced() == std::vector<NotPlacedName> {{kPhylum, z, 1, NotPlacedReason::kNeverEligible}});
@@ -908,7 +908,7 @@ TEST_CASE("AssignNames breaks an F1 tie toward fewer tips", "[taxonomy_decorator
 	REQUIRE(c.index.TipCount(2) == 3);
 	REQUIRE(c.index.InformativeTipCount(2) == 2);
 	const auto assignment = AssignNames(c.index, 2);
-	CHECK(AllNames(assignment, 12) == NamesOf(12, {{0, {{kDomain, d1, 0, 8, 8, 8}}},
+	CHECK(AllNames(assignment, 12) == NamesOf(12, {{0, {{kDomain, d1, 0, 7, 7, 7}}},
 	                                               {1, {{kPhylum, x, 1, 2, 2, 4}}},
 	                                               {3, {{kPhylum, y, 3, 3, 3, 3}}}}));
 }

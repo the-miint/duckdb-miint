@@ -182,9 +182,14 @@ public:
 
 private:
 	friend NameAssignment AssignNames(const CladeCountIndex &index, uint32_t min_count);
+	NameAssignment() = default;
 
 	std::vector<NameScore> scores_;
 	std::vector<NotPlacedName> not_placed_;
+	// The scores again, grouped by node, each node's by ascending rank: node v's are
+	// by_node_[node_offsets_[v] .. node_offsets_[v + 1]).
+	std::vector<NameScore> by_node_;
+	std::vector<uint32_t> node_offsets_;
 };
 
 // Assigns each name to the node that scores best for it (tax2tree's primary placement). A
