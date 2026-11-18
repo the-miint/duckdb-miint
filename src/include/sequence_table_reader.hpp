@@ -172,12 +172,14 @@ LoadedSingleEndSequences LoadSingleEndSequences(Connection &conn, const std::str
 // Produces sub-batches on demand from a streaming query result.
 // Thread-safe: multiple threads can call FetchSubBatch() concurrently.
 //
-// A sub-batch closes at `sub_batch_size` rows or, when `max_bases` is non-zero,
-// once its rows hold `max_bases` bases (both mates counted), whichever comes
-// first. The row that reaches `max_bases` is part of the batch it closes, so a
-// row longer than the limit is a batch of its own. `max_bases` is for callers
-// whose work per row scales with its length, where a row count alone puts a few
-// long rows in one batch and leaves the other threads idle.
+// A sub-batch holds at most `sub_batch_size` rows and, when `max_bases` is
+// non-zero, at most `max_bases` bases of sequence1, the same rule as
+// predict_genes' kBatchBases: a row that would take the batch past the limit
+// starts the next one, and a row longer than the limit is a batch of its own.
+// Only sequence1 counts because the one caller, place_krepp, places only
+// sequence1. `max_bases` is for callers whose work per row scales with its
+// length, where a row count alone puts a few long rows in one batch and leaves
+// the other threads idle.
 class QuerySequenceStream {
 public:
 	// Owns an internal Connection — convenient for single-pipeline readers.
@@ -250,8 +252,12 @@ private:
 	SequenceTableSchema schema_;
 	idx_t sub_batch_size_;
 	idx_t max_bases_ = 0;                // 0: close by rows only
-	miint::SequenceRecordBatch partial_; // Partially-filled sub-batch carried across Fetch() calls
-	idx_t partial_bases_ = 0;            // Bases held in partial_
+	miint::SequenceRecordBatch partial_; // Rows fetched from the stream; [consumed_, size()) not yet handed out
+	idx_t consumed_ = 0;                 // Rows of partial_ already handed out (moved-from)
+	// The bases limit's scan over the next batch: rows [consumed_, scan_end_)
+	// fit in it and hold scan_bases_ bases of sequence1.
+	idx_t scan_end_ = 0;
+	idx_t scan_bases_ = 0;
 	bool exhausted_ = false;
 	idx_t rows_delivered_ = 0;
 	mutable std::mutex mutex_;
@@ -262,6 +268,10 @@ private:
 
 	// `source` names what is being read, for error messages only.
 	void InitStream(const std::string &select_sql, const std::string &source);
+
+	// True once the held rows complete the next batch, with `end` set to its
+	// end in partial_; false while it needs more rows from the stream.
+	bool NextBatchEnd(idx_t &end);
 };
 
 } // namespace duckdb

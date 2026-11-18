@@ -69,13 +69,13 @@ statement ok
 CREATE TABLE one_row AS
 SELECT * EXCLUDE (like_weight_ratio) FROM place_krepp(query_table='toy_reads', index_path='{TEST_DIR}/toy_index', batch_size := 1);
 
-# One base per batch closes every batch on its first read, by the bases rule.
+# One base per batch: every read is longer than that, so each is a batch of its own.
 statement ok
 CREATE TABLE one_base AS
 SELECT * EXCLUDE (like_weight_ratio) FROM place_krepp(query_table='toy_reads', index_path='{TEST_DIR}/toy_index', batch_bases := 1);
 
-# Both limits given. Every toy read is 150 bases, so 400 bases is reached on the
-# third read, before the row limit of 5: batches of 3, the last of 1.
+# Both limits given. Every toy read is 150 bases, so 400 bases holds two reads
+# (a third would make 450), before the row limit of 5: batches of 2.
 statement ok
 CREATE TABLE mixed AS
 SELECT * EXCLUDE (like_weight_ratio) FROM place_krepp(query_table='toy_reads', index_path='{TEST_DIR}/toy_index',

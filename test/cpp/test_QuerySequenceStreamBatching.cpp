@@ -9,12 +9,14 @@
 // What has to hold, and why:
 //  - Every row comes out exactly once and in scan order. A row lost or repeated at a batch boundary
 //    is a query silently unplaced or placed twice.
-//  - A batch closes at whichever limit it reaches first, rows or bases.
-//  - The row that reaches the bases limit is in the batch it closes, so a query longer than the limit
-//    is a batch of its own rather than an empty batch, which callers read as end-of-stream.
-//  - The bases count runs across DuckDB chunk boundaries and is carried into the remainder after a
-//    split, since a batch of long rows is routinely assembled from more than one chunk.
-//  - Both mates count, so a paired relation's batches hold the bases they say they do.
+//  - A batch holds at most the row limit and at most the bases limit, whichever binds first. A row
+//    that would take it past the bases limit starts the next batch (predict_genes' kBatchBases rule).
+//  - A row longer than the bases limit is a batch of its own, not an empty batch, which callers read
+//    as end-of-stream.
+//  - The bases count runs across DuckDB chunk boundaries and on into the rows left after a cut, since
+//    a batch of long rows is routinely assembled from more than one chunk.
+//  - Only sequence1 counts: place_krepp, the caller, places sequence1 alone, so counting a mate would
+//    close its batches at half the bases it actually places.
 //  - No bases limit (0) is the row-only behaviour every other caller already has.
 
 #include <catch2/catch_test_macros.hpp>
@@ -96,10 +98,17 @@ TEST_CASE("QuerySequenceStream closes a sub-batch by bases", "[sequence_table_re
 	DuckDB db(nullptr);
 	Connection con(db);
 
-	SECTION("the row reaching the limit closes the batch it is in") {
+	SECTION("a row that would pass the limit starts the next batch") {
 		MakeReads(con, "reads", 10, 100);
 		auto batches = Batches(con, "reads", STANDARD_VECTOR_SIZE, 250);
-		// 100, 200, 300: the third row reaches 250, so it is the batch's last.
+		// 100, 200 fit; a third row would make 300.
+		REQUIRE(Sizes(batches) == std::vector<size_t> {2, 2, 2, 2, 2});
+		REQUIRE(Flatten(batches) == Ids(10));
+	}
+
+	SECTION("a batch may fill the limit exactly") {
+		MakeReads(con, "reads", 10, 100);
+		auto batches = Batches(con, "reads", STANDARD_VECTOR_SIZE, 300);
 		REQUIRE(Sizes(batches) == std::vector<size_t> {3, 3, 3, 1});
 		REQUIRE(Flatten(batches) == Ids(10));
 	}
@@ -118,20 +127,24 @@ TEST_CASE("QuerySequenceStream closes a sub-batch by bases", "[sequence_table_re
 		REQUIRE(Flatten(batches) == Ids(5));
 	}
 
-	SECTION("the count runs across chunk boundaries and into the remainder") {
-		// 5,000 rows arrive as three chunks (2,048 + 2,048 + 904). 30,000 bases is 3,000 rows, so the
-		// first batch spans two chunks and is split mid-chunk; the second is the 2,000 left over, of
-		// which 1,096 were already held from that split.
-		MakeReads(con, "reads", 5000, 10);
-		auto batches = Batches(con, "reads", 1000000, 30000);
-		REQUIRE(Sizes(batches) == std::vector<size_t> {3000, 2000});
-		REQUIRE(Flatten(batches) == Ids(5000));
+	SECTION("the count runs across chunk boundaries and into the rows left after a cut") {
+		// No chunk holds more than STANDARD_VECTOR_SIZE rows, so a first batch of one and a half
+		// chunks' worth must be assembled from at least two chunks and cut partway through one; the
+		// second batch then starts with the rows left over from that cut.
+		const idx_t v = STANDARD_VECTOR_SIZE;
+		const idx_t first = v + v / 2;
+		MakeReads(con, "reads", first + v, 10);
+		auto batches = Batches(con, "reads", 1000000000, first * 10);
+		REQUIRE(Sizes(batches) == std::vector<size_t> {first, v});
+		REQUIRE(Flatten(batches) == Ids(first + v));
 	}
 
-	SECTION("both mates count") {
+	SECTION("only sequence1 counts") {
+		// 50 bases of sequence1 per row: two rows fill 100. Counting the 50-base mate as well would
+		// put one row in each batch.
 		Exec(con, "CREATE TABLE pairs AS SELECT 'r' || i AS read_id, repeat('A', 50) AS sequence1, "
 		          "repeat('C', 50) AS sequence2 FROM range(4) t(i) ORDER BY i");
-		auto batches = Batches(con, "pairs", STANDARD_VECTOR_SIZE, 200);
+		auto batches = Batches(con, "pairs", STANDARD_VECTOR_SIZE, 100);
 		REQUIRE(Sizes(batches) == std::vector<size_t> {2, 2});
 		REQUIRE(Flatten(batches) == Ids(4));
 	}

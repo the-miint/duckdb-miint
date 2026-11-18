@@ -185,33 +185,44 @@ static miint::QualScore ExtractQualScore(DataChunk &chunk, idx_t qual_col_idx, U
 	return miint::QualScore(qual_vec_data);
 }
 
-// Helper to create a new sub-batch with reserved capacity.
-static miint::SequenceRecordBatch MakeSubBatch(bool is_paired, idx_t capacity) {
-	miint::SequenceRecordBatch batch(is_paired);
-	if (capacity > 0) {
-		batch.reserve(capacity);
-	}
-	return batch;
-}
-
-// Rows to reserve for a sub-batch: at most one chunk's worth. A sub-batch size
-// can be a caller's own number (place_krepp's batch_size), and reserving that
-// many strings up front would fail on a large one; past one chunk the vectors
-// grow as rows arrive.
+// Rows to reserve for the held rows: at most one chunk's worth. A sub-batch
+// size can be a caller's own number (place_krepp's batch_size), and reserving
+// that many strings up front would fail on a large one; past one chunk the
+// vectors grow as rows arrive.
 static idx_t ReserveRows(idx_t sub_batch_size) {
 	return std::min<idx_t>(sub_batch_size, STANDARD_VECTOR_SIZE);
 }
 
-// Bases in rows [begin, end) of `batch`, both mates.
-static idx_t BatchBases(const miint::SequenceRecordBatch &batch, idx_t begin, idx_t end) {
-	idx_t bases = 0;
-	for (idx_t i = begin; i < end; i++) {
-		bases += batch.sequences1[i].size();
-		if (batch.is_paired) {
-			bases += batch.sequences2[i].size();
+// Moves rows [begin, begin + count) of `from` into a new batch. The rows left
+// behind in `from` are moved-from and are dropped by DropFront.
+static miint::SequenceRecordBatch MoveRange(miint::SequenceRecordBatch &from, idx_t begin, idx_t count) {
+	miint::SequenceRecordBatch out(from.is_paired);
+	out.reserve(count);
+	for (idx_t i = begin; i < begin + count; i++) {
+		out.read_ids.push_back(std::move(from.read_ids[i]));
+		out.comments.push_back(std::move(from.comments[i]));
+		out.sequences1.push_back(std::move(from.sequences1[i]));
+		out.quals1.push_back(std::move(from.quals1[i]));
+		if (from.is_paired) {
+			out.sequences2.push_back(std::move(from.sequences2[i]));
+			out.quals2.push_back(std::move(from.quals2[i]));
 		}
 	}
-	return bases;
+	return out;
+}
+
+// Drops the first `count` rows of `batch`.
+static void DropFront(miint::SequenceRecordBatch &batch, idx_t count) {
+	auto drop = [count](auto &column) {
+		column.erase(column.begin(),
+		             column.begin() + static_cast<std::ptrdiff_t>(std::min<idx_t>(count, column.size())));
+	};
+	drop(batch.read_ids);
+	drop(batch.comments);
+	drop(batch.sequences1);
+	drop(batch.sequences2);
+	drop(batch.quals1);
+	drop(batch.quals2);
 }
 
 // Process a single DataChunk into a SequenceRecordBatch.
@@ -657,18 +668,41 @@ void QuerySequenceStream::InitStream(const std::string &select_sql, const std::s
 	}
 }
 
+bool QuerySequenceStream::NextBatchEnd(idx_t &end) {
+	// The bases limit: extend the scan over rows that arrived since the last
+	// call, stopping before the row that would take the batch past max_bases_.
+	// A row alone in the batch is taken whatever its length, so a row longer
+	// than the limit is a batch of its own rather than an empty one.
+	if (max_bases_ > 0) {
+		while (scan_end_ < partial_.size() && scan_end_ - consumed_ < sub_batch_size_) {
+			const idx_t row_bases = partial_.sequences1[scan_end_].size();
+			if (scan_end_ > consumed_ && scan_bases_ + row_bases > max_bases_) {
+				end = scan_end_;
+				return true;
+			}
+			scan_bases_ += row_bases;
+			scan_end_++;
+		}
+	}
+	if (partial_.size() - consumed_ >= sub_batch_size_) {
+		end = consumed_ + sub_batch_size_;
+		return true;
+	}
+	return false;
+}
+
 miint::SequenceRecordBatch QuerySequenceStream::FetchSubBatch() {
 	std::lock_guard<std::mutex> lock(mutex_);
 
-	if (exhausted_ && partial_.empty()) {
-		return miint::SequenceRecordBatch(schema_.has_sequence2);
-	}
-
-	// Fetch chunks from stream until we have a full sub-batch or stream is exhausted
-	auto full = [&]() {
-		return partial_.size() >= sub_batch_size_ || (max_bases_ > 0 && partial_bases_ >= max_bases_);
-	};
-	while (!exhausted_ && !full()) {
+	// Fetch chunks from the stream until the next batch is complete or the
+	// stream is exhausted. Rows [consumed_, partial_.size()) are held and not
+	// yet handed out.
+	idx_t end = 0;
+	while (!NextBatchEnd(end)) {
+		if (exhausted_) {
+			end = partial_.size();
+			break;
+		}
 		auto chunk = stream_->Fetch();
 		if (!chunk || chunk->size() == 0) {
 			// Fetch() returns null for both a clean end-of-stream AND a mid-stream
@@ -678,45 +712,29 @@ miint::SequenceRecordBatch QuerySequenceStream::FetchSubBatch() {
 				throw InvalidInputException("Failed to read sequences mid-stream: %s", stream_->GetError());
 			}
 			exhausted_ = true;
-			break;
+			continue;
 		}
-		const idx_t before = partial_.size();
+		// Drop the rows already handed out before appending, so the held rows
+		// stay within about one batch plus one chunk.
+		if (consumed_ > 0) {
+			DropFront(partial_, consumed_);
+			scan_end_ -= consumed_;
+			consumed_ = 0;
+		}
 		ProcessSingleChunk(*chunk, schema_, partial_, temp_read_ids_, temp_seq1_, temp_seq2_);
-		if (max_bases_ > 0) {
-			partial_bases_ += BatchBases(partial_, before, partial_.size());
-		}
 	}
 
-	// Where this sub-batch ends: sub_batch_size_ rows, or sooner, at the row
-	// whose bases reach max_bases_. That row is included, so the batch is never
-	// empty while rows remain - an empty batch is what callers read as the end.
-	idx_t cut = std::min<idx_t>(partial_.size(), sub_batch_size_);
-	idx_t cut_bases = 0;
-	if (max_bases_ > 0) {
-		for (idx_t i = 0; i < cut; i++) {
-			cut_bases += BatchBases(partial_, i, i + 1);
-			if (cut_bases >= max_bases_) {
-				cut = i + 1;
-				break;
-			}
-		}
+	// Moved out rather than copied, so cutting one chunk into many small
+	// batches costs no more than handing it out whole.
+	miint::SequenceRecordBatch result = MoveRange(partial_, consumed_, end - consumed_);
+	consumed_ = end;
+	scan_end_ = end;
+	scan_bases_ = 0;
+	if (consumed_ == partial_.size()) {
+		partial_.clear();
+		consumed_ = 0;
+		scan_end_ = 0;
 	}
-
-	if (cut == partial_.size()) {
-		// Everything held goes out: a batch that exactly fills, or the last one.
-		miint::SequenceRecordBatch result = std::move(partial_);
-		partial_ = exhausted_ ? miint::SequenceRecordBatch(schema_.has_sequence2)
-		                      : MakeSubBatch(schema_.has_sequence2, ReserveRows(sub_batch_size_));
-		partial_bases_ = 0;
-		rows_delivered_ += result.size();
-		return result;
-	}
-	// A chunk pushed partial_ past the cut - split: return the first `cut` rows
-	// and keep the remainder, with its bases, for the next call.
-	miint::SequenceRecordBatch result = partial_.SubRange(0, cut);
-	miint::SequenceRecordBatch remainder = partial_.SubRange(cut, partial_.size() - cut);
-	partial_ = std::move(remainder);
-	partial_bases_ -= cut_bases;
 	rows_delivered_ += result.size();
 	return result;
 }
