@@ -288,16 +288,25 @@ Verified on DuckDB 2.0 (`d54cbbe`).
     `pipeline.cpp`).
   - PARALLEL lets every thread prepare batches.
   - BATCH (`PhysicalBatchCopyToFile`) restores source order from batch indexes.
-  - What miint's FASTA and FASTQ writers return is in
-    [architecture.md](architecture.md#record-writers-on-duckdbs-batch-api).
+  - What miint's sequence writers (those that plan through `SequenceCopyPlan`) return is in
+    [architecture.md](architecture.md#record-writers-on-duckdbs-batch-api), and so is how they turn
+    order off by default: in their `plan` callback, on the bound `LogicalCopyToFile`, since the
+    callback below cannot.
 - **"Order kept" is what the callback is told.** It is false for a source that declares
   `NO_ORDER`; true for an `ORDER BY` (`FIXED_ORDER`) whatever the setting; otherwise the
   `preserve_insertion_order` setting decides. The COPY's `PRESERVE_ORDER` overrides all of these,
   and `PARTITION_BY`, `PER_THREAD_OUTPUT`, `FILE_SIZE_BYTES` and `ORDER_BY` force it off
   (`PhysicalPlanGenerator::PreserveInsertionOrder`, called from `plan_copy_to_file.cpp`). `EXPLAIN` does not show which mode
-  ran.
+  ran, and the COPY's `PhysicalOperator` log entries carry no thread id; `PhysicalCopyToFile::parallel` in the plan
+  does show it (`test_CopySequenceOrder.cpp` plans a COPY and reads it).
+- **`ExtractPlan` then `PhysicalPlanGenerator::Plan` resolves a plan's columns twice.** `ExtractPlan`
+  already runs `ColumnBindingResolver`, and `Plan` runs it again; most plans survive, but a top-N
+  fails with an internal error (`Failed to bind column reference ... inequal num bindings/types`).
+  To build a physical plan in a test, parse, plan and optimize the statement yourself inside
+  `RunFunctionInTransaction`, then call `Plan`. v2.0's `PreparedStatement` no longer exposes its
+  plan.
 - **An order-kept COPY in REGULAR mode still runs its source on one thread.** That covers
-  FASTA and FASTQ, and CSV or Parquet over a source without a batch index
+  miint's sequence writers, and CSV or Parquet over a source without a batch index
   ([Output order](#output-order-costs-threads-and-memory)); over one with a batch index, CSV and
   Parquet run in BATCH mode. A table function with heavy
   per-row work does that work on its own jobs and only emits from `Execute` (`rype_filter`
@@ -317,20 +326,30 @@ Verified on DuckDB 2.0 (`d54cbbe`).
     to and including the one that reaches the cap. The exception is the rest of a chunk: it is
     left whole unless the batch reaches 9/8 of the cap before the chunk's last row, so a batch
     can stay under 9/8 of the cap until its last row, which can take it further.
-    `'8MB'` is 8,000,000 bytes, as `ColumnDataCollection::SizeInBytes` counts them.
+    `'8MB'` is 8,000,000 bytes, as `ColumnDataCollection::SizeInBytes` counts them: the rows the
+    query hands the format, not what the format writes. SAM's `SEQUENCE_DATA` reads, looked up
+    while a record is built, are not in them, so a capped batch can make records of any size.
   - BATCH mode is different: it holds each source batch whole before cutting it, which for a
     table or Parquet row group of genomes is most of the input.
 - **Defaults.** A format can default the rows (`desired_batch_size`) but not the bytes: the
-  `copy_default_batch_size_bytes_t` typedef has no field. FASTA/FASTQ add both through a `plan`
-  callback instead. `plan` replaces binding, so it must rebind as a different format, or it
-  recurses. DuckDB checks options against the format named in the statement before calling
-  `plan`. `PARTITION_PATH` survives the rebind: the rebound statement binds it as any COPY would
-  (FASTA and FASTQ write correct partition directories with it, as DuckDB's JSON writer, which
-  also rewrites its COPY through `plan`, does).
+  `copy_default_batch_size_bytes_t` typedef has no field. miint's sequence writers add both
+  through a `plan` callback instead (`SequenceCopyPlan`). `plan` replaces binding, so it must rebind as a different
+  format, or it recurses. DuckDB checks options against the format named in the statement before
+  calling `plan`. `PARTITION_PATH` survives the rebind: the rebound statement binds it as any
+  COPY would (miint's sequence writers write correct partition directories with it, as DuckDB's
+  JSON writer, which also rewrites its COPY through `plan`, does).
 - **Concurrency.** In PARALLEL and partitioned COPYs, `prepare_batch` runs outside any lock and
   is given the first file's global state, not necessarily the destination's
   (`PhysicalCopyToFile::PrepareBatch`). `flush_batch` runs under the destination's per-file
   lock.
+- **A failed COPY leaves no output.** Each file and directory a COPY creates is registered with
+  its `CopyOutputLifecycle`, which removes them unless the COPY succeeds
+  (`copy_output_lifecycle.cpp`); this covers `PARTITION_BY` and `PER_THREAD_OUTPUT` too. A COPY
+  to one local file that already exists writes `tmp_<name>` beside it and moves it over the
+  target only on success (`ResolveUseTmpFile` in `bind_copy.cpp`, `plan_copy_to_file.cpp`), so the
+  old file survives a failure. The format is given the `tmp_` path, so its errors name that.
+  So a format need not clean up after its own error, and an error raised after some batches were
+  written leaves nothing partial.
 - **Observing batches.** `CALL enable_logging('PhysicalOperator')` (in the shell, add
   `storage = 'memory'`), then read `duckdb_logs_parsed('PhysicalOperator')`. There is one
   `PhysicalCopyToFile`/`FlushBatch` row per batch, with `info.file`, `info.rows`, `info.size`
@@ -499,7 +518,9 @@ nothing.
 
 This is a real free win for us. Coordinate-sorted BAM input written out in input order
 gives `reference_name` / `position` predicates useful row-group pruning at no cost —
-another reason to preserve input ordering where we already do.
+another reason to preserve input ordering where we already do. (Writing to Parquet keeps
+input order by default; miint's sequence writers do not, unless the query
+sorts or says `PRESERVE_ORDER true`.)
 
 **ART indexes are used far more narrowly than PostgreSQL habits suggest.** As of v1.4,
 only a single-column predicate against a single-column index is served by an index scan,

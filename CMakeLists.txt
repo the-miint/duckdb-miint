@@ -697,6 +697,8 @@ if(BUILD_UNITTESTS)
     test/cpp/test_RypeFilterSchedule.cpp
     test/cpp/test_HttpClientCommon.cpp
     test/cpp/test_CopySequenceDeferral.cpp
+    test/cpp/test_CopyRecordDeferral.cpp
+    test/cpp/test_CopySequenceOrder.cpp
     test/cpp/test_ReadFastxBatchIndex.cpp)
   # It includes SequenceReader.hpp, whose members depend on MIINT_STATIC_BUILD:
   # compiled as the miint it links was, or the two disagree on the class.
@@ -704,7 +706,10 @@ if(BUILD_UNITTESTS)
                               PROPERTIES COMPILE_DEFINITIONS MIINT_STATIC_BUILD)
   target_link_libraries(tests_duckdb Catch2::Catch2WithMain duckdb_static)
   link_extension_libraries(tests_duckdb "")
-  # Sets RLIMIT_FSIZE, so POSIX only
+  # These set RLIMIT_FSIZE, so POSIX only
+  if(UNIX)
+    target_sources(tests_duckdb PRIVATE test/cpp/test_CopySamWriteFailure.cpp)
+  endif()
   if(MIINT_ENABLE_HDF5 AND UNIX)
     target_sources(tests_duckdb PRIVATE test/cpp/test_CopyBiomWriteFailure.cpp)
   endif()

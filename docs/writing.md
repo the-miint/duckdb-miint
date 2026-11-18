@@ -7,6 +7,8 @@ COPY (SELECT * FROM read_fastx('some_file.fastq'))
 TO 'some_other_file.fasta' (FORMAT FASTA);
 ```
 
+**FASTQ, FASTA, SAM and BAM records come out in no fixed order unless the query has an `ORDER BY`.** Their records are a set (a SAM or BAM file is sorted only when its records are), so these four formats write on all of DuckDB's threads by default, and the order can change from run to run. This is not what DuckDB's own formats do: CSV and Parquet keep the order rows come in. To write records in an order, sort them with `ORDER BY`; to keep the order they come in without sorting, such as the input file's own order, add `PRESERVE_ORDER true`. Each format's "Threads, order and memory" has the details.
+
 Options follow DuckDB's rules for COPY options in every format here, as they do for CSV and Parquet:
 
 - A boolean option given alone means true: `(FORMAT FASTQ, INTERLEAVE)` is `INTERLEAVE true`.
@@ -69,9 +71,11 @@ An error about a record's data names its `read_id`: a NULL `sequence1`, `qual1` 
 
 **Threads, order and memory:**
 
-- **Insertion order kept** (the default): records are written in the query's order, on one thread, and the file is the same whatever `threads` is set to. The work that feeds the COPY directly runs on that thread too; work behind a sort, an aggregate or a join's build side still uses all threads.
-- **When record order does not matter**, add `PRESERVE_ORDER false` to the COPY, or `SET preserve_insertion_order = false`. The query and the writer then use all of DuckDB's threads, and the records come out in an order that can change from run to run. Mates stay together: an interleaved file has each R2 right after its R1, and split R1/R2 files stay in step.
-- A source whose rows come in no fixed order, such as the `rype_filter`, `align_minimap2` or `read_ena_sequences` table functions, is written on all threads without either setting. An `ORDER BY` keeps its order (on one thread) under `SET preserve_insertion_order = false`, but not under `PRESERVE_ORDER false`, which drops it.
+- **No record order, by default.** Unless the query has an `ORDER BY`, the query and the writer use all of DuckDB's threads, and the records come out in an order that can change from run to run (DuckDB's own formats keep the order rows come in). Mates stay together: an interleaved file has each R2 right after its R1, and split R1/R2 files stay in step.
+- **Write a pair's files in one COPY**, with `{ORIENTATION}` or `INTERLEAVE`. Two COPYs, one for R1 and one for R2, write each file in its own order, and the files stay in step only if both have the same `ORDER BY`, or both say `PRESERVE_ORDER true`.
+- **An `ORDER BY` keeps its order**, and the file is then the same whatever `threads` is set to. The writer runs on one thread; the sort still uses all threads. An `ORDER BY` anywhere in the query counts, one in a subquery included (`WHERE read_id IN (SELECT ... ORDER BY score DESC LIMIT 1000)`); when it does not order the output, `PRESERVE_ORDER false` puts the COPY back on all threads without changing what the subquery returns.
+- **`PRESERVE_ORDER true` keeps the order the rows come in**, without sorting: the input file's own order, for instance, or a table's. Records are written in the query's order, on one thread, and the file is the same whatever `threads` is set to. The work that feeds the COPY directly runs on that thread too; work behind a sort, an aggregate or a join's build side still uses all threads.
+- **`PRESERVE_ORDER false` drops an `ORDER BY`**, and the records come out unsorted. `SET preserve_insertion_order` makes no difference to these writers, except to a query whose `ORDER BY` does not reach the COPY (one under an aggregate, say), which `SET preserve_insertion_order = false` writes on all threads too.
 - `PARTITION_BY` and `PER_THREAD_OUTPUT` always use all threads, and name their files `data_0.fastq` and so on (`data_0.fastq.gz` with gzip).
 - **Batches.** DuckDB hands the writer its rows in batches. Unless the COPY sets them, `ROW_GROUP_SIZE 64` and `ROW_GROUP_SIZE_BYTES '8MB'` are added; a value given replaces its default, and the other default stays. A batch ends at whichever it reaches first: `ROW_GROUP_SIZE` rows (a pair is one row), or `ROW_GROUP_SIZE_BYTES`, measured as DuckDB's in-memory size of the rows rather than the text written. A batch can pass either: DuckDB adds rows a chunk at a time and cuts a chunk only at the byte cap, and keeps the row that crosses it. `FORMAT _miint_fastq`, the writer behind `FORMAT FASTQ`, adds no defaults. How a batch is written: [architecture notes](internals/architecture.md#record-writers-on-duckdbs-batch-api).
 - **Memory.** The writer's text buffers sit outside DuckDB's `memory_limit`; the rows themselves are held by DuckDB and counted against it.
@@ -103,9 +107,17 @@ TO 'output.fastq.gz' (FORMAT FASTQ, QUAL_OFFSET 33, COMPRESSION gzip);
 COPY (SELECT * FROM read_fastx('input.fastq'))
 TO 'output.fastq' (FORMAT FASTQ, ID_AS_SEQUENCE_INDEX true);
 
--- Record order does not matter: write on all threads
+-- Filter on all threads; the records come out in no fixed order, each R2 file in step with its R1
 COPY (SELECT * FROM read_fastx('R1.fastq.gz', sequence2 = 'R2.fastq.gz') WHERE length(sequence1) >= 100)
-TO 'filtered_{ORIENTATION}.fastq.gz' (FORMAT FASTQ, PRESERVE_ORDER false);
+TO 'filtered_{ORIENTATION}.fastq.gz' (FORMAT FASTQ);
+
+-- Records sorted by name
+COPY (SELECT * FROM read_fastx('input.fastq') ORDER BY read_id)
+TO 'sorted.fastq' (FORMAT FASTQ);
+
+-- Records in the input files' own order, without sorting
+COPY (SELECT * FROM read_fastx('run_*.fastq.gz'))
+TO 'all_runs.fastq.gz' (FORMAT FASTQ, PRESERVE_ORDER true);
 ```
 
 ### FASTA
@@ -160,9 +172,13 @@ TO 'output.fasta.gz' (FORMAT FASTA, INCLUDE_COMMENT true);
 COPY (SELECT * FROM read_fastx('input.fasta'))
 TO 'output.fasta' (FORMAT FASTA, LINE_WIDTH 60);
 
--- Genome order does not matter: write on all threads
+-- Genomes on all threads, in no fixed order
 COPY (SELECT read_id, sequence1 FROM genomes)
-TO 'genomes.fasta.gz' (FORMAT FASTA, PRESERVE_ORDER false);
+TO 'genomes.fasta.gz' (FORMAT FASTA);
+
+-- Genomes sorted by name
+COPY (SELECT read_id, sequence1 FROM genomes ORDER BY read_id)
+TO 'genomes_sorted.fasta.gz' (FORMAT FASTA);
 ```
 
 Prodigal's `-a` (proteins) and `-d` (gene nucleotides) FASTA, from `predict_genes`, are written with this format and the [`prodigal_proteins` and `prodigal_genes`](gene_prediction.md#writing-prodigals-fasta) macros.
@@ -200,11 +216,15 @@ The mapped case is refused rather than written because htslib cannot represent i
 
 `read_alignments` / `read_sam` return `''` for a record whose on-disk CIGAR is `*`, so both spellings occur naturally and `COPY (SELECT * FROM read_alignments(...))` round-trips unmapped reads unchanged. One consequence worth knowing: a **mapped** record with no CIGAR — which older BAM files can contain, since `bam_read1` accepts `n_cigar == 0` without the rewrite `sam_parse1` applies — was previously copied through and is now rejected. Set `0x4` on such records, or filter them.
 
-Note that these validation errors, like the pre-existing position checks, fire mid-write: the output file will already exist and, for BAM, be structurally incomplete. Treat a failed COPY's output as garbage rather than a partial result.
+BAM stores POS, PNEXT and TLEN in 32 bits, so a record past that range (or with a CIGAR of more than 65,535 operations spanning 2^28 bases or more) cannot be written as BAM and is refused with an error naming the column, its value and the read, such as `Column 'position' is 2147483649 for read 'r5', past 2147483648, the largest a BAM record holds (SAM text holds it)`; SAM text writes it.
+
+A data error fails the COPY. The writer raises it before it writes any of the batch the record is in, but earlier batches may be written by then; DuckDB then removes the file the COPY created (each of them, with `PARTITION_BY` or `PER_THREAD_OUTPUT`), and a file that was already there keeps its old contents. A failed write, as on a full disk, does the same, with an error naming the format and the file, such as `COPY FORMAT BAM: cannot write 'out.bam': sam_close failed: File too large` (the end of a file is written when it is closed). Over an existing file, DuckDB writes to a temporary file beside it, `tmp_out.bam`, and the error names that.
 
 **Optional columns:**
 - `tag_as`, `tag_xs`, `tag_ys`, `tag_xn`, `tag_xm`, `tag_xo`, `tag_xg`, `tag_nm` (BIGINT): Optional integer tags
 - `tag_yt`, `tag_md`, `tag_sa` (VARCHAR): Optional string tags
+
+A tag column of another type is refused before anything is written (`Column 'tag_as' must be BIGINT`). A NULL writes no tag. An integer tag is a 32-bit signed value in SAM and BAM alike, so a value outside that range is an error naming the read (`Column 'tag_as' is 2147483648 for read 'r1', outside the 32-bit signed range of a SAM integer tag`), not a value cut to 32 bits.
 
 SAM and BAM are written to local files only; a remote target (`s3://...`) is refused.
 
@@ -225,21 +245,34 @@ TO 'sorted.bam' (FORMAT BAM, REFERENCE_LENGTHS 'refs');
 -- samtools index sorted.bam   -> succeeds
 ```
 
+The `ORDER BY` is what sorts the file: without it the records come out in no fixed order, and `PRESERVE_ORDER false` drops it (see "Threads, order and memory" below).
+
 Two consequences worth knowing:
 
 - The order does **not** depend on how `REFERENCE_LENGTHS` was built (ASC, DESC or shuffled all give the same header), and it does not depend on `PRAGMA threads`. This is deliberate: DuckDB does not guarantee the row order of a parallel table scan, so the table's own row order could not be a reproducible contract.
 - The header is readable back from SQL with `read_alignment_header('file.bam')`, which exposes `@SQ` as `(tid, reference, length)` — see [Reading](reading.md#read_alignment_headerpath). That is the only way to observe `tid`, and therefore the only way to check this ordering contract on a BAM.
 - **Karyotype order is not expressible**: `'chr10'` sorts before `'chr2'`, so a human-genome BAM will be ordered `chr1, chr10, chr11, …, chr2` rather than `chr1, chr2, …, chr10`. The file is still internally consistent and indexable; it simply won't match a reference-order convention that isn't lexicographic. Sorting your records by `reference` keeps them aligned with whatever the header says.
 
-With `INCLUDE_HEADER=false` no `@SQ` lines are written at all, so the ordering above does not apply; each record's RNAME is written verbatim from its `reference` value. (This mode is SAM-only — BAM requires a header.)
+With `INCLUDE_HEADER=false` no `@SQ` lines are written at all, so the ordering above does not apply; each record's RNAME is written verbatim from its `reference` value. A `REFERENCE_LENGTHS` given with it is still read and checked (an empty table, a NULL name or length, or a negative length fails the COPY), but changes nothing in the file. (This mode is SAM-only — BAM requires a header.)
 
 > **`REFERENCE_LENGTHS` must be exhaustive when a header is written.** Supplying the table asserts it is the complete reference set, so a record whose `reference` (or `mate_reference`) is absent from it is rejected: `Column 'reference' is 'ctg000002' for read 'r2', which is not in the REFERENCE_LENGTHS table`. The header is serialized before the records are, so it cannot gain `@SQ` lines afterwards — a missing reference has no representation in the file being written, and earlier versions lost such records silently (SAM read the name back as `*`, BAM dropped the record). Derive the table from the same relation you are writing, e.g. `SELECT DISTINCT reference … FROM aln`. With `INCLUDE_HEADER=false` there are no `@SQ` lines to be exhaustive about, so any reference is accepted and written verbatim.
 - `SEQUENCE_DATA` (VARCHAR, optional): Table or view name containing original read sequences from `read_fastx`. When provided, writes actual SEQ and QUAL fields into the output instead of `*`. See [Sequence Data](#sequence-data) below.
 - `COMPRESSION` (default: auto): Enable gzip compression for SAM (auto-detected from `.gz` extension); values as for the other text formats, [above](#writing-files). BAM is always BGZF-compressed: it accepts `'gzip'` or `'gz'`, in any case, and refuses any other value, which it would ignore; `COMPRESSION_LEVEL 0` writes its BGZF blocks uncompressed.
 - `COMPRESSION_LEVEL` (BAM, and gzip SAM): BGZF compression level 0-9 (default: 6). Higher = better compression, slower speed. Refused for uncompressed SAM, as for FASTQ, FASTA and NEWICK.
-- **Multithreaded compression:** BAM and gzip-SAM output compress in parallel, following DuckDB's thread count (`PRAGMA threads`). Record order is preserved and the output is byte-identical to single-threaded writing. (The speedup is smaller than for FASTQ/FASTA because per-record marshalling is serialized; only the BGZF compression is parallelized.)
+- `ROW_GROUP_SIZE`, `ROW_GROUP_SIZE_BYTES` (defaults: 64 and `'8MB'`): how DuckDB batches the records it hands the writer; see "Threads, order and memory" below.
 
 A COPY reads `REFERENCE_LENGTHS` and `SEQUENCE_DATA` once, when it runs, so a COPY that writes several files gives every file the same `@SQ` lines and the same sequences.
+
+**Threads, order and memory:**
+
+- **No record order, by default.** Unless the query has an `ORDER BY` (anywhere in it, as for [FASTQ](#fastq)), records are formatted (SAM) or built (BAM) on all of DuckDB's threads, and follow the header in an order that can change from run to run; a pair's records need not stay next to each other. A tool that needs a pair's records together, reading name-grouped input (`samtools fixmate`, for one), needs `ORDER BY read_id`.
+- **A sorted file needs an `ORDER BY`.** `ORDER BY reference, position` writes a coordinate-sorted file ([above](#sam-and-bam)), on one thread (the sort still uses all threads), and the file is the same whatever `threads` is set to.
+- **`PRESERVE_ORDER true` keeps the order the rows come in**, without sorting: converting a coordinate-sorted BAM keeps it sorted only with this (or an `ORDER BY`). Records are written in the query's order, on one thread, and the file is the same whatever `threads` is set to; as for [FASTQ](#fastq), work behind a sort, an aggregate or a join's build side still uses all threads.
+- **`PRESERVE_ORDER false` drops an `ORDER BY`**, and a BAM meant to be sorted comes out unsorted. `SET preserve_insertion_order` makes no difference here either, as for [FASTQ](#fastq).
+- BAM and gzip SAM compress their blocks on all threads whatever the order, which does not change the bytes.
+- `PARTITION_BY` and `PER_THREAD_OUTPUT` always use all threads, and name their files `data_0.sam` (`data_0.sam.gz` with gzip) or `data_0.bam`.
+- **Batches.** As for [FASTQ](#fastq): `ROW_GROUP_SIZE 64` and `ROW_GROUP_SIZE_BYTES '8MB'` are added unless the COPY sets them, and `FORMAT _miint_sam` and `FORMAT _miint_bam`, the writers behind `FORMAT SAM` and `FORMAT BAM`, add no defaults. `ROW_GROUP_SIZE_BYTES` measures the rows the query hands the writer, which do not hold the reads `SEQUENCE_DATA` adds, so a batch of long reads can make far more than 8 MB of records.
+- **Memory.** The records of a batch, once built, sit outside DuckDB's `memory_limit` until written: up to 64 MiB a batch; the rest of a larger batch is built as it is written. The rows themselves are held by DuckDB and counted against it. `SEQUENCE_DATA` is held in memory whole ([below](#sequence-data)).
 
 **SAM Format Examples:**
 ```sql
@@ -281,19 +314,23 @@ TO 'compressed.bam' (FORMAT BAM, COMPRESSION_LEVEL 9, REFERENCE_LENGTHS 'ref_tab
 COPY (SELECT * FROM read_alignments('input.bam'))
 TO 'uncompressed.bam' (FORMAT BAM, COMPRESSION_LEVEL 0, REFERENCE_LENGTHS 'ref_table');
 
--- Convert SAM to BAM
+-- Convert SAM to BAM (records in no fixed order)
 COPY (SELECT * FROM read_alignments('input.sam'))
 TO 'output.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table');
 
--- Convert BAM to SAM
+-- Convert BAM to SAM, keeping the input's record order (a sorted input stays sorted)
 COPY (SELECT * FROM read_alignments('input.bam'))
-TO 'output.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_table');
+TO 'output.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_table', PRESERVE_ORDER true);
 
 -- Filter alignments and write to BAM
 COPY (
   SELECT * FROM read_alignments('input.bam')
   WHERE mapq >= 30 AND alignment_is_primary(flags)
 ) TO 'filtered.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table');
+
+-- A coordinate-sorted BAM, ready for samtools index
+COPY (SELECT * FROM read_alignments('input.bam') WHERE mapq >= 30 ORDER BY reference, position)
+TO 'sorted.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table');
 
 -- Write BAM with sequence data (SEQ and QUAL populated from FASTQ)
 CREATE TABLE sequences AS SELECT * FROM read_fastx('reads_R1.fastq', sequence2 = 'reads_R2.fastq');

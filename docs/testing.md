@@ -78,6 +78,7 @@ File not found: nonexistent.fastq
 - `test/sql/read_fastx.test` - FASTA/FASTQ reading functionality
 - `test/sql/alignment_functions.test` - Alignment analysis functions
 - `test/sql/copy_sam.test` - SAM/BAM writing functionality
+- `test/sql/copy_sam_bytes.test`, `copy_sam_batches.test`, `copy_sam_parallel.test` - SAM/BAM output pinned by md5 at 1 and 8 threads, DuckDB's batches, and writing with order off (`copy_fastx_*.test` do the same for FASTA/FASTQ); `test/cpp/test_CopySequenceOrder.cpp` (`tests_duckdb`) checks which COPYs keep order
 
 **Good practices for SQL tests:**
 - Test error cases first (missing files, invalid parameters)
@@ -89,6 +90,7 @@ File not found: nonexistent.fastq
 - A test that reads through a glob and asserts `filepath` values selects `replace(filepath, '\', '/')`: glob expansion returns native separators on Windows. A single path or an explicit path list keeps the caller's string and needs no wrapping.
 - Pin an error that must come before any work with `EXPLAIN`: it binds and plans the query without running `InitGlobal` or the scan. For a function that loads an index, a nonexistent index path shows the same thing, since a check made after the load would fail on the missing file instead.
 - A `max_execution_time` test (`SET max_execution_time`, then `statement error` expecting "Query exceeded maximum execution time") needs work many times longer than the deadline, and a function call that returns one chunk or less. DuckDB's pipeline calls its own throttled deadline check for every chunk (`docs/internals/duckdb-engine-notes.md`, "Interrupts and `max_execution_time`"), so a call whose output runs to many chunks can be stopped by DuckDB once the work is done, and the test then passes against a function that never checks. Run a mutation check of such a test more than once.
+- A writer's failed write or close is tested in `tests_duckdb` with the file-size limit lowered (`RLIMIT_FSIZE`, with `SIGXFSZ` ignored so a write past it fails with `EFBIG`): `test_CopySamWriteFailure.cpp` and `test_CopyBiomWriteFailure.cpp`. Set in the process, the limit can sit one byte under the size the file needs, which no SQL test can arrange. POSIX only.
 - `typeof()` is folded to a constant when the query binds, so it reports the bound type, as `DESCRIBE` does, not the type of the vectors a run returns. To check what a run returns, compare values in the input's own type.
 - Write files under `{TEST_DIR}`, the per-process scratch directory unittest substitutes into a test's SQL. Under `MIINT_TEST_JOBS`, test files and the C++ tests run at the same time in one working directory, so any other path a test writes must be one no other test reads or writes. For the same reason the parallel runner gives each SQL process a spill directory under its `{TEST_DIR}` (`docs/internals/duckdb-engine-notes.md`, "Storage").
 

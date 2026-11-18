@@ -19,12 +19,13 @@ statement ok
 CREATE TABLE tree1 AS SELECT * FROM read_newick('data/newick/simple.nwk');
 
 # A bare boolean option means true, as DuckDB's HEADER does for CSV: it writes what the option set to
-# true writes.
+# true writes. Files compared byte for byte here are written with PRESERVE_ORDER true: FASTQ, FASTA, SAM and BAM keep
+# no record order by default.
 statement ok
-COPY fq TO '{TEST_DIR}/bare_interleave.fq' (FORMAT FASTQ, INTERLEAVE);
+COPY fq TO '{TEST_DIR}/bare_interleave.fq' (FORMAT FASTQ, INTERLEAVE, PRESERVE_ORDER true);
 
 statement ok
-COPY fq TO '{TEST_DIR}/true_interleave.fq' (FORMAT FASTQ, INTERLEAVE true);
+COPY fq TO '{TEST_DIR}/true_interleave.fq' (FORMAT FASTQ, INTERLEAVE true, PRESERVE_ORDER true);
 
 query I
 SELECT (SELECT content FROM read_blob('{TEST_DIR}/bare_interleave.fq')) = (SELECT content FROM read_blob('{TEST_DIR}/true_interleave.fq'));
@@ -32,10 +33,10 @@ SELECT (SELECT content FROM read_blob('{TEST_DIR}/bare_interleave.fq')) = (SELEC
 true
 
 statement ok
-COPY (SELECT read_id, sequence1, sequence2 FROM fq) TO '{TEST_DIR}/bare_interleave.fa' (FORMAT FASTA, INTERLEAVE);
+COPY (SELECT read_id, sequence1, sequence2 FROM fq) TO '{TEST_DIR}/bare_interleave.fa' (FORMAT FASTA, INTERLEAVE, PRESERVE_ORDER true);
 
 statement ok
-COPY (SELECT read_id, sequence1, sequence2 FROM fq) TO '{TEST_DIR}/true_interleave.fa' (FORMAT FASTA, INTERLEAVE true);
+COPY (SELECT read_id, sequence1, sequence2 FROM fq) TO '{TEST_DIR}/true_interleave.fa' (FORMAT FASTA, INTERLEAVE true, PRESERVE_ORDER true);
 
 query I
 SELECT (SELECT content FROM read_blob('{TEST_DIR}/bare_interleave.fa')) = (SELECT content FROM read_blob('{TEST_DIR}/true_interleave.fa'));
@@ -43,10 +44,10 @@ SELECT (SELECT content FROM read_blob('{TEST_DIR}/bare_interleave.fa')) = (SELEC
 true
 
 statement ok
-COPY sam_test TO '{TEST_DIR}/bare_header.sam' (FORMAT SAM, INCLUDE_HEADER, REFERENCE_LENGTHS 'ref_table');
+COPY sam_test TO '{TEST_DIR}/bare_header.sam' (FORMAT SAM, INCLUDE_HEADER, REFERENCE_LENGTHS 'ref_table', PRESERVE_ORDER true);
 
 statement ok
-COPY sam_test TO '{TEST_DIR}/true_header.sam' (FORMAT SAM, INCLUDE_HEADER true, REFERENCE_LENGTHS 'ref_table');
+COPY sam_test TO '{TEST_DIR}/true_header.sam' (FORMAT SAM, INCLUDE_HEADER true, REFERENCE_LENGTHS 'ref_table', PRESERVE_ORDER true);
 
 query I
 SELECT (SELECT content FROM read_blob('{TEST_DIR}/bare_header.sam')) = (SELECT content FROM read_blob('{TEST_DIR}/true_header.sam'));
@@ -175,19 +176,19 @@ SELECT 'r' || i AS read_id,
 FROM range(2000) t(i);
 
 statement ok
-COPY varied TO '{TEST_DIR}/level1.fq.gz' (FORMAT FASTQ, COMPRESSION_LEVEL 1);
+COPY varied TO '{TEST_DIR}/level1.fq.gz' (FORMAT FASTQ, COMPRESSION_LEVEL 1, PRESERVE_ORDER true);
 
 statement ok
-COPY varied TO '{TEST_DIR}/level2.fq.gz' (FORMAT FASTQ, COMPRESSION_LEVEL 2);
+COPY varied TO '{TEST_DIR}/level2.fq.gz' (FORMAT FASTQ, COMPRESSION_LEVEL 2, PRESERVE_ORDER true);
 
 statement ok
-COPY varied TO '{TEST_DIR}/level3.fq.gz' (FORMAT FASTQ, COMPRESSION_LEVEL 3);
+COPY varied TO '{TEST_DIR}/level3.fq.gz' (FORMAT FASTQ, COMPRESSION_LEVEL 3, PRESERVE_ORDER true);
 
 statement ok
-COPY varied TO '{TEST_DIR}/level_str3.fq.gz' (FORMAT FASTQ, COMPRESSION_LEVEL '3');
+COPY varied TO '{TEST_DIR}/level_str3.fq.gz' (FORMAT FASTQ, COMPRESSION_LEVEL '3', PRESERVE_ORDER true);
 
 statement ok
-COPY varied TO '{TEST_DIR}/level_frac.fq.gz' (FORMAT FASTQ, COMPRESSION_LEVEL 1.6);
+COPY varied TO '{TEST_DIR}/level_frac.fq.gz' (FORMAT FASTQ, COMPRESSION_LEVEL 1.6, PRESERVE_ORDER true);
 
 query IIII
 SELECT (SELECT content FROM read_blob('{TEST_DIR}/level1.fq.gz')) <> (SELECT content FROM read_blob('{TEST_DIR}/level2.fq.gz')),

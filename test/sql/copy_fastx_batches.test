@@ -19,6 +19,10 @@ SELECT info.rows::BIGINT AS rows, info.size::BIGINT AS size, info.reason AS reas
 FROM duckdb_logs_parsed('PhysicalOperator')
 WHERE class = 'PhysicalCopyToFile' AND event = 'FlushBatch' AND parse_filename(info.file) = name;
 
+# A COPY whose batches are counted exactly, or whose bytes are compared with another's, says PRESERVE_ORDER true:
+# these formats keep no order by default, and on all threads a source scanned as several tasks would split the rows
+# into other batches, in another order.
+
 # A gzipped file's text. read_text does not decompress, so it is rebuilt from the lines read_csv decompresses, which is
 # exact for these files: LF line endings, no empty line, a newline at the end. (The same macro as prodigal_fasta.test.)
 statement ok
@@ -86,7 +90,7 @@ true	50	4	true
 # can pass 64 rows; four chunks of 16 make exactly 64.)
 
 statement ok
-COPY (SELECT read_id, sequence1 FROM short_reads WHERE i % 128 = 0) TO '{TEST_DIR}/small_default.fasta' (FORMAT FASTA);
+COPY (SELECT read_id, sequence1 FROM short_reads WHERE i % 128 = 0) TO '{TEST_DIR}/small_default.fasta' (FORMAT FASTA, PRESERVE_ORDER true);
 
 query IIII
 SELECT count(*), sum(rows), min(rows), max(rows) FROM batches('small_default.fasta');
@@ -95,7 +99,7 @@ SELECT count(*), sum(rows), min(rows), max(rows) FROM batches('small_default.fas
 
 statement ok
 COPY (SELECT read_id, sequence1, qual1 FROM short_reads WHERE i % 128 = 0)
-TO '{TEST_DIR}/small_default.fastq' (FORMAT FASTQ);
+TO '{TEST_DIR}/small_default.fastq' (FORMAT FASTQ, PRESERVE_ORDER true);
 
 query IIII
 SELECT count(*), sum(rows), min(rows), max(rows) FROM batches('small_default.fastq');
@@ -107,7 +111,7 @@ SELECT count(*), sum(rows), min(rows), max(rows) FROM batches('small_default.fas
 
 statement ok
 COPY (SELECT read_id, sequence1 FROM short_reads WHERE i % 128 = 0)
-TO '{TEST_DIR}/small_rows1000.fasta' (FORMAT FASTA, ROW_GROUP_SIZE 1000);
+TO '{TEST_DIR}/small_rows1000.fasta' (FORMAT FASTA, ROW_GROUP_SIZE 1000, PRESERVE_ORDER true);
 
 query II
 SELECT count(*), sum(rows) FROM batches('small_rows1000.fasta');
@@ -116,7 +120,7 @@ SELECT count(*), sum(rows) FROM batches('small_rows1000.fasta');
 
 statement ok
 COPY (SELECT read_id, sequence1, qual1 FROM short_reads WHERE i % 128 = 0)
-TO '{TEST_DIR}/small_rows1000.fastq' (FORMAT FASTQ, ROW_GROUP_SIZE 1000);
+TO '{TEST_DIR}/small_rows1000.fastq' (FORMAT FASTQ, ROW_GROUP_SIZE 1000, PRESERVE_ORDER true);
 
 query II
 SELECT count(*), sum(rows) FROM batches('small_rows1000.fastq');
@@ -151,35 +155,35 @@ FROM (SELECT i, 'P' || i AS read_id,
 
 statement ok
 COPY (SELECT read_id, sequence1, sequence2 FROM huge_pairs)
-TO '{TEST_DIR}/hp_deferred.{ORIENTATION}.fasta' (FORMAT FASTA, ROW_GROUP_SIZE 1000, ROW_GROUP_SIZE_BYTES '1GB');
+TO '{TEST_DIR}/hp_deferred.{ORIENTATION}.fasta' (FORMAT FASTA, ROW_GROUP_SIZE 1000, ROW_GROUP_SIZE_BYTES '1GB', PRESERVE_ORDER true);
 
 statement ok
-COPY (SELECT read_id, sequence1, sequence2 FROM huge_pairs) TO '{TEST_DIR}/hp_prepared.{ORIENTATION}.fasta' (FORMAT FASTA);
-
-statement ok
-COPY (SELECT read_id, sequence1, sequence2 FROM huge_pairs)
-TO '{TEST_DIR}/hp_deferred_il.fasta' (FORMAT FASTA, INTERLEAVE true, ROW_GROUP_SIZE 1000, ROW_GROUP_SIZE_BYTES '1GB');
-
-statement ok
-COPY (SELECT read_id, sequence1, sequence2 FROM huge_pairs) TO '{TEST_DIR}/hp_prepared_il.fasta' (FORMAT FASTA, INTERLEAVE true);
+COPY (SELECT read_id, sequence1, sequence2 FROM huge_pairs) TO '{TEST_DIR}/hp_prepared.{ORIENTATION}.fasta' (FORMAT FASTA, PRESERVE_ORDER true);
 
 statement ok
 COPY (SELECT read_id, sequence1, sequence2 FROM huge_pairs)
-TO '{TEST_DIR}/hp_deferred_il.fasta.gz' (FORMAT FASTA, INTERLEAVE true, ROW_GROUP_SIZE 1000, ROW_GROUP_SIZE_BYTES '1GB');
+TO '{TEST_DIR}/hp_deferred_il.fasta' (FORMAT FASTA, INTERLEAVE true, ROW_GROUP_SIZE 1000, ROW_GROUP_SIZE_BYTES '1GB', PRESERVE_ORDER true);
+
+statement ok
+COPY (SELECT read_id, sequence1, sequence2 FROM huge_pairs) TO '{TEST_DIR}/hp_prepared_il.fasta' (FORMAT FASTA, INTERLEAVE true, PRESERVE_ORDER true);
+
+statement ok
+COPY (SELECT read_id, sequence1, sequence2 FROM huge_pairs)
+TO '{TEST_DIR}/hp_deferred_il.fasta.gz' (FORMAT FASTA, INTERLEAVE true, ROW_GROUP_SIZE 1000, ROW_GROUP_SIZE_BYTES '1GB', PRESERVE_ORDER true);
 
 statement ok
 COPY (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM huge_pairs WHERE i <= 18)
-TO '{TEST_DIR}/hp_deferred.{ORIENTATION}.fastq' (FORMAT FASTQ, ROW_GROUP_SIZE 1000, ROW_GROUP_SIZE_BYTES '1GB');
+TO '{TEST_DIR}/hp_deferred.{ORIENTATION}.fastq' (FORMAT FASTQ, ROW_GROUP_SIZE 1000, ROW_GROUP_SIZE_BYTES '1GB', PRESERVE_ORDER true);
 
 statement ok
-COPY (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM huge_pairs WHERE i <= 18) TO '{TEST_DIR}/hp_prepared.{ORIENTATION}.fastq' (FORMAT FASTQ);
+COPY (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM huge_pairs WHERE i <= 18) TO '{TEST_DIR}/hp_prepared.{ORIENTATION}.fastq' (FORMAT FASTQ, PRESERVE_ORDER true);
 
 statement ok
 COPY (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM huge_pairs WHERE i <= 18)
-TO '{TEST_DIR}/hp_deferred_il.fastq' (FORMAT FASTQ, INTERLEAVE true, ROW_GROUP_SIZE 1000, ROW_GROUP_SIZE_BYTES '1GB');
+TO '{TEST_DIR}/hp_deferred_il.fastq' (FORMAT FASTQ, INTERLEAVE true, ROW_GROUP_SIZE 1000, ROW_GROUP_SIZE_BYTES '1GB', PRESERVE_ORDER true);
 
 statement ok
-COPY (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM huge_pairs WHERE i <= 18) TO '{TEST_DIR}/hp_prepared_il.fastq' (FORMAT FASTQ, INTERLEAVE true);
+COPY (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM huge_pairs WHERE i <= 18) TO '{TEST_DIR}/hp_prepared_il.fastq' (FORMAT FASTQ, INTERLEAVE true, PRESERVE_ORDER true);
 
 # Each deferred COPY was one batch of more than 64 MiB; the oracle's were not.
 query III
@@ -424,7 +428,7 @@ SELECT i, 't' || i AS read_id,
 FROM range(0, 5000) r(i);
 
 statement ok
-COPY (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM tiny) TO '{TEST_DIR}/tiny.fastq' (FORMAT FASTQ, INTERLEAVE true);
+COPY (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM tiny) TO '{TEST_DIR}/tiny.fastq' (FORMAT FASTQ, INTERLEAVE true, PRESERVE_ORDER true);
 
 query I
 SELECT (SELECT content FROM read_text('{TEST_DIR}/tiny.fastq')) = (
@@ -441,13 +445,13 @@ true
 # writes the same bytes, without the cap.
 
 statement ok
-COPY (SELECT read_id, sequence1 FROM short_reads WHERE i < 3000) TO '{TEST_DIR}/public.fasta' (FORMAT FASTA, LINE_WIDTH 10);
+COPY (SELECT read_id, sequence1 FROM short_reads WHERE i < 3000) TO '{TEST_DIR}/public.fasta' (FORMAT FASTA, LINE_WIDTH 10, PRESERVE_ORDER true);
 
 statement ok
 COPY (SELECT read_id, sequence1 FROM short_reads WHERE i < 3000) TO '{TEST_DIR}/hidden.fasta' (FORMAT _miint_fasta, LINE_WIDTH 10);
 
 statement ok
-COPY (SELECT read_id, sequence1, qual1 FROM short_reads WHERE i < 3000) TO '{TEST_DIR}/public.fastq' (FORMAT FASTQ, QUAL_OFFSET 64);
+COPY (SELECT read_id, sequence1, qual1 FROM short_reads WHERE i < 3000) TO '{TEST_DIR}/public.fastq' (FORMAT FASTQ, QUAL_OFFSET 64, PRESERVE_ORDER true);
 
 statement ok
 COPY (SELECT read_id, sequence1, qual1 FROM short_reads WHERE i < 3000)

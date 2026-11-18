@@ -26,17 +26,18 @@ class CopyStatement;
 // Constants
 //===--------------------------------------------------------------------===//
 constexpr idx_t DEFAULT_COPY_FLUSH_SIZE = 1024 * 1024; // 1MB default buffer size
-// The batch cap FASTA/FASTQ add when the statement gives none (ROW_GROUP_SIZE, ROW_GROUP_SIZE_BYTES). DuckDB flushes a
-// batch once it holds at least this many rows, or once it reaches this many bytes; only the byte cap cuts an input
-// chunk. The bytes bound the memory a batch of long records takes; the rows gather small input chunks. 8 MB rather
-// than more: with order kept one thread copies, formats and writes every batch, and FORMAT FASTA of a genome set from
-// 2-record Parquet files ran 7% slower with 64 MB batches than with 8 MB ones (8 threads, three runs each, spread 3%);
-// Revio HiFi reads agreed. Smaller batches also hold less memory.
+// The batch cap SequenceCopyPlan adds when the statement gives none (ROW_GROUP_SIZE,
+// ROW_GROUP_SIZE_BYTES). DuckDB flushes a batch once it holds at least this many rows, or once it reaches this many
+// bytes; only the byte cap cuts an input chunk. The bytes bound the memory a batch of long records takes; the rows
+// gather small input chunks. 8 MB rather than more: with order kept one thread copies, formats and writes every batch,
+// and FORMAT FASTA of a genome set from 2-record Parquet files ran 7% slower with 64 MB batches than with 8 MB ones (8
+// threads, three runs each, spread 3%); Revio HiFi reads agreed. Smaller batches also hold less memory.
 constexpr idx_t SEQUENCE_DEFAULT_BATCH_ROWS = 64;
 constexpr const char *SEQUENCE_DEFAULT_BATCH_BYTES = "8MB";
 // A batch whose output is larger than this is formatted in flush_batch and written out each time
 // DEFAULT_COPY_FLUSH_SIZE has gathered, rather than formatted into one buffer when it is prepared: that buffer would
-// sit outside DuckDB's memory_limit. A record larger than DEFAULT_COPY_FLUSH_SIZE is still held whole.
+// sit outside DuckDB's memory_limit. A record larger than DEFAULT_COPY_FLUSH_SIZE is still held whole. FASTA/FASTQ
+// defer the whole batch; SAM/BAM keep the records that fit and defer the rest (RecordPrepareBatch).
 constexpr idx_t SEQUENCE_DEFER_FORMAT_BYTES = 64ULL * 1024 * 1024;
 // FASTQ/FASTA gzip level when COMPRESSION_LEVEL is not given. COPY usually writes whole read sets,
 // such as every read that survives a host filter; there, level 1 compressed about three times as fast
@@ -272,17 +273,19 @@ unique_ptr<GlobalFunctionData> SequenceCopyInitializeGlobal(ClientContext &conte
 void SequenceCopyFinalize(SequenceCopyGlobalState &gstate);
 
 //===--------------------------------------------------------------------===//
-// Sequence Copy on DuckDB's Batch API (FASTA/FASTQ)
+// Sequence Copy on DuckDB's Batch API
 //===--------------------------------------------------------------------===//
-// FORMAT FASTA/FASTQ are two registrations each: the public one ("fasta") declares the options, the extension and a
-// plan callback, SequenceCopyPlan, which rebinds the statement as the writer ("_miint_fasta"). See
-// docs/internals/architecture.md, "Record writers on DuckDB's batch API".
+// Each format here is two registrations: the public one ("fasta") declares the options, the extension and a plan
+// callback, SequenceCopyPlan, which rebinds the statement as the writer ("_miint_fasta"). See
+// docs/internals/architecture.md, "Record writers on DuckDB's batch API". The batch data and prepare/flush below are
+// FASTA/FASTQ's; SAM/BAM's follow under "Record Writers".
 
 // REGULAR when insertion order is kept, PARALLEL when it is not; never BATCH (see the architecture notes).
 CopyFunctionExecutionMode SequenceCopyExecutionMode(bool preserve_insertion_order, bool supports_batch_index);
 
-// The public registration's plan callback: adds ROW_GROUP_SIZE and ROW_GROUP_SIZE_BYTES where absent, then binds the
-// statement as `writer_format`.
+// The public registration's plan callback: adds ROW_GROUP_SIZE and ROW_GROUP_SIZE_BYTES where absent, binds the
+// statement as `writer_format`, and turns insertion order off unless the query has an ORDER BY or the COPY gives
+// PRESERVE_ORDER.
 BoundStatement SequenceCopyPlan(Binder &binder, CopyStatement &stmt, const string &writer_format);
 
 // Where a record's text goes, named for the {ORIENTATION} files: R1 (which also takes the R2 records of interleaved
@@ -502,6 +505,139 @@ void SequenceFlushBatch(ClientContext &context, SequenceCopyGlobalState &gstate,
 	}
 	gstate.saw_paired |= batch.saw_paired;
 	gstate.saw_single |= batch.saw_single;
+}
+
+//===--------------------------------------------------------------------===//
+// Record Writers on DuckDB's Batch API (SAM, BAM)
+//===--------------------------------------------------------------------===//
+// The SAM and BAM writers write one stream of records, each built from one row. A record's size is known only once it
+// is built, so a batch's records are kept as they are built, up to SEQUENCE_DEFER_FORMAT_BYTES; the rows after that
+// are built again in flush_batch. DuckDB caps a batch by its input rows, and SEQUENCE_DATA's reads are not part of
+// them, so a batch of small rows can make records of any size.
+
+// A batch's records in output order, each starting on an 8-byte boundary (a BAM record's fields are read as integers).
+// Kept in blocks, so a record never moves once built.
+class RecordBuffer {
+public:
+	explicit RecordBuffer(Allocator &allocator_p) : allocator(allocator_p) {
+	}
+
+	// Room for the next record, of `size` bytes, valid until the buffer is next changed.
+	data_ptr_t Reserve(idx_t size);
+	// Drops the last record.
+	void PopBack();
+	// Drops every record and frees their memory.
+	void Clear();
+
+	// The records' bytes, not counting the padding between them.
+	idx_t Size() const {
+		return size;
+	}
+	idx_t Count() const {
+		return records.size();
+	}
+
+	// Calls `fun(data, size)` for each record, in order.
+	template <class FUN>
+	void ForEach(FUN &&fun) const {
+		for (auto &record : records) {
+			fun(const_data_ptr_t(blocks[record.block].data.get() + record.offset), record.size);
+		}
+	}
+
+private:
+	struct Block {
+		AllocatedData data;
+		idx_t used;
+	};
+	struct Record {
+		idx_t block;
+		idx_t offset;
+		idx_t size;
+	};
+
+	Allocator &allocator;
+	vector<Block> blocks;
+	vector<Record> records;
+	idx_t size = 0;
+};
+
+// A batch as prepare_batch leaves it for flush_batch: the records built, and, when they would have passed
+// SEQUENCE_DEFER_FORMAT_BYTES, the batch's rows, of which those from `deferred_from` on are still to be built.
+struct RecordBatchData : public PreparedBatchData {
+	explicit RecordBatchData(Allocator &allocator) : records(allocator) {
+	}
+
+	RecordBuffer records;
+	unique_ptr<ColumnDataCollection> deferred;
+	idx_t deferred_from = 0; // a row index across the collection's chunks
+};
+
+// What a writer supplies, ENCODER:
+//   SetChunk(chunk)      the chunk the next rows are in
+//   Encode(row, out)     checks the row and appends its record to `out` (out.Reserve); raises its data errors
+//   Check(row)           raises the data errors Encode would, without building the record's bytes
+// The encoder reads only what is the same for every output file (architecture.md, "Record writers on DuckDB's batch
+// API", Invariants).
+template <class ENCODER>
+unique_ptr<PreparedBatchData> RecordPrepareBatch(ClientContext &context, ENCODER &encoder,
+                                                 unique_ptr<ColumnDataCollection> rows) {
+	auto batch = make_uniq<RecordBatchData>(Allocator::Get(context));
+	bool deferring = false;
+	idx_t row_index = 0;
+	for (auto &chunk : rows->Chunks()) {
+		encoder.SetChunk(chunk);
+		for (idx_t row = 0; row < chunk.size(); row++, row_index++) {
+			if (deferring) {
+				// Built in flush_batch, so its errors are raised now.
+				encoder.Check(row);
+				continue;
+			}
+			encoder.Encode(row, batch->records);
+			if (batch->records.Size() > SEQUENCE_DEFER_FORMAT_BYTES) {
+				// Keep what fits: this record and the rest of the batch are built in flush_batch.
+				batch->records.PopBack();
+				batch->deferred_from = row_index;
+				deferring = true;
+			}
+		}
+	}
+	if (deferring) {
+		batch->deferred = std::move(rows);
+	}
+	return std::move(batch);
+}
+
+// flush_batch: hands `write(data, size)` each record in order. The kept ones first; then the deferred rows, built again
+// by the ENCODER `make_encoder()` returns, called only for a batch that has them, and handed over each time
+// DEFAULT_COPY_FLUSH_SIZE has gathered (a record larger than that is held whole).
+template <class MAKE_ENCODER, class WRITE>
+void RecordFlushBatch(ClientContext &context, RecordBatchData &batch, MAKE_ENCODER &&make_encoder, WRITE &&write) {
+	batch.records.ForEach(write);
+	if (!batch.deferred) {
+		return;
+	}
+	auto encoder = make_encoder();
+	RecordBuffer pending(Allocator::Get(context));
+	idx_t row_index = 0;
+	for (auto &chunk : batch.deferred->Chunks()) {
+		if (row_index + chunk.size() <= batch.deferred_from) {
+			row_index += chunk.size();
+			continue;
+		}
+		encoder.SetChunk(chunk);
+		for (idx_t row = 0; row < chunk.size(); row++, row_index++) {
+			if (row_index < batch.deferred_from) {
+				continue;
+			}
+			encoder.Encode(row, pending);
+			if (pending.Size() >= DEFAULT_COPY_FLUSH_SIZE) {
+				pending.ForEach(write);
+				pending.Clear();
+			}
+		}
+	}
+	pending.ForEach(write);
 }
 
 } // namespace duckdb

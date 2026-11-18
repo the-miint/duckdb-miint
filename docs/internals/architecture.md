@@ -48,11 +48,9 @@ Each file format has a record struct (SAMRecord, SequenceRecord, etc.) that:
 - Handles memory management with RAII
 
 ### Reference Table Pattern
-For headerless SAM files and SAM writing:
-- User provides DuckDB table name via parameter
-- `src/reference_table_reader.cpp` executes the query and extracts name/length columns
-- Validates reference names per SAM spec (no `*`, `=`, tabs, newlines, position patterns)
-- Returns `unordered_map<string, uint64_t>` for header construction
+`read_alignments`' headerless SAM and COPY SAM/BAM take reference lengths as the name of a table or view (`reference_lengths`, `REFERENCE_LENGTHS`). `src/reference_table_reader.cpp` reads its first two columns, a name (an id type, as its text) and a length, on a separate connection ([reading-tables-views.md](reading-tables-views.md)), and refuses an empty table, a NULL and a negative length; a repeated name keeps its first row.
+- `ReadReferenceTable` returns a name → length map, for `read_alignments`. `SAMReader` checks the names against the SAM spec (no leading `*` or `=`, no tabs or newlines, no position-like suffix).
+- `ReadReferenceTableSortedByName` returns (name, length) pairs sorted by name, for COPY SAM/BAM: a reference's place in the `@SQ` lines is its TID, so the order must not depend on the scan.
 
 ### Shared Table Function Utilities
 `src/include/table_function_common.hpp` / `.cpp` provides `ExpandGlobPattern` / `ExpandGlobPatternWithInfo` (a VARCHAR path or glob) and `ExpandPathList` (a VARCHAR[] of literal paths), which expand every path as DuckDB does (a `file:` URI to its local path, `~` to home), plus `IsStdinPath`, `SetResultVector*`, and similar helpers. Prefer these over re-implementing per-function: a reader that reads its path argument itself skips the expansion.
@@ -233,12 +231,13 @@ steps the computation one wave at a time.
 
 #### Record writers on DuckDB's batch API
 
-A COPY format that declares no `execution_mode` runs its whole pipeline on one thread ([duckdb-engine-notes.md](duckdb-engine-notes.md#copy-to)). FASTA and FASTQ write through `prepare_batch`/`flush_batch` instead, so that with order off the query and the formatting run on every thread.
+A COPY format that declares no `execution_mode` runs its whole pipeline on one thread ([duckdb-engine-notes.md](duckdb-engine-notes.md#copy-to)). The formats whose public registration plans through `SequenceCopyPlan` write through `prepare_batch`/`flush_batch` instead, so that with order off the query and the formatting run on every thread.
 
 - **Two registrations.**
   - The public one (`fasta`) has only `copy_options`, `extension` and a `plan` callback, `SequenceCopyPlan`. The callback adds `ROW_GROUP_SIZE 64` and `ROW_GROUP_SIZE_BYTES '8MB'`, each only when the statement has none of its own (why 8 MB: at `SEQUENCE_DEFAULT_BATCH_BYTES`). It then sets the format to the writer registration (`_miint_fasta`) and binds the statement again, which must be a different format ([duckdb-engine-notes.md](duckdb-engine-notes.md#copy-to)).
   - DuckDB checks the options against the public registration before calling `plan`, so an unknown option is reported against `FASTA`.
   - A path ending in `.fasta` reaches the callback too.
+  - SAM and BAM are the same: `sam`/`bam`, `_miint_sam`/`_miint_bam`.
 - **The writer registration** has `copy_options` and `copy_to_bind`, plus:
   - `copy_to_initialize_global` and `copy_to_finalize`;
   - `prepare_batch` and `flush_batch`;
@@ -246,14 +245,19 @@ A COPY format that declares no `execution_mode` runs its whole pipeline on one t
 
   It has no `copy_to_initialize_local`, `copy_to_sink` or `copy_to_combine`: DuckDB calls them only for a format without `prepare_batch`, and in BATCH mode.
 - **Mode** (`SequenceCopyExecutionMode`). REGULAR when insertion order is kept: one thread, input order, and output byte-identical at any thread count. PARALLEL when it is not.
-  - Order is off under `PRESERVE_ORDER false`, under `SET preserve_insertion_order = false` without an `ORDER BY`, for a source that declares `NO_ORDER`, and for `PARTITION_BY`/`PER_THREAD_OUTPUT`.
+  - **Order is off by default**, unlike DuckDB's own formats: a sequence file's records are a set. `SequenceCopyPlan` binds the statement, and when the COPY gives no `PRESERVE_ORDER` and no `LOGICAL_ORDER_BY` appears anywhere in its bound plan (`HasOrderBy`; the optimizer, which makes an `ORDER BY` with a `LIMIT` a top-N, has not run yet), sets the `LogicalCopyToFile`'s `preserve_order` to `DONT_PRESERVE_ORDER`. It must decide there: `execution_mode` is told only "order kept: yes/no", which an `ORDER BY` and the default setting both make yes.
+  - With an `ORDER BY`, DuckDB decides as it does for any COPY: an `ORDER BY` that reaches the COPY keeps order whatever `preserve_insertion_order` says ([duckdb-engine-notes.md](duckdb-engine-notes.md#copy-to)). One that does not (under an aggregate, say) leaves the setting to decide, so "anywhere" errs toward keeping order: slower, never wrong.
+  - Order is also off under `PRESERVE_ORDER false` (which drops an `ORDER BY`), for a source that declares `NO_ORDER`, and for `PARTITION_BY`/`PER_THREAD_OUTPUT`. `PRESERVE_ORDER true` keeps it.
+  - The hidden writer registrations (`_miint_fasta` and so on) have no `plan` callback, so used directly they keep DuckDB's default.
   - Never BATCH: it holds each source batch whole before the writer sees it ([duckdb-engine-notes.md](duckdb-engine-notes.md#copy-to)), which for genome-length records is most of the input.
 - **Invariants.**
-  - `prepare_batch` reads the bind data and nothing else: it runs concurrently and may be handed another file's global state.
-  - `flush_batch` writes a batch's R1 and R2 text in one call, under the global lock. The R2 file is created on its first write. DuckDB calls it one batch at a time per file.
-  - Cross-row checks travel with the batch: `saw_paired`/`saw_single` are merged into the global state at flush, and `copy_to_finalize` checks them.
-  - Data errors are raised in `prepare_batch` and name the record's `read_id`: the row checks in the first pass, and a quality score past `~` when the second pass formats the record. A batch formatted only in `flush_batch` is checked (`Check`) before `prepare_batch` returns.
-- **Memory.** The text buffers sit outside DuckDB's buffer manager, so outside `memory_limit`. `prepare_batch` therefore makes two passes over a batch. The first checks every row and sums each record's exact size (`Size`). The second formats into buffers of exactly that size, allocated by the batch (an owning `MemoryStream` needs a power-of-two capacity). Text longer than its size fails in `WriteData`, and text shorter is an internal error, so `Size` and `Write` cannot drift apart unnoticed. A batch whose text would exceed `SEQUENCE_DEFER_FORMAT_BYTES` (64 MiB) is not formatted there: `flush_batch` formats it, writing to the file each time `DEFAULT_COPY_FLUSH_SIZE` (1 MiB) has gathered. A record larger than that is held whole, so this bounds a batch of many records, not one record's text.
+  - `prepare_batch` runs concurrently and may be handed another file's global state, so it reads the bind data and only what is the same in every file and fixed once the file is initialized: for SAM/BAM, the header of headered output and the `REFERENCE_LENGTHS`/`SEQUENCE_DATA` the COPY read.
+  - `flush_batch` writes a batch's output in one call, under the global lock: FASTA/FASTQ's R1 and R2 text (the R2 file is created on its first write), SAM/BAM's records in order. DuckDB calls it one batch at a time per file.
+  - Cross-row checks travel with the batch: FASTA/FASTQ merge `saw_paired`/`saw_single` into the global state at flush, and `copy_to_finalize` checks them.
+  - Data errors are raised in `prepare_batch` and name the record's `read_id`. FASTA/FASTQ raise the row checks in the first pass, and a quality score past `~` when the second pass formats the record; SAM/BAM raise every check while building the record, BAM's 32-bit limits included, so `flush_batch` writes every record it is given. Rows built only in `flush_batch` are checked (`Check`) before `prepare_batch` returns.
+  - SAM/BAM's write errors name the format and the file, and they check `sam_close`: htslib writes the end of the file when it closes it, and reports there a block write that failed on its threads.
+- **Memory.** The prepared output sits outside DuckDB's buffer manager, so outside `memory_limit`, and each writer bounds it. FASTA/FASTQ: `prepare_batch` makes two passes over a batch. The first checks every row and sums each record's exact size (`Size`). The second formats into buffers of exactly that size, allocated by the batch (an owning `MemoryStream` needs a power-of-two capacity). Text longer than its size fails in `WriteData`, and text shorter is an internal error, so `Size` and `Write` cannot drift apart unnoticed. A batch whose text would exceed `SEQUENCE_DEFER_FORMAT_BYTES` (64 MiB) is not formatted there: `flush_batch` formats it, writing to the file each time `DEFAULT_COPY_FLUSH_SIZE` (1 MiB) has gathered. A record larger than that is held whole, so this bounds a batch of many records, not one record's text.
+  - SAM/BAM: a record's size is known only once it is built, and DuckDB's byte cap does not see the reads `SEQUENCE_DATA` adds, so a batch's records have no bound from the cap. `prepare_batch` keeps each record as it is built, in a `RecordBuffer` (1 MiB blocks; each record 8-byte aligned, as BAM's integer fields need, and never moved), up to `SEQUENCE_DEFER_FORMAT_BYTES`. The record that passes it is dropped, the rows from it on are checked and kept, and `flush_batch` writes the kept records, then builds those rows again, writing each time 1 MiB has gathered.
 - **Code.** `SequencePrepareBatch` and `SequenceFlushBatch` (`src/include/copy_format_common.hpp`) are templates over a writer's FORMAT:
   - `Visit` walks a chunk, checking rows and emitting records to the R1 or R2 stream;
   - `Size` returns a record's exact length as text;
@@ -261,12 +265,20 @@ A COPY format that declares no `execution_mode` runs its whole pipeline on one t
   - `Check` raises the data error `Write` would, without writing, for a batch formatted only in `flush_batch`.
 
   `SequenceChunkReader` holds what FASTA and FASTQ read alike: the id and comment, `sequence1`/`sequence2` (as references into the vector, since a short string lives inside its `string_t`: [duckdb-engine-notes.md](duckdb-engine-notes.md#execution-format-vectors)), the R2 routing, and the NULL errors.
+
+  `RecordPrepareBatch` and `RecordFlushBatch` (same header) are the one-stream writers' templates, over an ENCODER: `SetChunk`; `Encode(row, out)`, which checks the row and appends its record (`out.Reserve`); and `Check(row)`, which raises what `Encode` would. SAM and BAM share one, `SAMRecordEncoder` (`src/copy_sam.cpp`):
+  - it builds the row into a `bam1_t`, then stores the `sam_format1` line, or the BAM core and data;
+  - headered output's header is written at init, and every batch takes TIDs from one name → TID map, read with the relations once per COPY (`SAMCopyRelationsCache`);
+  - headerless SAM gives each encoder a header of its own holding the references its batch meets (`BatchReferences`): RNAME and RNEXT print by name, so a batch's TIDs do not reach the bytes;
+  - `flush_batch` writes record by record, so the BGZF blocks fall where writing each record with `sam_write1` puts them, whatever the batches (BAM through `sam_write1` on a `bam1_t` view of the stored record; gzip SAM with `bgzf_flush_try` then `bgzf_write`; plain SAM with `hwrite`). The htslib behavior behind these: [embedded-tools.md](embedded-tools.md#htslib-1221).
 - **The cap's semantics.** A batch closes at whichever cap it reaches first; only `ROW_GROUP_SIZE_BYTES` cuts a chunk, and the batch keeps the row that crosses it: [duckdb-engine-notes.md](duckdb-engine-notes.md#copy-to).
 - **Tests to copy.**
   - `test/sql/copy_fastx_bytes.test`: the md5 of each output, pinned at 1 and 8 threads.
   - `test/sql/copy_fastx_batches.test`: the cap, observed in DuckDB's `PhysicalOperator` log; batches over 64 MiB against small ones; paired and single-end rows in different batches; errors; short reads against text built in SQL; the registrations.
-  - `test/sql/copy_fastx_parallel.test`: from a source that can be scanned in parallel, input order with order kept (which tells REGULAR from PARALLEL), and record multisets, mates and partitions with order off.
+  - `test/sql/copy_fastx_parallel.test`: from a source that can be scanned in parallel, input order with `PRESERVE_ORDER true` (which tells REGULAR from PARALLEL), an `ORDER BY`'s order with no option, and record multisets, mates and partitions with order off.
+  - `test/cpp/test_CopySequenceOrder.cpp` (`tests_duckdb`): the mode DuckDB plans for each COPY (`PhysicalCopyToFile::parallel`), with and without an `ORDER BY` and `PRESERVE_ORDER`, which no SQL test can see: a COPY that runs on all threads can still write in order. At 20,000 rows DuckDB's sort hands its rows on in order even to a COPY on all threads, so an SQL test that an `ORDER BY` is kept needs more rows (the FASTA case in `copy_fastx_parallel.test` and the BAM case in `copy_sam_parallel.test` sort 200,000).
   - `test/cpp/test_CopySequenceDeferral.cpp` (`tests_duckdb`): which batches are formatted in `flush_batch`, which no SQL test can see.
+  - SAM/BAM's counterparts: `copy_sam_bytes.test`, `copy_sam_batches.test` (with batches over 64 MiB from `SEQUENCE_DATA`, and data errors raised before any batch is written), `copy_sam_parallel.test` and `test_CopyRecordDeferral.cpp`; and `test_CopySamWriteFailure.cpp`, a failed write or close under a lowered `RLIMIT_FSIZE`.
 
 ### Adding scalar/aggregate functions
 1. Implement in appropriate source file

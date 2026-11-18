@@ -52,116 +52,120 @@ foreach threads 1 8
 statement ok
 SET threads={threads};
 
+# Every COPY below whose records are compared in order says PRESERVE_ORDER true: these formats keep no order by
+# default, and without it the bytes would match at 1 and 8 threads only because each source here is scanned as one
+# task. The empty outputs need none.
+
 # FASTA
 
 statement ok
-COPY (SELECT read_id, sequence1 FROM reads WHERE i <= 300) TO '{TEST_DIR}/fxb{threads}_fa_plain.fasta' (FORMAT FASTA);
+COPY (SELECT read_id, sequence1 FROM reads WHERE i <= 300) TO '{TEST_DIR}/fxb{threads}_fa_plain.fasta' (FORMAT FASTA, PRESERVE_ORDER true);
 
 statement ok
 COPY (SELECT read_id, comment, sequence1 FROM reads WHERE i <= 300)
-TO '{TEST_DIR}/fxb{threads}_fa_comment.fasta' (FORMAT FASTA, INCLUDE_COMMENT true);
+TO '{TEST_DIR}/fxb{threads}_fa_comment.fasta' (FORMAT FASTA, INCLUDE_COMMENT true, PRESERVE_ORDER true);
 
 statement ok
 COPY (SELECT i AS sequence_index, read_id, sequence1 FROM reads WHERE i <= 300)
-TO '{TEST_DIR}/fxb{threads}_fa_seqindex.fasta' (FORMAT FASTA, ID_AS_SEQUENCE_INDEX true);
+TO '{TEST_DIR}/fxb{threads}_fa_seqindex.fasta' (FORMAT FASTA, ID_AS_SEQUENCE_INDEX true, PRESERVE_ORDER true);
 
 statement ok
-COPY (SELECT i AS read_id, sequence1 FROM reads WHERE i <= 300) TO '{TEST_DIR}/fxb{threads}_fa_bigint.fasta' (FORMAT FASTA);
+COPY (SELECT i AS read_id, sequence1 FROM reads WHERE i <= 300) TO '{TEST_DIR}/fxb{threads}_fa_bigint.fasta' (FORMAT FASTA, PRESERVE_ORDER true);
 
 statement ok
 COPY (SELECT md5(i::VARCHAR)::UUID AS read_id, sequence1 FROM reads WHERE i <= 300)
-TO '{TEST_DIR}/fxb{threads}_fa_uuid.fasta' (FORMAT FASTA);
+TO '{TEST_DIR}/fxb{threads}_fa_uuid.fasta' (FORMAT FASTA, PRESERVE_ORDER true);
 
 statement ok
 COPY (SELECT read_id, sequence1 FROM reads WHERE i <= 300)
-TO '{TEST_DIR}/fxb{threads}_fa_width60.fasta' (FORMAT FASTA, LINE_WIDTH 60);
+TO '{TEST_DIR}/fxb{threads}_fa_width60.fasta' (FORMAT FASTA, LINE_WIDTH 60, PRESERVE_ORDER true);
 
 statement ok
 COPY (SELECT read_id, sequence1, sequence2 FROM reads WHERE i <= 300)
-TO '{TEST_DIR}/fxb{threads}_fa_interleave.fasta' (FORMAT FASTA, INTERLEAVE true);
+TO '{TEST_DIR}/fxb{threads}_fa_interleave.fasta' (FORMAT FASTA, INTERLEAVE true, PRESERVE_ORDER true);
 
 statement ok
 COPY (SELECT read_id, sequence1, sequence2 FROM reads WHERE i <= 300)
-TO '{TEST_DIR}/fxb{threads}_fa_split.{ORIENTATION}.fasta' (FORMAT FASTA);
+TO '{TEST_DIR}/fxb{threads}_fa_split.{ORIENTATION}.fasta' (FORMAT FASTA, PRESERVE_ORDER true);
 
 statement ok
 COPY (SELECT read_id, sequence1 FROM reads WHERE i <= 300)
-TO '{TEST_DIR}/fxb{threads}_fa_plain.fasta.gz' (FORMAT FASTA, COMPRESSION gzip);
+TO '{TEST_DIR}/fxb{threads}_fa_plain.fasta.gz' (FORMAT FASTA, COMPRESSION gzip, PRESERVE_ORDER true);
 
 statement ok
 COPY (SELECT read_id, sequence1, sequence2 FROM reads WHERE i <= 300)
-TO '{TEST_DIR}/fxb{threads}_fa_split.{ORIENTATION}.fasta.gz' (FORMAT FASTA, COMPRESSION gzip);
+TO '{TEST_DIR}/fxb{threads}_fa_split.{ORIENTATION}.fasta.gz' (FORMAT FASTA, COMPRESSION gzip, PRESERVE_ORDER true);
 
 statement ok
-COPY (SELECT read_id, comment, sequence1 FROM reads) TO '{TEST_DIR}/fxb{threads}_fa_all.fasta' (FORMAT FASTA, INCLUDE_COMMENT true);
+COPY (SELECT read_id, comment, sequence1 FROM reads) TO '{TEST_DIR}/fxb{threads}_fa_all.fasta' (FORMAT FASTA, INCLUDE_COMMENT true, PRESERVE_ORDER true);
 
 statement ok
-COPY (SELECT read_id, sequence1 FROM long_reads) TO '{TEST_DIR}/fxb{threads}_fa_long.fasta' (FORMAT FASTA);
+COPY (SELECT read_id, sequence1 FROM long_reads) TO '{TEST_DIR}/fxb{threads}_fa_long.fasta' (FORMAT FASTA, PRESERVE_ORDER true);
 
 statement ok
 COPY (FROM (VALUES ('e1', 'ACGT'), ('e2', ''), ('e3', 'GG')) v(read_id, sequence1))
-TO '{TEST_DIR}/fxb{threads}_fa_empty_seq.fasta' (FORMAT FASTA);
+TO '{TEST_DIR}/fxb{threads}_fa_empty_seq.fasta' (FORMAT FASTA, PRESERVE_ORDER true);
 
 statement ok
 COPY (SELECT read_id, sequence1 FROM reads WHERE false) TO '{TEST_DIR}/fxb{threads}_fa_zero_rows.fasta' (FORMAT FASTA);
 
 statement ok
 COPY (SELECT read_id, sequence1 FROM huge)
-TO '{TEST_DIR}/fxb{threads}_fa_huge.fasta' (FORMAT FASTA, ROW_GROUP_SIZE 1000, ROW_GROUP_SIZE_BYTES '1GB');
+TO '{TEST_DIR}/fxb{threads}_fa_huge.fasta' (FORMAT FASTA, ROW_GROUP_SIZE 1000, ROW_GROUP_SIZE_BYTES '1GB', PRESERVE_ORDER true);
 
 # FASTQ
 
 statement ok
-COPY (SELECT read_id, sequence1, qual1 FROM reads WHERE i <= 300) TO '{TEST_DIR}/fxb{threads}_fq_plain.fastq' (FORMAT FASTQ);
+COPY (SELECT read_id, sequence1, qual1 FROM reads WHERE i <= 300) TO '{TEST_DIR}/fxb{threads}_fq_plain.fastq' (FORMAT FASTQ, PRESERVE_ORDER true);
 
 statement ok
 COPY (SELECT read_id, comment, sequence1, qual1 FROM reads WHERE i <= 300)
-TO '{TEST_DIR}/fxb{threads}_fq_comment.fastq' (FORMAT FASTQ, INCLUDE_COMMENT true);
+TO '{TEST_DIR}/fxb{threads}_fq_comment.fastq' (FORMAT FASTQ, INCLUDE_COMMENT true, PRESERVE_ORDER true);
 
 statement ok
 COPY (SELECT i AS sequence_index, read_id, sequence1, qual1 FROM reads WHERE i <= 300)
-TO '{TEST_DIR}/fxb{threads}_fq_seqindex.fastq' (FORMAT FASTQ, ID_AS_SEQUENCE_INDEX true);
+TO '{TEST_DIR}/fxb{threads}_fq_seqindex.fastq' (FORMAT FASTQ, ID_AS_SEQUENCE_INDEX true, PRESERVE_ORDER true);
 
 statement ok
-COPY (SELECT i AS read_id, sequence1, qual1 FROM reads WHERE i <= 300) TO '{TEST_DIR}/fxb{threads}_fq_bigint.fastq' (FORMAT FASTQ);
+COPY (SELECT i AS read_id, sequence1, qual1 FROM reads WHERE i <= 300) TO '{TEST_DIR}/fxb{threads}_fq_bigint.fastq' (FORMAT FASTQ, PRESERVE_ORDER true);
 
 statement ok
 COPY (SELECT md5(i::VARCHAR)::UUID AS read_id, sequence1, qual1 FROM reads WHERE i <= 300)
-TO '{TEST_DIR}/fxb{threads}_fq_uuid.fastq' (FORMAT FASTQ);
+TO '{TEST_DIR}/fxb{threads}_fq_uuid.fastq' (FORMAT FASTQ, PRESERVE_ORDER true);
 
 statement ok
 COPY (SELECT read_id, sequence1, qual1 FROM reads WHERE i <= 300)
-TO '{TEST_DIR}/fxb{threads}_fq_offset64.fastq' (FORMAT FASTQ, QUAL_OFFSET 64);
+TO '{TEST_DIR}/fxb{threads}_fq_offset64.fastq' (FORMAT FASTQ, QUAL_OFFSET 64, PRESERVE_ORDER true);
 
 statement ok
 COPY (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM reads WHERE i <= 300)
-TO '{TEST_DIR}/fxb{threads}_fq_interleave.fastq' (FORMAT FASTQ, INTERLEAVE true);
+TO '{TEST_DIR}/fxb{threads}_fq_interleave.fastq' (FORMAT FASTQ, INTERLEAVE true, PRESERVE_ORDER true);
 
 statement ok
 COPY (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM reads WHERE i <= 300)
-TO '{TEST_DIR}/fxb{threads}_fq_split.{ORIENTATION}.fastq' (FORMAT FASTQ);
+TO '{TEST_DIR}/fxb{threads}_fq_split.{ORIENTATION}.fastq' (FORMAT FASTQ, PRESERVE_ORDER true);
 
 statement ok
 COPY (SELECT read_id, sequence1, qual1 FROM reads WHERE i <= 300)
-TO '{TEST_DIR}/fxb{threads}_fq_plain.fastq.gz' (FORMAT FASTQ, COMPRESSION gzip);
+TO '{TEST_DIR}/fxb{threads}_fq_plain.fastq.gz' (FORMAT FASTQ, COMPRESSION gzip, PRESERVE_ORDER true);
 
 statement ok
 COPY (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM reads WHERE i <= 300)
-TO '{TEST_DIR}/fxb{threads}_fq_split.{ORIENTATION}.fastq.gz' (FORMAT FASTQ, COMPRESSION gzip);
+TO '{TEST_DIR}/fxb{threads}_fq_split.{ORIENTATION}.fastq.gz' (FORMAT FASTQ, COMPRESSION gzip, PRESERVE_ORDER true);
 
 statement ok
 COPY (SELECT read_id, comment, sequence1, qual1 FROM reads)
-TO '{TEST_DIR}/fxb{threads}_fq_all.fastq' (FORMAT FASTQ, INCLUDE_COMMENT true);
+TO '{TEST_DIR}/fxb{threads}_fq_all.fastq' (FORMAT FASTQ, INCLUDE_COMMENT true, PRESERVE_ORDER true);
 
 statement ok
 COPY (SELECT read_id, sequence1, list_transform(range(length(sequence1)), lambda j: ((i * 3 + j) % 41)::UTINYINT) AS qual1
       FROM long_reads WHERE i <= 200)
-TO '{TEST_DIR}/fxb{threads}_fq_long.fastq' (FORMAT FASTQ);
+TO '{TEST_DIR}/fxb{threads}_fq_long.fastq' (FORMAT FASTQ, PRESERVE_ORDER true);
 
 statement ok
 COPY (FROM (VALUES ('e1', 'ACGT', [30, 31, 32, 33]::UTINYINT[]), ('e2', '', []::UTINYINT[]), ('e3', 'GG', [40, 2]::UTINYINT[]))
            v(read_id, sequence1, qual1))
-TO '{TEST_DIR}/fxb{threads}_fq_empty_seq.fastq' (FORMAT FASTQ);
+TO '{TEST_DIR}/fxb{threads}_fq_empty_seq.fastq' (FORMAT FASTQ, PRESERVE_ORDER true);
 
 statement ok
 COPY (SELECT read_id, sequence1, qual1 FROM reads WHERE false) TO '{TEST_DIR}/fxb{threads}_fq_zero_rows.fastq' (FORMAT FASTQ);
@@ -169,7 +173,7 @@ COPY (SELECT read_id, sequence1, qual1 FROM reads WHERE false) TO '{TEST_DIR}/fx
 statement ok
 COPY (SELECT read_id, sequence1, list_transform(range(length(sequence1)), lambda j: ((i * 7 + j * 13) % 41)::UTINYINT) AS qual1
       FROM huge WHERE i <= 40)
-TO '{TEST_DIR}/fxb{threads}_fq_huge.fastq' (FORMAT FASTQ, ROW_GROUP_SIZE 1000, ROW_GROUP_SIZE_BYTES '1GB');
+TO '{TEST_DIR}/fxb{threads}_fq_huge.fastq' (FORMAT FASTQ, ROW_GROUP_SIZE 1000, ROW_GROUP_SIZE_BYTES '1GB', PRESERVE_ORDER true);
 
 # Read back on one thread: the outputs are what is under test, not the readers.
 statement ok

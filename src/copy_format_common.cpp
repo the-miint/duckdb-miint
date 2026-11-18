@@ -8,6 +8,7 @@
 #include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/parser/statement/copy_statement.hpp"
 #include "duckdb/planner/binder.hpp"
+#include "duckdb/planner/operator/logical_copy_to_file.hpp"
 
 #include <htslib-1.22.1/htslib/bgzf.h>
 #include <cerrno>
@@ -419,6 +420,20 @@ CopyFunctionExecutionMode SequenceCopyExecutionMode(bool preserve_insertion_orde
 	                                : CopyFunctionExecutionMode::PARALLEL_COPY_TO_FILE;
 }
 
+// Whether an ORDER BY sorts any part of a query's plan, as bound: before the optimizer, which makes an ORDER BY with a
+// LIMIT a top-N.
+static bool HasOrderBy(const LogicalOperator &op) {
+	if (op.type == LogicalOperatorType::LOGICAL_ORDER_BY) {
+		return true;
+	}
+	for (auto &child : op.children) {
+		if (HasOrderBy(*child)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 BoundStatement SequenceCopyPlan(Binder &binder, CopyStatement &stmt, const string &writer_format) {
 	auto &info = *stmt.info;
 	// Option names are identifiers, which compare case-insensitively.
@@ -429,7 +444,55 @@ BoundStatement SequenceCopyPlan(Binder &binder, CopyStatement &stmt, const strin
 		info.options["row_group_size_bytes"] = {Value(SEQUENCE_DEFAULT_BATCH_BYTES)};
 	}
 	info.format = writer_format;
-	return binder.Bind(stmt);
+	auto result = binder.Bind(stmt);
+	// A sequence file's records are a set unless the query sorts them, so order is kept only for an ORDER BY or
+	// PRESERVE_ORDER true, not by default as DuckDB does. With an ORDER BY, DuckDB decides: one that reaches the COPY
+	// keeps its order. An ORDER BY anywhere counts, so a query whose sort DuckDB would not keep (one under an
+	// aggregate, say) keeps the insertion order: slower, never wrong.
+	auto &copy = result.plan->Cast<LogicalCopyToFile>();
+	if (copy.preserve_order == PreserveOrderType::AUTOMATIC && !HasOrderBy(*copy.children[0])) {
+		copy.preserve_order = PreserveOrderType::DONT_PRESERVE_ORDER;
+	}
+	return result;
+}
+
+//===--------------------------------------------------------------------===//
+// Record Writers on DuckDB's Batch API
+//===--------------------------------------------------------------------===//
+// Records are gathered into blocks of this size; a larger record gets a block of its own.
+static constexpr idx_t RECORD_BLOCK_SIZE = DEFAULT_COPY_FLUSH_SIZE;
+
+data_ptr_t RecordBuffer::Reserve(idx_t record_size) {
+	idx_t offset = blocks.empty() ? 0 : AlignValue(blocks.back().used);
+	if (blocks.empty() || offset + record_size > blocks.back().data.GetSize()) {
+		blocks.push_back(Block {allocator.Allocate(MaxValue(RECORD_BLOCK_SIZE, record_size)), 0});
+		offset = 0;
+	}
+	auto &block = blocks.back();
+	block.used = offset + record_size;
+	records.push_back(Record {blocks.size() - 1, offset, record_size});
+	size += record_size;
+	return block.data.get() + offset;
+}
+
+void RecordBuffer::PopBack() {
+	D_ASSERT(!records.empty());
+	const auto record = records.back();
+	records.pop_back();
+	size -= record.size;
+	// The last record is in the last block. A block it starts held nothing else, and is freed: it may be a record's
+	// own block, of any size.
+	if (record.offset == 0) {
+		blocks.pop_back();
+	} else {
+		blocks.back().used = record.offset;
+	}
+}
+
+void RecordBuffer::Clear() {
+	blocks.clear();
+	records.clear();
+	size = 0;
 }
 
 string SequenceChunkReader::ReadId(idx_t row) const {

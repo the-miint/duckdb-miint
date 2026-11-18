@@ -1,5 +1,5 @@
 # name: test/sql/copy_fastx_parallel.test
-# description: COPY FORMAT FASTA/FASTQ on 8 threads from a source that can be scanned in parallel. With insertion order kept, records are written in input order. With it off, order is not kept, but every record is written exactly once, interleaved mates stay adjacent, split R1/R2 files stay in step, and partitioned output is complete. An unknown option is reported against the public format name.
+# description: COPY FORMAT FASTA/FASTQ on 8 threads from a source that can be scanned in parallel. With PRESERVE_ORDER true, records are written in input order, and with an ORDER BY (and no option) in its order. With neither, order is not kept (the default), but every record is written exactly once, interleaved mates stay adjacent, split R1/R2 files stay in step, and partitioned output is complete. An unknown option is reported against the public format name.
 # group: [sql]
 
 require miint
@@ -34,12 +34,12 @@ SELECT count(DISTINCT row_group_id) FROM parquet_metadata('{TEST_DIR}/src.parque
 statement ok
 CREATE VIEW p AS FROM read_parquet('{TEST_DIR}/src.parquet');
 
-# --- Order kept: rows are written in input order ---
+# --- PRESERVE_ORDER true: rows are written in input order ---
 # read_fastx numbers records from 1 in file order, and record k must be source row k - 1. With order kept the COPY runs
 # REGULAR, on one thread; were it PARALLEL, the batches would be written in whatever order they were finished.
 
 statement ok
-COPY (SELECT read_id, sequence1 FROM p) TO '{TEST_DIR}/kept.fasta' (FORMAT FASTA);
+COPY (SELECT read_id, sequence1 FROM p) TO '{TEST_DIR}/kept.fasta' (FORMAT FASTA, PRESERVE_ORDER true);
 
 query II
 SELECT count(*), count(*) FILTER (WHERE read_id <> 'r' || (sequence_index - 1)) FROM read_fastx('{TEST_DIR}/kept.fasta');
@@ -47,12 +47,37 @@ SELECT count(*), count(*) FILTER (WHERE read_id <> 'r' || (sequence_index - 1)) 
 20000	0
 
 statement ok
-COPY (SELECT read_id, sequence1, qual1 FROM p) TO '{TEST_DIR}/kept.fastq' (FORMAT FASTQ);
+COPY (SELECT read_id, sequence1, qual1 FROM p) TO '{TEST_DIR}/kept.fastq' (FORMAT FASTQ, PRESERVE_ORDER true);
 
 query II
 SELECT count(*), count(*) FILTER (WHERE read_id <> 'r' || (sequence_index - 1)) FROM read_fastx('{TEST_DIR}/kept.fastq');
 ----
 20000	0
+
+# --- An ORDER BY keeps its order, with no option ---
+# Record k must be the k-th row in the ORDER BY's order, which is not the input's (the sequences are md5-derived).
+# Too few rows come out of DuckDB's sort in order even to a COPY that keeps none (docs/internals/architecture.md,
+# "Tests to copy"), so this sorts 200,000 short reads: enough that a COPY that dropped the ORDER BY (as
+# PRESERVE_ORDER false does) writes them out of order. FASTQ goes through the same writer code; copy_sam_parallel.test
+# sorts 200,000 alignments for SAM and BAM's writer.
+
+statement ok
+CREATE TABLE many AS
+SELECT 'r' || i AS read_id, left(translate(md5(i::VARCHAR), '0123456789abcdef', 'ACGTACGTACGTACGT'), 8 + i % 9) AS sequence1
+FROM range(0, 200000) r(i);
+
+statement ok
+COPY many TO '{TEST_DIR}/many.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 20480);
+
+statement ok
+COPY (FROM read_parquet('{TEST_DIR}/many.parquet') ORDER BY sequence1, read_id) TO '{TEST_DIR}/sorted.fasta' (FORMAT FASTA);
+
+query II
+SELECT count(*), count(*) FILTER (WHERE f.read_id <> s.read_id)
+FROM read_fastx('{TEST_DIR}/sorted.fasta') f
+JOIN (SELECT read_id, row_number() OVER (ORDER BY sequence1, read_id) AS k FROM many) s ON f.sequence_index = s.k;
+----
+200000	0
 
 # Each check below counts the rows in one relation and not in the other, duplicates included, both ways: 0 when the
 # two hold the same records the same number of times.
@@ -169,28 +194,6 @@ SELECT count(*) FROM (
     (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM src
      EXCEPT ALL SELECT read_id, sequence1, qual1, sequence2, qual2
                 FROM read_fastx('{TEST_DIR}/split.R1.fastq', sequence2 = '{TEST_DIR}/split.R2.fastq')));
-----
-0
-
-# The setting does what the COPY option does.
-statement ok
-SET preserve_insertion_order = false;
-
-statement ok
-COPY (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM p) TO '{TEST_DIR}/split_setting.{ORIENTATION}.fastq' (FORMAT FASTQ);
-
-statement ok
-SET preserve_insertion_order = true;
-
-query I
-SELECT count(*) FROM (
-    (SELECT read_id, sequence1, qual1, sequence2, qual2
-     FROM read_fastx('{TEST_DIR}/split_setting.R1.fastq', sequence2 = '{TEST_DIR}/split_setting.R2.fastq')
-     EXCEPT ALL SELECT read_id, sequence1, qual1, sequence2, qual2 FROM src)
-    UNION ALL
-    (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM src
-     EXCEPT ALL SELECT read_id, sequence1, qual1, sequence2, qual2
-                FROM read_fastx('{TEST_DIR}/split_setting.R1.fastq', sequence2 = '{TEST_DIR}/split_setting.R2.fastq')));
 ----
 0
 
