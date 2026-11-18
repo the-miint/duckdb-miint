@@ -738,14 +738,15 @@ SELECT * FROM read_sra('SRR4424282.sra');
 - `include_technical` (BOOLEAN, optional, default false): With `split => 'spot'`, also return technical reads (`--include-technical`). Combined with `'split_3'` it is an error: `fasterq-dump` switches to another layout in that case, with only a notice on stderr.
 - `include_filepath` (BOOLEAN, optional, default false): Add a `filepath` column
 
-**Output schema (matches `read_fastx`):**
-- `sequence_index` (BIGINT): The spot number within its run (`fasterq-dump`'s `$si`). Under `'spot'` a spot's reads share it.
-- `read_id` (VARCHAR): `<run>.<spot>`, the run taken from the file name with `.sra`/`.sralite` removed
+**Output schema (`read_fastx`'s, with `read_ena_sequences`' `run_accession`):**
+- `sequence_index` (BIGINT): 1-based row number within its run, with no gaps, as in `read_fastx` and `read_ena_sequences`. It is not the spot number: a spot that yields no row leaves no gap, and under `'spot'` each read of a spot gets its own number. The spot number is in `read_id`.
+- `read_id` (VARCHAR): `<run>.<spot>` (`fasterq-dump`'s `$ac.$si`), the run taken from the file name with `.sra`/`.sralite` removed
 - `comment` (VARCHAR): The rest of `fasterq-dump`'s defline: the spot name, then `length=` and read 1's length (e.g. `M00763:72:000000000-KK57D:1:1101:15586:1335 length=251`). Just `length=<n>` for runs that store no names.
 - `sequence1` (VARCHAR): Read 1's bases
 - `sequence2` (VARCHAR, nullable): Read 2's bases under `'split_3'`; NULL for an unpaired spot and always under `'spot'`
 - `qual1` (UTINYINT[]): Read 1's phred qualities, capped at 93 as `fasterq-dump` prints them
 - `qual2` (UTINYINT[], nullable): Read 2's qualities, NULL when `sequence2` is
+- `run_accession` (VARCHAR): The run, as at the start of `read_id`. The `.sra` file does not record the sample or experiment; join with `read_ena(...)` for those
 - `read_number` (UTINYINT, `'spot'` only): The read's position in its spot, 1-based, counting technical reads (`fasterq-dump`'s `/N` suffix)
 - `filepath` (VARCHAR, optional): The file each row came from, when `include_filepath => true`
 
@@ -765,6 +766,7 @@ Supported are runs submitted as reads, without alignments: Illumina runs, runs l
 - Archives with storage far outside what public runs use: a table of contents over 64 MiB, nesting more than 32 directories deep or holding more than 64 MiB of paths, or a block of values that would decode to more than 2 GiB
 - Spot names that are not valid UTF-8 (a run storing Latin-1 names, for example)
 - Under `'split_3'`, a spot with more than two biological reads, which a paired row cannot hold: use `split => 'spot'`
+- A one-read spot whose stored read length is 0 although it has bases (`IOException`). `fasterq-dump` writes such a spot whole; none of the runs tested has one
 
 **Examples:**
 ```sql

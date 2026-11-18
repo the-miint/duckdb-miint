@@ -73,6 +73,9 @@ public:
 	// it would stop: READ_START and READ_LEN counts differ, a read runs past the spot, or the
 	// spot's bases and qualities differ in length.
 	void Read(int64_t row_id, Spot &out);
+	// Reads only a spot's READ_LEN and READ_TYPE (row_id, read_len, read_type, has_read_type):
+	// what RowsOfSpot needs, without decoding its bases, qualities or name.
+	void ReadLayout(int64_t row_id, Spot &out);
 
 private:
 	struct Impl;
@@ -107,6 +110,11 @@ struct SraRead {
 // The reads fasterq-dump writes for one spot, in its order (tbl_join.c). include_technical only
 // applies to SplitMode::Spot: split-3 always skips technical reads. Appends to out.
 void RouteSpot(const Spot &spot, SplitMode mode, bool include_technical, std::vector<SraRead> &out);
+
+// How many rows RouteSpot and RowsForSpot make of a spot, from what ReadLayout reads. A one-read
+// spot's length is taken from READ_LEN rather than READ, so a spot whose READ_LEN disagrees with
+// its READ is counted differently from how it is routed; read_sra checks the two agree.
+uint64_t RowsOfSpot(const Spot &layout, SplitMode mode, bool include_technical);
 
 // A row of read_sra's output: one read, or under split-3 a spot's two mates.
 struct SraRow {

@@ -109,6 +109,9 @@ struct WorkUnit {
 	int64_t first_row = 0;
 	int64_t end_row = 0;
 	idx_t batch_index = 0;
+	// The unit's rows are numbered first_index, first_index + 1, ...; it makes `rows` of them.
+	int64_t first_index = 1;
+	uint64_t rows = 0;
 };
 
 // Opens a run: a local file, or a remote one read by direct range requests.
@@ -126,6 +129,12 @@ struct GlobalState : public GlobalTableFunctionState {
 	int64_t next_row = 0;
 	int64_t end_row = 0;
 	idx_t next_batch = 0;
+	// Counts the rows of each unit as it is claimed, from the spots' read lengths and types alone,
+	// so every unit knows where its rows start in the run's 1-based sequence_index. Used under the
+	// lock only.
+	std::unique_ptr<SpotReader> layout_reader;
+	Spot layout;
+	int64_t next_index = 1;
 	uint64_t spots_per_unit = DEFAULT_SPOTS_PER_UNIT;
 
 	idx_t MaxThreads() const override {
@@ -157,7 +166,9 @@ struct GlobalState : public GlobalTableFunctionState {
 				run->first_reader = std::make_unique<const SpotReader>(run->table);
 				next_row = run->first_reader->FirstRow();
 				end_row = RowRangeEnd(next_row, run->first_reader->RowCount(), "the READ column");
+				layout_reader = std::make_unique<SpotReader>(run->table, run->first_reader.get());
 			});
+			next_index = 1;
 			current = std::move(run);
 		}
 		unit.run = current;
@@ -165,6 +176,15 @@ struct GlobalState : public GlobalTableFunctionState {
 		// Bounded by the rows left first, so a unit near the largest row id cannot overflow.
 		unit.end_row = next_row + int64_t(std::min<uint64_t>(spots_per_unit, uint64_t(end_row) - uint64_t(next_row)));
 		unit.batch_index = next_batch++;
+		unit.first_index = next_index;
+		unit.rows = 0;
+		WithRunErrors(bind, current->accession, [&] {
+			for (int64_t row = next_row; row < unit.end_row; row++) {
+				layout_reader->ReadLayout(row, layout);
+				unit.rows += RowsOfSpot(layout, bind.split, bind.include_technical);
+			}
+		});
+		next_index += int64_t(unit.rows);
 		next_row = unit.end_row;
 		return true;
 	}
@@ -175,6 +195,7 @@ struct LocalState : public LocalTableFunctionState {
 	WorkUnit unit;
 	idx_t batch_index = 0; // of the chunk last returned
 	int64_t next_row = 0;
+	int64_t next_index = 0; // the sequence_index of the unit's next row
 	std::shared_ptr<const OpenRun> reader_run;
 	std::unique_ptr<SpotReader> reader;
 	Spot spot;
@@ -246,6 +267,9 @@ void BindOptions(SraScanData &data, named_argument_map_t &params, vector<Logical
 
 	data.names = SequenceColumnNames();
 	data.types = SequenceColumnTypes();
+	// Where read_ena_sequences puts it.
+	data.names.emplace_back("run_accession");
+	data.types.emplace_back(LogicalType::VARCHAR);
 	if (data.split == SplitMode::Spot) {
 		data.names.emplace_back("read_number");
 		data.types.emplace_back(LogicalType::UTINYINT);
@@ -315,6 +339,21 @@ void FillRows(LocalState &ls, const SraScanData &bind, idx_t capacity, std::vect
 	}
 }
 
+// The rows decoded must be the rows Claim counted, or sequence_index would skip or repeat. They
+// differ only when a one-read spot's READ_LEN disagrees with its READ (RowsOfSpot). Checked with
+// each chunk of `n` more rows, and once the unit is done.
+void CheckUnitRows(const SraScanData &bind, const LocalState &ls, idx_t n, bool unit_done) {
+	const int64_t made = ls.next_index + int64_t(n) - ls.unit.first_index;
+	if (made > int64_t(ls.unit.rows) || (unit_done && made != int64_t(ls.unit.rows))) {
+		WithRunErrors(bind, ls.unit.run->accession, [&] {
+			throw SraFormatError("spots " + std::to_string(ls.unit.first_row) + ".." +
+			                     std::to_string(ls.unit.end_row - 1) + " make " + (unit_done ? "" : "at least ") +
+			                     std::to_string(made) + " rows, but their READ_LEN and READ_TYPE give " +
+			                     std::to_string(ls.unit.rows));
+		});
+	}
+}
+
 void Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &bind = data_p.bind_data->Cast<SraScanData>();
 	auto &gs = data_p.global_state->Cast<GlobalState>();
@@ -327,6 +366,9 @@ void Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &outp
 	rows.reserve(STANDARD_VECTOR_SIZE);
 	while (rows.empty()) {
 		if (!ls.has_unit && ls.pending_pos >= ls.pending.size()) {
+			if (ls.unit.run) {
+				CheckUnitRows(bind, ls, 0, true);
+			}
 			if (!gs.Claim(context, bind, ls.unit)) {
 				output.SetChildCardinality(0);
 				return;
@@ -334,6 +376,7 @@ void Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &outp
 			ls.has_unit = true;
 			ls.batch_index = ls.unit.batch_index;
 			ls.next_row = ls.unit.first_row;
+			ls.next_index = ls.unit.first_index;
 			if (ls.reader_run != ls.unit.run) {
 				WithRunErrors(bind, ls.unit.run->accession, [&] {
 					// The run's name index is shared with the reader Claim made, not read again.
@@ -348,12 +391,13 @@ void Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &outp
 
 	const idx_t n = rows.size();
 	const std::string &acc = ls.unit.run->accession;
+	CheckUnitRows(bind, ls, n, false);
 	auto seq_index = FlatVector::GetDataMutable<int64_t>(output.data[0]);
 	std::vector<std::string> read_ids(n), comments(n), seq1(n), seq2(n);
 	std::vector<const std::vector<uint8_t> *> qual1(n), qual2(n);
 	for (idx_t i = 0; i < n; i++) {
 		const SraRow &r = rows[i];
-		seq_index[i] = r.spot;
+		seq_index[i] = ls.next_index + int64_t(i);
 		read_ids[i] = acc + "." + std::to_string(r.spot);
 		// fasterq-dump's defline continues "$sn length=$rl"; read_fastx keeps read 1's.
 		comments[i] = r.read1.has_name ? r.read1.name + " " : std::string();
@@ -372,6 +416,8 @@ void Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &outp
 	SetResultVectorStringNullable(output.data[col++], seq2);
 	SetQualityList(output.data[col++], qual1);
 	SetQualityList(output.data[col++], qual2);
+	SetResultVectorFilepath(output.data[col++], acc); // one run per chunk, so a constant
+	ls.next_index += int64_t(n);
 	if (bind.split == SplitMode::Spot) {
 		auto numbers = FlatVector::GetDataMutable<uint8_t>(output.data[col++]);
 		for (idx_t i = 0; i < n; i++) {

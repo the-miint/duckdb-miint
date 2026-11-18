@@ -461,6 +461,18 @@ void SpotReader::Read(int64_t row_id, Spot &out) {
 	}
 }
 
+void SpotReader::ReadLayout(int64_t row_id, Spot &out) {
+	Impl &m = *impl_;
+	out.row_id = row_id;
+	m.read_len->Values(row_id, out.read_len);
+	out.has_read_type = m.read_type != nullptr;
+	if (m.read_type) {
+		m.read_type->Values(row_id, out.read_type);
+	} else {
+		out.read_type.clear();
+	}
+}
+
 namespace {
 constexpr uint8_t READ_TYPE_BIOLOGICAL = 1;
 constexpr uint8_t MAX_PRINTED_QUALITY = 93; // fasterq-dump prints every q >= 93 as '~'
@@ -486,7 +498,17 @@ bool Biological(const Spot &spot, size_t i) {
 }
 } // namespace
 
-void RouteSpot(const Spot &spot, SplitMode mode, bool include_technical, std::vector<SraRead> &out) {
+namespace {
+// A read fasterq-dump writes: its index in the spot (0-based) and the file it goes to.
+struct PlannedRead {
+	uint32_t index;
+	uint32_t destination;
+};
+
+// Which of a spot's reads fasterq-dump writes, and where (tbl_join.c), from its read lengths and
+// types and, for a one-read spot, its whole length. Appends to out.
+void PlanSpot(const Spot &spot, uint64_t spot_len, SplitMode mode, bool include_technical,
+              std::vector<PlannedRead> &out) {
 	// split-3 always skips technical reads (perform_fastq_split_3_join).
 	bool skip_tech = mode == SplitMode::Split3 || !include_technical;
 	auto where = [&spot] {
@@ -501,13 +523,13 @@ void RouteSpot(const Spot &spot, SplitMode mode, bool include_technical, std::ve
 
 	// A one-read spot is written whole, tested on its whole length (filter1).
 	if (reads == 1) {
-		if (spot.bases.empty()) {
+		if (spot_len == 0) {
 			return;
 		}
 		if (use_types && !spot.read_type.empty() && !Biological(spot, 0)) {
 			return;
 		}
-		Emit(spot, 1, UNPAIRED_FILE, 0, spot.bases.size(), out);
+		out.push_back({0, UNPAIRED_FILE});
 		return;
 	}
 
@@ -517,7 +539,7 @@ void RouteSpot(const Spot &spot, SplitMode mode, bool include_technical, std::ve
 			if (spot.read_len[i] == 0 || (use_types && !Biological(spot, i))) {
 				continue;
 			}
-			Emit(spot, uint32_t(i + 1), UNPAIRED_FILE, size_t(spot.read_start[i]), spot.read_len[i], out);
+			out.push_back({uint32_t(i), UNPAIRED_FILE});
 		}
 		return;
 	}
@@ -549,11 +571,37 @@ void RouteSpot(const Spot &spot, SplitMode mode, bool include_technical, std::ve
 		if (valid_bio_reads < 2) {
 			write_id = UNPAIRED_FILE;
 		}
-		Emit(spot, uint32_t(i + 1), write_id, size_t(spot.read_start[i]), spot.read_len[i], out);
+		out.push_back({uint32_t(i), write_id});
 		if (write_id != UNPAIRED_FILE) {
 			write_id++;
 		}
 	}
+}
+} // namespace
+
+void RouteSpot(const Spot &spot, SplitMode mode, bool include_technical, std::vector<SraRead> &out) {
+	std::vector<PlannedRead> plan;
+	PlanSpot(spot, spot.bases.size(), mode, include_technical, plan);
+	for (const PlannedRead &p : plan) {
+		if (spot.read_len.size() == 1) {
+			Emit(spot, 1, p.destination, 0, spot.bases.size(), out);
+		} else {
+			Emit(spot, p.index + 1, p.destination, size_t(spot.read_start[p.index]), spot.read_len[p.index], out);
+		}
+	}
+}
+
+uint64_t RowsOfSpot(const Spot &layout, SplitMode mode, bool include_technical) {
+	uint64_t spot_len = 0;
+	for (uint32_t len : layout.read_len) {
+		spot_len += len;
+	}
+	std::vector<PlannedRead> plan;
+	PlanSpot(layout, spot_len, mode, include_technical, plan);
+	if (mode == SplitMode::Spot) {
+		return plan.size();
+	}
+	return plan.empty() ? 0 : 1;
 }
 
 void RowsForSpot(std::vector<SraRead> &reads, SplitMode mode, std::vector<SraRow> &out) {

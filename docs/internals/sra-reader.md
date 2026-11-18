@@ -19,7 +19,7 @@ the format can be tested against fixtures without a database.
 | `sra_column` | A physical column: its index (`idx`, the `idx0` journal, `idx1`/`idx2` block types), blob location, CRC32 blob checksums (always verified; MD5 blob checksums, which no public run in the survey used, are refused), and the VDB blob framing: headers and page maps that give each row's length. |
 | `sra_codecs` | Column encodings: `zip` (deflate) and `izip`/`irzip` (integer planes with delta and two-series modes). |
 | `sra_name` | Spot names: the `skey` text index (a persisted trie with a projection from rows to keys) and `format_spot_name`. |
-| `sra_run` | Classification (which runs are read, and the message for each kind refused), `SpotReader` (the logical columns as the run's schema defines them, spot by spot, with `fasterq-dump`'s checks; this is where 2na bases are unpacked and ORed with 4na `ALTREAD`), and routing (`RouteSpot`, `RowsForSpot`: which reads `fasterq-dump` writes and where). |
+| `sra_run` | Classification (which runs are read, and the message for each kind refused), `SpotReader` (the logical columns as the run's schema defines them, spot by spot, with `fasterq-dump`'s checks; this is where 2na bases are unpacked and ORed with 4na `ALTREAD`), and routing (`RouteSpot`, `RowsForSpot`: which reads `fasterq-dump` writes and where; `RowsOfSpot`: how many rows, from the layout alone). |
 
 `src/read_sra.cpp` is the DuckDB layer: binding, the work-unit queue (`GlobalState::Claim`), and
 filling the output vectors.
@@ -38,6 +38,14 @@ filling the output vectors.
 - **Order.** Output is in run and spot order with parallel decoding: each work unit (a range of
   spots, `miint_sra_spots_per_unit`, default 131072) gets a batch index when claimed, and
   `get_partition_data` hands it to DuckDB. Claims happen in order, so batch indexes do too.
+- **Row numbers.** `sequence_index` counts a run's rows from 1 with no gaps, but how many rows a
+  spot makes is only known once it is routed, and units decode in parallel. So `Claim` counts each
+  unit's rows as it hands it out, from `READ_LEN` and `READ_TYPE` alone (`SpotReader::ReadLayout`,
+  `RowsOfSpot`, which share `RouteSpot`'s routing), and the unit's rows start where the last unit's
+  ended. The count runs under the lock and reads only those two columns, which are small and often
+  static; its cost on a remote run has not been measured. A one-read spot is routed on its `READ`
+  length but counted on `READ_LEN`; `Execute` checks each unit makes the rows it was counted for
+  and raises an `IOException` if not, so a one-read spot with `READ_LEN` 0 and bases is refused.
 - **The name index is shared.** Each decoding thread has its own `SpotReader`, but a run's `skey`
   index (tens of bytes per spot when a loader stores whole names) is read once and shared through
   `share_from`; `SkeyIndex` is immutable after construction for that reason.

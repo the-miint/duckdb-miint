@@ -393,3 +393,72 @@ TEST_CASE("Spots of every fixture match fasterq-dump's split-spot output", "[sra
 		}
 	}
 }
+
+namespace {
+// The rows RouteSpot and RowsForSpot make of a spot, which RowsOfSpot must count without them.
+uint64_t RoutedRows(const Spot &s, SplitMode mode, bool tech) {
+	std::vector<SraRead> reads;
+	RouteSpot(s, mode, tech, reads);
+	std::vector<SraRow> rows;
+	RowsForSpot(reads, mode, rows);
+	return rows.size();
+}
+} // namespace
+
+// read_sra numbers rows 1, 2, ... per run across units decoded in parallel, so each unit's row
+// count is taken from READ_LEN and READ_TYPE alone, before its spots are decoded. A count that
+// differs from the rows routed would skip or repeat a sequence_index.
+TEST_CASE("RowsOfSpot counts the rows a spot is routed to", "[sra]") {
+	const std::vector<Spot> spots = {
+	    MakeSpot("AAAACCCC", {0, 4}, {4, 4}, {BIO, BIO}),               // a pair
+	    MakeSpot("GGAAAACCCC", {0, 2, 6}, {2, 4, 4}, {TECH, BIO, BIO}), // a pair after a technical read
+	    MakeSpot("AAAA", {0, 4}, {4, 0}, {BIO, BIO}),                   // one mate empty: unpaired
+	    MakeSpot("GGAAAA", {0, 2}, {2, 4}, {TECH, BIO}),                // one biological read: unpaired
+	    MakeSpot("GGGG", {0, 2}, {2, 2}, {TECH, TECH}),                 // technical reads only: no row
+	    MakeSpot("", {0, 0}, {0, 0}, {BIO, BIO}),                       // no bases: no row
+	    MakeSpot("AAAACC", {0}, {6}, {BIO}),                            // one read
+	    MakeSpot("GGGG", {0}, {4}, {TECH}),                             // one technical read
+	    MakeSpot("", {0}, {0}, {BIO}),                                  // one empty read
+	    MakeSpot("AAAACCCC", {0, 4}, {4, 4}, {}),                       // no READ_TYPE column
+	};
+	for (size_t i = 0; i < spots.size(); i++) {
+		for (auto mode : {SplitMode::Split3, SplitMode::Spot}) {
+			for (bool tech : {false, true}) {
+				if (mode == SplitMode::Split3 && (tech || !spots[i].has_read_type)) {
+					continue; // refused before any spot is read, or a run-wide error
+				}
+				INFO("spot " << i << (mode == SplitMode::Spot ? " spot" : " split_3") << (tech ? " tech" : ""));
+				CHECK(RowsOfSpot(spots[i], mode, tech) == RoutedRows(spots[i], mode, tech));
+			}
+		}
+	}
+	// What the count cannot see: a one-read spot is routed on READ's length, counted on READ_LEN's.
+	Spot disagrees = MakeSpot("AAAA", {0}, {0}, {BIO});
+	CHECK(RowsOfSpot(disagrees, SplitMode::Split3, false) == 0);
+	CHECK(RoutedRows(disagrees, SplitMode::Split3, false) == 1);
+}
+
+TEST_CASE("Every fixture's rows are counted from READ_LEN and READ_TYPE alone", "[sra]") {
+	for (const auto &run : AcceptedRuns()) {
+		for (auto mode : {SplitMode::Split3, SplitMode::Spot}) {
+			for (bool tech : {false, true}) {
+				if (mode == SplitMode::Split3 && tech) {
+					continue;
+				}
+				INFO(run << (mode == SplitMode::Spot ? " spot" : " split_3") << (tech ? " tech" : ""));
+				auto table = std::make_shared<const SraTable>(OpenSraFixture(run + ".sra"));
+				SpotReader reader(table), layout_reader(table, &reader);
+				Spot spot, layout;
+				uint64_t counted = 0, routed = 0;
+				for (uint64_t i = 0; i < reader.RowCount(); i++) {
+					int64_t row = reader.FirstRow() + int64_t(i);
+					layout_reader.ReadLayout(row, layout);
+					counted += RowsOfSpot(layout, mode, tech);
+					reader.Read(row, spot);
+					routed += RoutedRows(spot, mode, tech);
+				}
+				CHECK(counted == routed);
+			}
+		}
+	}
+}
