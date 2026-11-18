@@ -12,7 +12,9 @@
 #include <optional>
 #include <ostream>
 #include <random>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 // Random trees with random taxonomies on their tips; the counts CladeCountIndex should give
@@ -179,6 +181,11 @@ inline uint32_t naive_min_count(size_t rank, uint32_t min_count) {
 	return rank == kStrainRank ? 1 : min_count;
 }
 
+// The count a node needs at `rank` to be eligible for a name `total` tips carry.
+inline uint32_t naive_threshold(size_t rank, uint32_t total, uint32_t min_count) {
+	return F1Score::Threshold(total, naive_min_count(rank, min_count));
+}
+
 // Per rank and node, how many names are eligible there, and the last one found, which is the
 // only one where the count is 1.
 struct NaiveEligible {
@@ -195,7 +202,7 @@ inline NaiveEligible naive_eligible(const TaxonomyCase &c, const TaxonomyStore &
 		out.count[r].assign(n, 0);
 		out.name[r].assign(n, kMissingName);
 		for (NameId name = 0; name < store.NameCount(r); name++) {
-			const uint32_t threshold = F1Score::Threshold(naive.Total(r, name, root), naive_min_count(r, min_count));
+			const uint32_t threshold = naive_threshold(r, naive.Total(r, name, root), min_count);
 			for (uint32_t v = 0; v < n; v++) {
 				if (naive.clade[r][name][v] >= threshold) {
 					out.count[r][v]++;
@@ -290,12 +297,9 @@ inline NaiveAssignment naive_assign(const TaxonomyCase &c, const TaxonomyStore &
 				}
 			}
 			if (candidates.empty()) {
-				// The root holds every tip carrying the name, so it is eligible if any node is.
-				const bool ever_eligible =
-				    naive.clade[r][name][root] >= F1Score::Threshold(total, naive_min_count(r, min_count));
-				const auto reason = !ever_eligible ? NotPlacedReason::kNeverEligible
-				                    : !ever_safe   ? NotPlacedReason::kNeverRankSafe
-				                                   : NotPlacedReason::kBlockedByContiguity;
+				const auto reason = total < naive_min_count(r, min_count) ? NotPlacedReason::kNeverEligible
+				                    : !ever_safe                          ? NotPlacedReason::kNeverRankSafe
+				                                                          : NotPlacedReason::kBlockedByContiguity;
 				out.not_placed.push_back({r, name, total, reason});
 				continue;
 			}
@@ -326,5 +330,43 @@ inline NaiveAssignment naive_assign(const TaxonomyCase &c, const TaxonomyStore &
 	}
 	return out;
 }
+
+// Over many naive_assign results, whether each tie-break decided some name and each reason left
+// some name unassigned. A test over random cases requires that all did, or its agreement shows
+// nothing about the ones that didn't.
+struct NaiveCoverage {
+	size_t won_on_tip_count = 0;
+	size_t won_on_postorder = 0;
+	std::set<NotPlacedReason> reasons;
+
+	void Add(const NaiveAssignment &assignment) {
+		won_on_tip_count += assignment.won_on_tip_count;
+		won_on_postorder += assignment.won_on_postorder;
+		for (const auto &name : assignment.not_placed) {
+			reasons.insert(name.reason);
+		}
+	}
+
+	// What never occurred; empty when everything did.
+	std::vector<std::string> Missing() const {
+		std::vector<std::string> missing;
+		if (won_on_tip_count == 0) {
+			missing.push_back("a name decided by fewer tips");
+		}
+		if (won_on_postorder == 0) {
+			missing.push_back("a name decided by postorder");
+		}
+		const std::pair<NotPlacedReason, const char *> all_reasons[] = {
+		    {NotPlacedReason::kNeverEligible, "kNeverEligible"},
+		    {NotPlacedReason::kNeverRankSafe, "kNeverRankSafe"},
+		    {NotPlacedReason::kBlockedByContiguity, "kBlockedByContiguity"}};
+		for (const auto &[reason, label] : all_reasons) {
+			if (!reasons.contains(reason)) {
+				missing.push_back(std::string("a name not placed for ") + label);
+			}
+		}
+		return missing;
+	}
+};
 
 } // namespace miint::test

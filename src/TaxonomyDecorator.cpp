@@ -18,11 +18,16 @@ void RequireMinCount(const char *caller, uint32_t min_count) {
 		throw std::invalid_argument(std::string(caller) + ": min_count must be at least 1");
 	}
 }
+
+// ceil(total / 2): the fewest of a name's tips that give recall of at least one half.
+uint32_t CeilHalf(uint32_t total) {
+	return total / 2 + total % 2;
+}
 } // namespace
 
 uint32_t F1Score::Threshold(uint32_t total, uint32_t min_count) {
 	RequireMinCount("F1Score", min_count);
-	return std::max(min_count, total / 2 + total % 2);
+	return std::max(min_count, CeilHalf(total));
 }
 
 std::strong_ordering F1Score::Compare(uint32_t c1, uint32_t m1, uint32_t c2, uint32_t m2, uint32_t total) {
@@ -149,7 +154,7 @@ uint32_t CladeCountIndex::NodeAtPreorder(uint32_t p) const {
 
 std::vector<uint32_t> LowestEligibleNodes(const CladeCountIndex &index, size_t rank, NameId name, uint32_t threshold) {
 	const uint32_t total = index.Total(rank, name);
-	if (threshold < F1Score::Threshold(total, 1)) {
+	if (threshold == 0 || threshold < CeilHalf(total)) {
 		throw std::invalid_argument("LowestEligibleNodes: threshold " + std::to_string(threshold) +
 		                            " is below 1 or below half of the name's " + std::to_string(total) + " tips");
 	}

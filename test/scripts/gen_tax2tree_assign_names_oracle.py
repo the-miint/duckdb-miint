@@ -20,11 +20,14 @@ where some name's candidates include such a pair is rejected and drawn again.
 Each case is drawn from an RNG seeded from (SEED, the case's name, the attempt), so adding a case
 never changes another. Nodes are numbered at random, except that each node's children ascend
 left to right, the order AssignNames reads siblings in; so neither node index nor its reverse
-is postorder, and a tie-break that compared indices would not match.
+is postorder.
 
-The script stops with an error when the tax2tree checkout has tracked changes, when tax2tree's
-floating-point scores order two of a name's candidates differently from their exact F1, and
-when no name in the fixture is decided by fewer tips, or none by postorder.
+The script stops with an error, before writing anything, when the tax2tree checkout has tracked
+changes, when tax2tree's floating-point scores order two of a name's candidates differently
+from their exact F1, and when the fixture lacks any of: a name decided by fewer tips; one
+decided by postorder; and among those, one whose node has a smaller index than another tied
+node's, and one whose node has a larger index. Without the last two, a tie-break that compared
+indices, in one direction or the other, would match.
 
 Outputs, under data/tax2tree/assign_names/:
   <case>.tree.tsv       node_index, parent_index (empty for the root), name (tips only)
@@ -33,7 +36,8 @@ Outputs, under data/tax2tree/assign_names/:
                         fold, by node, then rank
   cases.tsv             case, min_count
   provenance.txt        the tax2tree commit, the scikit-bio, numpy and Python versions, the
-                        seed, the redraws, how many names each tie-break decided, the command
+                        seed, the redraws, how many names each tie-break decided and by which
+                        index, the command
 
 Usage, from the repository root:
   conda run -n miint-beta-oracle python -I test/scripts/gen_tax2tree_assign_names_oracle.py \\
@@ -219,12 +223,14 @@ def score_names(nl, tree, counts):
     sorts them by, computed from the same ValidRelFreq and ConsensusRelFreq values the fold
     reads.
 
-    Returns (rational_tie, decided): rational_tie is True when two of a name's candidates have
-    equal F1 from different counts; decided counts the names whose best candidates tie on F1,
-    by the rule that separates them ("fewer tips" or "postorder"). Raises when the float scores
-    order two candidates differently from their exact F1.
+    Returns (rational_tie, decided, postorder_ties): rational_tie is True when two of a name's
+    candidates have equal F1 from different counts; decided counts the names whose best
+    candidates tie on F1, by the rule that separates them ("fewer tips" or "postorder");
+    postorder_ties lists (rank, name, the tied nodes' indices) for each name postorder decides.
+    Raises when the float scores order two candidates differently from their exact F1.
     """
     decided = {"fewer tips": 0, "postorder": 0}
+    postorder_ties = []
     for rank, names in candidates(tree).items():
         for name, nodes in names.items():
             total = counts[rank][name]
@@ -233,26 +239,31 @@ def score_names(nl, tree, counts):
                 c = sum(1 for tip in node.tips() if tip.Consensus[rank] == name)
                 exact = Fraction(2 * c, total + node.NumTips)
                 floating = nl.fmeasure(node.ValidRelFreq[rank][name], node.ConsensusRelFreq[rank][name])
-                scored.append((exact, floating, c, node.NumTips, len(list(node.tips()))))
+                scored.append((exact, floating, c, node.NumTips, len(list(node.tips())), node.idx))
             for i in range(len(scored)):
                 for j in range(i + 1, len(scored)):
-                    ei, fi, ci, mi, _ = scored[i]
-                    ej, fj, cj, mj, _ = scored[j]
+                    ei, fi, ci, mi, _, _ = scored[i]
+                    ej, fj, cj, mj, _, _ = scored[j]
                     if ei == ej and (ci, mi) != (cj, mj):
-                        return True, None
+                        return True, None, None
                     if (ei < ej) != (fi < fj) or (ei == ej) != (fi == fj):
                         raise RuntimeError(f"rank {rank}, {name}: float scores order candidates unlike exact F1")
             best = max(s[0] for s in scored)
             tied_tips = [s[4] for s in scored if s[0] == best]
             if len(tied_tips) > 1:
                 fewest = min(tied_tips)
-                decided["fewer tips" if tied_tips.count(fewest) == 1 else "postorder"] += 1
-    return False, decided
+                if tied_tips.count(fewest) == 1:
+                    decided["fewer tips"] += 1
+                else:
+                    decided["postorder"] += 1
+                    postorder_ties.append((rank, name, [s[5] for s in scored if s[0] == best and s[4] == fewest]))
+    return False, decided, postorder_ties
 
 
 def run_tax2tree(nl, tree_rows, lineage_of, expected_postorder, min_count):
     """The names each internal node keeps, or None for a draw to reject, and the tie-break
-    counts."""
+    counts, with the names postorder decided counted by whether a smaller or a larger index won
+    (a winner between two tied nodes counts as both)."""
     lines = consensus_lines(lineage_of)
     nl.determine_rank_order(lines[0].split("\t")[1])
     tipname_map = nl.load_consensus_map(lines, False)
@@ -262,15 +273,24 @@ def run_tax2tree(nl, tree_rows, lineage_of, expected_postorder, min_count):
     nl.decorate_name_relative_freqs(tree, counts, min_count)
     nl.set_ranksafe(tree)
     nl.pick_names(tree)
-    rational_tie, decided = score_names(nl, tree, counts)
+    rational_tie, decided, postorder_ties = score_names(nl, tree, counts)
     if rational_tie:
         return None, None
     nl.name_node_score_fold(tree)
     kept = []
+    holder = {}
     for node in tree.non_tips(include_self=True):
         for rank, name in enumerate(node.RankNames):
             if name is not None:
                 kept.append((node.idx, rank, name.split("__", 1)[1]))
+                holder[(rank, name)] = node.idx
+    decided["postorder, won by a smaller index"] = 0
+    decided["postorder, won by a larger index"] = 0
+    for rank, name, tied in postorder_ties:
+        winner = holder[(rank, name)]
+        assert winner in tied, (rank, name, winner, tied)
+        decided["postorder, won by a smaller index"] += winner < max(tied)
+        decided["postorder, won by a larger index"] += winner > min(tied)
     return sorted(kept), decided
 
 
@@ -297,10 +317,9 @@ def main():
     import skbio
     import t2t.nlevel as nl
 
-    os.makedirs(OUTDIR, exist_ok=True)
     redraws = 0
-    decided_total = {"fewer tips": 0, "postorder": 0}
-    cases = []
+    decided_total = {}
+    drawn = []
     stats = []
     for i in range(N_CASES):
         name = f"case{i:02d}"
@@ -315,8 +334,22 @@ def main():
             redraws += 1
             attempt += 1
         for rule, count in decided.items():
-            decided_total[rule] += count
+            decided_total[rule] = decided_total.get(rule, 0) + count
+        drawn.append((name, min_count, tree_rows, lineage_of, kept))
         root = next(idx for idx, parent, _ in tree_rows if parent is None)
+        tips = sum(1 for row in tree_rows if row[2])
+        below_root = sum(1 for idx, _, _ in kept if idx != root)
+        stats.append(
+            f"{name}: {len(tree_rows)} nodes, {tips} tips, {len(lineage_of)} with a lineage, min_count {min_count}, "
+            f"{len(kept)} names kept ({below_root} below the root); tie-breaks decided {decided['fewer tips']} "
+            f"by fewer tips, {decided['postorder']} by postorder; drawn {attempt + 1} time(s)"
+        )
+    for rule, count in decided_total.items():
+        if count == 0:
+            sys.exit(f"no name in the fixture is decided by {rule}; change SEED or N_CASES")
+
+    os.makedirs(OUTDIR, exist_ok=True)
+    for name, _, tree_rows, lineage_of, kept in drawn:
         write_tsv(
             os.path.join(OUTDIR, f"{name}.tree.tsv"),
             ["node_index", "parent_index", "name"],
@@ -332,18 +365,7 @@ def main():
             ["node_index", "rank", "name"],
             [(idx, COLUMNS[rank], text) for idx, rank, text in kept],
         )
-        cases.append((name, min_count))
-        tips = sum(1 for row in tree_rows if row[2])
-        below_root = sum(1 for idx, _, _ in kept if idx != root)
-        stats.append(
-            f"{name}: {len(tree_rows)} nodes, {tips} tips, {len(lineage_of)} with a lineage, min_count {min_count}, "
-            f"{len(kept)} names kept ({below_root} below the root); tie-breaks decided {decided['fewer tips']} "
-            f"by fewer tips, {decided['postorder']} by postorder; drawn {attempt + 1} time(s)"
-        )
-    for rule, count in decided_total.items():
-        if count == 0:
-            sys.exit(f"no name in the fixture is decided by {rule}; change SEED or N_CASES")
-    write_tsv(os.path.join(OUTDIR, "cases.tsv"), ["case", "min_count"], cases)
+    write_tsv(os.path.join(OUTDIR, "cases.tsv"), ["case", "min_count"], [(name, mc) for name, mc, *_ in drawn])
 
     with open(os.path.join(OUTDIR, "provenance.txt"), "w", newline="\n") as f:
         f.write("Generated by test/scripts/gen_tax2tree_assign_names_oracle.py.\n")
@@ -353,7 +375,9 @@ def main():
         f.write(f"redrawn for equal F1 from different counts: {redraws}\n")
         f.write(
             f"names decided by a tie-break: {decided_total['fewer tips']} by fewer tips, "
-            f"{decided_total['postorder']} by postorder\n"
+            f"{decided_total['postorder']} by postorder ({decided_total['postorder, won by a smaller index']} "
+            f"won by a smaller index than a tied node's, {decided_total['postorder, won by a larger index']} "
+            "by a larger)\n"
         )
         f.write(
             "command: conda run -n miint-beta-oracle python -I test/scripts/gen_tax2tree_assign_names_oracle.py "

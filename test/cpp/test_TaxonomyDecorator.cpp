@@ -8,7 +8,6 @@
 #include "taxonomy_decorator_fixtures.hpp"
 
 #include <algorithm>
-#include <array>
 #include <compare>
 #include <cstdint>
 #include <functional>
@@ -745,7 +744,7 @@ TEST_CASE("RankSafeMasks makes a singleton strain safe at its holder", "[taxonom
 	CHECK(SafeMasks(c.index, 1) == MasksOf(5, {{0, shallower}, {1, 0xFF}, {2, 0xFF}}));
 }
 
-// min_count 0 would let a node with no informative tips be eligible, with precision 0/0.
+// F1Score::Threshold says why min_count 0 is rejected.
 TEST_CASE("RankSafeMasks rejects a min_count of 0", "[taxonomy_decorator]") {
 	auto c = MakeCase({kNoParent, 0, 0}, WithN({1, 2}));
 	CHECK_THROWS_AS(RankSafeMasks(c.index, 0), std::invalid_argument);
@@ -773,8 +772,7 @@ TEST_CASE("RankSafeMasks matches brute-force rank safety", "[taxonomy_decorator]
 				const auto &eligible_names = eligible.count[r];
 				std::vector<std::vector<uint32_t>> split_lowest;
 				for (NameId name = 0; name < store.NameCount(r); name++) {
-					const uint32_t threshold =
-					    F1Score::Threshold(naive.Total(r, name, root), naive_min_count(r, min_count));
+					const uint32_t threshold = naive_threshold(r, naive.Total(r, name, root), min_count);
 					auto lowest = naive_lowest_eligible(c, naive, r, name, threshold);
 					if (lowest.size() == 2) {
 						split_lowest.push_back(std::move(lowest));
@@ -992,7 +990,7 @@ TEST_CASE("AssignNames looks past a node that skips the name's rank", "[taxonomy
 	                     {kPhylum, c.Name(kPhylum, "Pb"), 1, NotPlacedReason::kNeverEligible}}));
 }
 
-// min_count 0 would let a node with no informative tips be eligible, with precision 0/0.
+// F1Score::Threshold says why min_count 0 is rejected.
 TEST_CASE("AssignNames rejects a min_count of 0", "[taxonomy_decorator]") {
 	auto c = MakeCase({kNoParent, 0, 0}, WithN({1, 2}));
 	CHECK_THROWS_AS(AssignNames(c.index, 0), std::invalid_argument);
@@ -1050,8 +1048,7 @@ TEST_CASE("AssignNames matches the brute-force assignment", "[taxonomy_decorator
 		NaiveAssignment expected;
 	};
 	std::vector<Trial> trials;
-	size_t won_on_tip_count = 0, won_on_postorder = 0;
-	std::array<size_t, 3> reasons {};
+	NaiveCoverage coverage;
 	for (int k = 0; k < 300; k++) {
 		const uint32_t n = std::uniform_int_distribution<uint32_t>(1, 40)(rng);
 		auto c = random_taxonomy_case(rng, n);
@@ -1059,20 +1056,11 @@ TEST_CASE("AssignNames matches the brute-force assignment", "[taxonomy_decorator
 		const auto naive = naive_counts(c, store);
 		for (uint32_t min_count = 1; min_count <= 3; min_count++) {
 			auto expected = naive_assign(c, store, naive, min_count);
-			won_on_tip_count += expected.won_on_tip_count;
-			won_on_postorder += expected.won_on_postorder;
-			for (const auto &name : expected.not_placed) {
-				reasons[static_cast<size_t>(name.reason)]++;
-			}
+			coverage.Add(expected);
 			trials.push_back({c, min_count, std::move(expected)});
 		}
 	}
-	// Each tie-break and each reason must occur, or this test proves nothing about it.
-	CHECK(won_on_tip_count > 0);
-	CHECK(won_on_postorder > 0);
-	CHECK(reasons[static_cast<size_t>(NotPlacedReason::kNeverEligible)] > 0);
-	CHECK(reasons[static_cast<size_t>(NotPlacedReason::kNeverRankSafe)] > 0);
-	CHECK(reasons[static_cast<size_t>(NotPlacedReason::kBlockedByContiguity)] > 0);
+	CHECK(coverage.Missing().empty());
 
 	for (size_t k = 0; k < trials.size(); k++) {
 		const auto &[c, min_count, expected] = trials[k];

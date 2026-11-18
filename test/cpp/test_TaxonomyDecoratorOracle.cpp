@@ -15,7 +15,6 @@
 #include "duckdb/main/database.hpp"
 
 #include <algorithm>
-#include <array>
 #include <cstdint>
 #include <map>
 #include <random>
@@ -106,7 +105,7 @@ totals AS (SELECT rank, name, count(*) AS total FROM tip_name GROUP BY rank, nam
 // case's min_count. Strain is rank 7.
 //
 // The fold orders by F1 as a double, which is exact here: 2c and total + m are integers of at
-// most about 100, division is correctly rounded, so equal fractions give equal doubles, and two
+// most 100, division is correctly rounded, so equal fractions give equal doubles, and two
 // different fractions with denominators that small differ by at least 1/10^4, far more than a
 // rounding error.
 const char *kAssign = R"(
@@ -255,8 +254,8 @@ TEST_CASE("AssignNames agrees with a relational assignment", "[taxonomy_decorato
 	};
 	std::vector<Trial> trials;
 	std::mt19937 rng(20261123);
-	size_t compared = 0, not_placed = 0, won_on_tip_count = 0, won_on_postorder = 0;
-	std::array<size_t, 3> reasons {};
+	size_t compared = 0, not_placed = 0;
+	NaiveCoverage coverage;
 	for (int k = 0; k < 40; k++) {
 		const uint32_t n = std::uniform_int_distribution<uint32_t>(1, 50)(rng);
 		const auto c = random_taxonomy_case(rng, n);
@@ -278,11 +277,7 @@ TEST_CASE("AssignNames agrees with a relational assignment", "[taxonomy_decorato
 			REQUIRE(trial.unassigned == expected.not_placed);
 			compared += trial.winners.size();
 			not_placed += trial.unassigned.size();
-			won_on_tip_count += expected.won_on_tip_count;
-			won_on_postorder += expected.won_on_postorder;
-			for (const auto &name : expected.not_placed) {
-				reasons[static_cast<size_t>(name.reason)]++;
-			}
+			coverage.Add(expected);
 			trials.push_back(std::move(trial));
 		}
 	}
@@ -290,11 +285,7 @@ TEST_CASE("AssignNames agrees with a relational assignment", "[taxonomy_decorato
 	// tie-break, or agreement proves little about them.
 	CHECK(compared > 500);
 	CHECK(not_placed > 100);
-	CHECK(won_on_tip_count > 0);
-	CHECK(won_on_postorder > 0);
-	CHECK(reasons[static_cast<size_t>(NotPlacedReason::kNeverEligible)] > 0);
-	CHECK(reasons[static_cast<size_t>(NotPlacedReason::kNeverRankSafe)] > 0);
-	CHECK(reasons[static_cast<size_t>(NotPlacedReason::kBlockedByContiguity)] > 0);
+	CHECK(coverage.Missing().empty());
 
 	for (size_t k = 0; k < trials.size(); k++) {
 		const auto &trial = trials[k];

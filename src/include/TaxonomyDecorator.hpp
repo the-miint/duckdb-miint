@@ -196,11 +196,11 @@ private:
 };
 
 // Assigns each name to the node that scores best for it (tax2tree's pick_names and
-// name_node_score_fold). A
-// node's candidates are its picked ranks (PickedRanks of its RankSafeMasks entry), each for the
-// one name eligible there. A name's best candidate has the highest F1 (F1Score::Compare), then
-// the fewest tips (TipCount), then is the latest in postorder, children visited in ascending
-// index as TreeIndex visits them. Throws std::invalid_argument when min_count is 0.
+// name_node_score_fold). A node's candidates are its picked ranks (PickedRanks of its
+// RankSafeMasks entry), each for the one name eligible there. A name's best candidate has the
+// highest F1 (F1Score::Compare), then the fewest tips (TipCount), then is the latest in
+// postorder, children visited in ascending index as TreeIndex visits them. Throws
+// std::invalid_argument when min_count is 0.
 NameAssignment AssignNames(const CladeCountIndex &index, uint32_t min_count);
 
 } // namespace miint

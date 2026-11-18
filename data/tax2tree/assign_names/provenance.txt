@@ -3,7 +3,7 @@ tax2tree: commit b737947a53c5badc097850b38b0329026f89ee07, no tracked changes
 scikit-bio 0.7.3, numpy 2.5.1, Python 3.12.13
 seed 20261117, 20 cases
 redrawn for equal F1 from different counts: 6
-names decided by a tie-break: 6 by fewer tips, 34 by postorder
+names decided by a tie-break: 6 by fewer tips, 34 by postorder (24 won by a smaller index than a tied node's, 16 by a larger)
 command: conda run -n miint-beta-oracle python -I test/scripts/gen_tax2tree_assign_names_oracle.py --tax2tree PATH_TO_TAX2TREE_CHECKOUT
 
 case00: 84 nodes, 44 tips, 26 with a lineage, min_count 1, 12 names kept (12 below the root); tie-breaks decided 0 by fewer tips, 4 by postorder; drawn 1 time(s)
