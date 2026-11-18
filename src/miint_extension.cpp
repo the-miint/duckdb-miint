@@ -273,6 +273,7 @@ static unique_ptr<FunctionData> MiintVersionsBind(ClientContext &context, TableF
 #endif
 #ifdef MIINT_HAS_KREPP
 	data->versions.emplace_back("krepp", KREPP_GIT_VERSION);
+	data->versions.emplace_back("krepp-version", miint::KreppVersionString());
 	// A row only when krepp's OpenMP regions are compiled in, which is what
 	// decides whether krepp_index_create accepts threads > 1. Reported rather
 	// than left to the wall clock, since a build without it refuses the
