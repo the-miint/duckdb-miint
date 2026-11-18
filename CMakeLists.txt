@@ -584,6 +584,7 @@ list(
   test/cpp/test_taxdump_parser.cpp
   test/cpp/test_taxonomy_lineage.cpp
   test/cpp/test_TaxonomyDecorator.cpp
+  test/cpp/test_TaxonomyDecoratorParity.cpp
   test/cpp/test_TaxonomyStore.cpp
   test/cpp/test_TreeIndex.cpp
   test/cpp/test_WFA2Aligner.cpp

@@ -126,6 +126,7 @@ Only rules whose trigger appears in the diff can fire.
 | `sam_read1` / `bam_read1` / `bgzf_*` return handling; predicates on `cigar = ''` or `'*'` | R3 |
 | `test/sql/**`, `test/cpp/**`, `test/shell/**`, committed test data under `data/**`, a fixture produced by an external tool | R4 |
 | A new `require-env` or `require <extension>`; a detection or export in `run_tests.sh` | R4, R1 |
+| A fixture directory under `data/**` with a file per case, or many small uncompressed text files | R4 |
 | A numeric literal or tolerance in a test assertion; a parity, round-trip or port test; `typeof()` / `DESCRIBE` on id columns; Catch2 `CHECK` on a size followed by indexing | R4 |
 | A glob path in `test/sql/**` with `filepath` in the expected output | R4 |
 | `avx2::` / `avx512::` in `test/**`; `miint_add_isa_variants`; a carved value for an ISA-dispatched function | R4, R5 |
@@ -232,7 +233,7 @@ Safety must not rest on convention or a comment; and a guard must be real, so do
 - **Warnings accumulate.** `miint_warnings()` accumulates within a session, so a test asserts `count(*) >= 1` for a warning it expects.
 - **Catch2:** a size check followed by indexing uses `REQUIRE`; `CHECK` continues after failure and the index can crash the binary.
 - **Ports.** An oracle proves outputs on the inputs it contains; paths of a port no fixture reaches are checked by reading the reference against the port, and the PR says which paths those are [soft].
-- **Fixtures are fixed.** A fixture's inputs are committed with it, so a test never depends on regenerating them. A large text fixture (sequences, an assembly graph, a log) is committed compressed, and a test that needs the file as a tool writes it decompresses a copy into the test directory (sqllogictest's `unzip`).
+- **Fixtures are fixed.** A fixture's inputs are committed with it, so a test never depends on regenerating them. A large text fixture (sequences, an assembly graph, a log) is committed compressed, and a test that needs the file as a tool writes it decompresses a copy into the test directory (sqllogictest's `unzip`). A generated fixture of many cases is a few tables keyed by a case column, not a file per case and table, and is committed compressed even when each file is small.
 - **An external tool's fixture comes from the build the repository vendors**, when it vendors one, so the version matches what miint embeds. When miint's own function for the tool cannot produce the fixture, the README says why.
 - **Remote services.** A mock accepts URL shapes, result types and authentication modes the real server rejects, so the test plan says whether a live run happened (PR-level check 7).
 
