@@ -39,6 +39,7 @@ option(MIINT_ENABLE_UNIFRAC
 option(MIINT_ENABLE_KREPP "Build with krepp phylogenetic placement support" ON)
 option(MIINT_ENABLE_VSEARCH
        "Build with vsearch search, clustering and chimera detection" ON)
+option(MIINT_ENABLE_HMMER "Build with HMMER profile HMM support" ON)
 option(MIINT_ENABLE_LIBDEFLATE "Build htslib bgzf with libdeflate (Linux only)"
        ON)
 
@@ -63,8 +64,10 @@ if(EMSCRIPTEN)
 elseif(WIN32)
   # All of these rely on POSIX APIs (mkdtemp, process pipes, shm, autotools);
   # MAFFT segfaults on MinGW. SortMeRNA's RocksDB and parasail have never been
-  # built for MinGW (upstream CI tests MSVC only).
+  # built for MinGW (upstream CI tests MSVC only). HMMER has never been built
+  # for Windows here (upstream supports POSIX only).
   set(MIINT_ENABLE_VSEARCH OFF)
+  set(MIINT_ENABLE_HMMER OFF)
   set(MIINT_ENABLE_MAFFT OFF)
   set(MIINT_ENABLE_ABPOA OFF)
   set(MIINT_ENABLE_SYLPH OFF)
@@ -75,12 +78,12 @@ elseif(WIN32)
     set(MIINT_ENABLE_SORTMERNA OFF)
     message(
       STATUS
-        "MinGW detected: disabling vsearch, MAFFT, SortMeRNA, sylph, gpl-boundary, UniFrac, and krepp (gpl-boundary relies on POSIX APIs; libssu inmem assumes POSIX; SortMeRNA untested)"
+        "MinGW detected: disabling vsearch, HMMER, MAFFT, SortMeRNA, sylph, gpl-boundary, UniFrac, and krepp (gpl-boundary relies on POSIX APIs; libssu inmem assumes POSIX; SortMeRNA untested)"
     )
   else()
     message(
       STATUS
-        "Windows detected: disabling vsearch, MAFFT, sylph, gpl-boundary, UniFrac, and krepp (require POSIX APIs)"
+        "Windows detected: disabling vsearch, HMMER, MAFFT, sylph, gpl-boundary, UniFrac, and krepp (require POSIX APIs)"
     )
   endif()
 elseif(APPLE)
@@ -141,6 +144,7 @@ foreach(
   ABPOA
   KREPP
   VSEARCH
+  HMMER
   SORTMERNA
   CURL
   UNIFRAC

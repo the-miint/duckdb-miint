@@ -55,3 +55,7 @@
 	path = ext/st3
 	url = https://github.com/the-miint/st3.git
 	branch = main
+[submodule "ext/hmmer"]
+	path = ext/hmmer
+	url = https://github.com/the-miint/hmmer.git
+	branch = v3.4-miint

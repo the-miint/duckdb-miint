@@ -201,6 +201,7 @@ if $VERIFY; then
                     /^XML_/,
                     /^rype_/,
                     /^st3_/,
+                    /^esl_/,  /^p7_/,
                 ];
                 const isLib = name => libPatterns.some(p => p.test(name));
 
