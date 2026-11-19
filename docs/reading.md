@@ -848,7 +848,7 @@ SELECT * FROM 'spectra.mzML';
 SELECT * FROM 'spectra.mzXML';
 
 -- To read chromatograms, call the reader explicitly.
-SELECT * FROM read_mzml_chromatograms('some_file.mzml');
+SELECT * FROM read_mzml_chromatograms('spectra.mzML');
 ```
 
 **Parameters:**

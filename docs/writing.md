@@ -306,7 +306,7 @@ COPY (
 ) TO 'filtered.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table');
 
 -- Write BAM with sequence data (SEQ and QUAL populated from FASTQ)
-CREATE TABLE sequences AS SELECT * FROM read_fastx('reads_R1.fastq', 'reads_R2.fastq');
+CREATE TABLE sequences AS SELECT * FROM read_fastx('reads_R1.fastq', sequence2 = 'reads_R2.fastq');
 
 COPY (SELECT * FROM read_alignments('input.bam'))
 TO 'with_seq.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table', SEQUENCE_DATA 'sequences');

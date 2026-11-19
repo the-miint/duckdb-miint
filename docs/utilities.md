@@ -232,7 +232,7 @@ Paired-end read merging, powered by the [vsearch](https://github.com/torognes/vs
 SELECT read_id,
        (merge_pairs_vsearch(sequence1, qual1, sequence2, qual2)).merged AS merged,
        (merge_pairs_vsearch(sequence1, qual1, sequence2, qual2)).sequence AS merged_seq
-FROM read_fastx('forward.fq', 'reverse.fq');
+FROM read_fastx('forward.fq', sequence2 = 'reverse.fq');
 ```
 
 **Parameters (4-arg form, default tuning):**
@@ -276,7 +276,7 @@ FROM read_fastx('forward.fq', 'reverse.fq');
 ```sql
 -- Filter to only successfully merged reads
 SELECT read_id, m.*
-FROM read_fastx('forward.fq', 'reverse.fq'),
+FROM read_fastx('forward.fq', sequence2 = 'reverse.fq'),
      LATERAL (SELECT merge_pairs_vsearch(sequence1, qual1, sequence2, qual2)) AS m(result)
 WHERE m.result.merged;
 ```
@@ -318,8 +318,8 @@ SELECT read_id,
 FROM (
     SELECT read_id,
            extract_linked_amplicon(sequence1, qual1, 'GTAATACG', 'AGAGCACAC',
-                                   min_len := 18, max_len := 18) AS e
-    FROM read_fastx('reads.fq')
+                                   18, 18, 0.10) AS e
+    FROM 'reads.fq'
 ) WHERE umi IS NOT NULL;
 ```
 
