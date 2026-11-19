@@ -10,16 +10,16 @@ MIINT provides integration with NCBI's GenBank and RefSeq.
 - [Read sequences](#read-sequences) - Fetch sequence data from GenBank and RefSeq by accession.
 - [Read annotations](#read-annotations) - Fetch annotation data from GenBank and RefSeq by accession.
 - [Taxonomy](#taxonomy) - Obtain and use the NCBI taxonomy: the full tree (bulk/offline), online lineage lookups, offline lineage collapse, and parsing prefixed lineage strings.
-  - [Read the taxonomy tree (`read_ncbi_taxdump`)](#read-the-taxonomy-tree-read_ncbi_taxdump) - Bulk/offline: download + cache the taxonomy tree.
-  - [Remap retired taxids (`read_ncbi_taxdump_merged`)](#remap-retired-taxids-read_ncbi_taxdump_merged) - The retired→current taxid map.
-  - [Read every name class (`read_ncbi_taxdump_names`)](#read-every-name-class-read_ncbi_taxdump_names) - All of `names.dmp`, including `genbank common name`.
-  - [List deleted taxids (`read_ncbi_taxdump_deleted`)](#list-deleted-taxids-read_ncbi_taxdump_deleted) - The taxids NCBI deleted outright.
-  - [Look up lineages online (`read_ncbi_lineage`)](#look-up-lineages-online-read_ncbi_lineage) - Online/rate-limited: resolve a handful of taxids via E-utilities.
-  - [Collapse the tree to lineages (`taxonomy_lineage`)](#collapse-the-tree-to-lineages-taxonomy_lineage) - Offline: rank-collapse a taxdump tree, identical schema to `read_ncbi_lineage`.
-  - [Parse lineage strings (`parse_lineage`)](#parse-lineage-strings-parse_lineage) - Turn a `d__…; p__…` lineage string (GTDB, Greengenes2, tax2tree) into the shared schema's rank columns.
-  - [Map an NCBI rank to its column (`lineage_rank`)](#map-an-ncbi-rank-to-its-column-lineage_rank) - The shared schema's column an NCBI rank collapses into, so `superkingdom` and `domain` look up alike.
-  - [Split GTDB labels (`gtdb_label`, `gtdb_species_label`)](#split-gtdb-labels-gtdb_label-gtdb_species_label) - A GTDB name's base and the suffix GTDB gives the parts of a split taxon (`Bacillota_A`), to find split and polyphyletic taxa.
-  - [Read GTDB's genome metadata (`read_gtdb_metadata`, `read_gtdb_qc_failed`)](#read-gtdbs-genome-metadata-read_gtdb_metadata-read_gtdb_qc_failed) - Download and cache a GTDB release's genome metadata and its list of genomes that failed GTDB's quality checks, or read the files; link an NCBI species to its type strain's genome.
+    - [Read the taxonomy tree (`read_ncbi_taxdump`)](#read-the-taxonomy-tree-read_ncbi_taxdump) - Bulk/offline: download + cache the taxonomy tree.
+    - [Remap retired taxids (`read_ncbi_taxdump_merged`)](#remap-retired-taxids-read_ncbi_taxdump_merged) - The retired→current taxid map.
+    - [Read every name class (`read_ncbi_taxdump_names`)](#read-every-name-class-read_ncbi_taxdump_names) - All of `names.dmp`, including `genbank common name`.
+    - [List deleted taxids (`read_ncbi_taxdump_deleted`)](#list-deleted-taxids-read_ncbi_taxdump_deleted) - The taxids NCBI deleted outright.
+    - [Look up lineages online (`read_ncbi_lineage`)](#look-up-lineages-online-read_ncbi_lineage) - Online/rate-limited: resolve a handful of taxids via E-utilities.
+    - [Collapse the tree to lineages (`taxonomy_lineage`)](#collapse-the-tree-to-lineages-taxonomy_lineage) - Offline: rank-collapse a taxdump tree, identical schema to `read_ncbi_lineage`.
+    - [Parse lineage strings (`parse_lineage`)](#parse-lineage-strings-parse_lineage) - Turn a `d__…; p__…` lineage string (GTDB, Greengenes2, tax2tree) into the shared schema's rank columns.
+    - [Map an NCBI rank to its column (`lineage_rank`)](#map-an-ncbi-rank-to-its-column-lineage_rank) - The shared schema's column an NCBI rank collapses into, so `superkingdom` and `domain` look up alike.
+    - [Split GTDB labels (`gtdb_label`, `gtdb_species_label`)](#split-gtdb-labels-gtdb_label-gtdb_species_label) - A GTDB name's base and the suffix GTDB gives the parts of a split taxon (`Bacillota_A`), to find split and polyphyletic taxa.
+    - [Read GTDB's genome metadata (`read_gtdb_metadata`, `read_gtdb_qc_failed`)](#read-gtdbs-genome-metadata-read_gtdb_metadata-read_gtdb_qc_failed) - Download and cache a GTDB release's genome metadata and its list of genomes that failed GTDB's quality checks, or read the files; link an NCBI species to its type strain's genome.
 
 ### Accessions are literals, not table names
 
@@ -102,25 +102,38 @@ RESET miint_ncbi_eutils_url;  -- back to NCBI's
 Fetch GenBank and RefSeq metadata from NCBI by accession number. This function queries NCBI's E-utilities API to retrieve sequence metadata without downloading the full sequence.
 
 **Requirements:**
+
 - Requires the `httpfs` extension (automatically loaded)
 - Network access to NCBI servers (eutils.ncbi.nlm.nih.gov)
 
+```sql
+-- Get metadata for a single accession
+SELECT * FROM read_ncbi('NC_001416.1');
+```
+
 **Parameters:**
-- `accession` (VARCHAR or VARCHAR[]): NCBI accession number(s) (e.g., 'NC_001416.1', 'NM_001101.5')
-- `api_key` (VARCHAR, optional): NCBI API key for higher rate limits (10 req/s vs 3 req/s)
-- `batch_size` (BIGINT, optional, default 500): Number of accessions per epost+efetch round-trip. Larger batches reduce per-accession HTTP overhead; the default matches NCBI's practical guidance for POST.
+
+| Parameter | Type and default | Description |
+| --- | --- | --- |
+| `accession` | VARCHAR or VARCHAR[] | NCBI accession number(s) (e.g., 'NC_001416.1', 'NM_001101.5') |
+| `api_key` | VARCHAR, optional | NCBI API key for higher rate limits (10 req/s vs 3 req/s) |
+| `batch_size` | BIGINT, optional, default 500 | Number of accessions per epost+efetch round-trip. Larger batches reduce per-accession HTTP overhead; the default matches NCBI's practical guidance for POST. |
 
 **Output schema:**
-- `accession` (VARCHAR): Accession with version (e.g., 'NC_001416.1')
-- `version` (INTEGER): Version number extracted from accession
-- `description` (VARCHAR): Sequence description/definition
-- `organism` (VARCHAR): Source organism name
-- `taxonomy_id` (BIGINT): NCBI taxonomy ID
-- `length` (BIGINT): Sequence length in base pairs
-- `molecule_type` (VARCHAR): Molecule type (e.g., 'DNA', 'RNA', 'protein')
-- `update_date` (DATE): Last modification date
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `accession` | VARCHAR | Accession with version (e.g., 'NC_001416.1') |
+| `version` | INTEGER | Version number extracted from accession |
+| `description` | VARCHAR | Sequence description/definition |
+| `organism` | VARCHAR | Source organism name |
+| `taxonomy_id` | BIGINT | NCBI taxonomy ID |
+| `length` | BIGINT | Sequence length in base pairs |
+| `molecule_type` | VARCHAR | Molecule type (e.g., 'DNA', 'RNA', 'protein') |
+| `update_date` | DATE | Last modification date |
 
 **Behavior:**
+
 - Fetches GenBank XML format from E-utilities using the batched `epost` + `efetch` handshake (one POST + one GET per `batch_size` accessions)
 - Automatically detects accession type (RefSeq NC_/NM_/NP_, GenBank, etc.)
 - Paced below NCBI's limits (3 req/s without key, 10 req/s with key); see [Requests: waits and where they go](#requests-waits-and-where-they-go)
@@ -129,9 +142,6 @@ Fetch GenBank and RefSeq metadata from NCBI by accession number. This function q
 
 **Examples:**
 ```sql
--- Get metadata for a single accession
-SELECT * FROM read_ncbi('NC_001416.1');
-
 -- Get metadata for multiple accessions
 SELECT * FROM read_ncbi(['NC_001416.1', 'NC_001422.1']);
 
@@ -149,6 +159,7 @@ WHERE molecule_type = 'DNA';
 ```
 
 **Notes:**
+
 - Empty accessions raise `InvalidInputException` at bind time
 - A table or view name passed where an accession belongs is rejected at bind time — see [Accessions are literals, not table names](#accessions-are-literals-not-table-names)
 - Invalid accessions that NCBI silently drops appear in `miint_warnings()` (filter with `SELECT * FROM miint_warnings() WHERE message LIKE '%read_ncbi%'`) — they do not raise
@@ -159,16 +170,24 @@ WHERE molecule_type = 'DNA';
 Fetch FASTA sequences from NCBI by accession number. Returns data in the same schema as `read_fastx`, making it easy to combine NCBI sequences with local files.
 
 **Requirements:**
+
 - Requires the `httpfs` extension (automatically loaded)
 - Network access to NCBI servers (eutils.ncbi.nlm.nih.gov)
 
+```sql
+-- Fetch a single sequence
+SELECT * FROM read_ncbi_fasta('NC_001416.1');
+```
+
 **Parameters:**
+
 - `accession` (VARCHAR or VARCHAR[]): NCBI accession number(s) (e.g., 'NC_001416.1')
 - `api_key` (VARCHAR, optional): NCBI API key for higher rate limits
 - `include_filepath` (BOOLEAN, optional, default false): Add filepath column showing NCBI URL
 - `batch_size` (BIGINT, optional, default 500): Number of sequence accessions per epost+efetch round-trip. Assembly accessions (GCF_/GCA_) are always fetched one at a time via the Datasets API, so this parameter only affects the sequence (NC_/NM_/...) path.
 
 **Output schema (matches `read_fastx`):**
+
 - `sequence_index` (BIGINT): 0-based sequential index
 - `read_id` (VARCHAR): Accession number extracted from FASTA header
 - `comment` (VARCHAR, nullable): Description from FASTA header
@@ -179,6 +198,7 @@ Fetch FASTA sequences from NCBI by accession number. Returns data in the same sc
 - `filepath` (VARCHAR, optional): the URL the records were fetched from, when include_filepath=true
 
 **Behavior:**
+
 - Fetches FASTA via the batched `epost` + `efetch` handshake (sequence accessions); assemblies route through the Datasets API one at a time
 - Parses pipe-delimited FASTA headers (e.g., `gi|123|ref|NC_001416.1|description`)
 - Extracts accession as `read_id`, remainder as `comment`
@@ -187,9 +207,6 @@ Fetch FASTA sequences from NCBI by accession number. Returns data in the same sc
 
 **Examples:**
 ```sql
--- Fetch a single sequence
-SELECT * FROM read_ncbi_fasta('NC_001416.1');
-
 -- Fetch multiple sequences
 SELECT read_id, LENGTH(sequence1) AS seq_length
 FROM read_ncbi_fasta(['NC_001416.1', 'NC_001422.1']);
@@ -214,6 +231,7 @@ SELECT * FROM align_minimap2('reads', 'reference');
 ```
 
 **Notes:**
+
 - Large sequences (e.g., complete chromosomes) may take time to download
 - Output is compatible with all functions expecting `read_fastx` schema
 - Empty accessions raise `InvalidInputException` at bind time
@@ -225,15 +243,25 @@ SELECT * FROM align_minimap2('reads', 'reference');
 Fetch feature annotations from NCBI by accession number. Returns data in the same schema as `read_gff`, making it easy to analyze NCBI annotations with SQL.
 
 **Requirements:**
+
 - Requires the `httpfs` extension (automatically loaded)
 - Network access to NCBI servers (eutils.ncbi.nlm.nih.gov)
 
+```sql
+-- Get all annotations for Lambda phage
+SELECT * FROM read_ncbi_annotation('NC_001416.1');
+```
+
 **Parameters:**
-- `accession` (VARCHAR or VARCHAR[]): NCBI accession number(s) (e.g., 'NC_001416.1')
-- `api_key` (VARCHAR, optional): NCBI API key for higher rate limits
-- `include_filepath` (BOOLEAN, optional, default false): Add filepath column showing NCBI URL
+
+| Parameter | Type and default | Description |
+| --- | --- | --- |
+| `accession` | VARCHAR or VARCHAR[] | NCBI accession number(s) (e.g., 'NC_001416.1') |
+| `api_key` | VARCHAR, optional | NCBI API key for higher rate limits |
+| `include_filepath` | BOOLEAN, optional, default false | Add filepath column showing NCBI URL |
 
 **Output schema (matches `read_gff`):**
+
 - `seqid` (VARCHAR): Sequence/chromosome identifier (the accession)
 - `source` (VARCHAR): Annotation source ('RefSeq', 'GenBank', or 'NCBI')
 - `type` (VARCHAR): Feature type (e.g., 'gene', 'CDS', 'mRNA')
@@ -246,6 +274,7 @@ Fetch feature annotations from NCBI by accession number. Returns data in the sam
 - `filepath` (VARCHAR, optional): the URL the records were fetched from, when include_filepath=true
 
 **Behavior:**
+
 - Fetches INSDC feature table format from E-utilities
 - Converts to GFF3-compatible schema
 - Detects source automatically from accession prefix (RefSeq for NC_/NM_, etc.)
@@ -256,9 +285,6 @@ Fetch feature annotations from NCBI by accession number. Returns data in the sam
 
 **Examples:**
 ```sql
--- Get all annotations for Lambda phage
-SELECT * FROM read_ncbi_annotation('NC_001416.1');
-
 -- Get only genes
 SELECT seqid, position, stop_position, attributes['gene'] AS gene_name
 FROM read_ncbi_annotation('NC_001416.1')
@@ -297,6 +323,7 @@ COPY (
 ```
 
 **Notes:**
+
 - Output is compatible with queries designed for `read_gff`
 - Complex feature locations (join, complement) emit a warning and use outer bounds only
 - The `phase` column is set from the `codon_start` qualifier for CDS features
@@ -348,16 +375,24 @@ canonical dump from NCBI and caches the extracted files locally, so subsequent c
 fast and offline.
 
 **Requirements:**
+
 - Requires the `httpfs` extension (automatically loaded) only when downloading or reading a remote source
 - Network access to NCBI (ftp.ncbi.nlm.nih.gov) for the default download
 
+```sql
+-- Download (once) and read the whole NCBI taxonomy
+SELECT COUNT(*) FROM read_ncbi_taxdump();
+```
+
 **Parameters:**
+
 - `source` (VARCHAR, positional, optional): where to read the dump from. Omit (or pass NULL) to auto-download the default dump. May be:
-  - a **directory** of already-extracted `.dmp` files (read directly; no download/untar)
-  - a local or remote (`http://`/`https://`) `taxdump.tar.gz` archive (streamed, gunzipped, and untarred)
+    - a **directory** of already-extracted `.dmp` files (read directly; no download/untar)
+    - a local or remote (`http://`/`https://`) `taxdump.tar.gz` archive (streamed, gunzipped, and untarred)
 - `refresh` (BOOLEAN, optional, default false): re-download the default dump even if a cached copy exists
 
 **Output schema (tree-table + `rank`, consistent with `read_newick`):**
+
 - `node_index` (BIGINT): the tax_id
 - `parent_index` (BIGINT, nullable): the parent tax_id; **NULL for the root** (NCBI self-parents taxid 1)
 - `name` (VARCHAR): scientific name (`name_class = 'scientific name'`). Every other name class — synonyms, `genbank common name`, authorities — is reached via [`read_ncbi_taxdump_names`](#read-every-name-class-read_ncbi_taxdump_names), not here
@@ -365,6 +400,7 @@ fast and offline.
 - `is_tip` (BOOLEAN): true iff no node lists this node as its parent
 
 **Behavior:**
+
 - Default source is `https://ftp.ncbi.nlm.nih.gov/pub/taxonomy/taxdump.tar.gz`
 - The **extracted** `.dmp` files are cached under `${XDG_CACHE_HOME:-$HOME/.cache}/miint/taxonomy/`, so download + gunzip + untar happen once; later reads hit the fast local-directory path. Set `MIINT_TAXONOMY_CACHE_DIR` to override the cache location.
 - The tree contains **live nodes only**. Merged-away taxids live in `read_ncbi_taxdump_merged`, deleted ones in `read_ncbi_taxdump_deleted`; neither appears here.
@@ -372,9 +408,6 @@ fast and offline.
 
 **Examples:**
 ```sql
--- Download (once) and read the whole NCBI taxonomy
-SELECT COUNT(*) FROM read_ncbi_taxdump();
-
 -- Read a previously extracted dump directory (fully offline)
 SELECT node_index, parent_index, name, rank
 FROM read_ncbi_taxdump('/data/taxonomy/')
@@ -401,8 +434,11 @@ data **before** joining against the tree — a naive join would silently drop me
 **Parameters:** same `source` / `refresh` as `read_ncbi_taxdump`.
 
 **Output schema:**
-- `old_taxid` (BIGINT): the retired taxid
-- `new_taxid` (BIGINT): the current taxid it was merged into
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `old_taxid` | BIGINT | the retired taxid |
+| `new_taxid` | BIGINT | the current taxid it was merged into |
 
 **Example:**
 ```sql
@@ -424,12 +460,16 @@ no class filtered out. Use it when you need a second name for a taxon — most o
 **Parameters:** same `source` / `refresh` as `read_ncbi_taxdump`.
 
 **Output schema:**
-- `taxid` (BIGINT): the taxon the name belongs to
-- `name` (VARCHAR): the name itself (`name_txt`)
-- `unique_name` (VARCHAR): NCBI's disambiguator, supplied when a name string is shared across taxa; **empty string** (not NULL) on most rows
-- `name_class` (VARCHAR): which kind of name this is
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `taxid` | BIGINT | the taxon the name belongs to |
+| `name` | VARCHAR | the name itself (`name_txt`) |
+| `unique_name` | VARCHAR | NCBI's disambiguator, supplied when a name string is shared across taxa; **empty string** (not NULL) on most rows |
+| `name_class` | VARCHAR | which kind of name this is |
 
 **Behavior:**
+
 - Rows are emitted in file order, so a taxon's names are grouped but not sorted by class
 - A taxon has exactly one `scientific name` but may carry several rows of another class, so aggregate rather than assuming one row per (taxid, class) pair
 - Reads **only** `names.dmp` — not the whole dump — so it can be joined against the other readers without each one paying for members it does not use
@@ -465,11 +505,13 @@ resolving cannot be told apart from bad input. This exposes `delnodes.dmp`.
 **Parameters:** same `source` / `refresh` as `read_ncbi_taxdump`.
 
 **Output schema:**
+
 - `taxid` (BIGINT): the deleted taxid
 
 There is no replacement column: unlike a merge, a deletion names no successor.
 
 **Behavior:**
+
 - A dump carrying no `delnodes.dmp` is an **error**, not zero rows. "Nothing was deleted" and "the extraction was incomplete" must not look alike to a caller that treats the result as authoritative — an empty answer read as truth would un-retire every taxid NCBI has deleted. Each reader requires only the member it reads, so a dump without `delnodes.dmp` is still perfectly usable via `read_ncbi_taxdump` and `read_ncbi_taxdump_names`.
 - Deletions substantially outnumber merges (~778k vs ~100k in the current dump)
 - The live, merged, and deleted id sets are mutually disjoint — a taxon is exactly one of the three
@@ -499,15 +541,25 @@ Resolves a small set of taxids to full lineages via NCBI E-utilities (`efetch`,
 the cached `read_ncbi_taxdump` + `taxonomy_lineage`, which emit the identical schema.
 
 **Requirements:**
+
 - Requires the `httpfs` extension (automatically loaded)
 - Network access to NCBI (eutils.ncbi.nlm.nih.gov)
 
+```sql
+-- One taxid
+SELECT * FROM read_ncbi_lineage(562);
+```
+
 **Parameters:**
-- `taxid` (BIGINT or BIGINT[]): the taxon(s) to resolve
-- `api_key` (VARCHAR, optional): NCBI API key for higher rate limits (10 req/s vs 3 req/s)
-- `batch_size` (BIGINT, optional, default 500, max 10000): taxids per `epost`+`efetch` round-trip
+
+| Parameter | Type and default | Description |
+| --- | --- | --- |
+| `taxid` | BIGINT or BIGINT[] | the taxon(s) to resolve |
+| `api_key` | VARCHAR, optional | NCBI API key for higher rate limits (10 req/s vs 3 req/s) |
+| `batch_size` | BIGINT, optional, default 500, max 10000 | taxids per `epost`+`efetch` round-trip |
 
 **Output schema (the shared lineage schema, identical to `taxonomy_lineage`):**
+
 - `taxid` (BIGINT): the query taxon
 - `name` (VARCHAR): its scientific name
 - `rank` (VARCHAR): its rank
@@ -515,15 +567,13 @@ the cached `read_ncbi_taxdump` + `taxonomy_lineage`, which emit the identical sc
 - `lineage` (VARCHAR): formatted `d__…;p__…;c__…;o__…;f__…;g__…;s__…`, with `;t__<strain>` appended when a strain is present
 
 **Behavior:**
+
 - Both the legacy `superkingdom` and the newer `domain` rank collapse to the `domain` column (NCBI is mid-transition)
 - Taxids silently omitted by NCBI are reported via `miint_warnings()`, not raised; a taxid that NCBI has since merged is recognised as resolved (via the response's `AkaTaxIds`) rather than reported as missing
 - Rate-limited and retried on transient failures with exponential backoff
 
 **Examples:**
 ```sql
--- One taxid
-SELECT * FROM read_ncbi_lineage(562);
-
 -- Several taxids
 SELECT taxid, name, genus, species, lineage
 FROM read_ncbi_lineage([562, 9606]);
@@ -539,23 +589,29 @@ via `read_ncbi_taxdump`) from each taxon up to the root and rank-collapses the p
 the **same schema** `read_ncbi_lineage` emits. Because the schema is identical, offline and
 online are drop-in interchangeable.
 
+```sql
+-- Same call shape and schema as read_ncbi_lineage, but offline over the cached dump
+SELECT * FROM taxonomy_lineage(taxids := [562, 9606]);
+```
+
 **Parameters:**
-- `taxids` (BIGINT[], optional, default NULL): the taxa to resolve. NULL collapses **every** live node (see the memory note below).
-- `source` (optional, default NULL): passed straight to `read_ncbi_taxdump` — NULL auto-downloads/uses the cache; a directory or `.tar.gz` reads that instead
-- `refresh` (BOOLEAN, optional, default false): passed to `read_ncbi_taxdump`
+
+| Parameter | Type and default | Description |
+| --- | --- | --- |
+| `taxids` | BIGINT[], optional, default NULL | the taxa to resolve. NULL collapses **every** live node (see the memory note below). |
+| `source` | optional, default NULL | passed straight to `read_ncbi_taxdump` — NULL auto-downloads/uses the cache; a directory or `.tar.gz` reads that instead |
+| `refresh` | BOOLEAN, optional, default false | passed to `read_ncbi_taxdump` |
 
 **Output schema:** identical to [`read_ncbi_lineage`](#look-up-lineages-online-read_ncbi_lineage).
 
 **Behavior:**
+
 - Rank→column mapping (the one [`lineage_rank`](#map-an-ncbi-rank-to-its-column-lineage_rank) gives, shared with `read_ncbi_lineage`): `superkingdom` **or** `domain` → `domain`; `phylum`/`class`/`order`/`family`/`genus`/`species`/`strain` → their like-named columns; all other ranks (`clade`, `subspecies`, `no rank`, …) are dropped. Absent ranks are NULL in their column but rendered empty (e.g. `p__`) in the formatted `lineage`.
 - A requested taxid that is not a live node produces no row (same omission semantics as `read_ncbi_lineage`; remap first with `read_ncbi_taxdump_merged` if a taxid may be retired).
 - The taxdump is parsed once per call, regardless of how many taxids are requested.
 
 **Examples:**
 ```sql
--- Same call shape and schema as read_ncbi_lineage, but offline over the cached dump
-SELECT * FROM taxonomy_lineage(taxids := [562, 9606]);
-
 -- Read from an extracted dump directory instead of the default cache
 SELECT taxid, lineage
 FROM taxonomy_lineage(taxids := [562], source := '/data/taxonomy/');
@@ -567,6 +623,7 @@ JOIN taxonomy_lineage(source := '/data/taxonomy/') l ON l.taxid = m.taxonomy_id;
 ```
 
 **Notes:**
+
 - **Memory:** calling `taxonomy_lineage()` with `taxids := NULL` over the full NCBI tree materializes a lineage for every one of ~2.9M nodes and is memory-heavy (tens of GB peak). For typical use, always pass `taxids := [...]` — resolving thousands of taxids is fast and light. The unfiltered form is intended for whole-taxonomy exports on machines with ample RAM.
 
 ### Parse lineage strings (`parse_lineage`)
@@ -577,7 +634,16 @@ Turns a prefixed lineage string, as written by GTDB, Greengenes2, tax2tree and
 `(feature_id, lineage)` taxonomy into those columns. It works on any prefixed lineage, not
 only NCBI ones.
 
+```sql
+-- A QIIME 2 taxonomy.tsv (header: Feature ID, Taxon, Confidence). The classifier writes
+-- 'Unassigned', which has no prefix, for features it could not classify.
+SELECT "Feature ID" AS feature_id, unnest(parse_lineage(Taxon))
+FROM read_csv('taxonomy.tsv', delim = '\t', header = true)
+WHERE Taxon <> 'Unassigned';
+```
+
 **Parameters:**
+
 - `lineage` (VARCHAR): for example `d__Bacteria; p__Bacillota; c__Bacilli` or `d__Bacteria;p__Bacillota;c__Bacilli`
 - `domain_letter` (VARCHAR, named only, default `'d'`): the prefix letter of the domain, `'d'` or `'k'`. Greengenes 13_8 writes `k__Bacteria`; pass `domain_letter := 'k'` to read it. It must be a constant, so one call cannot mix `d__` and `k__` rows.
 - `allow_subset` (BOOLEAN, named only, default `false`): accept a lineage that starts below the domain, such as `c__Bacilli; o__Lactobacillales` or `p__Bacillota`. The internal node labels of a tree decorated by tax2tree are like this: each starts at the rank where decoration began. The ranks above the first field are NULL, and the result type is the same. It must be a constant.
@@ -588,6 +654,7 @@ DuckDB 2.0 does not accept `(expr).*`, so use `unnest(parse_lineage(lineage))` t
 the struct into columns.
 
 **Rules:**
+
 - Fields are separated by `;`, and whitespace around a field is ignored, so `'; '` and `';'` both work.
 - Each field is `<letter>__<name>`, and its letter must match its position: `d p c o f g s t` (domain through strain). A skipped rank therefore errors rather than shifting the names below it into the wrong columns.
 - With `allow_subset := true`, the first field's letter picks the rank the lineage starts at, and each later field must carry the next rank's letter. `c__A; o__B` gives class `A` and order `B`; `c__A; f__B` (order skipped) and `o__B; c__A` (reversed) are errors.
@@ -597,6 +664,7 @@ the struct into columns.
 - `parse_lineage` does not reject gaps: `d__A; p__; c__C` returns phylum NULL and class `C`. Consumers that need gap-free lineages check that themselves.
 
 **Errors** quote the lineage and name the field:
+
 - an empty lineage, or an empty field (a trailing or doubled `;`)
 - a prefix letter out of position, or `k__` without `domain_letter := 'k'` (and `d__` with it)
 - a lineage that starts below the domain without `allow_subset := true`
@@ -605,12 +673,6 @@ the struct into columns.
 
 **Examples:**
 ```sql
--- A QIIME 2 taxonomy.tsv (header: Feature ID, Taxon, Confidence). The classifier writes
--- 'Unassigned', which has no prefix, for features it could not classify.
-SELECT "Feature ID" AS feature_id, unnest(parse_lineage(Taxon))
-FROM read_csv('taxonomy.tsv', delim = '\t', header = true)
-WHERE Taxon <> 'Unassigned';
-
 -- Greengenes 13_8, which writes k__ for the domain
 SELECT feature_id, unnest(parse_lineage(lineage, domain_letter := 'k'))
 FROM gg_13_8_taxonomy;
@@ -637,22 +699,26 @@ Older taxdumps write the rank `superkingdom` and newer ones `domain`, so a looku
 filters on the raw rank finds nothing in a taxdump written with the other one;
 `lineage_rank` gives `domain` for both.
 
+```sql
+-- The domains of a taxdump, whether it ranks them superkingdom or domain.
+SELECT node_index, name, rank
+FROM read_ncbi_taxdump()
+WHERE lineage_rank(rank) = 'domain';
+```
+
 **Parameters:**
+
 - `ncbi_rank` (VARCHAR): an NCBI rank, as in `read_ncbi_taxdump`'s `rank` column.
 
 **Returns:** VARCHAR, one of `domain`, `phylum`, `class`, `order`, `family`, `genus`,
 `species` or `strain`:
+
 - `superkingdom` and `domain` give `domain`; `phylum`, `class`, `order`, `family`, `genus`, `species` and `strain` give their own name.
 - Every other rank (`clade`, `kingdom`, `subspecies`, `no rank`, ...) gives NULL: the schema drops it, as the lineage functions do. So does a NULL `ncbi_rank`.
 - Ranks are matched exactly as NCBI writes them, in lower case: `Phylum` and `' phylum'` give NULL.
 
 **Examples:**
 ```sql
--- The domains of a taxdump, whether it ranks them superkingdom or domain.
-SELECT node_index, name, rank
-FROM read_ncbi_taxdump()
-WHERE lineage_rank(rank) = 'domain';
-
 -- How many nodes of each NCBI rank fall into each schema column.
 SELECT lineage_rank(rank) AS column_name, rank, count(*) AS nodes
 FROM read_ncbi_taxdump()
@@ -672,9 +738,11 @@ files, as in the examples below, and in the `gtdb_taxonomy` column of
 [`read_gtdb_metadata`](#read-gtdbs-genome-metadata-read_gtdb_metadata-read_gtdb_qc_failed).
 
 **Parameters:**
+
 - `name` (VARCHAR): one name, without its rank prefix, as `parse_lineage` returns it (`Bacillota_A`, not `p__Bacillota_A`).
 
 **Returns:** all fields VARCHAR.
+
 - `gtdb_label(name)`: `STRUCT(base, suffix)`, for the ranks above species.
 - `gtdb_species_label(name)`: `STRUCT(genus_base, genus_suffix, epithet, epithet_suffix)`. `epithet` is everything after the genus label and its space, without the epithet's suffix: the specific epithet, or for a name such as `Foo bar subsp. baz`, all of `bar subsp. baz`.
 
@@ -683,6 +751,7 @@ name without one has a NULL suffix. A name that does not fit the rules below, or
 name, gives NULL rather than an error, and so do its fields.
 
 **Rules:**
+
 - A base name is ASCII letters, digits and `-`: `CAG-41`, `UBA1234`.
 - A suffix is `_` followed by runs of capital letters and digits joined by single underscores: `_A`, `_A1`, or `_Y_123`, which is one suffix, `Y_123`. `Foo_A_`, `Foo__A` and `Foo_a` do not fit.
 - A species is the genus label, one space, then the epithet, each with its own optional suffix. The epithet may hold single spaces and dots, as in `bar subsp. baz`, and its suffix may only sit at its very end: `bar subsp. baz_A` fits, `bar_A subsp. baz` does not.
@@ -729,21 +798,24 @@ and the licence requires that data adapted from them and shared credit GTDB and 
 same licence.
 
 **Requirements:**
+
 - Requires the `httpfs` extension (automatically loaded) only to download a release or read a URL
 - Network access to GTDB (data.gtdb.ecogenomic.org) for a release not yet cached
 
 **Parameters** (named only; pass exactly one of `release` and `source`):
+
 - `release` (VARCHAR): a GTDB release, such as `'232'` or `'214.1'`. A bare number is the release's first, `.0`. Its files are downloaded into a cache when the query runs, and read from there after. Releases from 214.1 serve the files these functions read. Earlier ones ship `.tar.gz` archives: extract the `.tsv` and pass it as `source`.
 - `source` (VARCHAR): what to read, as it is, never cached:
-  - a `.tsv` or `.tsv.gz` file, local or remote: `http(s)://`, or any scheme a loaded DuckDB file system reads, such as `s3://`. Gzip is told by the `.gz` name, as `read_csv` tells it.
-  - a directory holding one release's files, such as a release's cache directory. For `read_gtdb_metadata`, at most one `bac120_metadata_r<N>.tsv[.gz]` and one `ar53_metadata_r<N>.tsv[.gz]` (`ar122_` before release 207), at least one of the two, of the same release. For `read_gtdb_qc_failed`, exactly one `qc_failed_r<N>.tsv[.gz]`. Other files are ignored.
+    - a `.tsv` or `.tsv.gz` file, local or remote: `http(s)://`, or any scheme a loaded DuckDB file system reads, such as `s3://`. Gzip is told by the `.gz` name, as `read_csv` tells it.
+    - a directory holding one release's files, such as a release's cache directory. For `read_gtdb_metadata`, at most one `bac120_metadata_r<N>.tsv[.gz]` and one `ar53_metadata_r<N>.tsv[.gz]` (`ar122_` before release 207), at least one of the two, of the same release. For `read_gtdb_qc_failed`, exactly one `qc_failed_r<N>.tsv[.gz]`. Other files are ignored.
 - `refresh` (BOOLEAN, default false): with `release`, download its files again though they are cached. With `source` it is an error.
 
 **Output:**
+
 - `read_gtdb_metadata`: `domain` (VARCHAR), then every column of the file, named and ordered as in its header, all VARCHAR, with GTDB's missing-value marker `none` read as NULL. NCBI's own `na`, which GTDB passes through in some `ncbi_` columns, is kept as written.
-  - `domain` is `'Bacteria'` for a `bac120_` file and `'Archaea'` for an `ar53_` or `ar122_` one, matching `parse_lineage`'s domain and GTDB's `d__` names, so the two join.
-  - The columns change between releases: release 232 has 113, and 214.1 has 110, without CheckM2's.
-  - Cast what you need, for example `TRY_CAST(checkm2_completeness AS DOUBLE)`. GTDB writes booleans as `t` and `f`.
+    - `domain` is `'Bacteria'` for a `bac120_` file and `'Archaea'` for an `ar53_` or `ar122_` one, matching `parse_lineage`'s domain and GTDB's `d__` names, so the two join.
+    - The columns change between releases: release 232 has 113, and 214.1 has 110, without CheckM2's.
+    - Cast what you need, for example `TRY_CAST(checkm2_completeness AS DOUBLE)`. GTDB writes booleans as `t` and `f`.
 - `read_gtdb_qc_failed`: every column of the file, named as GTDB names them (`"Accession"`, `"NCBI species"`, `"CM1 completeness (%)"`; quote them in SQL), all VARCHAR, values as written (`-`, `s__` and `none` included). Its columns change between releases too: 232 has 26, and 214.1 has 20, before CheckM2.
 - In both, an empty field is NULL, and the order of the rows is not promised.
 
@@ -756,6 +828,7 @@ so to GTDB's placement of that strain, without matching names. The examples belo
 join, which gives a row for each such genome.
 
 **Behavior:**
+
 - **The cache.** A release's files are kept, compressed as served, at `<cache>/<release>/<file name>`, such as `~/.cache/miint/gtdb/232.0/bac120_metadata_r232.tsv.gz`. `<cache>` is the `miint_gtdb_cache_dir` setting, or `${XDG_CACHE_HOME:-~/.cache}/miint/gtdb` when that is empty (the default). Every file sits in the release's directory, `qc_failed` included, so the directory is a `source` for either function. Only the files a call reads are downloaded: `read_gtdb_qc_failed` does not fetch the metadata.
 - **Downloads.** A file is downloaded to a file of its own beside its final name, which is renamed into place once complete. So a file at its final name is complete, and it is trusted: nothing checks it against GTDB again until `refresh := true`. A failed or interrupted download removes its file. A killed process leaves `<name>.<id>.part`, which is never read and can be deleted.
 - **Binding reads only header lines**, which name the columns, through DuckDB's file systems: from the file, or from GTDB for a release's file not yet cached and every file with `refresh := true`. For a remote file, httpfs fetches only the start: 64 KB of a plain file, and of a gzip file 16 MiB or the whole file if smaller, the piece DuckDB reads a remote compressed file in. So `DESCRIBE` or `EXPLAIN` of release 232 not yet cached fetches about 23 MB (16 MiB of `bac120`, all 7 MB of `ar53`) and caches nothing; the download happens when the query runs.
@@ -764,10 +837,12 @@ join, which gives a row for each such genome.
 - **Retries.** A download that fails with HTTP 5xx, 429 or 408 is tried again after 1, 2 and 4 s, and DuckDB's own HTTP retries (`http_retries`) run within each attempt. Ctrl-C and `max_execution_time` end a download or a wait ([Requests: waits and where they go](#requests-waits-and-where-they-go)).
 
 **Settings:**
+
 - `miint_gtdb_url` (default `https://data.gtdb.ecogenomic.org/releases`): where releases are downloaded from, as `<url>/release232/232.0/bac120_metadata_r232.tsv.gz` and `<url>/release232/232.0/auxillary_files/qc_failed_r232.tsv` (GTDB's spelling). A mirror with GTDB's layout works.
 - `miint_gtdb_cache_dir` (default empty): where the cache is kept; see above.
 
 **Errors:**
+
 - both or neither of `release` and `source`, a `release` other than a number, or two joined by a dot, each without a leading zero, an empty `source`, or `refresh` with `source`
 - an empty `miint_gtdb_url`, or no cache directory: `miint_gtdb_cache_dir` empty with neither `XDG_CACHE_HOME` nor `HOME` set
 - a `source` that does not exist, or a directory that does not hold one release's files

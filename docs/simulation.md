@@ -18,15 +18,16 @@ Each species is assigned a random optimum position drawn uniformly on `[0, 1]` a
 `simulate_gradient_otus(abundances, num_samples, seqs_per_sample, [options])`
 
 **Parameters:**
+
 - `abundances` (LIST(DOUBLE), required, positional): Per-species relative abundances (peak heights). Must be non-empty, finite, non-negative, and not all zero. See [Supplying the abundance vector](#supplying-the-abundance-vector).
 - `num_samples` (INTEGER, required, positional): Number of samples along the gradient (≥ 1).
 - `seqs_per_sample` (BIGINT, required, positional): Sequencing depth — reads drawn per sample (≥ 1).
 - `sp_width` (DOUBLE, default `0.1`): Gaussian width (σ) of every species' response curve; must be finite and positive.
 - `noise` (DOUBLE, default `0.0`): Noise magnitude. `0.0` = unperturbed. The perturbation standard deviation is `noise ×` the width source selected by `noise_type`.
 - `noise_type` (VARCHAR, default `'+species'`): selects where each perturbation's standard deviation comes from — a species' own abundance, or the sample total shared across all species.
-  - `'+species'` (default): adds `Normal(0, noise·x)` to each species' abundance `x`. The width is per species, so the perturbation is a relative jitter of the same proportion everywhere, and a species with zero abundance takes zero width — the perturbation step leaves it at zero. Note this does not by itself guarantee such a species stays absent from the output: the floor-shift below lifts the whole profile whenever some other species is driven negative, which becomes likely as `noise` approaches (or exceeds) 1.
-  - `'*sample'`: multiplies each species by `Normal(1, noise·Σ)`, where `Σ` is the sample's abundance sum.
-  - `'+sample'`: adds `Normal(0, noise·Σ)` to each species.
+    - `'+species'` (default): adds `Normal(0, noise·x)` to each species' abundance `x`. The width is per species, so the perturbation is a relative jitter of the same proportion everywhere, and a species with zero abundance takes zero width — the perturbation step leaves it at zero. Note this does not by itself guarantee such a species stays absent from the output: the floor-shift below lifts the whole profile whenever some other species is driven negative, which becomes likely as `noise` approaches (or exceeds) 1.
+    - `'*sample'`: multiplies each species by `Normal(1, noise·Σ)`, where `Σ` is the sample's abundance sum.
+    - `'+sample'`: adds `Normal(0, noise·Σ)` to each species.
 
   After perturbation the profile is shifted so its minimum is 0 (a uniform per-sample shift — not a per-species clip; there is no clip option for gradient noise) and then rescaled to preserve the sample's mean abundance. Only validated when `noise ≠ 0`.
 - `range_lo` (DOUBLE, default `0.1`), `range_hi` (DOUBLE, default `0.9`): Gradient sampling interval; both finite with `range_lo ≤ range_hi`.
@@ -60,14 +61,17 @@ Starting from the input vector (renormalized to sum 1), one **centroid** is buil
 `simulate_cluster_otus(abundances, seqs_per_sample, [options])`
 
 **Parameters:**
-- `abundances` (LIST(DOUBLE), required, positional): Base per-species relative abundances (as above).
-- `seqs_per_sample` (BIGINT, required, positional): Sequencing depth per sample (≥ 1).
-- `cluster_sizes` (LIST(INTEGER), default `[30, 30, 30]`): Number of samples in each cluster; non-empty, each ≥ 1. The number of clusters is the list length; total samples is the sum.
-- `cluster_spacing` (DOUBLE, default `1.0`): Perturbation magnitude from base → cluster centroid (larger = clusters further apart). Finite, ≥ 0.
-- `sample_spacing` (DOUBLE, default `0.5`): Perturbation magnitude from centroid → sample (larger = looser clusters). Finite, ≥ 0.
-- `noise_type` (VARCHAR, default `'*sample'`): `'*sample'` (multiplicative) or `'+sample'` (additive).
-- `normalization` (VARCHAR, default `'clip'`): `'clip'` floors negatives at 0; `'rescale'` shifts the minimum to 0. Both then renormalize to sum 1.
-- `seed` (BIGINT, default `-1`): RNG seed (`-1` = nondeterministic).
+
+| Parameter | Type and default | Description |
+| --- | --- | --- |
+| `abundances` | LIST(DOUBLE), required, positional | Base per-species relative abundances (as above). |
+| `seqs_per_sample` | BIGINT, required, positional | Sequencing depth per sample (≥ 1). |
+| `cluster_sizes` | LIST(INTEGER), default `[30, 30, 30]` | Number of samples in each cluster; non-empty, each ≥ 1. The number of clusters is the list length; total samples is the sum. |
+| `cluster_spacing` | DOUBLE, default `1.0` | Perturbation magnitude from base → cluster centroid (larger = clusters further apart). Finite, ≥ 0. |
+| `sample_spacing` | DOUBLE, default `0.5` | Perturbation magnitude from centroid → sample (larger = looser clusters). Finite, ≥ 0. |
+| `noise_type` | VARCHAR, default `'*sample'` | `'*sample'` (multiplicative) or `'+sample'` (additive). |
+| `normalization` | VARCHAR, default `'clip'` | `'clip'` floors negatives at 0; `'rescale'` shifts the minimum to 0. Both then renormalize to sum 1. |
+| `seed` | BIGINT, default `-1` | RNG seed (`-1` = nondeterministic). |
 
 **Output schema:**
 

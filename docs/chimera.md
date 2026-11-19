@@ -18,6 +18,7 @@ Reference-based chimera detection using the UCHIME algorithm, detecting chimeric
 `detect_chimera_uchime(query_table, db='refs_table', [sample_id='col'], [options])`
 
 **Parameters:**
+
 - `query_table` (VARCHAR): Name of a table or view containing query sequences. Must have `read_id` (VARCHAR, BIGINT, or UUID — see *Identifier-column types* below) and `sequence1` (VARCHAR) columns.
 - `db` (VARCHAR, required): Name of a table or view containing reference sequences. Same schema requirements as `query_table` (its `read_id` type is independent of the query's).
 - `sample_id` (VARCHAR, optional): Name of a column in `query_table` to partition by. When provided, queries are scored per-sample against the (shared, load-once) reference database, and the sample column is prepended to the output. Execution is serialized (the vsearch wrapper is not thread-safe across concurrent calls). A TEMP table or view cannot be used as the source in this mode: the per-sample path builds a fixed-name temporary view on a private per-thread connection, which must stay isolated so parallel workers do not collide on that name. Materialize the source as an ordinary table first. Tracked as #207.
@@ -52,10 +53,12 @@ Reference-based chimera detection using the UCHIME algorithm, detecting chimeric
 | `flag` | VARCHAR | Classification: `Y` (chimera), `N` (non-chimera), `?` (borderline) |
 
 **Identifier-column types (`read_id`, `parent_a_id`, `parent_b_id`, `closest_parent_id`):**
+
 - The query and reference `read_id` columns may each be `VARCHAR`, `BIGINT`, or `UUID`, independently. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time with the message `Column 'read_id' in table '<table>' must be VARCHAR, BIGINT, or UUID`.
 - The output `read_id` mirrors the query table's type; the three parent columns (reference labels) mirror the reference table's type, and they can differ (e.g. a `UUID` query against a `BIGINT` reference). `BIGINT`/`UUID` ids round-trip through their decimal / canonical-lowercase forms. The parent columns stay SQL NULL for non-chimeric rows regardless of id type.
 
 **Behavior:**
+
 - One output row per query sequence (all queries are reported, not just chimeras)
 - Non-chimeric sequences (flag=`N`) have NULL for parent and identity columns, and 0 for vote columns
 - `id_a_b` (parent A vs parent B identity) is only computed for chimeric (`Y`) and borderline (`?`) results. Non-chimeric results report `id_a_b=0.0`. This avoids an extra pairwise alignment per query that is not needed for classification. Note: vsearch computes `id_a_b` for all queries unconditionally.
@@ -64,6 +67,7 @@ Reference-based chimera detection using the UCHIME algorithm, detecting chimeric
 - Tables and views are both supported for query and reference inputs
 
 **Algorithm:**
+
 1. For each query, partition into 4 chunks and search the reference DB using an 8-mer index for candidate parents (up to 16)
 2. Align query to each candidate using vsearch's SIMD-optimized Needleman-Wunsch global alignment
 3. Select the 2 best parents via smoothed identity (32bp sliding window)
@@ -93,6 +97,7 @@ SELECT flag, count(*) FROM detect_chimera_uchime('queries', db:='refs') GROUP BY
 Sequences are loaded here with [`read_fastx`](reading.md); for finding best-matching references more generally, see [sequence search](search.md).
 
 **Error conditions:**
+
 - Error if `db` parameter is missing
 - Error if query or reference table does not exist or lacks `read_id`/`sequence1` columns
 - Error if reference table is empty
@@ -108,6 +113,7 @@ De novo chimera detection using the UCHIME algorithm, detecting chimeric sequenc
 `detect_chimera_uchime_denovo(input_table, [sample_id='col'], [options])`
 
 **Parameters:**
+
 - `input_table` (VARCHAR): Name of a table or view containing sequences with abundance. By default must have `read_id` (VARCHAR, BIGINT, or UUID — see *Identifier-column types* below), `sequence1` (VARCHAR), and `size` (integer type) columns; use `id_col`/`sequence_col`/`count_col` to override.
 - `sample_id` (VARCHAR, optional): Name of a column in `input_table` to partition by. Each sample gets its own k-mer index and bootstrap; a read_id that appears in multiple samples is therefore scored independently. The sample column is prepended to the output. Execution is serialized per the vsearch wrapper's thread-safety constraints.
 - `id_col` (VARCHAR, default `'read_id'`): Name of the read identifier column in `input_table`.
@@ -121,6 +127,7 @@ De novo chimera detection using the UCHIME algorithm, detecting chimeric sequenc
 **Identifier-column types:** The `id_col` column may be `VARCHAR`, `BIGINT`, or `UUID` (other numeric types — INTEGER, UBIGINT, HUGEINT, DOUBLE — are rejected at bind time with `Column '<id_col>' in table '<table>' must be VARCHAR, BIGINT, or UUID`). De novo detection has a single id source, so `read_id` and all three parent columns share that one type; the parent columns stay NULL for non-chimeric rows. `BIGINT`/`UUID` ids round-trip through their decimal / canonical-lowercase forms. The `;size=` abundance annotation is never embedded in the id — the count comes from `count_col`, so a numeric id never collides with abundance.
 
 **Behavior:**
+
 - Sequences are processed in decreasing abundance order (highest first)
 - The first two sequences (most abundant) are unconditionally treated as non-chimeric to seed the reference database
 - Non-chimeric and borderline sequences are added to the reference DB incrementally
@@ -148,6 +155,7 @@ WHERE u.flag != 'Y';
 The `count_col := 'abundance'` option lets you chain the output of [denoising](denoising.md) directly into de novo chimera detection.
 
 **Error conditions:**
+
 - Error if table does not exist or lacks the resolved id/sequence/count columns
 - Error if the count column is not an integer type
 - Error if table is empty

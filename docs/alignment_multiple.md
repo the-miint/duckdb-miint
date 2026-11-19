@@ -15,6 +15,7 @@ Multiple sequence alignment using MAFFT's PartTree algorithm. Reads all sequence
 MAFFT is embedded as a statically linked C library (no external binary required). The PartTree algorithm uses O(N log N) guide tree construction with k-tuple distances, making it suitable for large datasets (tested up to 5,000+ sequences).
 
 **Parameters:**
+
 - `table_name` (VARCHAR): Name of a table or view containing sequences to align. Must have `read_id` (VARCHAR) and `sequence1` (VARCHAR) columns. Minimum 2 sequences, each at least 6 characters. DNA and protein sequences are auto-detected. Paired-end tables (those with a `sequence2` column) are rejected at bind.
 - `sample_id` (VARCHAR, optional): Name of a column in `table_name` to partition by. When provided, `align_mafft` runs one MSA per distinct sample value and prepends the sample column to the output. The per-sample ≥2-sequences and ≥6-char validations apply within each sample; the whole query aborts if any sample violates them. `sequence_index` is per-sample (0..n-1 within each sample). Join back to the input on `(<sample_id>, read_id)`.
 
@@ -79,6 +80,7 @@ GROUP BY a.read_id, b.read_id;
 **Performance:** ~2x faster than native `mafft --parttree` for 1,000-5,000 sequences (no shell script overhead or temp file I/O). For 36 sequences, ~15x faster.
 
 **Limitations:**
+
 - All sequences are materialized in memory (required by the MSA algorithm)
 - Sequences must be at least 6 characters (MAFFT internal requirement)
 - Single-threaded alignment (process-wide mutex)
@@ -90,6 +92,7 @@ Multiple sequence alignment using [abPOA](https://github.com/yangao07/abPOA) (ad
 abPOA is embedded as a statically linked C library (no external binary required). It supports adaptive banding for 3-10x speedup over full-DP POA, minimizer-based progressive guide tree construction, and convex gap penalties.
 
 **Parameters:**
+
 - `table_name` (VARCHAR): Name of a table or view containing sequences to align. Must have `read_id` (VARCHAR) and `sequence1` (VARCHAR) columns. Minimum 2 sequences. DNA only. Paired-end tables (those with a `sequence2` column) are rejected at bind.
 - `sample_id` (VARCHAR, optional): Name of a column in `table_name` to partition by. When provided, `align_abpoa` runs one MSA per distinct sample value and prepends the sample column to the output. `sequence_index` is per-sample (0..n-1 within each sample). Unlike `align_mafft`, per-sample alignments run in parallel (abPOA is thread-safe).
 - `match` (INTEGER, default 2): Match score.
@@ -139,6 +142,7 @@ SELECT * FROM align_abpoa('cohort', sample_id := 'sample') ORDER BY sample, sequ
 ```
 
 **Limitations:**
+
 - All sequences are materialized in memory (required by the POA algorithm)
 - DNA only (nucleotide mode)
 
@@ -151,6 +155,7 @@ Particularly useful for amplicon denoising, strain-level variant calling, and lo
 **Parameters:**
 
 Same alignment parameters as `align_abpoa`, plus:
+
 - `max_num_cons` (INTEGER, default 1): Maximum number of consensus sequences to generate. When > 1, abPOA clusters reads and produces one consensus per cluster (up to `max_num_cons`).
 - `min_freq` (FLOAT, default 0.25): Minimum cluster frequency for multi-consensus mode. Clusters below this threshold are merged.
 - `algorithm` (VARCHAR, default `'heaviest_bundling'`): Consensus algorithm — `'heaviest_bundling'` (highest weight path through the graph) or `'majority_voting'` (most frequent base per position).

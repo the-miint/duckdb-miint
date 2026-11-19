@@ -1,6 +1,56 @@
 # MIINT Documentation
 
-MIINT provides a range of bioinformatic capabilities. The materials included here are coupled where possible with detailed explanation and examples.
+Start with [installation](installation.md), or choose a task below. For functions that take the name of a table or view, see [Passing relations by name](#passing-relations-by-name).
+
+## Reading & writing
+
+- [Reading files](reading.md) - File formats with read support in MIINT (FASTA/FASTQ, SAM/BAM, PAF, GFA, SFF, SRA, BIOM, mzML/mzXML, GFF, jplace, Newick), and myloasm assembly output.
+- [Writing files](writing.md) - File formats with write support in MIINT.
+
+## Public data repositories
+
+- [EBI/ENA](insdc_ena.md) - Interaction with EBI/ENA including submission and fetching of data.
+- [NCBI](insdc_ncbi.md) - Interaction with NCBI including fetching of data and the NCBI taxonomy (tree, name classes, lineages, retired/deleted-taxid handling), parsing `d__…; p__…` lineage strings into the shared lineage schema, mapping NCBI ranks to its columns, and splitting GTDB labels into base names and suffixes; GTDB's genome metadata and the genomes that failed its quality checks.
+
+## Alignment
+
+- [Reference based alignment](alignment_reference.md) - High throughput reference based read alignment.
+- [Pairwise alignment](alignment_pairwise.md) - Pairwise alignment methods.
+- [Multiple sequence alignment](alignment_multiple.md) - Multiple sequence alignment methods.
+- [Alignment analysis](alignment_analysis.md) - Operations for the analysis of alignment data.
+
+## Genomes
+
+- [Gene prediction](gene_prediction.md) - Call prokaryotic genes and their proteins (Prodigal, single-genome or metagenomic), and write them as Prodigal's GFF, or its `-a`/`-d` FASTA (`prodigal_proteins`, `prodigal_genes`).
+
+## Amplicon & community analysis
+
+- [Quality control](qc.md) - Adapter / polyG / polyX / quality trimming and per-read filtering.
+- [Denoising](denoising.md) - Denoise sequencing data into sub-OTU variants.
+- [Chimera checking](chimera.md) - Reference-based and de novo chimera detection.
+- [Sequence clustering](clustering.md) - Cluster sequences into OTUs at an identity threshold.
+- [Sequence search](search.md) - Search sequences against a reference database.
+- [Taxonomic classification](classification.md) - Classify sequences by minimizer/k-mer content (RYpe).
+- [Profiling & feature tables](profiling.md) - Abundance profiling (sylph) and OGU feature tables (Woltka).
+- [Absolute quantification](absolute_quantification.md) - Turn compositional read counts into absolute quantities: cell counts from synDNA spike-ins (Zaramela et al. 2022), and copies of each ORF's ssRNA.
+- [Source tracking](source_tracking.md) - SourceTracker: estimate what fraction of each sink community came from each source environment, with per-feature assignments and leave-one-out validation.
+
+## Phylogeny & diversity
+
+- [Phylogeny estimation](phylogeny.md) - Phylogenetic estimation, placement of query sequences onto a backbone and index building (krepp), tree manipulation (shear, resolve multifurcations/placements), the nearest target tip per query and group, node depths, lowest common ancestors and ancestors, and comparative methods (independent contrasts, ancestral state reconstruction: Brownian-motion, parsimony, and Mk maximum likelihood).
+- [Alpha and beta diversity](diversity.md) - Methods to compute and analyze alpha and beta diversity, including rarefaction, non-phylogenetic community distances, ordination (PCoA) and Procrustes alignment, sample clustering, and the two-sample Kolmogorov-Smirnov test.
+- [Community simulation](simulation.md) - Generate synthetic gradient / clustered OTU tables with known ground truth for benchmarking resemblance and ordination methods.
+- [scikit-bio methods](scikit_bio.md) - Statistics computed by scikit-bio itself, through skb-arrow, such as the Mantel test's permutation p-value and ANCOM-BC differential abundance.
+- [Multi-omics integration](multiomics.md) - MMvec: learn which metabolites co-occur with which microbes from paired count tables, without the spurious associations correlation produces on compositional data.
+- [Sample classification & regression](sample_classifier.md) - Random forests over a feature table (sc, a reimplementation of QIIME 2's q2-sample-classifier): fit, predict, estimate generalization by cross-validation, and explain individual predictions with SHAP (SHapley Additive exPlanations) feature attributions, computed exactly with path-dependent TreeSHAP.
+
+## Mass spectrometry
+
+- [MassQL](massql.md) - Operating on mass spectrometry data through MassQL.
+
+## Other
+
+- [Utilities](utilities.md) - Sequence helpers, versions/diagnostics, and optional-tool installation.
 
 ## Passing relations by name
 
@@ -60,53 +110,3 @@ Two constraints come with it:
   table — and passing it to a MIINT function **deadlocks the process** with no error and no timeout. The
   cause is a lock-ordering hazard inside DuckDB's own Arrow scan, and nothing in MIINT can intercept it.
   Materialize first: `con.execute(...).arrow().read_all()`, or `CREATE TEMP TABLE ... AS SELECT`.
-
-## Reading & writing
-
-- [Reading files](reading.md) - File formats with read support in MIINT (FASTA/FASTQ, SAM/BAM, PAF, GFA, SFF, SRA, BIOM, mzML/mzXML, GFF, jplace, Newick), and myloasm assembly output.
-- [Writing files](writing.md) - File formats with write support in MIINT.
-
-## Public data repositories
-
-- [EBI/ENA](insdc_ena.md) - Interaction with EBI/ENA including submission and fetching of data.
-- [NCBI](insdc_ncbi.md) - Interaction with NCBI including fetching of data and the NCBI taxonomy (tree, name classes, lineages, retired/deleted-taxid handling), parsing `d__…; p__…` lineage strings into the shared lineage schema, mapping NCBI ranks to its columns, and splitting GTDB labels into base names and suffixes; GTDB's genome metadata and the genomes that failed its quality checks.
-
-## Alignment
-
-- [Reference based alignment](alignment_reference.md) - High throughput reference based read alignment.
-- [Pairwise alignment](alignment_pairwise.md) - Pairwise alignment methods.
-- [Multiple sequence alignment](alignment_multiple.md) - Multiple sequence alignment methods.
-- [Alignment analysis](alignment_analysis.md) - Operations for the analysis of alignment data.
-
-## Genomes
-
-- [Gene prediction](gene_prediction.md) - Call prokaryotic genes and their proteins (Prodigal, single-genome or metagenomic), and write them as Prodigal's GFF, or its `-a`/`-d` FASTA (`prodigal_proteins`, `prodigal_genes`).
-
-## Amplicon & community analysis
-
-- [Quality control](qc.md) - Adapter / polyG / polyX / quality trimming and per-read filtering.
-- [Denoising](denoising.md) - Denoise sequencing data into sub-OTU variants.
-- [Chimera checking](chimera.md) - Reference-based and de novo chimera detection.
-- [Sequence clustering](clustering.md) - Cluster sequences into OTUs at an identity threshold.
-- [Sequence search](search.md) - Search sequences against a reference database.
-- [Taxonomic classification](classification.md) - Classify sequences by minimizer/k-mer content (RYpe).
-- [Profiling & feature tables](profiling.md) - Abundance profiling (sylph) and OGU feature tables (Woltka).
-- [Absolute quantification](absolute_quantification.md) - Turn compositional read counts into absolute quantities: cell counts from synDNA spike-ins (Zaramela et al. 2022), and copies of each ORF's ssRNA.
-- [Source tracking](source_tracking.md) - SourceTracker: estimate what fraction of each sink community came from each source environment, with per-feature assignments and leave-one-out validation.
-
-## Phylogeny & diversity
-
-- [Phylogeny estimation](phylogeny.md) - Phylogenetic estimation, placement of query sequences onto a backbone and index building (krepp), tree manipulation (shear, resolve multifurcations/placements), the nearest target tip per query and group, node depths, lowest common ancestors and ancestors, and comparative methods (independent contrasts, ancestral state reconstruction: Brownian-motion, parsimony, and Mk maximum likelihood).
-- [Alpha and beta diversity](diversity.md) - Methods to compute and analyze alpha and beta diversity, including rarefaction, non-phylogenetic community distances, ordination (PCoA) and Procrustes alignment, sample clustering, and the two-sample Kolmogorov-Smirnov test.
-- [Community simulation](simulation.md) - Generate synthetic gradient / clustered OTU tables with known ground truth for benchmarking resemblance and ordination methods.
-- [scikit-bio methods](scikit_bio.md) - Statistics computed by scikit-bio itself, through skb-arrow, such as the Mantel test's permutation p-value and ANCOM-BC differential abundance.
-- [Multi-omics integration](multiomics.md) - MMvec: learn which metabolites co-occur with which microbes from paired count tables, without the spurious associations correlation produces on compositional data.
-- [Sample classification & regression](sample_classifier.md) - Random forests over a feature table (sc, a reimplementation of QIIME 2's q2-sample-classifier): fit, predict, estimate generalization by cross-validation, and explain individual predictions with SHAP (SHapley Additive exPlanations) feature attributions, computed exactly with path-dependent TreeSHAP.
-
-## Mass spectrometry
-
-- [MassQL](massql.md) - Operating on mass spectrometry data through MassQL.
-
-## Other
-
-- [Utilities](utilities.md) - Sequence helpers, versions/diagnostics, and optional-tool installation.

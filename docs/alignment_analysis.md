@@ -31,6 +31,7 @@ A considerable amount of analysis on alignment data can be performed with native
 Test individual SAM flag bits. Each function takes a `USMALLINT` (the flags column from `read_alignments`) and returns a `BOOLEAN`.
 
 **Primary names:**
+
 - `alignment_is_paired(flags)` - Read is paired (0x1)
 - `alignment_is_proper_pair(flags)` - Read is properly paired (0x2)
 - `alignment_is_unmapped(flags)` - Read is unmapped (0x4)
@@ -67,6 +68,7 @@ Per-base CIGAR walker. Expands each alignment into one row per reference positio
 `compute_pileup(alignments_table, reference_table)`
 
 CIGAR op handling:
+
 - `M` / `=` / `X` — emit one row per ref position; advance both cursors.
 - `D` / `N` — emit one row per ref position with `query_base = NULL` and
   `query_qual = NULL`; advance ref only.
@@ -78,6 +80,14 @@ CIGAR op handling:
 Reuses miint's existing CIGAR parser, not htslib. The reference base at
 each position is looked up from the supplied `reference_table` — no MD-tag
 input is required.
+
+```sql
+-- Per-position pileup
+SELECT ref_pos, query_base, query_qual
+FROM compute_pileup('bin_a_alignments', 'bin_a_reference')
+WHERE ref_id = 'binA_cons'
+ORDER BY ref_pos, read_id;
+```
 
 **Parameters:**
 
@@ -102,6 +112,7 @@ that should appear as `ref_id` in the reference table.
 | `insert_pos` | INTEGER | 0 for reference-aligned rows; 1-based position within an insertion event |
 
 **Behavior:**
+
 - Throws if an alignment references a contig missing from
   `reference_table`, or if a CIGAR's reference span runs past the end of
   the reference.
@@ -116,12 +127,6 @@ that should appear as `ref_id` in the reference table.
 
 **Example:**
 ```sql
--- Per-position pileup 
-SELECT ref_pos, query_base, query_qual
-FROM compute_pileup('bin_a_alignments', 'bin_a_reference')
-WHERE ref_id = 'binA_cons'
-ORDER BY ref_pos, read_id;
-
 -- Allele counts per position (filter out NULL query bases from deletions)
 SELECT ref_pos, query_base, COUNT(*) AS n
 FROM compute_pileup('alignments', 'reference')
@@ -140,10 +145,13 @@ Slice alignment data from a table or view to a genomic region. Each alignment is
 `alignment_slice(table_name, start, stop, [include_deletions=false])`
 
 **Parameters:**
-- `table_name` (VARCHAR): Name of a table or view containing alignment data
-- `start` (BIGINT): Region start position (1-based, inclusive)
-- `stop` (BIGINT): Region stop position (1-based, exclusive)
-- `include_deletions` (BOOLEAN, default `false`): Whether deletion (D) operations count as overlap evidence. When `false`, reads whose only overlap with the region is through deletions are excluded.
+
+| Parameter | Type and default | Description |
+| --- | --- | --- |
+| `table_name` | VARCHAR | Name of a table or view containing alignment data |
+| `start` | BIGINT | Region start position (1-based, inclusive) |
+| `stop` | BIGINT | Region stop position (1-based, exclusive) |
+| `include_deletions` | BOOLEAN, default `false` | Whether deletion (D) operations count as overlap evidence. When `false`, reads whose only overlap with the region is through deletions are excluded. |
 
 **Coordinates:** 1-based half-open `[start, stop)`, consistent with `position` and `stop_position` from `read_alignments`.
 
@@ -152,6 +160,7 @@ Slice alignment data from a table or view to a genomic region. Each alignment is
 **Output schema:** Same columns as found in the input table (from the recognized alignment column set), with adjusted values for overlapping reads. The identifier columns `read_id`, `reference`, and `mate_reference` keep their input storage type — `VARCHAR`, `BIGINT`, or `UUID` — rather than being coerced to `VARCHAR`, so a `BIGINT`/`UUID` id round-trips through slicing unchanged (consistent with `align_minimap2`).
 
 **Behavior:**
+
 - Reads that don't overlap the region are excluded
 - Soft clips (S) do not count as overlap evidence
 - Trimmed portions of the CIGAR become hard clips (H)
@@ -182,6 +191,7 @@ FROM alignment_slice('chr1_alns', 1000, 2000);
 ```
 
 **Notes:**
+
 - The function reads from the input table via a separate connection, so uncommitted changes in the current transaction may not be visible
 - Multi-region slicing (different regions per reference) is not yet supported; use separate queries per region
 - `alignment_seq_identity` with the `'cigar'` method works on sliced output because it reads identity directly from `=`/`X` CIGAR ops without needing tags. Other methods (`gap_compressed`, `blast`, `gap_excluded`) require NM or MD tags which are NULLed after trimming.
@@ -195,47 +205,52 @@ Calculate sequence identity between read and reference using three different met
 
 *IMPORTANT*: these calculations assume use of '='/'X' (e.g., `--xeq` with bowtie2, `-eqx` with minimap2, etc).
 
-**Parameters:**
-- `cigar` (VARCHAR): CIGAR string from alignment.
-- `nm` (BIGINT): NM tag value (edit distance)
-- `md` (VARCHAR): MD tag value (mismatch positions)
-- `type` (VARCHAR, default='gap_compressed'): Identity calculation method
-
-**Identity types:**
-
-1. **`'gap_excluded'`**: Ignore gaps, only consider match/mismatch positions
-   - Formula: `#matches / (#matches + #mismatches)`
-   - Requires: CIGAR + MD tag
-   - Use case: Genetic divergence between species
-
-2. **`'blast'`**: Traditional BLAST-style identity
-   - Formula: `#matches / alignment_columns`
-   - Requires: CIGAR + NM tag
-   - Use case: General similarity measurement
-   - Note: Large indels significantly lower identity
-
-3. **`'gap_compressed'`** (default): Count consecutive gaps as single events
-   - Formula: `(m - n + g) / (m + o)` where m=M_columns, n=NM, g=gap_bases, o=gap_opens
-   - Equivalent to: `1 - (n - g + o) / (m + o)` from the blog post
-   - Requires: CIGAR + NM tag
-   - Use case: Filtering alignments (recommended)
-   - Note: More robust to structural variations
-
-4. **`'cigar'`**: Identity from extended CIGAR operations only (no tags needed)
-   - Formula: `match_ops / alignment_columns` where match_ops = count of `=` ops
-   - Requires: CIGAR with `=`/`X` ops (not `M`). NM and MD tags are ignored.
-   - Returns NULL if CIGAR uses `M` (ambiguous) or mixes `M` with `=`/`X` (inconsistent)
-   - Use case: Computing identity on trimmed alignments from `alignment_slice`, where tags have been invalidated
-
-**Returns:** DOUBLE between 0.0 and 1.0, or NULL for unmapped reads or missing required tags
-
-**Example:**
 ```sql
 -- Calculate gap-compressed identity (default)
 SELECT read_id, alignment_seq_identity(cigar, tag_nm, tag_md, 'gap_compressed') AS identity
 FROM read_alignments('alignments.sam')
 WHERE tag_nm IS NOT NULL;
+```
 
+**Parameters:**
+
+| Parameter | Type and default | Description |
+| --- | --- | --- |
+| `cigar` | VARCHAR | CIGAR string from alignment. |
+| `nm` | BIGINT | NM tag value (edit distance) |
+| `md` | VARCHAR | MD tag value (mismatch positions) |
+| `type` | VARCHAR, default='gap_compressed' | Identity calculation method |
+
+**Identity types:**
+
+1. **`'gap_excluded'`**: Ignore gaps, only consider match/mismatch positions
+    - Formula: `#matches / (#matches + #mismatches)`
+    - Requires: CIGAR + MD tag
+    - Use case: Genetic divergence between species
+
+2. **`'blast'`**: Traditional BLAST-style identity
+    - Formula: `#matches / alignment_columns`
+    - Requires: CIGAR + NM tag
+    - Use case: General similarity measurement
+    - Note: Large indels significantly lower identity
+
+3. **`'gap_compressed'`** (default): Count consecutive gaps as single events
+    - Formula: `(m - n + g) / (m + o)` where m=M_columns, n=NM, g=gap_bases, o=gap_opens
+    - Equivalent to: `1 - (n - g + o) / (m + o)` from the blog post
+    - Requires: CIGAR + NM tag
+    - Use case: Filtering alignments (recommended)
+    - Note: More robust to structural variations
+
+4. **`'cigar'`**: Identity from extended CIGAR operations only (no tags needed)
+    - Formula: `match_ops / alignment_columns` where match_ops = count of `=` ops
+    - Requires: CIGAR with `=`/`X` ops (not `M`). NM and MD tags are ignored.
+    - Returns NULL if CIGAR uses `M` (ambiguous) or mixes `M` with `=`/`X` (inconsistent)
+    - Use case: Computing identity on trimmed alignments from `alignment_slice`, where tags have been invalidated
+
+**Returns:** DOUBLE between 0.0 and 1.0, or NULL for unmapped reads or missing required tags
+
+**Example:**
+```sql
 -- Filter high-quality alignments
 SELECT COUNT(*)
 FROM read_alignments('alignments.bam')
@@ -264,12 +279,20 @@ One-arg convenience wrapper over `alignment_seq_identity(cigar, NULL, NULL, 'cig
 
 `cigar_sequence_identity(cigar)`
 
+```sql
+-- Modern CIGAR (=/X), no NM/MD needed
+SELECT read_id, cigar_sequence_identity(cigar) AS identity
+FROM read_alignments('alignments.sam');
+```
+
 **Parameters:**
+
 - `cigar` (VARCHAR): CIGAR string with extended ops (`=` for match, `X` for mismatch). Aligners must be invoked with `--xeq` (bowtie2) or `-eqx` (minimap2) for this to work; legacy `M`-only CIGAR cannot be used.
 
 **Formula:** `match_ops / alignment_columns` where `match_ops` is the count of `=` operations and `alignment_columns` is `M + I + D` (with `=`/`X` counting as `M`).
 
 **Returns:** DOUBLE in [0.0, 1.0], or NULL when identity can't be determined from CIGAR alone:
+
 - CIGAR is NULL, empty, or `*` (unmapped)
 - CIGAR uses only `M` (legacy — can't distinguish matches from mismatches; use `alignment_seq_identity` with NM or MD instead)
 - CIGAR mixes `M` with `=`/`X` (inconsistent encoding)
@@ -277,10 +300,6 @@ One-arg convenience wrapper over `alignment_seq_identity(cigar, NULL, NULL, 'cig
 
 **Example:**
 ```sql
--- Modern CIGAR (=/X), no NM/MD needed
-SELECT read_id, cigar_sequence_identity(cigar) AS identity
-FROM read_alignments('alignments.sam');
-
 -- Filter high-identity alignments
 SELECT COUNT(*)
 FROM read_alignments('alignments.bam')
@@ -304,7 +323,16 @@ figure describes the molecule. This aggregate pools them.
 
 `cigar_pooled_identity(cigar)` — aggregate
 
+```sql
+-- One identity per read, however many records the aligner emitted
+SELECT read_id, cigar_pooled_identity(cigar) AS identity
+FROM read_alignments('alignments.bam')
+WHERE NOT alignment_is_unmapped(flags) AND NOT alignment_is_secondary(flags)
+GROUP BY read_id;
+```
+
 **Parameters:**
+
 - `cigar` (VARCHAR): CIGAR strings with extended ops (`=`/`X`), one row per alignment record. Group by whatever identifies one read: `read_id`, or `(read_id, alignment_is_read1(flags))` for paired data.
 
 **Formula:** `sum(match_ops) / sum(alignment_columns)` over the group — the same ratio as
@@ -314,6 +342,7 @@ read reported as two records is 1.0, not 1.0 minus a fabricated gap.
 
 **Returns:** DOUBLE in [0.0, 1.0], or NULL under the same conditions as
 `cigar_sequence_identity` applied to the totals:
+
 - every CIGAR in the group is NULL, empty, or `*`
 - the group uses only `M` (legacy — can't distinguish matches from mismatches). Re-aligning with extended CIGARs is the only way to recover a *pooled* figure; [`alignment_seq_identity`](#sequence-identity) with NM or MD reconstructs what `M` omits but only per record, and those per-record figures cannot be averaged into the read's identity (see below)
 - the group mixes `M` with `=`/`X`, **including across records** — one record in legacy `M` and another extended means the `=`/`X` counts describe only part of the read, so no identity is reported for any of it
@@ -325,12 +354,6 @@ so a query can move from one to the other without changing what identity means.
 
 **Example:**
 ```sql
--- One identity per read, however many records the aligner emitted
-SELECT read_id, cigar_pooled_identity(cigar) AS identity
-FROM read_alignments('alignments.bam')
-WHERE NOT alignment_is_unmapped(flags) AND NOT alignment_is_secondary(flags)
-GROUP BY read_id;
-
 -- Paired data: keep the mates apart, they are different molecules
 SELECT read_id, alignment_is_read1(flags) AS is_read1,
        cigar_pooled_identity(cigar) AS identity
@@ -361,12 +384,16 @@ means "identity of this read against this reference".
 Calculate the total query length from a CIGAR string. This is useful for understanding read lengths and query coverage.
 
 **Parameters:**
-- `cigar` (VARCHAR): CIGAR string from alignment
-- `include_hard_clips` (BOOLEAN, default=true): Whether to include hard-clipped bases in the length
+
+| Parameter | Type and default | Description |
+| --- | --- | --- |
+| `cigar` | VARCHAR | CIGAR string from alignment |
+| `include_hard_clips` | BOOLEAN, default=true | Whether to include hard-clipped bases in the length |
 
 **Returns:** BIGINT - Total query length, or 0 for NULL/unmapped reads
 
 **Behavior:**
+
 - When `include_hard_clips=true`: Returns M + I + S + = + X + H (all query-consuming operations)
 - When `include_hard_clips=false`: Returns M + I + S + = + X (matches HTSlib's `bam_cigar2qlen`)
 - Soft clips (S) are always included (they're present in the sequence field)
@@ -408,12 +435,16 @@ Calculate the total query length from a CIGAR string. This is useful for underst
 `cigar_query_length(cigar, [include_hard_clips=true])`
 
 **Parameters:**
-- `cigar` (VARCHAR): CIGAR string from alignment
-- `include_hard_clips` (BOOLEAN, default=true): Whether to include hard-clipped bases in the length
+
+| Parameter | Type and default | Description |
+| --- | --- | --- |
+| `cigar` | VARCHAR | CIGAR string from alignment |
+| `include_hard_clips` | BOOLEAN, default=true | Whether to include hard-clipped bases in the length |
 
 **Returns:** BIGINT - Total query length, or 0 for NULL/unmapped reads
 
 **Behavior:**
+
 - When `include_hard_clips=true`: Returns M + I + S + = + X + H (all query-consuming operations)
 - When `include_hard_clips=false`: Returns M + I + S + = + X (matches HTSlib's `bam_cigar2qlen`)
 - Soft clips (S) are always included (they're present in the sequence field)
@@ -454,35 +485,41 @@ Calculate the proportion of query bases covered by the reference alignment. This
 
 `cigar_query_coverage(cigar, [type='aligned'])`
 
+```sql
+-- Get aligned coverage (default)
+SELECT read_id, cigar_query_coverage(cigar) AS aligned_cov
+FROM read_alignments('alignments.sam');
+```
+
 **Parameters:**
-- `cigar` (VARCHAR): CIGAR string from alignment
-- `type` (VARCHAR, default='aligned'): Coverage calculation method
+
+| Parameter | Type and default | Description |
+| --- | --- | --- |
+| `cigar` | VARCHAR | CIGAR string from alignment |
+| `type` | VARCHAR, default='aligned' | Coverage calculation method |
 
 **Coverage types:**
 
 1. **`'aligned'`** (default): Bases that align to the reference
-   - Formula: `(M + = + X) / (M + I + S + = + X + H)`
-   - Only counts bases that match/mismatch the reference
-   - Insertions and clips reduce coverage
+    - Formula: `(M + = + X) / (M + I + S + = + X + H)`
+    - Only counts bases that match/mismatch the reference
+    - Insertions and clips reduce coverage
 
 2. **`'mapped'`**: Bases that are mapped (not clipped)
-   - Formula: `(M + I + = + X) / (M + I + S + = + X + H)`
-   - Counts insertions as "mapped" even though they don't align
-   - Only clips reduce coverage
+    - Formula: `(M + I + = + X) / (M + I + S + = + X + H)`
+    - Counts insertions as "mapped" even though they don't align
+    - Only clips reduce coverage
 
 **Returns:** DOUBLE between 0.0 and 1.0, or NULL for NULL CIGAR
 
 **Behavior:**
+
 - Query length denominator always includes hard clips
 - Returns 0.0 for reads with only clipping operations (no alignment)
 - Deletions (D) and reference skips (N) don't affect coverage (they don't consume query)
 
 **Examples:**
 ```sql
--- Get aligned coverage (default)
-SELECT read_id, cigar_query_coverage(cigar) AS aligned_cov
-FROM read_alignments('alignments.sam');
-
 -- Get mapped coverage (includes insertions)
 SELECT read_id, cigar_query_coverage(cigar, 'mapped') AS mapped_cov
 FROM read_alignments('alignments.sam');
@@ -515,6 +552,7 @@ GROUP BY reference;
 ```
 
 **Use cases:**
+
 - **Aligned coverage**: Assess quality of alignment (how much of read actually matches reference)
 - **Mapped coverage**: Identify heavily clipped reads (adapters, chimeras, low-quality ends)
 - Filter reads based on alignment quality thresholds
@@ -543,10 +581,18 @@ combine them. That is what this returns.
 
 `cigar_query_intervals(cigar, flags, [type='aligned'])`
 
+```sql
+-- A trailing soft clip is not covered
+SELECT cigar_query_intervals('3000=3000S', 0);
+```
+
 **Parameters:**
-- `cigar` (VARCHAR): CIGAR string from the alignment
-- `flags` (USMALLINT): SAM flags. Only the reverse-strand bit (`0x10`) is consulted
-- `type` (VARCHAR, default `'aligned'`): `'aligned'` counts `M`/`=`/`X`; `'mapped'` also counts `I`. Same vocabulary as [`cigar_query_coverage`](#cigar-query-coverage)
+
+| Parameter | Type and default | Description |
+| --- | --- | --- |
+| `cigar` | VARCHAR | CIGAR string from the alignment |
+| `flags` | USMALLINT | SAM flags. Only the reverse-strand bit (`0x10`) is consulted |
+| `type` | VARCHAR, default `'aligned'` | `'aligned'` counts `M`/`=`/`X`; `'mapped'` also counts `I`. Same vocabulary as [`cigar_query_coverage`](#cigar-query-coverage) |
 
 **Returns:** `LIST<STRUCT(start BIGINT, stop BIGINT)>` — 0-based, half-open, ascending and
 non-overlapping. Empty list for an unmapped or empty CIGAR. NULL if `cigar` or `flags` is
@@ -554,6 +600,7 @@ NULL. Being 0-based is an [exception](reading.md#exceptions) to miint's 1-based 
 add 1 to both ends to compare them with `read_paf`'s `query_start` / `query_stop`.
 
 **Behavior:**
+
 - **Intervals are in the original read's orientation, not the reference's.** SAM writes
   CIGARs in reference orientation, so on a reverse-strand record the leading clip sits at
   the read's 3′ end. The reverse bit mirrors each interval onto the read, which is what
@@ -569,8 +616,6 @@ add 1 to both ends to compare them with `read_paf`'s `query_start` / `query_stop
 
 **Examples:**
 ```sql
--- A trailing soft clip is not covered
-SELECT cigar_query_intervals('3000=3000S', 0);
 -- [{'start': 0, 'stop': 3000}]
 
 -- Same alignment on the reverse strand: the covered block is at the other end of the read
@@ -601,13 +646,25 @@ evidence needed to tell a genuine wrap from a chimera.
 
 Aggregate function that merges overlapping genomic intervals into a minimal set of non-overlapping intervals. Useful for computing coverage regions, reducing redundant intervals, and analyzing read depth.
 
+```sql
+-- Calculate coverage regions per reference from SAM/BAM alignments
+SELECT reference,
+       compress_intervals(position, stop_position) AS coverage
+FROM read_alignments('alignments.bam')
+GROUP BY reference;
+```
+
 **Parameters:**
-- `start` (BIGINT): Start position of interval
-- `stop` (BIGINT): Stop position of interval
+
+| Parameter | Type and default | Description |
+| --- | --- | --- |
+| `start` | BIGINT | Start position of interval |
+| `stop` | BIGINT | Stop position of interval |
 
 **Returns:** `LIST<STRUCT(start BIGINT, stop BIGINT)>` — array of merged intervals, sorted by start position
 
 **Behavior:**
+
 - Intervals that overlap or touch (stop1 = start2) are merged into a single interval
 - Automatically compresses state when accumulating >1M intervals (prevents memory issues)
 - Thread-safe: works correctly with parallel GROUP BY operations
@@ -615,12 +672,6 @@ Aggregate function that merges overlapping genomic intervals into a minimal set 
 
 **Examples:**
 ```sql
--- Calculate coverage regions per reference from SAM/BAM alignments
-SELECT reference,
-       compress_intervals(position, stop_position) AS coverage
-FROM read_alignments('alignments.bam')
-GROUP BY reference;
-
 -- Calculate total covered bases per reference
 SELECT reference,
        SUM(c.stop - c.start) AS total_coverage
@@ -646,6 +697,7 @@ WHERE LEAD(interval.start) OVER (PARTITION BY reference ORDER BY interval.start)
 ```
 
 **Performance notes:**
+
 - Automatic periodic compression at 1M intervals prevents memory bloat with large datasets
 - Multi-threaded aggregation: each thread maintains its own state, merged at finalization
 - Algorithm: sorts intervals by start position, then single-pass merge (O(n log n))
@@ -699,6 +751,7 @@ The guarantee is **containment**, `bin_start(bin_of(p)) <= p < bin_start(bin_of(
 > **Do not pass `stop_position` to `bin_of`.** `bin_of` takes a position; `stop_position` is an exclusive end, so a read reaching the reference end carries `genome_length + 1` and `bin_of` raises. Use `bin_of(stop_position - 1, ...)` for the last covered base, or `interval_bins(position, stop_position, ...)` for the whole read. The error message says as much, but it aborts the query rather than one row — and it only triggers on reads at the very end of a reference, so it will pass on a small fixture and fail on a real BAM.
 
 **Behavior:**
+
 - NULL in any argument → NULL
 - `stop <= start` (empty or inverted interval) → empty list, so `UNNEST` drops the row
 - Intervals are clamped to `[1, genome_length]`; bins outside the genome are never emitted
@@ -744,6 +797,7 @@ SELECT bin_of(481323, 500, 4719737);
 > **A group with no sample in a bin contributes no row**, so `stddev_samp` sees one value and returns NULL rather than treating the absent group as zero. If absent-means-zero is what you want, densify against your sample roster first — that is a metadata decision, not a binning one.
 
 **Performance notes:**
+
 - When `n_bins <= genome_length` (the normal case) every bin is at least one base wide, so the result is a contiguous bin range and the cost is the number of bins the interval touches
 - When `n_bins > genome_length` the macro enumerates positions rather than bins, so the cost is the interval's length rather than `n_bins`. Binning a 3 bp plasmid into 10⁶ bins costs three positions, not a million
 
@@ -752,6 +806,13 @@ SELECT bin_of(481323, 500, 4719737);
 `compute_coverage_depth(position, stop_position, cigar, reference_length, mode)`
 
 Aggregate function that computes per-position depth of coverage across a reference sequence. Follows `samtools depth` semantics: two modes for handling deletion (D) operations, and N (ref-skip) operations are always excluded.
+
+```sql
+-- Per-position depth for a single reference
+SELECT compute_coverage_depth(position, stop_position, cigar, 1000, 'exclude_deletions')
+FROM read_alignments('alignments.bam')
+WHERE reference = 'chr1';
+```
 
 **Parameters:**
 
@@ -766,10 +827,12 @@ Aggregate function that computes per-position depth of coverage across a referen
 **Returns:** `LIST(UINTEGER)` — element `i` is the depth at 1-based position `i+1`.
 
 **Mode semantics:**
+
 - `'include_deletions'`: M/=/X/D count as coverage, N excluded (equivalent to `samtools depth -J`)
 - `'exclude_deletions'`: only M/=/X count, D and N excluded (equivalent to `samtools depth` default)
 
 **Behavior:**
+
 - NULL rows are ignored
 - Empty groups (all NULLs) return NULL
 - All rows in a group must have the same `reference_length`
@@ -777,11 +840,6 @@ Aggregate function that computes per-position depth of coverage across a referen
 
 **Examples:**
 ```sql
--- Per-position depth for a single reference
-SELECT compute_coverage_depth(position, stop_position, cigar, 1000, 'exclude_deletions')
-FROM read_alignments('alignments.bam')
-WHERE reference = 'chr1';
-
 -- Mean depth via UNNEST
 SELECT AVG(depth) AS mean_depth
 FROM (
@@ -792,6 +850,7 @@ FROM (
 ```
 
 **Performance notes:**
+
 - Memory: allocates `reference_length * 4` bytes per group (e.g., ~1GB for a 250M-position human chromosome)
 - Multi-threaded aggregation: each thread maintains independent state, merged at finalization
 - Fast path: reads with only M/=/X operations (no N or excluded D) skip CIGAR walking
@@ -824,6 +883,7 @@ The two reference relations do not have to declare `genome_id` with the *same* t
 | `proportion_covered` | DOUBLE | Fraction of genome covered (`covered / total_length`) |
 
 **Behavior:**
+
 - Overlapping alignments on the same contig are merged before counting (via `compress_intervals`)
 - Multiple contigs mapping to the same genome have their coverage summed
 - Contigs in `alignments` that are not present in `subject_genome_id` are excluded from output
@@ -887,6 +947,7 @@ All three parameters are unquoted table/view names (not string literals):
 | `proportion_covered` | DOUBLE | Fraction of genome covered (`covered / total_length`) |
 
 **Behavior:**
+
 - Intervals are merged *within* a sample, never *across* samples
 - A `(sample, genome)` pair with no qualifying alignments produces no row, rather than a zero-coverage row
 - On single-sample input the result matches `genome_coverage` exactly
@@ -971,6 +1032,7 @@ The coordinates are emitted, not just `region_id`, because the presence join is 
 **Why `samples` is required.** `not applicable` cannot be derived from `positions` alone: a sample with no coverage contributes no rows, so it is indistinguishable from a sample that is not in the study. Without the roster this function could only emit `present` and `absent` — the very conflation it exists to prevent. Keeping the roster explicit also means the caller decides what "the cohort" is.
 
 **Behavior:**
+
 - The overlap test is `start < region_stop AND stop > region_start`. A read starting exactly where a region ends shares no base with it and is `absent`.
 - `positions` does **not** need to be pre-compressed. Presence asks only whether *any* interval overlaps, so overlapping input intervals give the same answer as their union — no `compress_intervals` pass needed.
 - Samples appearing in `positions` but not in the roster are ignored — the roster defines the cohort.
@@ -1103,6 +1165,7 @@ WHERE p.state IN ('present', 'absent');   -- drop non-detections; do not pool th
 > **Join on the coordinates too, not just `region_id`.** Both functions emit `region_start`/`region_stop` because that is the tuple identifying a region, and two spans sharing a `region_id` are scored independently by design. Keyed on `region_id` alone this join cross-assigns: with regions `('g1',50,60,'RD')` and `('g1',700,750,'RD')` it reports the `[700,750)` row as `absent` while handing it `covered = 5` — the value belonging to `[50,60)` — and duplicates every row of a sample present in both spans. An `absent` row carrying coverage is a contradiction with no downstream tell.
 
 **Behavior:**
+
 - The overlap test is `start < region_stop AND stop > region_start`. An alignment starting exactly where a region ends shares no base with it and contributes nothing.
 - **Overlapping regions are each scored against their own bounds**, so a base can count in two regions. Well defined, and required for sliding-window regions — but it means `SUM(covered)` across regions is not a partition of the genome.
 - **Multi-contig genomes.** `regions.genome_id` is matched against `positions.genome_id` directly, so regions are **contig-level** by default. Genome-level regions work too, but you must shift `positions` into the genome's coordinate frame first — see [Multi-contig genomes](#multi-contig-genomes) below. If no `genome_id` in `regions` matches any in `positions`, the call **raises** rather than returning zero rows, since that is almost always a contig-vs-genome naming mixup.
@@ -1224,6 +1287,7 @@ Coverage accumulates as a **union**, not a sum. A running `SUM` of per-sample br
 | `proportion_covered` | DOUBLE | `covered / genome_length` |
 
 **Behavior:**
+
 - **`roster` is required, and it is what makes the curve comparable across groups.** A sample with no coverage of the target contributes no `positions` rows at all, so without the roster it would silently vanish — the group would look smaller than it is, and two groups with different detection rates would have incomparable x-axes. Zero-coverage samples sort first, so the curve correctly starts flat.
 - Samples in `positions` but not in `roster` are ignored; the roster defines the cohort.
 - **Ties in breadth are broken by `sample_id`**, so the curve is byte-identical across runs and thread counts. This matters more than it looks: micov's Monte Carlo null calls this ~100× per genome per group, and an unstable ordering would surface as noise in the null.
@@ -1422,6 +1486,7 @@ other column is computable from legacy `M` CIGARs, so coverage and the topology 
 regardless of aligner.
 
 **Preconditions and exclusions:**
+
 - **Secondary records are excluded.** They re-place query bases a sibling already covers, so
   they cannot raise a union but would inflate `n_fragments`.
 - **Unmapped records are excluded**, as are references absent from `reference_lengths` — the
@@ -1512,6 +1577,7 @@ WHERE coverage >= 0.90 AND identity >= 0.99
 > Use a CTE or a join instead.
 
 **Performance notes:**
+
 - Grouping is done by DuckDB's own window and hash-aggregate operators rather than by
   bespoke machinery, and it handles per-read grouping over large alignment sets well —
   roughly a second per two million records on one machine. It is **not** a streaming
@@ -1557,6 +1623,7 @@ Both input tables must use the column names `id` and `sequence` exactly. `max_nm
 | `nm` | INTEGER | Hamming distance between the two sequences |
 
 **Behavior:**
+
 - Throws if a query and a candidate reference have different lengths (sequences must be length-uniform within a comparison).
 - Empty query or ref tables produce zero rows.
 - Empty sequences are rejected at the row level.
@@ -1610,6 +1677,7 @@ The deliberate type asymmetry means callers join the MAFFT row back to the origi
 | `qual` | LIST(UTINYINT) | Posterior per-base Q list (parallel to `seq`, capped at 60) |
 
 **Behavior:**
+
 - NULL rows are ignored (`IgnoreNull() = true`). Groups where every row is NULL return NULL.
 - All rows within a group must share the same MSA width; throws on a width mismatch.
 - Each row's `qual` length must equal its sequence's ungapped count; throws on mismatch.
@@ -1685,6 +1753,7 @@ QUALIFY cigar_pooled_identity(cigar) OVER (
 ```
 
 **Gotchas:**
+
 - Clause order: `QUALIFY` must come **after** any named `WINDOW` clause. To avoid the ordering entirely, inline the window with `OVER ( ... )` as above.
 - If one mate is unmapped the pooled figure degrades to the other mate's identity, which is safe under `no_mixed`/`no_discordant` (both mates always mapped) but worth a guard if you relax those.
 - This filter is a partitioned window aggregate (roughly one pass over the data); it scales linearly and comfortably handles tens of millions of alignment rows.

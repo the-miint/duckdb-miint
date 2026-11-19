@@ -15,6 +15,7 @@ Greedy sequence clustering, powered by the [vsearch](https://github.com/torognes
 `cluster_sequences_vsearch(input_table, id=threshold, [options])`
 
 **Parameters:**
+
 - `input_table` (VARCHAR): Name of a table or view containing sequences. Must have `read_id` (VARCHAR, BIGINT, or UUID — see *Identifier-column types* below) and `sequence1` (VARCHAR) columns.
 - `id` (DOUBLE, required): Minimum identity threshold (0.0-1.0). No silent default — must be specified explicitly.
 - `strand` (VARCHAR, default `'plus'`): `'plus'` for plus-strand only, `'both'` to also search reverse complements.
@@ -33,6 +34,7 @@ Greedy sequence clustering, powered by the [vsearch](https://github.com/torognes
 | `cigar_truncated` | BOOLEAN | True if CIGAR was truncated (>4096 chars) |
 
 **Identifier-column types (`read_id`, `centroid_id`):**
+
 - The input `read_id` column may be `VARCHAR`, `BIGINT`, or `UUID`. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time with the message `Column 'read_id' in table '<table>' must be VARCHAR, BIGINT, or UUID`.
 - Both output id columns mirror the input type. `centroid_id` is itself one of the input `read_id`s, so it always shares `read_id`'s type. `BIGINT` ids round-trip through their decimal form; `UUID` ids round-trip through their canonical 36-char lowercase form (uppercase input comes back lowercase).
 
@@ -63,12 +65,14 @@ GROUP BY centroid_id ORDER BY size DESC;
 ```
 
 **Behavior:**
+
 - One output row per input sequence
 - Single-threaded (inherently sequential — each centroid must be indexed before the next sequence is processed)
 - RNA sequences (U) are automatically converted to DNA (T)
 - All results are materialized before returning (vsearch session mutex held for the duration)
 
 **Error conditions:**
+
 - Error if `id` parameter is missing
 - Error if `id` is not between 0.0 and 1.0
 - Error if `strand` is not `'plus'` or `'both'`
