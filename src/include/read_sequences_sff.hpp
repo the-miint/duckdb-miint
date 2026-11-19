@@ -2,6 +2,7 @@
 #include "SFFReader.hpp"
 #include "QualScore.hpp"
 #include "remote_file_helper.hpp"
+#include "table_function_common.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/typedefs.hpp"
 #include "duckdb/common/types.hpp"
@@ -23,11 +24,8 @@ public:
 		std::vector<LogicalType> types;
 
 		Data(const std::vector<std::string> &paths, bool include_fp, bool do_trim)
-		    : file_paths(paths), include_filepath(include_fp), trim(do_trim),
-		      names({"sequence_index", "read_id", "comment", "sequence1", "sequence2", "qual1", "qual2"}),
-		      types({LogicalType::BIGINT, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
-		             LogicalType::VARCHAR, LogicalType::LIST(LogicalType::UTINYINT),
-		             LogicalType::LIST(LogicalType::UTINYINT)}) {
+		    : file_paths(paths), include_filepath(include_fp), trim(do_trim), names(SequenceColumnNames()),
+		      types(SequenceColumnTypes()) {
 			if (include_filepath) {
 				names.emplace_back("filepath");
 				types.emplace_back(LogicalType::VARCHAR);

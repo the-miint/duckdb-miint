@@ -96,6 +96,7 @@ These are the system-level tools the build invokes directly. CI installs the sam
 ```shell
 brew install ninja pkg-config autoconf automake libtool autoconf-archive libomp
 ```
+
 - `ninja` — build driver (`bash build.sh` runs `GEN=ninja make`).
 - `pkg-config` — required by vcpkg's `openssl` port (transitively pulled in by `curl` / `rocksdb`).
 - `autoconf`, `automake`, `libtool`, `autoconf-archive` — vsearch ships `autogen.sh`; without these the configure step fails with `autoreconf: command not found`.

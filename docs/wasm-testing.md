@@ -87,6 +87,7 @@ WFA2, expat, rype) leak as unresolved imports.
 ### How PIC side modules work
 
 In a PIC WASM side module (`-sSIDE_MODULE=2`), library symbols appear as:
+
 - `GOT.func.X` / `GOT.mem.X` **imports** (PIC mechanism)
 - Direct **exports** of `X` (the actual symbol definition)
 
@@ -95,6 +96,7 @@ resolves it at load time by pointing the GOT entry at the module's own export.
 A GOT import **without** a matching export means the library wasn't linked.
 
 The verification script checks:
+
 1. No direct `env.*` imports of library symbols (= not linked at all)
 2. No `GOT.*` imports without matching exports (= linked but PIC broken)
 3. `miint_duckdb_cpp_init` export exists (extension entry point)

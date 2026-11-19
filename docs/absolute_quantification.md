@@ -155,6 +155,7 @@ SELECT * FROM absquant_fit_models(
 ```
 
 **Parameters:**
+
 - `syndna_counts` (VARCHAR): name of the [synDNA counts](#syndna-counts) relation
 - `syndna_pool` (VARCHAR): name of the [pool composition](#syndna-pool-composition) relation
 - `sample_params` (VARCHAR): name of the [sample parameters](#sample-parameters) relation

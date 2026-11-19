@@ -37,6 +37,7 @@
 #include <read_alignment_header.hpp>
 #include <read_sequences_sam.hpp>
 #include <read_sequences_sff.hpp>
+#include "read_sra.hpp"
 #include <align_minimap2.hpp>
 #include <align_minimap2_sharded.hpp>
 #include <save_minimap2_index.hpp>
@@ -65,6 +66,7 @@
 #include <ena_upload_reads.hpp>
 #include <miint_log.hpp>
 #include <miint_macros.hpp>
+#include <openmp_runtime_keepalive.hpp>
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/main/database.hpp"
 #include <sequence_functions.hpp>
@@ -281,6 +283,7 @@ static unique_ptr<FunctionData> MiintVersionsBind(ClientContext &context, TableF
 #endif
 #ifdef MIINT_HAS_KREPP
 	data->versions.emplace_back("krepp", KREPP_GIT_VERSION);
+	data->versions.emplace_back("krepp-version", miint::KreppVersionString());
 	// A row only when krepp's OpenMP regions are compiled in, which is what
 	// decides whether krepp_index_create accepts threads > 1. Reported rather
 	// than left to the wall clock, since a build without it refuses the
@@ -320,6 +323,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Before anything can reach rype or sc: on DuckDB-Wasm this gives rayon a
 	// pool it can actually run (the calling thread); elsewhere it does nothing.
 	miint_rust_glue_init();
+
+	// Before anything can enter OpenMP: a static libomp must outlive every thread
+	// DuckDB runs miint on.
+	miint::KeepOpenMPRuntimeAlive();
 
 	miint::RegisterMiintLogType(loader.GetDatabaseInstance());
 	miint::RegisterENASecretType(loader);
@@ -380,6 +387,13 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                                 "download. Empty (the default) means ${XDG_CACHE_HOME:-~/.cache}/miint/gtdb.",
 	                                 LogicalType::VARCHAR, Value(""));
 
+	// Spots per read_sra work unit: the unit of parallel decoding and of output batches. Tests
+	// lower it to spread a small fixture over several units and threads.
+	ena_db_config.AddExtensionOption("miint_sra_spots_per_unit",
+	                                 "Spots per read_sra work unit, the unit of parallel decoding. 0 uses the default "
+	                                 "(131072).",
+	                                 LogicalType::BIGINT, Value::BIGINT(0));
+
 	ScalarFunction version_func("miint_version", {}, LogicalType::VARCHAR, MiintVersionFunction);
 	loader.RegisterFunction(version_func);
 
@@ -391,6 +405,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ReadAlignmentHeaderTableFunction::Register(loader);
 	ReadSequencesSamTableFunction::Register(loader);
 	ReadSequencesSFFTableFunction::Register(loader);
+	ReadSraTableFunction::Register(loader);
 #ifdef MIINT_HAS_HDF5
 	ReadBIOMTableFunction::Register(loader);
 #endif

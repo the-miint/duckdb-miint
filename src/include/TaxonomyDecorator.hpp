@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <vector>
 
 namespace miint {
@@ -92,8 +93,18 @@ public:
 	// Informative tips in the tree carrying `name` at `rank`: the denominator of recall.
 	uint32_t Total(size_t rank, NameId name) const;
 
+	// The number of names at `rank` in the store the index was built from; NameIds at that
+	// rank are 0..NameCount-1.
+	size_t NameCount(size_t rank) const;
+	// The preorder positions of the informative tips carrying `name` at `rank`, ascending.
+	std::span<const uint32_t> Occurrences(size_t rank, NameId name) const;
+	// The node at preorder position `p`.
+	uint32_t NodeAtPreorder(uint32_t p) const;
+
 private:
 	TreeIndex tree_;
+	// The node at each preorder position.
+	std::vector<uint32_t> node_at_;
 	// Over preorder positions: entry p counts the tips (informative tips) at positions less than p.
 	std::vector<uint32_t> tip_prefix_;
 	std::vector<uint32_t> informative_prefix_;
@@ -102,5 +113,94 @@ private:
 	std::array<std::vector<uint32_t>, kLineageRanks.size()> offsets_;
 	std::array<std::vector<uint32_t>, kLineageRanks.size()> occurrences_;
 };
+
+// A name's lowest eligible nodes at `rank`: the nodes whose count reaches `threshold` while no
+// child's does, in ascending preorder. There are none when even the root falls short of
+// `threshold`, and two only when each holds exactly half of an even total. Throws
+// std::invalid_argument for a threshold below 1 or below ceil(Total/2), which
+// F1Score::Threshold never gives.
+std::vector<uint32_t> LowestEligibleNodes(const CladeCountIndex &index, size_t rank, NameId name, uint32_t threshold);
+
+// The min_count rank `rank` uses: `min_count`, except 1 at strain, the last rank. A strain on
+// one tip can be held alone only by nodes spanning that tip, and under a min_count of 2 it would
+// be eligible nowhere.
+uint32_t MinCountAt(size_t rank, uint32_t min_count);
+
+// Per node, bit r is set when rank r is safe there: exactly one name is eligible at rank r, each
+// name's threshold being F1Score::Threshold(Total, MinCountAt(r, min_count)). Tips get 0, since
+// no name is assigned to a tip. Throws std::invalid_argument when min_count is 0.
+std::vector<uint8_t> RankSafeMasks(const CladeCountIndex &index, uint32_t min_count);
+
+// The ranks a node takes names at, from its safe mask: the run of safe ranks that starts at its
+// shallowest safe rank and stops at the first unsafe rank after it (tax2tree's pick_names).
+uint8_t PickedRanks(uint8_t safe_mask);
+
+// A name assigned to a node, and the counts its score came from: c of the node's m informative
+// tips carry the name, of `total` in the tree.
+struct NameScore {
+	size_t rank;
+	NameId name;
+	uint32_t node;
+	uint32_t c;
+	uint32_t m;
+	uint32_t total;
+
+	bool operator==(const NameScore &) const = default;
+};
+
+// Why a name some informative tip carries was assigned to no node.
+enum class NotPlacedReason {
+	// Fewer tips carry it than its rank's min_count.
+	kNeverEligible,
+	// Eligible, but at every internal node where it is, so is another name at its rank.
+	kNeverRankSafe,
+	// Its rank is safe somewhere, but at each such node an unsafe shallower rank ended the
+	// node's run of picked ranks first.
+	kBlockedByContiguity,
+};
+
+struct NotPlacedName {
+	size_t rank;
+	NameId name;
+	uint32_t total;
+	NotPlacedReason reason;
+
+	bool operator==(const NotPlacedName &) const = default;
+};
+
+// The names AssignNames gave each internal node, with the counts each score came from, and the
+// names it gave no node, with why.
+class NameAssignment {
+public:
+	// The names assigned to `node`, by ascending rank; empty for most nodes and every tip.
+	std::span<const NameScore> NamesAt(uint32_t node) const;
+	// The deepest of NamesAt(node), or nullptr when it is empty (tax2tree's
+	// set_preliminary_name_and_rank).
+	const NameScore *Preliminary(uint32_t node) const;
+	// Every assigned name, by (rank, name).
+	const std::vector<NameScore> &Scores() const;
+	// Every name with an informative tip that was assigned nowhere, by (rank, name).
+	const std::vector<NotPlacedName> &NotPlaced() const;
+
+private:
+	friend NameAssignment AssignNames(const CladeCountIndex &index, uint32_t min_count);
+	// Keeps `scores` and `not_placed`, both by (rank, name), and groups the scores by node.
+	NameAssignment(std::vector<NameScore> scores, std::vector<NotPlacedName> not_placed, uint32_t node_count);
+
+	std::vector<NameScore> scores_;
+	std::vector<NotPlacedName> not_placed_;
+	// The scores again, grouped by node, each node's by ascending rank: node v's are
+	// by_node_[node_offsets_[v] .. node_offsets_[v + 1]).
+	std::vector<NameScore> by_node_;
+	std::vector<uint32_t> node_offsets_;
+};
+
+// Assigns each name to the node that scores best for it (tax2tree's pick_names and
+// name_node_score_fold). A node's candidates are its picked ranks (PickedRanks of its
+// RankSafeMasks entry), each for the one name eligible there. A name's best candidate has the
+// highest F1 (F1Score::Compare), then the fewest tips (TipCount), then is the latest in
+// postorder, children visited in ascending index as TreeIndex visits them. Throws
+// std::invalid_argument when min_count is 0.
+NameAssignment AssignNames(const CladeCountIndex &index, uint32_t min_count);
 
 } // namespace miint

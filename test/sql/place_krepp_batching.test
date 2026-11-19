@@ -1,0 +1,149 @@
+# name: test/sql/place_krepp_batching.test
+# description: place_krepp's batch_size and batch_bases change how work is split, not what is placed
+# group: [sql]
+
+require miint
+
+require-env KREPP_AVAILABLE
+
+require-env MIINT_KREPP_TOY_REFS
+
+# batch_size and batch_bases decide how the query relation is cut into the
+# units of work place_krepp's threads claim. That is all they may decide: a
+# read's placements depend on the read and the index, so every way of cutting
+# the same reads has to place the same reads, each once, with the same values.
+# If a batch boundary lost a read, placed one twice, or placed one with another
+# read's sequence, that would show here.
+#
+# How the batches are cut is asserted directly against QuerySequenceStream in
+# the C++ tests. That threads then claim them in parallel is the scan's design,
+# and is not observable from SQL: the rows are the same on one thread as on
+# many.
+#
+# The index is built here from krepp's toy references rather than taken from
+# MIINT_KREPP_TOY_INDEX, which needs a krepp CLI build.
+#
+# The comparison is per read, not row for row, because krepp itself does not
+# return the same rows from one place_krepp call to the next, even with
+# identical arguments (docs/phylogeny.md, "Reproducibility"). like_weight_ratio
+# moves between calls, so it is left out. The set of candidate edges can also
+# differ by one between calls with identical arguments, so an exact row-for-row
+# match can fail with no batching involved. What stayed stable in every call
+# measured, and so what is asserted here: which reads place, no
+# (fragment, edge_num) twice, and identical stable columns on every edge both
+# calls return. A read lost or placed twice at a batch boundary breaks the
+# first two; a read placed with another read's sequence breaks the third.
+
+statement ok
+SET threads = 4;
+
+statement ok
+CREATE TABLE toy_refs AS
+SELECT regexp_extract(filepath, '([^/]+)\.fna$', 1) AS read_id, sequence1
+FROM read_fastx('{MIINT_KREPP_TOY_REFS}/*.fna', include_filepath := true);
+
+statement ok
+CREATE TABLE toy_tree AS
+SELECT node_index, parent_index, name, branch_length, node_index AS edge_id, is_tip
+FROM read_newick('ext/krepp/test/tree_toy.nwk');
+
+query I
+SELECT status
+FROM krepp_index_create('toy_refs', '{TEST_DIR}/toy_index',
+                        tree_table := 'toy_tree', k := 27, w := 35, h := 11);
+----
+ok
+
+statement ok
+CREATE TABLE toy_reads AS SELECT read_id, sequence1 FROM read_fastx('ext/krepp/test/query_toy.fq');
+
+statement ok
+CREATE TABLE baseline AS
+SELECT * EXCLUDE (like_weight_ratio) FROM place_krepp(query_table='toy_reads', index_path='{TEST_DIR}/toy_index');
+
+# Something is placed, so the comparisons below are not two empty sets agreeing.
+# More than one read is, so a cut between reads can matter.
+query I
+SELECT count(DISTINCT fragment) > 1 FROM baseline;
+----
+true
+
+# One read per batch: as many batches as reads, every boundary exercised.
+statement ok
+CREATE TABLE one_row AS
+SELECT * EXCLUDE (like_weight_ratio) FROM place_krepp(query_table='toy_reads', index_path='{TEST_DIR}/toy_index', batch_size := 1);
+
+# One base per batch: every read is longer than that, so each is a batch of its own.
+statement ok
+CREATE TABLE one_base AS
+SELECT * EXCLUDE (like_weight_ratio) FROM place_krepp(query_table='toy_reads', index_path='{TEST_DIR}/toy_index', batch_bases := 1);
+
+# Both limits given. Every toy read is 150 bases, so 400 bases holds two reads
+# (a third would make 450), before the row limit of 5: batches of 2.
+statement ok
+CREATE TABLE mixed AS
+SELECT * EXCLUDE (like_weight_ratio) FROM place_krepp(query_table='toy_reads', index_path='{TEST_DIR}/toy_index',
+                          batch_size := 5, batch_bases := 400);
+
+# The largest batch_size there is: every read in one batch. The stream must not
+# try to reserve that many rows up front.
+statement ok
+CREATE TABLE one_batch AS
+SELECT * EXCLUDE (like_weight_ratio) FROM place_krepp(query_table='toy_reads', index_path='{TEST_DIR}/toy_index',
+                          batch_size := 9223372036854775807);
+
+# Every call in one table, so each check below covers all of them at once.
+# The variants are listed by name rather than taken from the rows: a variant
+# that placed nothing would have no rows, and would drop out of any list read
+# back from them.
+statement ok
+CREATE TABLE variant_names AS
+SELECT * FROM (VALUES ('baseline'), ('one_row'), ('one_base'), ('mixed'), ('one_batch')) t(variant);
+
+statement ok
+CREATE TABLE variants AS
+SELECT 'baseline' AS variant, * FROM baseline
+UNION ALL SELECT 'one_row', * FROM one_row
+UNION ALL SELECT 'one_base', * FROM one_base
+UNION ALL SELECT 'mixed', * FROM mixed
+UNION ALL SELECT 'one_batch', * FROM one_batch;
+
+# The same reads place in every call: none lost at a batch boundary, and none
+# conjured. Both directions against the baseline.
+query I
+SELECT count(*) FROM (
+    (SELECT v.variant, b.fragment FROM variant_names v, (SELECT DISTINCT fragment FROM baseline) b
+     EXCEPT SELECT variant, fragment FROM variants)
+    UNION ALL
+    (SELECT variant, fragment FROM variants
+     EXCEPT SELECT v.variant, b.fragment FROM variant_names v, (SELECT DISTINCT fragment FROM baseline) b));
+----
+0
+
+# No read placed twice: a read handed to two batches would repeat each of its
+# (fragment, edge_num) pairs.
+query I
+SELECT count(*) FROM (
+    SELECT variant, fragment, edge_num FROM variants GROUP BY ALL HAVING count(*) > 1);
+----
+0
+
+# Every edge both calls return carries the same stable columns. A read placed
+# with another read's sequence would change these.
+query I
+SELECT count(*)
+FROM variants v JOIN baseline b USING (fragment, edge_num)
+WHERE (v.likelihood, v.distal_length, v.pendant_length, v.distance)
+      IS DISTINCT FROM (b.likelihood, b.distal_length, b.pendant_length, b.distance);
+----
+0
+
+# And the join above is not vacuous: every variant shares edges with the
+# baseline for every read that places.
+query I
+SELECT (SELECT count(*) FROM (
+            SELECT v.variant, v.fragment FROM variants v JOIN baseline b USING (fragment, edge_num)
+            GROUP BY ALL))
+     = (SELECT count(*) FROM variant_names) * (SELECT count(DISTINCT fragment) FROM baseline);
+----
+true

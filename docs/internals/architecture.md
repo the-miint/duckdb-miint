@@ -9,6 +9,7 @@ Cross-cutting design patterns and implementation notes for duckdb-miint. This fi
 - Reading from user-specified tables/views → `docs/internals/reading-tables-views.md`
 - Consuming Arrow C Data Interface streams → `docs/internals/arrow-zero-copy.md`
 - Adding `sample_id` support to a table function → `docs/internals/per-sample-pattern.md`
+- Reading NCBI SRA archives (`read_sra`) → `docs/internals/sra-reader.md`
 
 `docs/` is published at https://the-miint.github.io/duckdb-miint/. The site (`the-miint/the-miint.github.io`) copies `docs/` at build time, except `UPDATING.md`, and serves `table_of_contents.md` as the section's index page. Its navigation is a hand-maintained `nav` in its own `mkdocs.yml`, and `mkdocs build --strict` fails when a synced page is missing from that nav or an anchor link is broken, so a new, renamed or deleted page here needs a matching change there. Downstream projects read these pages as miint's contract.
 
