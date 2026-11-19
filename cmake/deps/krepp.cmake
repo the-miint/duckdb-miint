@@ -8,10 +8,10 @@
 # index layout. Off on Windows and under Emscripten.
 #
 # Like the HDF5 and SortMeRNA deps files: clang-tidy builds do not have vcpkg
-# wired up, so this header can be absent there. Dropping krepp from the
-# analysis set is the house response - a FATAL_ERROR here fails the whole tidy
-# pipeline for every other extension too, which is what it did on the first CI
-# run of this feature. Regular builds still require the header.
+# wired up, so this header can be absent there. Dropping krepp from the analysis
+# set is the house response - a FATAL_ERROR here fails the whole tidy pipeline
+# for every other extension too, which is what it did on the first CI run of
+# this feature. Regular builds still require the header.
 find_path(PHMAP_INCLUDE_DIR parallel_hashmap/phmap.h)
 if(CLANG_TIDY)
   if(NOT PHMAP_INCLUDE_DIR)
@@ -24,8 +24,7 @@ if(CLANG_TIDY)
   endif()
   message(
     STATUS
-      "parallel-hashmap found for tidy-check - krepp placement support enabled"
-  )
+      "parallel-hashmap found for tidy-check - krepp placement support enabled")
 elseif(NOT PHMAP_INCLUDE_DIR)
   message(
     FATAL_ERROR
@@ -53,8 +52,8 @@ set_target_properties(krepp PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # same table: both are 256 bytes, but krepp's maps every byte from 0x80 up to N
 # and minimap2's does not. Linking both is a duplicate-symbol error, and letting
 # one win would be worse than the error - the losing library would encode bases
-# with a table it was not written for. Renaming krepp's copy keeps the two apart.
-# This line covers krepp's own sources; the single miint TU that includes
+# with a table it was not written for. Renaming krepp's copy keeps the two
+# apart. This line covers krepp's own sources; the single miint TU that includes
 # krepp's headers gets the same define via a source-file property below -
 # deliberately not target-wide, for the reason recorded there. PRIVATE, not
 # PUBLIC: krepp's own TUs still get both, but neither becomes a usage
@@ -142,8 +141,7 @@ target_link_libraries(krepp PUBLIC ZLIB::ZLIB)
 # happened to line up, so scope it now.
 set_source_files_properties(
   src/KreppPlacer.cpp src/KreppIndexBuilder.cpp
-  PROPERTIES INCLUDE_DIRECTORIES
-             "${KREPP_DIR}/src;${PHMAP_INCLUDE_DIR}")
+  PROPERTIES INCLUDE_DIRECTORIES "${KREPP_DIR}/src;${PHMAP_INCLUDE_DIR}")
 # These three belong to the ONE translation unit that includes krepp's headers,
 # not to the targets. Applied target-wide they also rewrote the declaration in
 # src/KSW2Aligner.cpp, which declares minimap2's `unsigned char
