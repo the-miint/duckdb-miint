@@ -31,6 +31,55 @@ struct TaxonomyRow {
 // bacterium", "Clostridiales Family XVII. Incertae Sedis"), not a name.
 const std::vector<std::string> &DefaultBadNameTokens();
 
+// The kinds of problem a single row can have. taxonomy_violations returns them as rows;
+// TaxonomyStore throws on them.
+enum class TaxonomyViolationKind {
+	// The feature_id is empty.
+	InvalidId,
+	// A rank value is not a bare name: empty, with whitespace at either end, with a rank
+	// prefix ("p__Bacillota"), or containing ';'.
+	InvalidValue,
+	// The feature_id is on more than one row; every one of those rows is reported.
+	DuplicateId,
+	// A rank is NULL while a deeper rank is not.
+	Gap,
+};
+
+// One problem with one input row.
+struct RowViolation {
+	TaxonomyViolationKind kind;
+	// The input row.
+	size_t row;
+	// InvalidValue: the value's rank. Gap: the first NULL rank. 0 for the id kinds.
+	size_t rank;
+	// InvalidValue: why the value is not a name ("is empty", ...). nullptr otherwise.
+	const char *reason;
+	// DuplicateId: how many rows carry the id. 0 otherwise.
+	size_t count;
+};
+
+// Every row problem, each row read as given, in input order; within a row, its id first, then
+// its values by rank, then its gap.
+std::vector<RowViolation> FindRowViolations(const std::vector<TaxonomyRow> &rows);
+
+// A label, a rank and a whole name, under more than one parent. A label's parent is the value
+// at the rank directly above it, and a NULL there is a parent too.
+struct MultipleParents {
+	// The label's rank: a kLineageRanks index of at least 1, since a domain has no parent.
+	size_t rank;
+	// One entry per distinct parent, in the order each was first seen: every row that puts the
+	// label under that parent, in input order. The text is read from the rows: the label is
+	// rows[rows_by_parent[p][0]].ranks[rank], and the parent is .ranks[rank - 1].
+	std::vector<std::vector<size_t>> rows_by_parent;
+};
+
+// The labels under more than one parent, in the order in which each one's second parent first
+// appears. `depths`, if given, holds one value per row: that row's ranks from depths[row] down
+// are read as NULL (TaxonomyStore passes the depths of its cleaned lineages). Without it, every
+// row is read as given, gaps included.
+std::vector<MultipleParents> FindMultipleParents(const std::vector<TaxonomyRow> &rows,
+                                                 const std::vector<size_t> *depths = nullptr);
+
 // A lineage cut short by a bad-name token: `rank` and every deeper rank were emptied.
 struct LineageTruncation {
 	size_t row;

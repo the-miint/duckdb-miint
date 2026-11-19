@@ -94,6 +94,14 @@ const std::vector<std::string> &DefaultBadNameTokens() {
 	return tokens;
 }
 
+std::vector<RowViolation> FindRowViolations(const std::vector<TaxonomyRow> &) {
+	return {};
+}
+
+std::vector<MultipleParents> FindMultipleParents(const std::vector<TaxonomyRow> &, const std::vector<size_t> *) {
+	return {};
+}
+
 TaxonomyStore::TaxonomyStore(const std::vector<TaxonomyRow> &rows, const std::vector<std::string> &bad_name_tokens) {
 	std::vector<std::string> lower_tokens;
 	for (const auto &token : bad_name_tokens) {

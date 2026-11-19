@@ -330,3 +330,204 @@ TEST_CASE("TaxonomyStore reports the problem count and the first 10", "[taxonomy
 	REQUIRE(b11 != std::string::npos);
 	CHECK(b12 < b11);
 }
+
+// --- FindRowViolations and FindMultipleParents --------------------------------------------
+//
+// The checks behind both TaxonomyStore's errors and taxonomy_violations' rows. A caller that
+// keeps the violations (miintax stores them, reports totals and can write its files anyway)
+// needs every one of them, each pointing at its input row, rather than the first 10 in a
+// message.
+
+namespace {
+const char *KindText(TaxonomyViolationKind kind) {
+	switch (kind) {
+	case TaxonomyViolationKind::InvalidId:
+		return "invalid_id";
+	case TaxonomyViolationKind::InvalidValue:
+		return "invalid_value";
+	case TaxonomyViolationKind::DuplicateId:
+		return "duplicate_id";
+	case TaxonomyViolationKind::Gap:
+		return "gap";
+	}
+	return "?";
+}
+
+// Each violation as one line, "row 2 gap phylum", so that a failure shows the whole list.
+std::vector<std::string> Describe(const std::vector<RowViolation> &violations) {
+	std::vector<std::string> out;
+	for (const auto &v : violations) {
+		std::string line = "row " + std::to_string(v.row) + " " + KindText(v.kind);
+		switch (v.kind) {
+		case TaxonomyViolationKind::InvalidValue:
+			line += std::string(" ") + kLineageRanks[v.rank].column + ": " + (v.reason ? v.reason : "<no reason>");
+			break;
+		case TaxonomyViolationKind::DuplicateId:
+			line += " x" + std::to_string(v.count);
+			break;
+		case TaxonomyViolationKind::Gap:
+			line += std::string(" ") + kLineageRanks[v.rank].column;
+			break;
+		case TaxonomyViolationKind::InvalidId:
+			break;
+		}
+		out.push_back(std::move(line));
+	}
+	return out;
+}
+
+// Each label as one line, "family 'fA': 'oA' [0 1]; NULL [2]", its parents in the order given,
+// with the text read from the rows as MultipleParents documents.
+std::vector<std::string> Describe(const std::vector<TaxonomyRow> &rows, const std::vector<MultipleParents> &found) {
+	std::vector<std::string> out;
+	for (const auto &label : found) {
+		REQUIRE(label.rank >= 1);
+		REQUIRE(!label.rows_by_parent.empty());
+		REQUIRE(!label.rows_by_parent[0].empty());
+		const auto &name = rows[label.rows_by_parent[0][0]].ranks[label.rank];
+		REQUIRE(name);
+		std::string line = std::string(kLineageRanks[label.rank].column) + " '" + *name + "':";
+		for (size_t p = 0; p < label.rows_by_parent.size(); p++) {
+			const auto &under = label.rows_by_parent[p];
+			REQUIRE(!under.empty());
+			const auto &parent = rows[under[0]].ranks[label.rank - 1];
+			line += (p == 0 ? " " : "; ") + (parent ? "'" + *parent + "'" : std::string("NULL")) + " [";
+			for (size_t i = 0; i < under.size(); i++) {
+				line += (i == 0 ? "" : " ") + std::to_string(under[i]);
+			}
+			line += "]";
+		}
+		out.push_back(std::move(line));
+	}
+	return out;
+}
+
+using Lines = std::vector<std::string>;
+} // namespace
+
+// Each row is checked in full, so a row with several problems shows them all, and they come in
+// the order TaxonomyStore's message lists them: input order, and within a row its id, its
+// values by rank, then its gap.
+TEST_CASE("FindRowViolations reports every row problem in input order", "[taxonomy_store]") {
+	std::vector<TaxonomyRow> rows {Row("G1", {"A", "B", "C"}), Row("", {"A", " B"}),
+	                               Row("G2", {"A", std::nullopt, "C", std::nullopt, "E"}),
+	                               Row("G3", {"A", "B", "C", "", "g__F"})};
+	CHECK(Describe(FindRowViolations(rows)) == Lines {"row 1 invalid_id",
+	                                                  "row 1 invalid_value phylum: starts or ends "
+	                                                  "with whitespace",
+	                                                  "row 2 gap phylum", "row 3 invalid_value order: is empty",
+	                                                  "row 3 invalid_value family: starts with a rank prefix such "
+	                                                  "as 'p__'"});
+	// A clean taxonomy has none, so no rows can be told apart from rows not checked.
+	CHECK(FindRowViolations({Row("G1", {"A", "B"}), Row("G2", {"A", "C"})}).empty());
+	CHECK(FindRowViolations({}).empty());
+}
+
+// The reasons are the text taxonomy_violations returns in `detail`; each is a value no other
+// row spells the same way, or, for ';', one that reads as two ranks once lineages are joined.
+TEST_CASE("FindRowViolations gives the reason a value is not a name", "[taxonomy_store]") {
+	struct Case {
+		std::string value;
+		std::string reason;
+	};
+	for (const auto &c : std::vector<Case> {{"", "is empty"},
+	                                        {" Foo", "starts or ends with whitespace"},
+	                                        {"Foo\t", "starts or ends with whitespace"},
+	                                        {"g__Foo", "starts with a rank prefix such as 'p__'"},
+	                                        {"Foo;Bar", "contains ';'"}}) {
+		INFO("value '" << c.value << "'");
+		CHECK(Describe(FindRowViolations({Row("G1", {"A", "B", "C", "D", "E", c.value})})) ==
+		      Lines {"row 0 invalid_value genus: " + c.reason});
+	}
+}
+
+// miintax counts how many rows carry a repeated id (its I2), and a caller looking for the rows
+// at fault needs each of them, so every occurrence is reported with the total. An empty id is
+// reported as such, and is not a repeat: it names no feature.
+TEST_CASE("FindRowViolations reports every occurrence of a repeated id", "[taxonomy_store]") {
+	std::vector<TaxonomyRow> rows {Row("G1", {"A", "B"}), Row("G2", {"A", "B"}), Row("G1", {"A", "C"}),
+	                               Row("G1", {"A", "D"}), Row("", {"A"}),        Row("", {"A"})};
+	CHECK(Describe(FindRowViolations(rows)) == Lines {"row 0 duplicate_id x3", "row 2 duplicate_id x3",
+	                                                  "row 3 duplicate_id x3", "row 4 invalid_id", "row 5 invalid_id"});
+}
+
+// A gap is a NULL rank above a set one; the first NULL rank is the one reported, once per row
+// (miintax's I4 names it). NULLs at the end of a lineage are not gaps: a lineage may stop at
+// any rank, or be empty.
+TEST_CASE("FindRowViolations reports a gap at its first NULL rank", "[taxonomy_store]") {
+	CHECK(Describe(FindRowViolations({Row("G1", {"A", std::nullopt, "C"})})) == Lines {"row 0 gap phylum"});
+	// d__dA; p__; c__cZ; o__; f__fZ: two NULLs above set ranks, one gap, at the phylum.
+	CHECK(Describe(FindRowViolations({Row("L2", {"dA", std::nullopt, "cZ", std::nullopt, "fZ"})})) ==
+	      Lines {"row 0 gap phylum"});
+	CHECK(Describe(FindRowViolations({Row("L2", {"dA", "pA", std::nullopt, "oZ", "fZ", "gZ", "gZ sZ"})})) ==
+	      Lines {"row 0 gap class"});
+	// A NULL domain under a set phylum is a gap too.
+	CHECK(Describe(FindRowViolations({Row("G2", {std::nullopt, "B"})})) == Lines {"row 0 gap domain"});
+	CHECK(FindRowViolations({Row("G1", {"A", "B"}), Row("G2", {}), Row("G3", {"A", "B", "C", "D", "E", "F", "G", "H"})})
+	          .empty());
+}
+
+// The parent rules miintax's I1 checks: a label is a rank and a whole name, and its parent is
+// the value directly above it, NULL included, so an empty family is a parent like any other.
+TEST_CASE("FindMultipleParents counts a NULL rank as a parent", "[taxonomy_store]") {
+	std::vector<TaxonomyRow> rows {Row("G1", {"dA", "pA", "cA", "oA", "fA", "gA", "gA sA"}),
+	                               Row("L1", {"dA", "pA", "cA", "oA", "fA", "gA"}),
+	                               Row("L1", {"dA", "pA", "cA", "oA", std::nullopt, "gA", "gA sB"})};
+	CHECK(Describe(rows, FindMultipleParents(rows)) == Lines {"genus 'gA': 'fA' [0 1]; NULL [2]"});
+}
+
+TEST_CASE("FindMultipleParents checks a species under its genus", "[taxonomy_store]") {
+	std::vector<TaxonomyRow> rows {Row("G1", {"dA", "pA", "cA", "oA", "fA", "gA", "gA sA"}),
+	                               Row("L1", {"dA", "pA", "cA", "oA", "fA", "gB", "gA sA"})};
+	CHECK(Describe(rows, FindMultipleParents(rows)) == Lines {"species 'gA sA': 'gA' [0]; 'gB' [1]"});
+}
+
+// Names compare whole: GTDB's suffixes make Bacillus and Bacillus_A two taxa, which may sit in
+// different families. The same text at two ranks is two labels too. A domain has no parent.
+TEST_CASE("FindMultipleParents compares labels whole and per rank", "[taxonomy_store]") {
+	std::vector<TaxonomyRow> rows {Row("G1", {"dA", "pA", "cA", "oA", "f1", "Bacillus"}),
+	                               Row("G2", {"dA", "pA", "cA", "oA", "f2", "Bacillus_A"}),
+	                               Row("G3", {"dA", "pA", "cA", "oA", "X", "gX"}),
+	                               Row("G4", {"dA", "pA", "cA", "oA", "f3", "X"}), Row("G5", {"dB", "pB"})};
+	CHECK(FindMultipleParents(rows).empty());
+	// A phylum under two domains is a label under two parents.
+	rows.push_back(Row("G6", {"dB", "pA"}));
+	CHECK(Describe(rows, FindMultipleParents(rows)) == Lines {"phylum 'pA': 'dA' [0 1 2 3]; 'dB' [5]"});
+}
+
+// The parent check runs over every row, a repeated id's included: miintax checks one parent per
+// label over its primary and secondary files together, and an id may be in both. Every row under
+// each parent is listed, so the rows at fault can be found.
+TEST_CASE("FindMultipleParents lists every row under each parent", "[taxonomy_store]") {
+	std::vector<TaxonomyRow> rows {Row("G1", {"dA", "pA", "cA", "oA", "fA"}), Row("G1", {"dA", "pA", "cA", "oA", "fA"}),
+	                               Row("G2", {"dA", "pA", "cA", "oB", "fA"}),
+	                               Row("G3", {"dA", "pA", "cA", "oA", "fA"})};
+	CHECK(Describe(rows, FindMultipleParents(rows)) == Lines {"family 'fA': 'oA' [0 1 3]; 'oB' [2]"});
+}
+
+// The order is the input's, so a run is reproducible: labels in the order their second parent
+// first appears (as TaxonomyStore's message lists them), and each label's parents in the order
+// they were first seen.
+TEST_CASE("FindMultipleParents keeps input order", "[taxonomy_store]") {
+	std::vector<TaxonomyRow> rows {
+	    Row("R0", {"d", "p", "c", "oA", "fX"}), Row("R1", {"d", "p", "c", "oA", "fY"}),
+	    Row("R2", {"d", "p", "c", "oB", "fY"}), Row("R3", {"d", "p", "c", "oB", "fX"}),
+	    Row("R4", {"d", "p", "c", "oC", "fY"}),
+	};
+	CHECK(Describe(rows, FindMultipleParents(rows)) ==
+	      Lines {"family 'fY': 'oA' [1]; 'oB' [2]; 'oC' [4]", "family 'fX': 'oA' [0]; 'oB' [3]"});
+}
+
+// TaxonomyStore checks parents over its cleaned lineages, which it describes by depth: the
+// ranks a cut removed must not count, or a placeholder cleaning drops would still conflict.
+TEST_CASE("FindMultipleParents reads only the ranks above each row's depth", "[taxonomy_store]") {
+	std::vector<TaxonomyRow> rows {Row("G1", {"dA", "pA", "cA", "oA", "fA"}),
+	                               Row("G2", {"dA", "pA", "cA", "oB", "fA"})};
+	CHECK(Describe(rows, FindMultipleParents(rows)) == Lines {"family 'fA': 'oA' [0]; 'oB' [1]"});
+	const std::vector<size_t> cut_at_family {5, 4};
+	CHECK(FindMultipleParents(rows, &cut_at_family).empty());
+	const std::vector<size_t> wiped {5, 0};
+	CHECK(FindMultipleParents(rows, &wiped).empty());
+	const std::vector<size_t> whole {8, 8};
+	CHECK(Describe(rows, FindMultipleParents(rows, &whole)) == Lines {"family 'fA': 'oA' [0]; 'oB' [1]"});
+}
