@@ -17,6 +17,14 @@ set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 # docs/internals/build-system.md. Each embedded dependency lives in its own
 # cmake/deps/<name>.cmake (sylph and st3 are part of rust_glue.cmake).
 
+# DuckDB defines EXT_VERSION_MIINT, miint's commit, for every target in this
+# directory, so each new commit would recompile all of miint and every library
+# built here. Only miint_extension.cpp reads it. This must come before any
+# target or subdirectory, which take the directory's definitions when created.
+if(COMMAND set_extension_version_sources)
+  set_extension_version_sources(miint src/miint_extension.cpp)
+endif()
+
 # ---------------------------------------------------------------------------
 # Features
 # ---------------------------------------------------------------------------
