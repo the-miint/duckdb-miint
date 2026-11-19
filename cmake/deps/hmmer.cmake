@@ -63,7 +63,15 @@ function(miint_hmmer_config in out)
     string(REGEX REPLACE "\n#undef ${name}([ \t][^\n]*)?\n"
                          "\n#define ${name} ${value}\n" text "${text}")
   endforeach()
-  file(WRITE ${out} "${text}")
+  # Written only when its text changes: every HMMER source includes it, so a
+  # rewrite on each configure would recompile them all.
+  set(old "")
+  if(EXISTS ${out})
+    file(READ ${out} old)
+  endif()
+  if(NOT "${old}" STREQUAL "${text}")
+    file(WRITE ${out} "${text}")
+  endif()
   set_property(
     DIRECTORY
     APPEND

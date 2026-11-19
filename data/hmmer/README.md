@@ -41,3 +41,11 @@ source byte for byte.
 awk '/^sub h2_nt_file/{w=1} /^sub h2_aa_file/{w=0} /<<"EOF"/{on=1; next} /^EOF$/{on=0} on && w' \
     ext/hmmer/testsuite/i15-hmmconvert.pl > data/hmmer/ecori.hmm2
 ```
+
+One file is not a model, and is made here rather than copied: `truncated_fasta.fa.gz`, a gzipped FASTA
+record of 1.2 MB with the last 200 bytes of the gzip stream cut off, so that reading it to the end fails. It
+was written with
+
+```sh
+python3 -c 'import gzip; body = ">seq1 not a model\n" + ("ACGT" * 15 + "\n") * 20000; data = gzip.compress(body.encode(), mtime=0); open("data/hmmer/truncated_fasta.fa.gz", "wb").write(data[:-200])'
+```

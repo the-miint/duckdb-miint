@@ -13,13 +13,11 @@ namespace duckdb {
 class ReadHmmTableFunction {
 public:
 	struct LocalState : public LineScanLocalState {
-		// The current file's model being read: its lines so far, each ending in '\n', from the
-		// line after the previous model's "//" (or the file's first line).
+		// The current file's model being read: its lines so far, each ending in '\n', from its
+		// first line that is neither blank nor a comment. Empty between models.
 		std::string record;
 		// The file line `record` starts at.
 		uint64_t record_start = 1;
-		// Whether `record` holds a line that is neither blank nor a comment.
-		bool record_has_text = false;
 		// The models of the current file read so far.
 		uint64_t models_read = 0;
 	};

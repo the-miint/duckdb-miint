@@ -684,4 +684,37 @@ TEST_CASE("HMMER profile - how a read's outcome becomes an error", "[hmmer]") {
 		CHECK_THROWS_AS(ThrowIfReadFailed(eslEMEM, false, "", 1), std::bad_alloc);
 	}
 }
+
+// What a caller splitting a file into records relies on, as HMMER reads lines (p7_hmmfile.c's
+// format tags, Easel's fileparser with '#' as its comment character).
+TEST_CASE("HMMER profile - lines as HMMER reads them", "[hmmer]") {
+	using miint::hmmer::FirstWord;
+	using miint::hmmer::IsBlankOrComment;
+	using miint::hmmer::IsFormatTag;
+	using miint::hmmer::IsModelEnd;
+
+	CHECK(FirstWord("HMMER3/f [3.1b2 | February 2015]") == "HMMER3/f");
+	CHECK(FirstWord(" \tNAME  fn3") == "NAME");
+	CHECK(FirstWord("//") == "//");
+	CHECK(FirstWord("").empty());
+	CHECK(FirstWord(" \t ").empty());
+
+	CHECK(IsBlankOrComment(""));
+	CHECK(IsBlankOrComment("#"));
+	CHECK(IsBlankOrComment("#comment"));
+	CHECK_FALSE(IsBlankOrComment("NAME"));
+	CHECK_FALSE(IsBlankOrComment("//"));
+
+	for (const char *tag : {"HMMER3/a", "HMMER3/b", "HMMER3/c", "HMMER3/d", "HMMER3/e", "HMMER3/f", "HMMER2.0"}) {
+		CHECK(IsFormatTag(tag));
+	}
+	for (const char *not_tag : {"HMMER3/g", "HMMER3", "HMMER2", "HMMER", "hmmer3/f", "HMMER3/F", ">seq1", "//", ""}) {
+		CHECK_FALSE(IsFormatTag(not_tag));
+	}
+
+	CHECK(IsModelEnd("//"));
+	CHECK_FALSE(IsModelEnd("///"));
+	CHECK_FALSE(IsModelEnd("#//"));
+	CHECK_FALSE(IsModelEnd(""));
+}
 #endif

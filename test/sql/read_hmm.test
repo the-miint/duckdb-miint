@@ -511,6 +511,13 @@ SELECT * FROM read_hmm('{TEST_DIR}/not_a_model.hmm');
 ----
 read_hmm: {TEST_DIR}/not_a_model.hmm: model 1 (line 1): Format tag is '>seq1': unrecognized (expected HMMER3/a to HMMER3/f, or HMMER2.0)
 
+# And is rejected at that line, without reading on, so a large file that isn't HMMER's is never held
+# in memory. This gzipped FASTA is cut off near its end: reading it through would fail there instead.
+statement error
+SELECT * FROM read_hmm('data/hmmer/truncated_fasta.fa.gz');
+----
+read_hmm: data/hmmer/truncated_fasta.fa.gz: model 1 (line 1): Format tag is '>seq1': unrecognized (expected HMMER3/a to HMMER3/f, or HMMER2.0)
+
 # A bad second model: the model number and the line count the whole file, not the model.
 statement ok
 COPY (SELECT rtrim(content || replace(content, 'ALPH  amino', 'ALPH  custom'), chr(10)) FROM read_text('data/hmmer/XYPPX.hmm'))
@@ -520,6 +527,20 @@ statement error
 SELECT * FROM read_hmm('{TEST_DIR}/second_bad.hmm');
 ----
 read_hmm: {TEST_DIR}/second_bad.hmm: model 2 (line 47): Unrecognized alphabet type custom
+
+# Blank and comment lines before and between models count toward the line: a comment and a blank
+# line, XYPPX (lines 3 to 43), a blank line and a comment, then the bad model from line 46, whose
+# ALPH line is its sixth.
+statement ok
+COPY (SELECT rtrim('# leading comment' || chr(10) || chr(10) || content || chr(10) || '# between models' || chr(10)
+                   || replace(content, 'ALPH  amino', 'ALPH  custom'), chr(10))
+      FROM read_text('data/hmmer/XYPPX.hmm'))
+TO '{TEST_DIR}/comments_bad.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT * FROM read_hmm('{TEST_DIR}/comments_bad.hmm');
+----
+read_hmm: {TEST_DIR}/comments_bad.hmm: model 2 (line 51): Unrecognized alphabet type custom
 
 # More models than one output vector holds (2048), and a defect past the first vector, so the
 # model number and line are checked where a per-chunk counter would reset. XYPPX.hmm is 41

@@ -49,7 +49,11 @@ struct ModelDestroyer {
 	}
 };
 
-std::string FormatName(int format) {
+// Every format p7_hmmfile_OpenBuffer reads from text, each named by its tag.
+constexpr int TEXT_FORMATS[] = {p7_HMMFILE_20, p7_HMMFILE_3a, p7_HMMFILE_3b, p7_HMMFILE_3c,
+                                p7_HMMFILE_3d, p7_HMMFILE_3e, p7_HMMFILE_3f};
+
+const char *FormatName(int format) {
 	switch (format) {
 	case p7_HMMFILE_20:
 		return "HMMER2.0";
@@ -73,9 +77,8 @@ std::string FormatName(int format) {
 
 // p7_hmmfile_OpenBuffer failed with a format error, which it reports with no
 // message and no line: its first token is not a HMMER format tag, or there is
-// none. Names the token, found as Easel's parser finds it: the first
-// whitespace-delimited word, skipping blank lines and lines whose first word
-// starts with '#'.
+// none. Names the token, found as Easel's parser finds it: the first word of
+// the first line that is neither blank nor a comment.
 [[noreturn]] void ThrowNotAModel(std::string_view record) {
 	int64_t line = 0;
 	size_t start = 0;
@@ -85,16 +88,9 @@ std::string FormatName(int format) {
 			end = record.size();
 		}
 		line++;
-		size_t word = start;
-		while (word < end && std::isspace(static_cast<unsigned char>(record[word]))) {
-			word++;
-		}
-		if (word < end && record[word] != '#') {
-			size_t word_end = word;
-			while (word_end < end && !std::isspace(static_cast<unsigned char>(record[word_end]))) {
-				word_end++;
-			}
-			throw ProfileParseError("Format tag is '" + std::string(record.substr(word, word_end - word)) +
+		const auto word = FirstWord(record.substr(start, end - start));
+		if (!IsBlankOrComment(word)) {
+			throw ProfileParseError("Format tag is '" + std::string(word) +
 			                            "': unrecognized (expected HMMER3/a to HMMER3/f, or HMMER2.0)",
 			                        line);
 		}
@@ -105,6 +101,35 @@ std::string FormatName(int format) {
 }
 
 } // namespace
+
+std::string_view FirstWord(std::string_view line) {
+	size_t begin = 0;
+	while (begin < line.size() && std::isspace(static_cast<unsigned char>(line[begin]))) {
+		begin++;
+	}
+	size_t end = begin;
+	while (end < line.size() && !std::isspace(static_cast<unsigned char>(line[end]))) {
+		end++;
+	}
+	return line.substr(begin, end - begin);
+}
+
+bool IsBlankOrComment(std::string_view first_word) {
+	return first_word.empty() || first_word[0] == '#';
+}
+
+bool IsFormatTag(std::string_view first_word) {
+	for (int format : TEXT_FORMATS) {
+		if (first_word == FormatName(format)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+bool IsModelEnd(std::string_view first_word) {
+	return first_word == "//";
+}
 
 void Initialize() {
 	static std::once_flag initialized;
@@ -125,7 +150,9 @@ ProfileHeader ParseProfile(std::string_view record) {
 	// read's.
 	TakeExceptionMessage();
 
-	if (record.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+	static_assert(MAX_RECORD_BYTES == static_cast<size_t>(std::numeric_limits<int>::max()),
+	              "HMMER's buffer length is an int");
+	if (record.size() > MAX_RECORD_BYTES) {
 		throw ProfileParseError(
 		    "Model record of " + std::to_string(record.size()) + " bytes is larger than HMMER can read (2 GiB)", 1);
 	}

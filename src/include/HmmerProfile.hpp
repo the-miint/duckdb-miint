@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <stdexcept>
@@ -69,6 +70,19 @@ public:
 private:
 	int64_t line;
 };
+
+// How HMMER reads the lines of a model file, for a caller splitting a file into
+// records. HMMER takes each line's first word, its first whitespace-delimited
+// token: it skips a line with none (blank) or whose first word starts with '#'
+// (a comment); a model's first line it doesn't skip starts with the model's
+// format tag; and a model ends at a line whose first word is "//".
+std::string_view FirstWord(std::string_view line);
+bool IsBlankOrComment(std::string_view first_word);
+bool IsFormatTag(std::string_view first_word); // HMMER3/a ... HMMER3/f, or HMMER2.0
+bool IsModelEnd(std::string_view first_word);
+
+// The largest record ParseProfile reads: HMMER takes a buffer's length as an int.
+constexpr size_t MAX_RECORD_BYTES = 2147483647;
 
 // Reads one model: the text of one record, from its format line ("HMMER3/f
 // ...", "HMMER2.0 ...") through its closing "//". Text after the "//" is not

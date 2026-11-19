@@ -83,6 +83,20 @@ LineFile::LineFile(FileSystem &fs, const std::string &path_p, const std::string 
       }) {
 }
 
+bool ClaimNextFile(ClientContext &context, const LineScanData &data, LineScanGlobalState &global,
+                   LineScanLocalState &local) {
+	size_t idx;
+	{
+		std::lock_guard<std::mutex> guard(global.lock);
+		if (global.next_file_idx >= data.file_paths.size()) {
+			return false;
+		}
+		idx = global.next_file_idx++;
+	}
+	local.file = make_uniq<LineFile>(FileSystem::GetFileSystem(context), data.file_paths[idx], data.function_name);
+	return true;
+}
+
 void SetTagMap(Vector &map_vec, idx_t row, const std::vector<miint::SamStyleTag> &tags) {
 	auto offset = ListVector::GetListSize(map_vec);
 	ListVector::Reserve(map_vec, offset + tags.size());

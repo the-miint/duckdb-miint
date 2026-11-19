@@ -73,6 +73,11 @@ struct LineScanLocalState : public LocalTableFunctionState {
 	std::unique_ptr<LineFile> file;
 };
 
+// Open, as the calling thread's `file`, the next file no thread has taken. Returns false once
+// every file is taken. Each file is read by one thread, start to end.
+bool ClaimNextFile(ClientContext &context, const LineScanData &data, LineScanGlobalState &global,
+                   LineScanLocalState &local);
+
 // Write `tags` as row `row` of a MAP(VARCHAR, VARCHAR) vector.
 void SetTagMap(Vector &map_vec, idx_t row, const std::vector<miint::SamStyleTag> &tags);
 
@@ -92,19 +97,9 @@ void ScanLines(ClientContext &context, TableFunctionInput &data_p, DataChunk &ou
 	std::string chunk_path = local.file ? local.file->path : std::string();
 	while (row < STANDARD_VECTOR_SIZE && chunk_bytes < LINE_SCAN_MAX_CHUNK_BYTES) {
 		if (!local.file) {
-			if (row > 0) {
+			if (row > 0 || !ClaimNextFile(context, data, global, local)) {
 				break;
 			}
-			size_t idx;
-			{
-				std::lock_guard<std::mutex> guard(global.lock);
-				if (global.next_file_idx >= data.file_paths.size()) {
-					break;
-				}
-				idx = global.next_file_idx++;
-			}
-			local.file =
-			    make_uniq<LineFile>(FileSystem::GetFileSystem(context), data.file_paths[idx], data.function_name);
 			chunk_path = local.file->path;
 		}
 

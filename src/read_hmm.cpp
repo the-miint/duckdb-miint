@@ -5,13 +5,14 @@
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
 
-#include <cctype>
 #include <optional>
 #include <string_view>
 
 namespace duckdb {
 
 namespace {
+
+namespace hmmer = miint::hmmer;
 
 enum Column : idx_t {
 	NAME,
@@ -36,21 +37,42 @@ enum Column : idx_t {
 	VITERBI_MU,
 	VITERBI_LAMBDA,
 	FORWARD_TAU,
-	FORWARD_LAMBDA
+	FORWARD_LAMBDA,
+	COLUMN_COUNT
 };
 
-// The first whitespace-delimited word of `line`, or "" for a blank line.
-std::string_view FirstWord(std::string_view line) {
-	size_t begin = 0;
-	while (begin < line.size() && std::isspace(static_cast<unsigned char>(line[begin]))) {
-		begin++;
-	}
-	size_t end = begin;
-	while (end < line.size() && !std::isspace(static_cast<unsigned char>(line[end]))) {
-		end++;
-	}
-	return line.substr(begin, end - begin);
-}
+struct ColumnSpec {
+	const char *name;
+	LogicalTypeId type;
+};
+
+// In Column's order.
+constexpr ColumnSpec COLUMNS[] = {
+    {"hmm_name", LogicalTypeId::VARCHAR},
+    {"hmm_accession", LogicalTypeId::VARCHAR},
+    {"hmm_description", LogicalTypeId::VARCHAR},
+    {"hmm_length", LogicalTypeId::BIGINT},
+    {"alphabet", LogicalTypeId::VARCHAR},
+    {"format", LogicalTypeId::VARCHAR},
+    {"max_length", LogicalTypeId::BIGINT},
+    {"sequence_count", LogicalTypeId::BIGINT},
+    {"effective_sequence_count", LogicalTypeId::FLOAT},
+    {"checksum", LogicalTypeId::UINTEGER},
+    {"gathering_sequence", LogicalTypeId::FLOAT},
+    {"gathering_domain", LogicalTypeId::FLOAT},
+    {"trusted_sequence", LogicalTypeId::FLOAT},
+    {"trusted_domain", LogicalTypeId::FLOAT},
+    {"noise_sequence", LogicalTypeId::FLOAT},
+    {"noise_domain", LogicalTypeId::FLOAT},
+    {"consensus", LogicalTypeId::VARCHAR},
+    {"msv_mu", LogicalTypeId::FLOAT},
+    {"msv_lambda", LogicalTypeId::FLOAT},
+    {"viterbi_mu", LogicalTypeId::FLOAT},
+    {"viterbi_lambda", LogicalTypeId::FLOAT},
+    {"forward_tau", LogicalTypeId::FLOAT},
+    {"forward_lambda", LogicalTypeId::FLOAT},
+};
+static_assert(sizeof(COLUMNS) / sizeof(COLUMNS[0]) == COLUMN_COUNT, "one ColumnSpec per Column");
 
 void SetString(Vector &vec, idx_t row, const std::string &value) {
 	FlatVector::GetDataMutable<string_t>(vec)[row] = StringVector::AddString(vec, value);
@@ -73,7 +95,7 @@ void SetNumber(Vector &vec, idx_t row, const std::optional<T> &value) {
 	FlatVector::GetDataMutable<T>(vec)[row] = *value;
 }
 
-void WriteRow(DataChunk &output, idx_t row, const miint::hmmer::ProfileHeader &h) {
+void WriteRow(DataChunk &output, idx_t row, const hmmer::ProfileHeader &h) {
 	auto &out = output.data;
 	SetString(out[NAME], row, h.name);
 	SetString(out[ACCESSION], row, h.accession);
@@ -112,20 +134,10 @@ unique_ptr<NodeStatistics> ReadHmmCardinality(ClientContext &context, const Func
 
 unique_ptr<FunctionData> ReadHmmTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
                                                     vector<LogicalType> &return_types, vector<Identifier> &names) {
-	names = {"hmm_name",         "hmm_accession",      "hmm_description",
-	         "hmm_length",       "alphabet",           "format",
-	         "max_length",       "sequence_count",     "effective_sequence_count",
-	         "checksum",         "gathering_sequence", "gathering_domain",
-	         "trusted_sequence", "trusted_domain",     "noise_sequence",
-	         "noise_domain",     "consensus",          "msv_mu",
-	         "msv_lambda",       "viterbi_mu",         "viterbi_lambda",
-	         "forward_tau",      "forward_lambda"};
-	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR,  LogicalType::VARCHAR, LogicalType::BIGINT,
-	                LogicalType::VARCHAR, LogicalType::VARCHAR,  LogicalType::BIGINT,  LogicalType::BIGINT,
-	                LogicalType::FLOAT,   LogicalType::UINTEGER, LogicalType::FLOAT,   LogicalType::FLOAT,
-	                LogicalType::FLOAT,   LogicalType::FLOAT,    LogicalType::FLOAT,   LogicalType::FLOAT,
-	                LogicalType::VARCHAR, LogicalType::FLOAT,    LogicalType::FLOAT,   LogicalType::FLOAT,
-	                LogicalType::FLOAT,   LogicalType::FLOAT,    LogicalType::FLOAT};
+	for (const auto &column : COLUMNS) {
+		names.emplace_back(column.name);
+		return_types.emplace_back(column.type);
+	}
 	return BindLineScan(context, input, names, return_types);
 }
 
@@ -135,15 +147,18 @@ unique_ptr<LocalTableFunctionState> ReadHmmTableFunction::InitLocal(ExecutionCon
 	return make_uniq<LocalState>();
 }
 
-// Each model is a record: the lines up to and including the next whose first word is "//",
-// which HMMER reads as the model's end. Blank and comment lines between models belong to the
-// next record, where HMMER skips them, so the line it reports counts from the previous "//".
-// What follows the last "//" is a model only if it holds a line that is neither blank nor a
-// comment: a model cut off before its "//" then fails in HMMER, as it should, rather than
-// being dropped.
+// Each model is a record: its lines from the first that HMMER doesn't skip, which holds its
+// format tag, through the next whose first word is "//", which HMMER reads as its end. The blank
+// and comment lines before a model are left out, so HMMER's line numbers count from the record's
+// first line. Text after the last "//" that isn't blank or comment is a model too: one cut off
+// before its "//" then fails in HMMER, as it should, rather than being dropped.
 //
-// As ScanLines does, each thread reads its files one at a time, start to end, and a chunk
-// holds one file's rows only, so the filepath column is constant.
+// A record goes to HMMER early when it can't be a model: when its first line holds no format tag
+// (HMMER rejects it from that line alone), or when it has outgrown what HMMER can read. Reading on
+// to a "//" would otherwise hold all of a file that isn't HMMER's, a FASTA file say, in memory.
+//
+// As ScanLines does, each thread reads its files one at a time, start to end, and a chunk holds
+// one file's rows only, so the filepath column is constant.
 void ReadHmmTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
 	auto &data = data_p.bind_data->Cast<LineScanData>();
 	auto &global = data_p.global_state->Cast<LineScanGlobalState>();
@@ -155,10 +170,10 @@ void ReadHmmTableFunction::Execute(ClientContext &context, TableFunctionInput &d
 
 	auto read_model = [&]() {
 		local.models_read++;
-		miint::hmmer::ProfileHeader header;
+		hmmer::ProfileHeader header;
 		try {
-			header = miint::hmmer::ParseProfile(local.record);
-		} catch (const miint::hmmer::ProfileParseError &e) {
+			header = hmmer::ParseProfile(local.record);
+		} catch (const hmmer::ProfileParseError &e) {
 			const uint64_t line = local.record_start + static_cast<uint64_t>(e.Line()) - 1;
 			throw InvalidInputException(data.function_name + ": " + local.file->path + ": model " +
 			                            std::to_string(local.models_read) + " (line " + std::to_string(line) +
@@ -167,50 +182,40 @@ void ReadHmmTableFunction::Execute(ClientContext &context, TableFunctionInput &d
 		WriteRow(output, row, header);
 		row++;
 		chunk_bytes += local.record.size();
-	};
-	auto start_record = [&](uint64_t first_line) {
 		local.record.clear();
-		local.record_start = first_line;
-		local.record_has_text = false;
 	};
 
 	while (row < STANDARD_VECTOR_SIZE && chunk_bytes < LINE_SCAN_MAX_CHUNK_BYTES) {
 		if (!local.file) {
-			if (row > 0) {
+			if (row > 0 || !ClaimNextFile(context, data, global, local)) {
 				break;
 			}
-			size_t idx;
-			{
-				std::lock_guard<std::mutex> guard(global.lock);
-				if (global.next_file_idx >= data.file_paths.size()) {
-					break;
-				}
-				idx = global.next_file_idx++;
-			}
-			local.file =
-			    make_uniq<LineFile>(FileSystem::GetFileSystem(context), data.file_paths[idx], data.function_name);
 			chunk_path = local.file->path;
+			local.record.clear();
 			local.models_read = 0;
-			start_record(1);
 		}
 
 		std::string_view line;
 		if (!local.file->lines.Next(line)) {
-			if (local.record_has_text) {
+			if (!local.record.empty()) {
 				read_model();
 			}
 			local.file.reset();
 			continue;
 		}
+		const auto word = hmmer::FirstWord(line);
+		const bool first_line = local.record.empty();
+		if (first_line) {
+			if (hmmer::IsBlankOrComment(word)) {
+				continue;
+			}
+			local.record_start = local.file->lines.LineNumber();
+		}
 		local.record.append(line);
 		local.record.push_back('\n');
-		const auto word = FirstWord(line);
-		if (!word.empty() && word[0] != '#') {
-			local.record_has_text = true;
-		}
-		if (word == "//") {
+		if ((first_line && !hmmer::IsFormatTag(word)) || hmmer::IsModelEnd(word) ||
+		    local.record.size() > hmmer::MAX_RECORD_BYTES) {
 			read_model();
-			start_record(local.file->lines.LineNumber() + 1);
 		}
 	}
 	if (data.include_filepath && row > 0) {
