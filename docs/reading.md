@@ -1,6 +1,6 @@
 # Reading files
 
-MIINT supports reading FASTA, FASTQ, SAM, BAM, PAF, GFA, SFF, BIOM, mzML, mzXML, GFF, jplace and Newick, and the output directory of the myloasm assembler.  
+MIINT supports reading FASTA, FASTQ, SAM, BAM, PAF, GFA, SFF, BIOM, mzML, mzXML, GFF, jplace, Newick and HMMER profile HMMs, and the output directory of the myloasm assembler.  
 
 A reader expands each path it is given as DuckDB's own readers do: a `file:` URI names the local path it spells (`file:///p`, `file://localhost/p` and `file:/p` name `/p`; on Windows, `file:///C:/p` names `C:/p`), and a leading `~` names the directory of DuckDB's `home_directory` setting (by default your home directory). This holds for a single path, for each path in a list (a list's paths are literal paths, never globs), and for the files a glob matches. Index and database paths given to aligners and classifiers are passed to their libraries as given, so give those as plain paths.
 
@@ -27,6 +27,7 @@ A reader expands each path it is given as DuckDB's own readers do: a `file:` URI
 - [jplace](#jplace) - jplace formatted files.
 - [Newick](#newick) - Phylogenies in Newick.
 - [GFFv3](#gff) - GFF formatted annotation data.
+- [HMMER profile HMMs](#hmmer-profile-hmms) - Profile HMM files as HMMER writes them (HMMER3 and HMMER2), one row per model.
 - [Coordinate conventions](#coordinate-conventions) - How positions on references and on reads are reported, and how each format is converted.
 
 ### Reading a file by its name
@@ -53,6 +54,7 @@ SELECT * FROM tree.nwk;            -- a name made of plain words needs no quotes
 | `.mzXML` | `read_mzxml` | |
 | `.sff` | `read_sequences_sff` | |
 | `.biom` | `read_biom`, in a build with [`MIINT_ENABLE_HDF5`](installation.md#optional-feature-flags) | |
+| `.hmm` | `read_hmm`, in a build with [`MIINT_ENABLE_HMMER`](installation.md#optional-feature-flags) | `.gz` |
 
 - The format's suffix is matched in any case, so `.mzML` and `.mzml` are both read by `read_mzml`. The compression suffix must be lower case: `.gz` or `.zst`.
 - Only the path is passed. For any other parameter, such as `sequence2` for paired-end reads or `include_filepath`, call the reader.
@@ -1315,6 +1317,105 @@ SELECT parse_gff_attributes('ID=gene1;Name=TEST1;biotype=protein_coding');
   - Other standard GFF3 producers
 
 **Implementation note:** Implemented as a DuckDB macro using `read_csv` with GFF-specific parsing.
+
+### HMMER profile HMMs
+
+Read the profile HMMs in a HMMER model file, as `hmmbuild` writes it and as Pfam and Dfam distribute it, through the `read_hmm` table function. Each row is one model: its header and its E-value statistics. The model's emission and transition probabilities are not output.
+
+**Basic example:**
+
+```sql
+SELECT hmm_name, hmm_accession, hmm_length FROM read_hmm('Pfam-A.hmm.gz');
+```
+
+**Parameters:**
+- `filename` (VARCHAR or VARCHAR[]): Path to model file(s), or a glob pattern (e.g., `'models/*.hmm'`)
+  - **Glob patterns**: When a single VARCHAR contains glob characters (`*`, `?`, `[`), files are expanded and sorted alphabetically
+  - **Arrays**: VARCHAR[] elements are treated as literal paths (no glob expansion)
+- `include_filepath` (BOOLEAN, optional, default false): Add a `filepath` column to the output
+
+**Output schema.** Each column is a line of the model's header, which HMMER's documentation describes under the same tag. A field the model does not have is NULL.
+
+| Column | Type | HMMER header line |
+|---|---|---|
+| `hmm_name` | VARCHAR | `NAME` |
+| `hmm_accession` | VARCHAR | `ACC` |
+| `hmm_description` | VARCHAR | `DESC` |
+| `hmm_length` | BIGINT | `LENG`, the number of match states |
+| `alphabet` | VARCHAR | `ALPH`, under Easel's names: `amino`, `DNA` or `RNA` |
+| `format` | VARCHAR | The format tag on the model's first line: `HMMER3/a` to `HMMER3/f`, or `HMMER2.0` |
+| `max_length` | BIGINT | `MAXL` |
+| `sequence_count` | BIGINT | `NSEQ` |
+| `effective_sequence_count` | FLOAT | `EFFN` |
+| `checksum` | UINTEGER | `CKSUM` |
+| `gathering_sequence`, `gathering_domain` | FLOAT | `GA`, the per-sequence and per-domain gathering thresholds, in bits |
+| `trusted_sequence`, `trusted_domain` | FLOAT | `TC`, the trusted cutoffs |
+| `noise_sequence`, `noise_domain` | FLOAT | `NC`, the noise cutoffs |
+| `consensus` | VARCHAR | The consensus residue of each match state, from the `CONS` column (see below) |
+| `msv_mu`, `msv_lambda` | FLOAT | `STATS LOCAL MSV`: the location and slope of the MSV score distribution |
+| `viterbi_mu`, `viterbi_lambda` | FLOAT | `STATS LOCAL VITERBI` |
+| `forward_tau`, `forward_lambda` | FLOAT | `STATS LOCAL FORWARD` |
+| `filepath` | VARCHAR | Only with `include_filepath := true` |
+
+HMMER holds the cutoffs, `EFFN` and the statistics as 32-bit floats; as `FLOAT` they compare and print as written in the file (`7.2`, where a `DOUBLE` of the same value prints `7.199999809265137`).
+
+**Behavior:**
+- Each model is read by HMMER 3.4 itself, one model at a time. So a file may mix format versions and alphabets, which HMMER's own programs refuse, and a model reads the same whichever file it is in.
+- A `DNA` or `RNA` model has one value on each of its `GA`, `TC` and `NC` lines; HMMER uses it for both the per-sequence and per-domain columns.
+- `consensus` is the file's `CONS` column when the model has one (`CONS yes`, in `HMMER3/e` and `HMMER3/f`). Otherwise HMMER computes it from the match emissions, as it does for every older model: each match state's most probable residue, upper case when its probability is at least 0.5 (`amino`) or 0.9 (`DNA`, `RNA`).
+- A `HMMER2.0` model is converted as HMMER 3 reads one, the way `hmmconvert` converts it:
+  - its E-value statistics are calibrated by HMMER as the model is read. The random seed is fixed, so a model always gets the same values;
+  - it has no `EFFN` or `MAXL`. Its `CKSUM` is HMMER2's own checksum, a different one, which HMMER 3 ignores, so `checksum` is NULL;
+  - a `Nucleic` alphabet is read as `DNA`.
+- For a HMMER3 model, `checksum` is NULL only when the model has no `CKSUM` line; `CKSUM 0` gives 0.
+- Header lines with no column are not output: `DATE`, `COM`, `RF`, `MM`, `CS`, `MAP`, and HMMER2's null-model and statistics lines.
+- Blank lines and lines whose first word starts with `#` are skipped, as HMMER skips them. A file of nothing else returns no rows.
+- HMMER checks `LENG`, `MAXL`, `NSEQ` and `EFFN`, but reads the cutoffs, the statistics and the model's probabilities without checking them: a value there that is not a number reads as 0 (`GA xx yy;` gives 0.0 and 0.0), in read_hmm as in HMMER's own programs.
+- gzip-compressed files (`.gz`) are decompressed transparently, including multi-member (bgzip) files. Remote paths (`s3://`, `https://`) are read through DuckDB's file system.
+- One thread reads each file; several files are read in parallel.
+- An empty file returns no rows.
+- stdin is not supported.
+- Available in builds with HMMER (`MIINT_ENABLE_HMMER`), which is every build except Windows.
+
+**Malformed models fail the scan.** The error names the file, the model's number in the file, the line HMMER stopped at, and HMMER's own message:
+
+```
+read_hmm: models.hmm: model 2 (line 47): Unrecognized alphabet type custom
+```
+
+Among the defects HMMER rejects:
+- a first line that is not a format tag, as in a file that is not a HMMER model file at all. read_hmm stops at that line rather than reading on;
+- a model cut off before its closing `//`;
+- no `NAME`, `LENG`, `ALPH` or `HMM` line; an alphabet HMMER doesn't know; a `GA`, `TC` or `NC` line before `ALPH`;
+- an `MM` line in a file older than `HMMER3/f`; a `HMMER2.0` model with no `NULE` line;
+- a model longer than 100000 match states, or a single model of more than 2 GiB of text;
+- a node line with too few fields.
+
+**Differences from HMMER's programs:**
+
+| HMMER | `read_hmm` |
+|---|---|
+| A model without a field marks it unset, and holds an unset cutoff or statistic as −99999 | NULL |
+| `hmmconvert` calibrates a `HMMER2.0` model's statistics | The same calibration, as the model is read |
+| A `HMMER3/e` or `HMMER3/f` model saying `CONS no` has no consensus | `consensus` is always filled in: computed when the model has no `CONS` column |
+| `DATE` and `COM` | Not output |
+| Every model of a file must share one alphabet | Each model is read on its own; formats and alphabets may mix |
+
+**Examples:**
+```sql
+-- Pfam families with a gathering threshold of at least 25 bits
+SELECT hmm_accession, hmm_name, gathering_sequence
+FROM read_hmm('Pfam-A.hmm.gz')
+WHERE gathering_sequence >= 25;
+
+-- Models by alphabet and format across a directory
+SELECT alphabet, format, count(*) AS models
+FROM read_hmm('models/*.hmm')
+GROUP BY ALL;
+
+-- Dfam models with their length and maximum hit length
+SELECT hmm_name, hmm_length, max_length FROM 'Dfam.hmm.gz' WHERE alphabet = 'DNA';
+```
 
 ### Coordinate conventions
 

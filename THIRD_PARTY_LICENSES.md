@@ -549,6 +549,291 @@ it is recorded here.
 
 ---
 
+## HMMER and Easel
+
+Profile hidden Markov models. Used by `read_hmm`. Embedded as a statically
+linked C library built from 39 source files of HMMER and its Easel library
+(`cmake/deps/hmmer.cmake`), taken from the-miint's forks: HMMER 3.4 on branch
+`v3.4-miint`, pinned as the `ext/hmmer` submodule, and Easel 0.49 on branch
+`v0.49-miint`, a submodule inside it (`ext/hmmer/easel`). The forks' changes
+are listed in `ext/hmmer/miint/README.md` and `ext/hmmer/easel/miint/README.md`.
+
+- Repositories: https://github.com/the-miint/hmmer and
+  https://github.com/the-miint/easel (upstream: https://github.com/EddyRivasLab/hmmer
+  and https://github.com/EddyRivasLab/easel)
+- License: HMMER, BSD-3-Clause, with a sublicence for Michael Farrar's SIMD
+  technology limited to HMMER's use, modification and redistribution (in the
+  text below); Easel, BSD-2-Clause
+- Test fixtures: the model files in `data/hmmer/` come from HMMER's and
+  Easel's source distributions, under the same licences; `data/hmmer/README.md`
+  gives each one's source.
+
+### HMMER license (`ext/hmmer/LICENSE`)
+
+```
+HMMER - Biological sequence analysis with profile hidden Markov models
+Copyright (C) 1992-2023 Sean R. Eddy
+Copyright (C) 2015-2023 President and Fellows of Harvard College
+Copyright (C) 2000-2023 Howard Hughes Medical Institute
+Copyright (C) 1995-2006 Washington University School of Medicine
+Copyright (C) 1992-1995 MRC Laboratory of Molecular Biology
+-----------------------------------------------------------------------
+
+The code includes contributions and input from current and past
+members of the HMMER development team, as well as other colleagues and
+sources, including:
+
+   Bill Arndt
+   Jeremy Buhler
+   Tyler Camp
+   Nick Carter
+   Sergi Castellano
+   Goran Ceric
+   Michael Farrar
+   Rob Finn
+   Ian Holmes
+   Bjarne Knudsen
+   Diana Kolbe
+   Martin Larralde
+   Erik Lindahl
+   Graeme Mitchison
+   Eric Nawrocki
+   Lee Newberg
+   Sam Petti
+   Elena Rivas
+   Walt Shands
+   Travis Wheeler
+
+HMMER also includes copyrighted and licensed code that has been
+incorporated from other sources, including:
+
+   Yuta Mori (libdivsufsort-lite)
+   Apple Computer
+   Free Software Foundation, Inc.
+   IBM TJ Watson Research Center
+   X Consortium
+
+HMMER uses the Easel software library, which has its own license and
+copyright information. See easel/LICENSE.
+
+HMMER includes patent-pending SIMD technology under a nonexclusive
+license from the estate of Michael Farrar. You are sublicensed to use
+this technology specifically for the use, modification, and
+redistribution of HMMER.
+
+HMMER development is supported in part by the National Human Genome
+Research Institute of the US National Institutes of Health under grant
+number R01HG009116. The content is solely the responsibility of the
+authors and does not necessarily represent the official views of the
+National Institutes of Health.
+
+HMMER source code is distributed as open source under the terms of the
+BSD three-clause license:
+
+   Redistribution and use in source and binary forms, with or without
+   modification, are permitted provided that the following conditions
+   are met:
+
+   1. Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+
+   2. Redistributions in binary form must reproduce the above
+      copyright notice, this list of conditions and the following
+      disclaimer in the documentation and/or other materials provided
+      with the distribution.
+
+   3. Neither the name of any copyright holder nor the names of
+      contributors may be used to endorse or promote products derived
+      from this software without specific prior written permission.
+
+   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+   FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+   COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
+   INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+   (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+   SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+   HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+   STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+   ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
+   OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+### Easel license (`ext/hmmer/easel/LICENSE`)
+
+```
+Easel - a library of C functions for biological sequence analysis
+Copyright (C) 1990-2023 Sean R. Eddy
+Copyright (C) 2015-2023 President and Fellows of Harvard College
+Copyright (C) 2000-2023 Howard Hughes Medical Institute
+Copyright (C) 1995-2006 Washington University School of Medicine
+Copyright (C) 1992-1995 MRC Laboratory of Molecular Biology, UK
+-------------------------------------------------------------------
+
+Easel's code includes contributions from members of the Eddy/Rivas
+laboratory at Harvard University, the HMMER and Infernal development
+teams, and other colleagues, including:
+
+   Tyler Camp
+   Nick Carter
+   Michael Farrar
+   Graeme Mitchison
+   Eric Nawrocki
+   Sam Petti
+   Elena Rivas
+   Travis Wheeler
+
+Easel also includes code we have incorporated from other sources and
+authors -- including public domain code, and licensed copyrighted
+code. Sources and licenses are noted in the appropriate places in
+individual files. Copyright holders and contributors include:
+
+   Barry W. Brown, James Lovato        esl_random:esl_rnd_Gaussian()
+   Bob Jenkins                         esl_random::esl_rnd_mix3()
+   Steven G. Johnson, and others       autoconf macros in m4/
+   Martin Larralde                     ARM Neon support
+   Kevin Lawler                        esl_rand64::esl_rand64_Deal()
+   Stephen Moshier                     SIMD vectorized logf,expf
+   Takuji Nishimura, Makoto Matsumoto  esl_random, esl_rand64
+   Julien Pommier                      SIMD vectorized logf,expf
+   David Robert Nadeau                 esl_stopwatch
+   Henry Spencer                       esl_regexp
+   David Wheeler                       easel::esl_tmpfile()
+   Free Software Foundation, Inc.      configure
+   FreeBSD 		               easel::esl_strsep()
+   Sun Microsystems, Inc.              esl_stats::esl_erfc()
+
+Easel development is supported in part by the National Human Genome
+Research Institute of the US National Institutes of Health under grant
+number R01HG009116. The content is solely the responsibility of the
+authors and does not necessarily represent the official views of the
+National Institutes of Health.
+
+The Easel library is open source software. It is freely distributed
+under the terms of the BSD (Berkeley Software Distribution) open
+source license:
+
+   Redistribution and use in source and binary forms, with or without
+   modification, are permitted provided that the following conditions
+   are met:
+
+   1. Redistributions of source code must retain the above copyright
+      notice, this list of conditions and the following disclaimer.
+
+   2. Redistributions in binary form must reproduce the above
+      copyright notice, this list of conditions and the following
+      disclaimer in the documentation and/or other materials provided
+      with the distribution.
+
+   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+   FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+   COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
+   INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+   (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+   SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+   HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+   STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+   ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
+   OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+### Notices in the Easel files linked into miint
+
+Easel's license says that code it took from other authors carries its source
+and license in the file it is in. These are the notices in the files miint
+links (none of HMMER's linked files carries one):
+
+| File | Code | Notice |
+|---|---|---|
+| `esl_sse.c` (x86-64 and wasm builds), `esl_neon.c` (arm64 builds) | `esl_sse_logf()` / `esl_sse_expf()`, and their NEON versions | Derived from Julien Pommier's zlib-licensed SIMD routines, which derive from Stephen Moshier's Cephes library ("may be used freely"). Copyright (C) 2007 Julien Pommier; Copyright (C) 1992 Stephen Moshier. The file's notice is below |
+| `esl_rand64.c` | The 64-bit Mersenne Twister; `esl_rand64_Deal()` | "derived from MT19937-64 (2004/9/29) by Takuji Nishimura and Makoto Matsumoto … Copyright (C) 2004, Makoto Matsumoto and Takuji Nishimura. All rights reserved." `esl_rand64_Deal()`: "derived from code by Kevin Lawler (Brave Software; brave.com). Copyright (2016) Kevin Lawler. Released under ISC License." |
+| `esl_random.c` | The Mersenne Twister MT19937; `esl_rnd_Gaussian()`; `esl_mix3()` | MT19937 after Matsumoto and Nishimura; `esl_rnd_Gaussian()` "derived from the public domain RANLIB.c `gennor()` function, written by Barry W. Brown and James Lovato"; `esl_mix3()` after Bob Jenkins. The file carries no license text for these; Easel's license names their authors |
+| `esl_stats.c` | `esl_erfc()` | "Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved. Developed at SunPro, a Sun Microsystems, Inc. business. Permission to use, copy, modify, and distribute this software is freely granted, provided that this notice is preserved." |
+| `easel.c` | `esl_tmpfile()` | "Substantially copied from David Wheeler, 'Secure Programming for Linux and Unix HOWTO' … Copyright (C) 1999-2001 David A. Wheeler. Licensed under the MIT license" |
+| `easel.c` | `esl_strsep()` | Taken from FreeBSD, under the BSD license below |
+
+`esl_sse.c` and `esl_neon.c`:
+
+```
+In addition to our own copyrights, esl_sse_logf() and esl_sse_expf() are also:
+ Copyright (C) 2007 Julien Pommier
+ Copyright (C) 1992 Stephen Moshier
+
+These functions derived from zlib-licensed routines by
+Julien Pommier, http://gruntthepeon.free.fr/ssemath/. The
+zlib license:
+
+ *-------------------------------------------------------------------------
+Copyright (C) 2007  Julien Pommier
+
+ This software is provided 'as-is', without any express or implied
+ warranty.  In no event will the authors be held liable for any damages
+ arising from the use of this software.
+
+ Permission is granted to anyone to use this software for any purpose,
+ including commercial applications, and to alter it and redistribute it
+ freely, subject to the following restrictions:
+
+ 1. The origin of this software must not be misrepresented; you must not
+    claim that you wrote the original software. If you use this software
+    in a product, an acknowledgment in the product documentation would be
+    appreciated but is not required.
+ 2. Altered source versions must be plainly marked as such, and must not be
+    misrepresented as being the original software.
+ 3. This notice may not be removed or altered from any source distribution.
+
+ *-------------------------------------------------------------------------
+
+In turn, Pommier had derived the logf() and expf() functions from
+serial versions in the Cephes math library. According to its
+readme, Cephes is "copyrighted by the author" and "may be used
+freely but it comes with no support or guarantee."  Cephes is
+available in NETLIB [http://www.netlib.org/cephes/]. NETLIB is
+widely considered to be a free scientific code repository, though
+the copyright and license status of many parts, including Cephes,
+is ill-defined. We have attached Moshier's copyright,
+to credit his original contribution. Thanks to both Pommier and
+Moshier for their clear code.
+```
+
+`easel.c`, `esl_strsep()`:
+
+```
+    Taken from FreeBSD, under BSD open source license:
+
+    Copyright (c) 1990, 1993
+    The Regents of the University of California.  All rights reserved.
+
+    Redistribution and use in source and binary forms, with or without
+    modification, are permitted provided that the following conditions
+    are met:
+    1. Redistributions of source code must retain the above copyright
+       notice, this list of conditions and the following disclaimer.
+    2. Redistributions in binary form must reproduce the above copyright
+       notice, this list of conditions and the following disclaimer in the
+       documentation and/or other materials provided with the distribution.
+    4. Neither the name of the University nor the names of its contributors
+       may be used to endorse or promote products derived from this software
+       without specific prior written permission.
+
+    THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+    ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+    IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+    ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+    FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+    DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+    OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+    HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+    LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+    OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+    SUCH DAMAGE.
+```
+
+---
+
 ## abPOA
 
 Adaptive banded partial order alignment for multiple sequence alignment
