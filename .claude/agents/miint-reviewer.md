@@ -143,6 +143,16 @@ Only rules whose trigger appears in the diff can fire.
 | A MAP or key-value column holding a format's optional fields; a parser of typed fields | R2 |
 | A `switch` or comparison on a format's code letters; a hand-written character-class, case or number helper | R6 |
 | Two structurally similar code paths; a repeated literal or error message; a helper in a feature-named file | R6, R8 |
+| A reader of a binary format: header offsets, record sizes, bit masks or shifts, version or type checks | R6 |
+| A table function's `Bind` declaring its output columns or expanding a path argument | R6 |
+| A vector or map filled in a loop, or sized from a count read from input | R3 |
+| Arithmetic on an offset, count, row id or size read from a file; a buffer sized from a length a frame or header claims | R3 |
+| Recursion or nesting driven by input; a path or name built up per level | R3 |
+| An `Execute` that claims units of many chunks or remote reads | R2 |
+| A test described as running in parallel; a window over the scan under test | R4 |
+| A doc or comment claiming errors are detected, or claiming coverage of real data | R7 |
+| A download pinned by a checksum in `run_tests.sh`; a checksum list or manifest under `data/**` | R4, R1 |
+| Code ported from or written against another project's source; `THIRD_PARTY_LICENSES.md` | R5 |
 | Any new or changed doc, docstring or comment; a test header comment; a `data/**/README*` | R7 |
 | A user-facing string: an exception message, a `docs/` page, a parameter description | R7, R9 |
 | A new file, moved code, feature- or platform-specific naming, a one-shot script, a fixture generator under `test/scripts/**`, a benchmark tree | R8 |
@@ -202,6 +212,7 @@ Safety must not rest on convention or a comment; and a guard must be real, so do
 - **Arrow export is sized by bytes.** An Arrow batch is sized by bytes against a ceiling just under a power of two, and `memory_limit` does not bound Arrow export buffers (`docs/internals/duckdb-engine-notes.md`, "Arrow export"). Flag a row-count batch size on an Arrow-exporting path, a large row hint passed as `ArrowAppender`'s `initial_capacity` to an appender a byte ceiling closes early, and docs offering `memory_limit` as the bound.
 - **Progress.** An operator whose Sink or Finalize blocks for seconds without reporting progress overrides `GetSinkProgress` to return `ProgressData::SetInvalid()`; a table function without a progress callback already reports none, and an early-stopping fit's iteration count is not a progress fraction (`docs/internals/duckdb-engine-notes.md`, "Progress reporting").
 - **A caught DuckDB exception is unwrapped.** A catch a DuckDB exception can reach (`std::exception`, `std::runtime_error`) that builds a message or a stored error string from it uses `ErrorData(e).RawMessage()`: `what()` is DuckDB's serialized form, and the user sees JSON inside the new message (`docs/internals/duckdb-engine-notes.md`, "Exceptions"). A worker thread's error is carried to the join as a `std::exception_ptr`. A catch around DuckDB-free code may keep `what()`.
+- **Interrupts are checked on every `Execute` call** when one claimed unit spans many chunks or remote reads; a check only between units leaves a cancel waiting on the whole unit.
 - **Threads follow DuckDB.** A function does not add its own `threads` parameter where DuckDB's setting applies [soft: ask what it adds]. An embedded tool that runs its own worker threads takes its count from DuckDB's setting [soft: ask how the count relates to DuckDB's own workers].
 
 ### R3 — C++ safety and concurrency [strong]
@@ -217,6 +228,10 @@ Safety must not rest on convention or a comment; and a guard must be real, so do
 - **htslib return codes.** `sam_read1` returning `-3` means a rejected format or, once the format is readable, a corrupt record; leniency is gated on `fp->format.format`, and treating every negative return as end of stream resumes the scan after a bad record (`docs/internals/embedded-tools.md`, HTSlib). A fixture puts the bad record mid-file and asserts the count. `read_alignments` returns `''` for an on-disk `*` CIGAR, so logic about a missing CIGAR keys on the unmapped flag (0x4).
 - **Arrow streams handed to C or Rust.** A stream whose ownership transfers "once the callee begins consuming" stays owned by miint (`docs/internals/arrow-zero-copy.md`, "Handing a stream to a C library"). An Arrow array built by hand for a Rust consumer reports its true `null_count` [soft]; arrow-rs drops the validity bitmap when the count is 0 (`docs/internals/embedded-tools.md`, rype subsystem).
 - **Numerics** [soft]: finiteness is tested with `std::isfinite`, not `!std::isnan`; a range or overflow guard checks the computed value, not the inputs.
+- **Size what is known** [soft]: a vector filled in a loop whose count is known before it starts is reserved first, and a container sized from a count read from input is bounded by the bytes behind it before it is reserved.
+- **A buffer sized from a length the input claims is bounded before it is allocated**, on every decode path: by what the input's bytes can produce and by a size cap. A cap one codec applies and its sibling does not leaves the sibling allocating gigabytes from a few bytes, once per decoding thread. Where nothing in the bytes bounds the claim, decode only what the structure addresses.
+- **Arithmetic on values read from a file is checked, not only the reads.** A start plus a count, an index times a size, or the difference of two ids from the file can overflow; a signed overflow is undefined, an unsigned one wraps past the bound it was meant to pass. Check the operands against the bound first (unsigned, or `__builtin_*_overflow`) and raise a format error. Bounds-checked reads say nothing about the arithmetic done on what they read.
+- **Nesting read from input is bounded twice**: by depth, and by the memory each level derives. An entry that stores its full path makes memory grow with the square of the depth, which a cap on the input's size does not catch.
 - **Dead state** [soft]: a member written once and never read, or work redone per iteration that the constructor already validated, adds a throw site and a misleading reading.
 
 ### R4 — Tests verify intent [strong]
@@ -233,6 +248,11 @@ Safety must not rest on convention or a comment; and a guard must be real, so do
 - **Warnings accumulate.** `miint_warnings()` accumulates within a session, so a test asserts `count(*) >= 1` for a warning it expects.
 - **Catch2:** a size check followed by indexing uses `REQUIRE`; `CHECK` continues after failure and the index can crash the binary.
 - **Ports.** An oracle proves outputs on the inputs it contains; paths of a port no fixture reaches are checked by reading the reference against the port, and the PR says which paths those are [soft].
+- **Downloaded data that fails its checksum fails the run.** A test file `run_tests.sh` downloads skips only when the download fails; a downloaded file that does not match its pinned checksum is an error, since the committed expected values no longer apply to it. The pin lives in one committed manifest that the script reads, not in a copy in the script.
+- **A test of parallel output runs in parallel.** A streaming window over the scan (`row_number() OVER ()`) makes its pipeline single-threaded; compare the full rows of a parallel `CREATE TABLE AS`, ordered by `rowid`, with the serial result.
+- **Each documented input path has a test.** A reader documented to take `https://` or `s3://` paths reads one from the mock range server.
+- **A check in `run_tests.sh` behaves the same on macOS and Linux.** `sha256sum -c` reads a checklist from stdin only when given `-`; without it, macOS fails every check and the guarded tests always skip.
+- **One manifest per fact.** A checksum list or provenance file that repeats what another committed manifest or an assertion already pins is dropped, not kept in step by hand.
 - **Fixtures are fixed.** A fixture's inputs are committed with it, so a test never depends on regenerating them. A large text fixture (sequences, an assembly graph, a log) is committed compressed, and a test that needs the file as a tool writes it decompresses a copy into the test directory (sqllogictest's `unzip`). A generated fixture of many cases is a few tables keyed by a case column, not a file per case and table, and is committed compressed even when each file is small.
 - **An external tool's fixture comes from the build the repository vendors**, when it vendors one, so the version matches what miint embeds. When miint's own function for the tool cannot produce the fixture, the README says why.
 - **Remote services.** A mock accepts URL shapes, result types and authentication modes the real server rejects, so the test plan says whether a live run happened (PR-level check 7).
@@ -246,6 +266,7 @@ Safety must not rest on convention or a comment; and a guard must be real, so do
 - **An include sits under no more conditions than its uses.** A use guarded by fewer preprocessor conditions than its include builds only where the condition holds, and with libcurl off on macOS and WASM a Linux build cannot see the error. Probe: the file's command from `compile_commands.json`, minus the condition's `-D`, with `-fsyntax-only`.
 - **`MIINT_HAS_AVX2` / `MIINT_HAS_AVX512` say the build contains a variant, not that the CPU can run it** (`docs/internals/embedded-tools.md`, "Per-instruction-set compilation").
 - **Docs mirror CMake.** A change to `ExternalProject_Add`, `find_package` or a `MIINT_ENABLE_*` option changes `docs/internals/embedded-tools.md` in the same PR.
+- **Code taken from another project is attributed where it is defined and in `THIRD_PARTY_LICENSES.md`**: a line-by-line port, and also code that follows the source's structure closely enough to count as copied with modification (the same steps in the same order, the same quirks, a verbatim lookup table). A PR whose reader was written against a reference implementation says which parts are which, after comparing function by function.
 - **GPL code stays out of process** (`docs/internals/architecture.md`, "GPL/BSD License Boundary"); a GPL tool's numeric output may be committed as a fixture, its code may not.
 - **Interpreting a file by its name** [soft]: reading sniffs content; a writer's format comes from an explicit parameter, with the suffix as the default only.
 
@@ -255,7 +276,9 @@ When two similar code paths solve the same problem differently, factor out the s
 
 - **Existing primitives first.** PR-level check 1 owns the procedure. A hand-rolled reverse complement, interval merge, COO builder, id codec or format writer beside an existing one is the finding, in tests as in `src/`.
 - **A copy-pasted sibling is parameterized**, not maintained twice. Same for near-duplicate blocks in one file and an error message or constant repeated across sites.
-- **A literal with format meaning is named when it recurs.** A record's marker byte, a record or tag type letter, or a field separator compared at several sites becomes a named constant or enum, so each comparison says what it tests; error messages and comments keep the literal.
+- **A binary format's layout is named, not spelled out.** Header and record offsets, field sizes, bit masks and shifts, version numbers, tags and type codes in a reader are named constants or enums, with the layout described where they are defined, even when used once; byte-to-bit and width conversions use `sizeof` and one shared bits-per-byte constant. One enum or constant style throughout the reader, and a constant two files need is shared, not defined twice.
+- **Reader boilerplate comes from `table_function_common.hpp`.** A reader's shared columns, path-argument expansion and file-exists check use the helpers there, not a copy of them.
+- **Elsewhere, a literal with format meaning is named when it recurs.** A record's marker byte, a record or tag type letter, or a field separator compared at several sites becomes a named constant or enum, so each comparison says what it tests; error messages and comments keep the literal.
 - **Character classes and number parsing come from the standard library or DuckDB** where one matches the grammar. A hand-written one says why the library's does not fit: a locale dependence, or a header the code cannot include.
 - **Never compute through spec-invalid input.** A result is not computed by building input the format's specification forbids and passing it to a parser that accepts it, such as concatenating CIGAR strings so clipping operations land in the interior. Correctness would rest on the parser's laxity. Combine the components the parser already computes; if nothing exposes them, add an accessor.
 - **Underusing a tool is reinventing it** [soft]: check whether DuckDB or the embedded tool already does the expensive part (parallelism, list inputs, a documented pivot) before building around it.
@@ -269,6 +292,7 @@ Flag:
 - **A comment, docstring or doc that enumerates the current members of a set that will grow** ("the three metrics"; a header comment listing the functions it registers; a cross-reference that lists the functions another page documents; not a pointer to one function) where a rule or a link would stay true: state the rule, or link to the page that owns the list.
 - **A comment that contradicts the code beside it**, or the PR's own measurements; and the module comment a PR's change falsifies. Read the comments of every changed file, not only the hunks.
 - **A doc asserting a capability, URL, option or error timing that does not exist**, or denying one that does. Verify against the code.
+- **An integrity or coverage claim that outruns what was checked or measured.** "A damaged file raises an error" holds only where every byte is covered by a checksum or a structural check; "nearly all runs" gives the measured share or is softened.
 - **User-facing docs carrying internal notes.** Design rationale, benchmarks and implementation history go in `docs/internals/`; task pages say what a function does, its parameters, its output and its caveats, with the caveats beside the function they qualify.
 - **Undefined terms and symbols** [soft]: a symbol used before it is defined, a name a reader cannot expand, a unit conversion stated without its reason.
 - **Comments naming a test file, a distant module's internals, or an issue number of this repo** where the invariant could be stated in words. A pointer to the one doc that holds a rationale is fine, and so is a qualified external issue.
