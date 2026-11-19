@@ -65,6 +65,7 @@
 #include <ena_upload_reads.hpp>
 #include <miint_log.hpp>
 #include <miint_macros.hpp>
+#include <openmp_runtime_keepalive.hpp>
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/main/database.hpp"
 #include <sequence_functions.hpp>
@@ -313,6 +314,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Before anything can reach rype or sc: on DuckDB-Wasm this gives rayon a
 	// pool it can actually run (the calling thread); elsewhere it does nothing.
 	miint_rust_glue_init();
+
+	// Before anything can enter OpenMP: a static libomp must outlive every thread
+	// DuckDB runs miint on.
+	miint::KeepOpenMPRuntimeAlive();
 
 	miint::RegisterMiintLogType(loader.GetDatabaseInstance());
 	miint::RegisterENASecretType(loader);

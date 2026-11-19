@@ -152,6 +152,14 @@ foreach(
   endif()
 endforeach()
 
+# Only now is it known whether any feature links miint_openmp: a static libomp
+# that nothing links needs no keepalive, and its omp.h is not on the path.
+if(MIINT_OPENMP_STATIC_LIBOMP AND miint_openmp IN_LIST MIINT_LINK_LIBRARIES)
+  list(APPEND MIINT_DEFINITIONS MIINT_OPENMP_STATIC_LIBOMP)
+else()
+  set(MIINT_OPENMP_STATIC_LIBOMP OFF)
+endif()
+
 # Libraries that the archives above depend on go last.
 list(APPEND MIINT_LINK_LIBRARIES ZLIB::ZLIB expat::expat Threads::Threads)
 list(APPEND MIINT_WASM_LIBS "$<TARGET_FILE:ZLIB::ZLIB>"
@@ -319,6 +327,7 @@ list(
   src/ncbi_parser.cpp
   src/NearestTip.cpp
   src/NewickTree.cpp
+  src/openmp_runtime_keepalive.cpp
   src/paf_parser.cpp
   src/parse_lineage.cpp
   src/per_run_reader.cpp
@@ -710,5 +719,13 @@ if(BUILD_UNITTESTS)
   if(MIINT_ENABLE_KREPP)
     target_sources(tests_duckdb
                    PRIVATE test/cpp/test_PlaceKreppParallelSink.cpp)
+  endif()
+  # Only where libomp is linked statically, the one runtime that can fail it. It
+  # compiles its own `omp critical`, so it needs the flag Apple Clang accepts.
+  if(MIINT_OPENMP_STATIC_LIBOMP)
+    target_sources(tests_duckdb PRIVATE test/cpp/test_OpenMPRuntimeLifetime.cpp)
+    set_source_files_properties(
+      test/cpp/test_OpenMPRuntimeLifetime.cpp
+      PROPERTIES COMPILE_OPTIONS "-Xpreprocessor;-fopenmp")
   endif()
 endif()
