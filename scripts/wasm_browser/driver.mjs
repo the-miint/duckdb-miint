@@ -132,11 +132,15 @@ function runNative(duckdb) {
   // (.output stderr), so errors stay in order with the markers. After each step
   // the shell runs SELECT 'alive'. No -bail: a step expected to fail must not
   // end the run.
+  //
+  // -no-agent: DuckDB 2.0's shell otherwise prints errors as JSON when an AI
+  // coding tool's environment variable (AI_AGENT, CLAUDECODE, ...) is set, and
+  // otherwise, with stdin not a terminal, ends with a hint line outside any step.
   const script = ['.output stderr', '.mode json',
     ...steps.flatMap(s => [`.print @@step ${s.name}`, s.sql.trim().replace(/;?$/, ';'),
                            '.print @@alive', "SELECT 'alive' AS alive;"]),
     '.print @@end', ''].join('\n');
-  const r = spawnSync(duckdb, ['-no-init', ':memory:'], { input: script, encoding: 'utf8',
+  const r = spawnSync(duckdb, ['-no-agent', '-no-init', ':memory:'], { input: script, encoding: 'utf8',
                                               timeout: NATIVE_TIMEOUT_MS, maxBuffer: NATIVE_MAX_BUFFER });
   if (r.error && r.error.code !== 'ETIMEDOUT' && r.error.code !== 'ENOBUFS') {
     aborted = `could not run ${duckdb}: ${r.error.message}`;
@@ -146,7 +150,11 @@ function runNative(duckdb) {
   const outside = [];
   let cur = null;
   let ended = false;
-  for (const line of (r.stderr ?? '').split('\n')) {
+  // In .mode json, DuckDB 2.0's shell prints a result's opening '[' before it
+  // runs the statement, so an error follows it on the same line ("[Invalid
+  // Input Error: ..."). That '[' is dropped, leaving the shell's error line.
+  const unbracket = l => (l.startsWith('[') && DUCKDB_ERROR_LINE.test(l.slice(1)) ? l.slice(1) : l);
+  for (const line of (r.stderr ?? '').split('\n').map(unbracket)) {
     const m = line.match(/^@@step (.*)$/);
     if (m) {
       cur = { out: [], alive: [], aliveSeen: false };
