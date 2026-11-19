@@ -36,6 +36,9 @@ constexpr FormatReader FORMAT_READERS[] = {
     {"read_mzml", false, false, {".mzml"}},
     {"read_mzxml", false, false, {".mzxml"}},
     {"read_sequences_sff", false, false, {".sff"}},
+#ifdef MIINT_HAS_HMMER
+    {"read_hmm", true, false, {".hmm"}},
+#endif
 #ifdef MIINT_HAS_HDF5
     {"read_biom", false, false, {".biom"}},
 #endif
