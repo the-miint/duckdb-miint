@@ -152,6 +152,14 @@ foreach(
   endif()
 endforeach()
 
+# Only now is it known whether any feature links miint_openmp: a static libomp
+# that nothing links needs no keepalive, and its omp.h is not on the path.
+if(MIINT_OPENMP_STATIC_LIBOMP AND miint_openmp IN_LIST MIINT_LINK_LIBRARIES)
+  list(APPEND MIINT_DEFINITIONS MIINT_OPENMP_STATIC_LIBOMP)
+else()
+  set(MIINT_OPENMP_STATIC_LIBOMP OFF)
+endif()
+
 # Libraries that the archives above depend on go last.
 list(APPEND MIINT_LINK_LIBRARIES ZLIB::ZLIB expat::expat Threads::Threads)
 list(APPEND MIINT_WASM_LIBS "$<TARGET_FILE:ZLIB::ZLIB>"
@@ -319,6 +327,7 @@ list(
   src/ncbi_parser.cpp
   src/NearestTip.cpp
   src/NewickTree.cpp
+  src/openmp_runtime_keepalive.cpp
   src/paf_parser.cpp
   src/parse_lineage.cpp
   src/per_run_reader.cpp
@@ -359,6 +368,7 @@ list(
   src/read_paf.cpp
   src/read_sequences_sam.cpp
   src/read_sequences_sff.cpp
+  src/read_sra.cpp
   src/reference_table_reader.cpp
   src/remote_file_helper.cpp
   src/rype_classify.cpp
@@ -388,6 +398,12 @@ list(
   src/shear_tree.cpp
   src/simulate_resemblance.cpp
   src/simulate_resemblance_function.cpp
+  src/sra_archive.cpp
+  src/sra_codecs.cpp
+  src/sra_column.cpp
+  src/sra_name.cpp
+  src/sra_run.cpp
+  src/sra_source.cpp
   src/table_function_common.cpp
   src/taxdump_archive.cpp
   src/taxdump_parser.cpp
@@ -494,6 +510,12 @@ list(
   src/SequenceReader.cpp
   src/SFFReader.cpp
   src/simulate_resemblance.cpp
+  src/sra_archive.cpp
+  src/sra_codecs.cpp
+  src/sra_column.cpp
+  src/sra_name.cpp
+  src/sra_run.cpp
+  src/sra_source.cpp
   src/taxdump_archive.cpp
   src/taxdump_parser.cpp
   src/taxonomy_lineage.cpp
@@ -580,6 +602,12 @@ list(
   test/cpp/test_sigpipe_bootstrap.cpp
   test/cpp/test_SimulateCluster.cpp
   test/cpp/test_SimulateGradient.cpp
+  test/cpp/test_SraArchive.cpp
+  test/cpp/test_SraCodecs.cpp
+  test/cpp/test_SraColumn.cpp
+  test/cpp/test_SraName.cpp
+  test/cpp/test_SraRun.cpp
+  test/cpp/test_SraSpots.cpp
   test/cpp/test_taxdump_archive.cpp
   test/cpp/test_taxdump_parser.cpp
   test/cpp/test_taxonomy_lineage.cpp
@@ -710,5 +738,13 @@ if(BUILD_UNITTESTS)
   if(MIINT_ENABLE_KREPP)
     target_sources(tests_duckdb
                    PRIVATE test/cpp/test_PlaceKreppParallelSink.cpp)
+  endif()
+  # Only where libomp is linked statically, the one runtime that can fail it. It
+  # compiles its own `omp critical`, so it needs the flag Apple Clang accepts.
+  if(MIINT_OPENMP_STATIC_LIBOMP)
+    target_sources(tests_duckdb PRIVATE test/cpp/test_OpenMPRuntimeLifetime.cpp)
+    set_source_files_properties(
+      test/cpp/test_OpenMPRuntimeLifetime.cpp
+      PROPERTIES COMPILE_OPTIONS "-Xpreprocessor;-fopenmp")
   endif()
 endif()

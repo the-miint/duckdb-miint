@@ -27,6 +27,8 @@ All scalars accept `seq VARCHAR` + `qual LIST(UTINYINT)`. Quality is the
 decoded Phred integer list emitted by `read_fastx` (not ASCII), so values
 are 0..93 directly.
 
+<a id="scalar-overloads"></a>
+
 ### Reading the `[, ...]` notation: overloads are all-or-nothing
 
 **The bracketed arguments above are not individually optional.** Each function
@@ -58,7 +60,7 @@ SELECT filter_read('ACGT', [30,30,30,30]::UTINYINT[], 3);
 --   filter_read(VARCHAR, UTINYINT[], INTEGER, INTEGER, INTEGER, INTEGER, INTEGER, INTEGER)
 ```
 
-Beyond these per-read scalars, [`infer_trim`](#reconciling-external-qc-results--infer_trim)
+Beyond these per-read scalars, [`infer_trim`](#infer-trim-reference)
 is a **table macro** that reconciles reads trimmed by an *external* QC tool back
 to 5'/3' trim coordinates — see its section below.
 
@@ -83,7 +85,7 @@ expecting non-zero — it's structurally zero.
 `trim_adapters_pe` is the exception to this layout: it operates on a read
 *pair* and returns a wider paired struct (`sequence1`/`quality1`/`sequence2`/
 `quality2` plus `overlap_len`, `adapter_trimmed`, `trimmed1_3p`, `trimmed2_3p`).
-See [its reference](#trim_adapters_peseq1-qual1-seq2-qual2--adapters-overlap_require-overlap_diff_limit-overlap_diff_percent_limit-match_revcomp-min_match-allow_pre_start) below.
+See [its reference](#trim-adapters-pe-reference) below.
 
 `filter_read` returns:
 
@@ -122,7 +124,7 @@ WITH pipeline AS (
         trim_polyg((t1).sequence, (t1).quality)                     AS t2,  -- auto-on for two-color instruments only
         trim_adapters((t2).sequence, (t2).quality, 'AGATCGGAAGAGC')  AS t3,
         filter_read((t3).sequence, (t3).quality)                    AS f
-    FROM read_fastx('reads.fastq.gz')
+    FROM 'reads.fastq.gz'
 )
 SELECT
     sequence_index, read_id,
@@ -175,6 +177,13 @@ vectorized speed.
 Three flavors of sliding-window quality trimming, ported from fastp's
 `cut_tail`, `cut_front`, and `cut_right` respectively.
 
+```sql
+SELECT read_id, (trim_quality_3p(sequence1, qual1)).sequence AS trimmed_sequence
+FROM 'reads.fastq.gz';
+```
+
+Pass either just the sequence and quality scores or all four arguments. See [accepted arities](#scalar-overloads) for the overload rules.
+
 - **`trim_quality_3p` (cut_tail):** slide a window from the 3' end toward
   the 5' end. While the window mean is below `mean_q`, recede; stop at the
   first window that passes. Result keeps `[0, end_of_last_passing_window)`.
@@ -187,8 +196,16 @@ Three flavors of sliding-window quality trimming, ported from fastp's
   first window whose mean is below `mean_q`, drop that window AND everything
   to its right. Result keeps `[0, first_bad_window_start)`.
 
-Defaults: `window=4`, `mean_q=20`. `window` is clamped to `1..1000` (fastp's
-documented range). Read shorter than the window is a no-op.
+**Parameters**
+
+| Parameter | Default | Purpose |
+| --- | --- | --- |
+| `seq` | Required | Sequence to trim. |
+| `qual` | Required | Decoded integer Phred scores. |
+| `window` | `4` | Window length, clamped to fastp's range of `1..1000`. |
+| `mean_q` | `20` | Minimum mean Phred score for a passing window. |
+
+Reads shorter than the window are returned as-is. The functions return the [trim struct](#return-structs).
 
 ### `trim_polyg(seq, qual [, min_len, max_mm, max_window_mean_q])`
 
@@ -235,6 +252,7 @@ stops early once a candidate matches at position 0 (the leftmost possible
 trim, so no remaining candidate can beat it).
 
 Defaults:
+
 - `match_revcomp=false`. fastp expects `--adapter_sequence_r2` to be the
   pre-RC'd adapter; we offer the convenience flag instead.
 - `min_match=0` → auto-scale (4 for 1 candidate, 5 for 2–3, 6 for ≥4).
@@ -248,6 +266,8 @@ Defaults:
   because non-Illumina protocols don't need it and it can over-trim.
   When enabled and a pre-start match is found, `trim_start=0` is returned —
   the entire read should be dropped.
+
+<a id="trim-adapters-pe-reference"></a>
 
 ### `trim_adapters_pe(seq1, qual1, seq2, qual2 [, adapters, overlap_require, overlap_diff_limit, overlap_diff_percent_limit, match_revcomp, min_match, allow_pre_start])`
 
@@ -348,6 +368,8 @@ maintain bit-for-bit parity in the common case:
   accepted overlap longer than 50 the reported `diff` (mismatch count) is the
   *full* count over the whole overlap, which can exceed `overlap_diff_limit`.
   This is a fastp quirk, ported faithfully to keep byte-for-byte parity.
+
+<a id="infer-trim-reference"></a>
 
 ## Reconciling external QC results — `infer_trim`
 

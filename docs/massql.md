@@ -182,6 +182,7 @@ SELECT formula('H2O');       -- 18.010565
 ```
 
 Additional mass functions:
+
 - `aminoaciddelta(sequence)` — residue mass for amino acid sequences (e.g., `aminoaciddelta(GK)`)
 - `peptide(sequence, charge=N, ion=X)` — fragment ion mass (e.g., `peptide(PEPTIDEK,charge=2,ion=b)`)
 

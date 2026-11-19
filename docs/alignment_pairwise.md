@@ -53,17 +53,20 @@ SELECT align_pairwise_wfa2_score(query, subject, 2, 6, 2);
 ```
 
 **Parameters (5-arg form):**
+
 - `query` (VARCHAR), `subject` (VARCHAR): the two sequences to align
 - `mismatch` (INTEGER): mismatch penalty (must be > 0)
 - `gap_open` (INTEGER): gap-opening penalty (must be >= 0)
 - `gap_extend` (INTEGER): gap-extension penalty (must be > 0)
 
 **Return type:**
+
 - `align_pairwise_wfa2_score` returns INTEGER (the alignment penalty)
 - `align_pairwise_wfa2_cigar` returns `STRUCT(score INTEGER, cigar VARCHAR)`
 - `align_pairwise_wfa2_full` returns `STRUCT(score INTEGER, cigar VARCHAR, query_aligned VARCHAR, subject_aligned VARCHAR)`
 
 **Behavior:**
+
 - Score is penalty-style: `0` = identical, larger = more divergent.
 - CIGAR uses the extended alphabet (`=` for match, `X` for mismatch).
 - NULL inputs produce NULL output; alignment failure produces NULL.
@@ -80,6 +83,7 @@ SELECT (align_pairwise_wfa2_full('ACGT', 'AGT')).query_aligned,
 ```
 
 **Error conditions:**
+
 - `mismatch` not > 0
 - `gap_open` not >= 0
 - `gap_extend` not > 0
@@ -105,6 +109,7 @@ SELECT align_pairwise_ksw2_score(query, subject, 2, 4, 6, 2, 100, 400);
 ```
 
 **Parameters (6-/8-arg forms):**
+
 - `query` (VARCHAR), `subject` (VARCHAR): the two sequences to align
 - `match` (INTEGER): match score (must be > 0); positive contribution per matched base
 - `mismatch` (INTEGER): mismatch penalty (must be > 0); subtracted per mismatched base
@@ -114,11 +119,13 @@ SELECT align_pairwise_ksw2_score(query, subject, 2, 4, 6, 2, 100, 400);
 - `zdrop` (INTEGER, 8-arg only): z-drop threshold for early termination; negative disables
 
 **Return type:**
+
 - `align_pairwise_ksw2_score` returns INTEGER (the alignment score)
 - `align_pairwise_ksw2_cigar` returns `STRUCT(score INTEGER, cigar VARCHAR)`
 - `align_pairwise_ksw2_full` returns `STRUCT(score INTEGER, cigar VARCHAR, query_aligned VARCHAR, subject_aligned VARCHAR)`
 
 **Behavior:**
+
 - Score is native positive: an identical alignment scores `qlen * match`.
 - CIGAR uses the extended alphabet (`=` / `X`); KSW2's native `M` is split into `=` / `X` by an eqx post-pass.
 - NULL inputs produce NULL output; alignment failure (e.g., z-drop early termination) produces NULL.
@@ -132,6 +139,7 @@ SELECT (align_pairwise_ksw2_cigar('ACGT', 'ACAT')).cigar;   -- 2=1X1= (eqx post-
 ```
 
 **Error conditions:**
+
 - `match` not > 0
 - `mismatch` not > 0
 - `gap_open` not >= 0
@@ -158,16 +166,19 @@ SELECT align_pairwise_ksw2_dual_affine_score(query, subject, 2, 4, 6, 2, 24, 1, 
 ```
 
 **Parameters (8-/10-arg forms):** same first four as the extz family (`match`, `mismatch`, `gap_open`, `gap_extend`), plus:
+
 - `gap_open2` (INTEGER): second-pair gap-opening penalty (must be >= 0); typically larger than `gap_open`
 - `gap_extend2` (INTEGER): second-pair gap-extension penalty (must be > 0); typically smaller than `gap_extend`
 - `w`, `zdrop` (10-arg only): bandwidth and z-drop as in the extz family
 
 **Return type:**
+
 - `align_pairwise_ksw2_dual_affine_score` returns INTEGER (the alignment score)
 - `align_pairwise_ksw2_dual_affine_cigar` returns `STRUCT(score INTEGER, cigar VARCHAR)`
 - `align_pairwise_ksw2_dual_affine_full` returns `STRUCT(score INTEGER, cigar VARCHAR, query_aligned VARCHAR, subject_aligned VARCHAR)`
 
 **Behavior:**
+
 - Score is native positive (same scale as the extz family).
 - CIGAR ops are `=`, `X`, `I`, `D` (eqx post-pass splits KSW2's native `M`).
 - For each gap of length `L`, the cheaper of `gap_open + L*gap_extend` and `gap_open2 + L*gap_extend2` is chosen.
@@ -183,6 +194,7 @@ SELECT align_pairwise_ksw2_dual_affine_score(repeat('A', 50), repeat('A', 20));
 ```
 
 **Error conditions:**
+
 - `match` not > 0
 - `mismatch` not > 0
 - `gap_open` not >= 0
@@ -214,16 +226,19 @@ SELECT align_pairwise_ksw2_splice_score(query, subject, 2, 4, 6, 2, 24, 9, -1);
 ```
 
 **Parameters (8-/9-arg forms):** same first four as the extz family (`match`, `mismatch`, `gap_open`, `gap_extend`), plus:
+
 - `gap_open2` (INTEGER): intron-open penalty (must be >= 0); introns extend at the `gap_extend` rate
 - `noncan` (INTEGER): penalty added when the chosen intron boundary is non-canonical (must be >= 0)
 - `zdrop` (9-arg only): z-drop threshold
 
 **Return type:**
+
 - `align_pairwise_ksw2_splice_score` returns INTEGER (the alignment score)
 - `align_pairwise_ksw2_splice_cigar` returns `STRUCT(score INTEGER, cigar VARCHAR)`
 - `align_pairwise_ksw2_splice_full` returns `STRUCT(score INTEGER, cigar VARCHAR, query_aligned VARCHAR, subject_aligned VARCHAR)`
 
 **Behavior:**
+
 - Score is native positive (same scale as the extz family).
 - CIGAR ops are `=`, `X`, `I`, `D`, and `N` (intron skip); the eqx post-pass splits `M` into `=` / `X`.
 - The `_full` aligned-sequence output renders `N` (intron-skip) the same as `D` -- the intron appears as gap characters in `query_aligned`, with the corresponding subject bases in `subject_aligned`. The CIGAR string preserves the aligned-op (`=` / `X`) vs `N` distinction for downstream consumers.
@@ -237,6 +252,7 @@ SELECT align_pairwise_ksw2_splice_score('ACGT', 'ACAT');   -- 2  (3*match - mism
 ```
 
 **Error conditions:**
+
 - `match` not > 0
 - `mismatch` not > 0
 - `gap_open` not >= 0

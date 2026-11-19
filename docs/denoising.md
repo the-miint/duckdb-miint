@@ -19,6 +19,7 @@ Designed as a composable SQL building block. Dereplication is native SQL (`GROUP
 `deblur(input_table, [sample_id='col'], [options])`
 
 **Parameters:**
+
 - `input_table` (VARCHAR): Name of a table or view containing pre-aligned, pre-dereplicated sequences. By default must have `read_id` (VARCHAR), `sequence1` (VARCHAR), and `abundance` (integer type) columns; use `id_col`/`sequence_col`/`count_col` to override. All sequences in the sequence column must have the same aligned length and the same unaligned length (number of non-gap characters).
 - `sample_id` (VARCHAR, optional): Name of a column in `input_table` to partition by. Deblur is applied independently per sample, and the sample column is prepended to the output. Unlike the two uchime functions, deblur's backend is re-entrant so samples run across DuckDB worker threads in parallel (bounded by `min(num_threads, num_samples)`).
 - `id_col` (VARCHAR, default `'read_id'`): Name of the read identifier column in `input_table`.
@@ -40,6 +41,7 @@ Designed as a composable SQL building block. Dereplication is native SQL (`GROUP
 | `abundance` | BIGINT | Corrected abundance (banker's rounding) |
 
 **Behavior:**
+
 - Sequences are uppercased internally (matching the Python deblur reference implementation)
 - Output is ordered by corrected abundance descending
 - Single-threaded (inherently sequential — each sequence's correction depends on all previous corrections)
@@ -105,6 +107,7 @@ SELECT * FROM deblur('aligned_seqs', error_profile := [1, 0.04, 0.01, 0.005]);
 ```
 
 **Error conditions:**
+
 - Error if table does not exist or lacks the resolved id/sequence/count columns
 - Error if any of `id_col`/`sequence_col`/`count_col` is the empty string
 - Error if `abundance` column is not an integer type

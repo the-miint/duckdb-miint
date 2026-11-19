@@ -58,6 +58,25 @@ struct GlobExpansionResult {
 // Useful for paired-end read validation where both must be globs or both literals
 GlobExpansionResult ExpandGlobPatternWithInfo(FileSystem &fs, ClientContext &context, const std::string &pattern);
 
+// A reader's first argument: a VARCHAR path or glob (expanded as ExpandGlobPatternWithInfo does), or
+// a VARCHAR[] of literal paths (as ExpandPathList does; is_glob is false). Throws
+// InvalidInputException, naming function_name, for NULL or any other type.
+GlobExpansionResult ExpandPathArgument(FileSystem &fs, ClientContext &context, const Value &arg,
+                                       const std::string &function_name);
+
+// Throws IOException("File not found: <path>") for the first local path that does not exist. Stdin
+// and remote paths are not checked: they are opened when the scan starts.
+void RequireLocalFilesExist(FileSystem &fs, const std::vector<std::string> &paths);
+
+// The columns read_fastx returns, which every sequence reader returns first: sequence_index,
+// read_id, comment, sequence1, sequence2, qual1 and qual2.
+std::vector<std::string> SequenceColumnNames();
+std::vector<LogicalType> SequenceColumnTypes();
+
+// A BIGINT extension option, registered in LoadInternal, that must not be negative: `if_null` when
+// it is NULL. `zero_means` says, in the error for a negative value, what 0 does.
+idx_t GetNonNegativeOption(ClientContext &context, const char *name, idx_t if_null, const char *zero_means);
+
 // --- Result vector helpers ---
 // Shared utilities for populating DuckDB result vectors from batch data.
 // Used by read_fastx, read_alignments, read_sequences_sam, and other table functions.

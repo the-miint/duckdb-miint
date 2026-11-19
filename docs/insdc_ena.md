@@ -10,23 +10,23 @@ Both surfaces share the same accession types, the same authentication model (Web
 ## Table of contents
 
 - [Reading](#reading) - Detail on reading data from ENA.
-  - [Metadata](#read-ena) - Run / sample / study etc level metadata.
-  - [Attributes](#read-ena-attributes) - Submitter-defined sample attributes.
-  - [Sequences](#read-ena-sequences) - Stream FASTA / FASTQ / SFF data into a `read_fastx` compatible schema.
-  - [Searchable fields](#ena-searchable-fields) - List the fields ENA's Portal API can return for a result type.
+    - [Metadata](#read-ena) - Run / sample / study etc level metadata.
+    - [Attributes](#read-ena-attributes) - Submitter-defined sample attributes.
+    - [Sequences](#read-ena-sequences) - Stream FASTA / FASTQ / SFF data into a `read_fastx` compatible schema.
+    - [Searchable fields](#ena-searchable-fields) - List the fields ENA's Portal API can return for a result type.
 - [Writing](#writing) - Detail on submitting data to ENA.
-  - [Register](#register-secret) - Register your submission credentials. 
-  - [Attach](#attach-the-catalog) - Attach the ENA catalog.
-  - [Register the project](#register-the-project) - Register a project with ENA.
-  - [Register samples](#register-samples) - Register samples with ENA.
-  - [Upload sequence data](#upload-sequence-data) - Upload sequence data to ENA.
-  - [Register experiments and runs](#register-experiments-and-runs) - Register the experiments and runs with ENA.
-  - [Audit log](#audit-log) - The recorded audit trail from the submission process.
-  - [Alias targeting](#alias-targeting) - Targeting submissions by alias. 
-  - [Alias lookup](#alias-lookup) - Looking up submission information by alias.
-  - [Status transition rules](#status-transition-rules) - Rules for how ENA statuses change.
-  - [End to end example](#end-to-end-example) - An end-to-end example of the submission process.
-  - [Caveats and limitations](#caveats-and-limitations) - Known caveats and limitations to be aware of.
+    - [Register](#register-secret) - Register your submission credentials.
+    - [Attach](#attach-the-catalog) - Attach the ENA catalog.
+    - [Register the project](#register-the-project) - Register a project with ENA.
+    - [Register samples](#register-samples) - Register samples with ENA.
+    - [Upload sequence data](#upload-sequence-data) - Upload sequence data to ENA.
+    - [Register experiments and runs](#register-experiments-and-runs) - Register the experiments and runs with ENA.
+    - [Audit log](#audit-log) - The recorded audit trail from the submission process.
+    - [Alias targeting](#alias-targeting) - Targeting submissions by alias.
+    - [Alias lookup](#alias-lookup) - Looking up submission information by alias.
+    - [Status transition rules](#status-transition-rules) - Rules for how ENA statuses change.
+    - [End to end example](#end-to-end-example) - An end-to-end example of the submission process.
+    - [Caveats and limitations](#caveats-and-limitations) - Known caveats and limitations to be aware of.
   
 ### Reading
 
@@ -54,21 +54,30 @@ FROM runs r, read_ena_sequences(r.run_accession) s;
 Query metadata from the EBI European Nucleotide Archive (ENA) Portal API. Returns run, sample, or study metadata as a table.
 
 **Requirements:**
+
 - Requires the `httpfs` extension (automatically loaded)
 - Network access to EBI servers (www.ebi.ac.uk)
 
+```sql
+-- Get all run metadata for a single run
+SELECT * FROM read_ena('ERR1074767');
+```
+
 **Parameters:**
+
 - `accession` (VARCHAR or VARCHAR[]): ENA/SRA accession(s). Supports study (PRJNA\*, PRJEB\*, ERP\*, SRP\*), sample (SAMN\*, SAME\*), run (SRR\*, ERR\*), and experiment (SRX\*, ERX\*) accessions.
 - `result` (VARCHAR, optional, default 'read_run'): ENA result type. One of: `read_run`, `sample`, `study`. When the accession type doesn't match the result type (e.g., run accession with `result='study'`), the accession is automatically resolved.
 - `fields` (VARCHAR, optional): Comma-separated list of ENA field names to return. If omitted, a sensible default set is used per result type.
 
 **Output schema:**
+
 - Columns are named after the requested fields. `read_count`, `base_count` and `tax_id` are BIGINT; `fastq_ftp`, `fastq_aspera` and `fastq_md5` are VARCHAR[] and `fastq_bytes` is BIGINT[] (ENA's `;`-separated lists, split); every other field is VARCHAR
 - Default `read_run` fields include: `run_accession`, `experiment_accession`, `sample_accession`, `study_accession`, `fastq_ftp`, `fastq_bytes`, `fastq_md5`, `library_strategy`, `library_layout`, `instrument_model`, `read_count`, `base_count`, and more
 - Default `sample` fields include: `sample_accession`, `scientific_name`, `tax_id`, `collection_date`, `country`, `lat`, `lon`, `depth`, and more
 - Default `study` fields include: `study_accession`, `study_title`, `study_description`, `center_name`, and more
 
 **Behavior:**
+
 - Queries the ENA Portal API (`/search` endpoint) with `format=tsv`
 - Accession type is auto-detected from prefix and mapped to the appropriate query parameter
 - Cross-type resolution: e.g., a run accession with `result='study'` first resolves to the study accession, then queries the study
@@ -76,9 +85,6 @@ Query metadata from the EBI European Nucleotide Archive (ENA) Portal API. Return
 
 **Examples:**
 ```sql
--- Get all run metadata for a single run
-SELECT * FROM read_ena('ERR1074767');
-
 -- Get specific fields
 SELECT run_accession, library_layout, read_count
 FROM read_ena('ERR1074767', fields='run_accession,library_layout,read_count');
@@ -98,18 +104,29 @@ CREATE TABLE project_runs AS SELECT * FROM read_ena('PRJNA555783');
 Fetch sample attributes from EBI/ENA via the Browser XML API. Returns every attribute in a sample's XML: the submitter-defined key-value attributes, named as the submitter wrote them and including those the Portal API does not carry, plus ENA's own (such as `ENA-LAST-UPDATE`).
 
 **Requirements:**
+
 - Requires the `httpfs` extension (automatically loaded)
 - Network access to EBI servers (www.ebi.ac.uk)
 
+```sql
+-- Get all attributes for a run's sample
+SELECT * FROM read_ena_attributes('ERR1074767');
+```
+
 **Parameters:**
+
 - `accession` (VARCHAR or VARCHAR[]): ENA/SRA accession(s). Supports study, sample, run, and experiment accessions. Non-sample accessions are automatically resolved to their associated sample accession(s).
 
 **Output schema:**
-- `sample_accession` (VARCHAR): BioSample accession (SAMN\*/SAME\*)
-- `tag` (VARCHAR): Attribute name as it appears in the sample XML (e.g., 'collection date', 'geographic location (country and/or sea)', custom fields, 'ENA-LAST-UPDATE')
-- `value` (VARCHAR): Attribute value
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `sample_accession` | VARCHAR | BioSample accession (SAMN\*/SAME\*) |
+| `tag` | VARCHAR | Attribute name as it appears in the sample XML (e.g., 'collection date', 'geographic location (country and/or sea)', custom fields, 'ENA-LAST-UPDATE') |
+| `value` | VARCHAR | Attribute value |
 
 **Behavior:**
+
 - Resolves non-sample accessions to sample accessions via the Portal API
 - Fetches XML from the Browser API in batches of 200 samples
 - Parses `<SAMPLE_ATTRIBUTE>` `<TAG>`/`<VALUE>` pairs
@@ -120,9 +137,6 @@ Tags are the names in the sample XML, so the same attribute can be spelled diffe
 
 **Examples:**
 ```sql
--- Get all attributes for a run's sample
-SELECT * FROM read_ena_attributes('ERR1074767');
-
 -- Get attributes for a specific sample
 SELECT * FROM read_ena_attributes('SAMEA3610311');
 
@@ -150,26 +164,34 @@ WHERE host_body_site = 'UBERON:feces';
 Enumerate the fields that ENA's Portal API can return for a result type (its `/returnFields` list). Use this to discover what field names are available for a given result type (sample, read_run, study, experiment, etc.) before constructing a query — a `fields=` list for `read_ena` (result types `read_run`, `sample` and `study`), or a direct Portal API `/search` URL.
 
 **Requirements:**
+
 - Requires the `httpfs` extension (automatically loaded)
 - Network access to EBI servers (www.ebi.ac.uk)
 
+```sql
+-- All fields the sample result type can return
+SELECT field_name, type FROM ena_searchable_fields('sample') ORDER BY field_name;
+```
+
 **Parameters:**
+
 - `result_type` (VARCHAR, required): An ENA Portal API result type (e.g., `'sample'`, `'read_run'`, `'study'`, `'experiment'`)
 
 **Output schema:**
-- `field_name` (VARCHAR): Canonical field identifier accepted by ENA's `/search?fields=...` query parameter
-- `type` (VARCHAR): ENA's declared type for the field (e.g., `text`, `number`, `date`, `controlled value`, `taxonomy`)
-- `description` (VARCHAR, nullable): ENA's human-readable description, when available
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `field_name` | VARCHAR | Canonical field identifier accepted by ENA's `/search?fields=...` query parameter |
+| `type` | VARCHAR | ENA's declared type for the field (e.g., `text`, `number`, `date`, `controlled value`, `taxonomy`) |
+| `description` | VARCHAR, nullable | ENA's human-readable description, when available |
 
 **Behavior:**
+
 - Issues exactly one HTTP call to `/returnFields?result=<result_type>&format=tsv` on first use and caches the parsed result for the remainder of the scan
 - Validates `result_type` as alphanumeric + `_-.` to prevent URL injection
 
 **Examples:**
 ```sql
--- All fields the sample result type can return
-SELECT field_name, type FROM ena_searchable_fields('sample') ORDER BY field_name;
-
 -- Check whether a field exists before requesting it
 SELECT COUNT(*) > 0 AS exists
 FROM ena_searchable_fields('sample')
@@ -181,10 +203,17 @@ WHERE field_name = 'host_body_site';
 Stream FASTA/FASTQ sequence data from EBI/ENA with run, sample, and experiment accession columns. Returns data in the same schema as `read_fastx` plus accession metadata columns, enabling direct association of sequence data with project metadata. Supports mixed FASTA/FASTQ paired-end data (unlike `read_fastx` which rejects format mismatches).
 
 **Requirements:**
+
 - Requires the `httpfs` extension (automatically loaded)
 - Network access to EBI servers (ftp.sra.ebi.ac.uk via HTTPS)
 
+```sql
+-- Stream reads from a single run
+SELECT * FROM read_ena_sequences('ERR1074767') LIMIT 100;
+```
+
 **Parameters:**
+
 - `accession` (VARCHAR or VARCHAR[]): ENA/SRA accession(s). Supports study (bulk download all runs), sample, run, and experiment accessions.
 - `include_filepath` (BOOLEAN, optional, default false): Add a filepath column naming where each run was read from: its HTTPS URL(s), or `host:/path` for a run read over Aspera. For paired-end runs, the two are semicolon-separated.
 - `qual_offset` (BIGINT, optional, default 33): Quality score offset (33 for Phred+33/Sanger, 64 for Phred+64/Illumina 1.3+)
@@ -192,27 +221,31 @@ Stream FASTA/FASTQ sequence data from EBI/ENA with run, sample, and experiment a
 - `trim_sff` (BOOLEAN, optional, default true): For SFF runs, apply the quality and adapter clip positions from the SFF header to trim sequences and quality scores. Ignored for FASTQ runs. Named `trim_sff` rather than `trim` because `TRIM` is a SQL function keyword and this function is dual-path (supports both scalar and lateral invocation), which together prevent DuckDB's binder from accepting `trim=...`.
 - `download_method` (VARCHAR, optional, default `'auto'`): `'http'`, `'aspera'` or `'auto'`. `'auto'` uses Aspera when `ascp` is on `PATH`, an Aspera key is found or downloaded, and every FASTQ run has Aspera paths; otherwise HTTP. When `ascp` exits before sending any data (a rejected key, an unreachable host), `'auto'` warns and reads that run over HTTP, and runs of the scan that start after it go straight to HTTP; `'aspera'` raises the error with `ascp`'s message. Lateral calls always use HTTP.
 - `verify_md5` (BOOLEAN, optional, default **true**): Verify each downloaded FASTQ file's bytes against ENA's reported `fastq_md5` once the file has been read to completion, raising a hard error (`IOException`) on mismatch. On by default — it's cheap (the digest is computed incrementally over bytes already in flight) and catches silent truncation/corruption that byte- or row-count checks miss. Verification is automatically skipped (with a loud warning, never silently) when it doesn't apply:
-  - ENA reported no `fastq_md5` for a given file.
-  - The file is not gzip-compressed (verification hashes the raw pre-decompression bytes, matching the basis of ENA's reported digest; a non-gzip file has no such basis here).
-  - The run routes through SFF (`OpenSFF`) or Aspera (`download_method => 'aspera'`) — neither transport is wired to the verification tap.
-  - `max_sequences` capped the run before it reached the file's true end — verification requires having seen every byte, so a deliberately partial read is never treated as a failure.
+    - ENA reported no `fastq_md5` for a given file.
+    - The file is not gzip-compressed (verification hashes the raw pre-decompression bytes, matching the basis of ENA's reported digest; a non-gzip file has no such basis here).
+    - The run routes through SFF (`OpenSFF`) or Aspera (`download_method => 'aspera'`) — neither transport is wired to the verification tap.
+    - `max_sequences` capped the run before it reached the file's true end — verification requires having seen every byte, so a deliberately partial read is never treated as a failure.
 
 Pass named parameters with arrow syntax (`name => value`). Because `read_ena_sequences` also supports lateral / correlated invocation, `name = value` is read as a comparison and fails with a Binder Error. For example: `read_ena_sequences('X', prefer_format => 'sff', trim_sff => false)`. This works only when the accession argument is a literal (or a list of literals). In a lateral / correlated call, where the accession comes from another table's column, DuckDB doesn't bind named parameters in any syntax (passing one fails with a Binder Error), so those calls run with the defaults ([#295](https://github.com/the-miint/duckdb-miint/issues/295)).
 
 **Output schema:**
-- `sequence_index` (BIGINT): 1-based sequence index (per run)
-- `read_id` (VARCHAR): FASTQ read identifier
-- `comment` (VARCHAR): FASTQ comment line (nullable)
-- `sequence1` (VARCHAR): Forward read sequence
-- `sequence2` (VARCHAR): Reverse read sequence (NULL for single-end)
-- `qual1` (UTINYINT[]): Forward quality scores
-- `qual2` (UTINYINT[]): Reverse quality scores (NULL for single-end)
-- `run_accession` (VARCHAR): SRR/ERR run accession
-- `sample_accession` (VARCHAR): SAMN/SAME BioSample accession
-- `experiment_accession` (VARCHAR): SRX/ERX experiment accession
-- `filepath` (VARCHAR, optional): HTTPS URL(s), or Aspera `host:/path`(s), the run was read from
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `sequence_index` | BIGINT | 1-based sequence index (per run) |
+| `read_id` | VARCHAR | FASTQ read identifier |
+| `comment` | VARCHAR | FASTQ comment line (nullable) |
+| `sequence1` | VARCHAR | Forward read sequence |
+| `sequence2` | VARCHAR | Reverse read sequence (NULL for single-end) |
+| `qual1` | UTINYINT[] | Forward quality scores |
+| `qual2` | UTINYINT[] | Reverse quality scores (NULL for single-end) |
+| `run_accession` | VARCHAR | SRR/ERR run accession |
+| `sample_accession` | VARCHAR | SAMN/SAME BioSample accession |
+| `experiment_accession` | VARCHAR | SRX/ERX experiment accession |
+| `filepath` | VARCHAR, optional | HTTPS URL(s), or Aspera `host:/path`(s), the run was read from |
 
 **Behavior:**
+
 - At bind time, queries ENA Portal API to discover runs, FASTQ URLs, and library layout (paired vs single-end)
 - Constructs HTTPS URLs from ENA's FTP paths
 - Streams FASTQ data through the same `SequenceReader`/`DuckDBSeqStream` infrastructure as `read_fastx`
@@ -221,9 +254,6 @@ Pass named parameters with arrow syntax (`name => value`). Because `read_ena_seq
 
 **Examples:**
 ```sql
--- Stream reads from a single run
-SELECT * FROM read_ena_sequences('ERR1074767') LIMIT 100;
-
 -- Stream all reads for a BioProject directly to Parquet
 COPY (SELECT * FROM read_ena_sequences('PRJNA555783'))
   TO 'project_sequences.parquet' (FORMAT PARQUET);
@@ -243,6 +273,7 @@ FROM read_ena_sequences('ERR1074767', include_filepath => true) LIMIT 5;
 ```
 
 **Notes:**
+
 - For large projects, the FASTQ download can take significant time and bandwidth
 - The `run_accession` column enables easy JOIN back to metadata from `read_ena`
 - Quality scores are converted to numeric values using the specified offset (default Phred+33)
@@ -322,6 +353,7 @@ FROM read_ena('PRJEB11419') AS r,
 ```
 
 Limitations in lateral mode:
+
 - Named parameters (`max_sequences`, `verify_md5`, `include_filepath`, ...) can't be passed in any syntax: the call
   fails to bind. Every option keeps its default ([#295](https://github.com/the-miint/duckdb-miint/issues/295)).
 - Downloads always use HTTP, even when `ascp` is available (the lateral use case is
@@ -462,6 +494,7 @@ SELECT * FROM ena_upload_reads(
 Layout is auto-detected from the input rows: presence of `sequence2` / `qual2` per sample-group decides single vs. paired. `layout := 'paired_interleaved'` overrides this to emit one interleaved file per sample. Mixed single/paired rows under the same `sample_ref` are rejected at scan time.
 
 `target_url` schemes:
+
 - `aspera://webin2.ebi.ac.uk/` — production Aspera transport, requires `ascp` on `PATH` (`MIINT_ENABLE_ASPERA` runtime check).
 - `ftp://` / `ftps://` / `http://` / `https://` — libcurl streaming-upload transport.
 - `file:///some/dir/` — write to a local directory; no `secret` parameter required. Useful for testing the encode→gzip→md5 pipeline without round-tripping through ENA.
