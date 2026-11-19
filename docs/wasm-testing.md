@@ -37,6 +37,11 @@ Catches: linker errors, missing symbols, `-fPIC` issues, Rust PIC problems.
 This runs `make wasm_eh` which builds the extension as a WASM side module.
 The output is `build/wasm_eh/extension/miint/miint.duckdb_extension.wasm`.
 
+DuckDB 2.0 takes its version from `DUCKDB_VERSION`. Unless it is set, the
+script sets it to the `duckdb_version` CI builds
+(`.github/workflows/MainDistributionPipeline.yml`). Without it, the extension
+would be stamped with the DuckDB commit, and duckdb-wasm would refuse to load it.
+
 Use `--clean` for a full rebuild (necessary after changing CMake flags or
 updating submodules):
 

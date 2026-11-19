@@ -72,13 +72,29 @@ fi
 # packages if the Makefile doesn't set it from the toolchain file.
 export VCPKG_TARGET_TRIPLET="${VCPKG_TARGET_TRIPLET:-wasm32-emscripten}"
 
+# DuckDB 2.0 takes its version from DUCKDB_VERSION whenever CMake configures. Without it the
+# build is a development version, the extension's metadata names the DuckDB commit instead of
+# the release, and duckdb-wasm refuses to load it (test_wasm_browser.sh fails at LOAD, though
+# the build and the import check pass). So it defaults to the version CI builds: the workflow
+# input scripts/check-duckdb-version.sh treats as canonical, read as test_wasm_browser.sh reads it.
+if [ -z "${DUCKDB_VERSION:-}" ]; then
+    DUCKDB_VERSION="$(grep -oE '^[[:space:]]*duckdb_version:[[:space:]]*v?[0-9]+\.[0-9]+\.[0-9]+' \
+        "$REPO_DIR/.github/workflows/MainDistributionPipeline.yml" | head -1 | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+$' || true)"
+    if [ -z "$DUCKDB_VERSION" ]; then
+        echo "ERROR: DUCKDB_VERSION is not set, and .github/workflows/MainDistributionPipeline.yml has no"
+        echo "duckdb_version input to default it from."
+        exit 1
+    fi
+fi
+export DUCKDB_VERSION
+
 if ! rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-emscripten; then
     echo "Installing Rust wasm32-unknown-emscripten target..."
     rustup target add wasm32-unknown-emscripten
 fi
 
 EMCC_VERSION=$(emcc --version 2>&1 | head -1 | grep -oP '\d+\.\d+\.\d+' || echo "unknown")
-echo "=== WASM build (emcc $EMCC_VERSION) ==="
+echo "=== WASM build (emcc $EMCC_VERSION, DuckDB $DUCKDB_VERSION) ==="
 echo "    CI uses emsdk 6.0.9"
 echo ""
 
