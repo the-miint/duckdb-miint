@@ -1,6 +1,7 @@
 #pragma once
 
 #include "read_newick.hpp"
+#include "tree_table_reader.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 
@@ -14,7 +15,8 @@ namespace duckdb {
 //                    becomes the new root.
 // - collapse=false : keep every internal node on the kept root-paths unchanged.
 // Missing tips (names not found as tips in the tree) error unless
-// ignore_missing:=true. Output schema matches read_newick (without filepath).
+// ignore_missing:=true. Output schema matches read_newick (without filepath), with
+// `name` in the tree's id type and the tree's `label` column, when it has one, last.
 class ShearTreeTableFunction {
 public:
 	struct Data : public TableFunctionData {
@@ -22,15 +24,19 @@ public:
 		std::string tips_table_name;
 		bool collapse;
 		bool ignore_missing;
+		TreeNameColumns tree_columns;
 
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 
-		Data(std::string tree_table, std::string tips_table, bool collapse, bool ignore_missing);
+		Data(std::string tree_table, std::string tips_table, bool collapse, bool ignore_missing,
+		     TreeNameColumns tree_columns);
 	};
 
 	struct GlobalState : public GlobalTableFunctionState {
 		std::vector<ReadNewickTableFunction::NodeRow> rows;
+		// Each row's label; empty when the tree has no label column
+		std::vector<std::optional<std::string>> labels;
 		size_t current_row_idx = 0;
 
 		idx_t MaxThreads() const override {

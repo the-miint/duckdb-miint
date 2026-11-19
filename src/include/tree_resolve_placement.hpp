@@ -1,6 +1,7 @@
 #pragma once
 
 #include "read_newick.hpp"
+#include "tree_table_reader.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 
@@ -15,11 +16,15 @@ public:
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 
-		Data(std::string tree_table, std::string placements_table);
+		TreeNameColumns tree_columns;
+
+		Data(std::string tree_table, std::string placements_table, TreeNameColumns tree_columns);
 	};
 
 	struct GlobalState : public GlobalTableFunctionState {
 		std::vector<ReadNewickTableFunction::NodeRow> rows;
+		// Each row's label; empty when the tree has no label column
+		std::vector<std::optional<std::string>> labels;
 		size_t current_row_idx = 0;
 
 		idx_t MaxThreads() const override {

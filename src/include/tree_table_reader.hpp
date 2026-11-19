@@ -3,6 +3,7 @@
 #include "NewickTree.hpp"
 #include "TreeIndex.hpp"
 #include "duckdb/main/client_context.hpp"
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -19,6 +20,33 @@ void ValidateTreeTableSchema(ClientContext &context, const std::string &table_na
 // Read tree node data from a table or view and return as NodeInput structs.
 // Uses a separate Connection to avoid deadlocking the current context.
 std::vector<miint::NodeInput> ReadTreeTable(ClientContext &context, const std::string &table_name);
+
+// A tree table's `name` and `label` columns, as a function that returns a tree binds them. `name`
+// keeps its id type (VARCHAR, BIGINT or UUID) from input to output, and text labels live in an
+// optional `label` VARCHAR column, so a tree can hold typed tip ids and text labels on its
+// internal nodes together.
+struct TreeNameColumns {
+	bool has_name = false;
+	// VARCHAR when there is no name column
+	LogicalType name_type = LogicalType::VARCHAR;
+	bool has_label = false;
+
+	// The output schema: read_newick's (without filepath), with `name` in name_type, and
+	// `label VARCHAR` last when the tree has one.
+	void OutputSchema(std::vector<std::string> &names, std::vector<LogicalType> &types) const;
+};
+
+// Check a tree table's `name` (an id type) and `label` (VARCHAR) columns, throwing
+// BinderException naming `fn` otherwise.
+TreeNameColumns BindTreeNameColumns(ClientContext &context, const char *fn, const std::string &table_name);
+
+// ReadTreeTable, for a function that returns a tree. Names are read in the bound type and held as
+// text, as ReadTreeTable holds them. When the tree has a `label` column, `labels` receives each
+// row's label (nullopt for NULL) in node_index order, which is the order of the returned nodes. A
+// column whose type has changed since bind is refused (InvalidInputException).
+std::vector<miint::NodeInput> ReadTreeTable(ClientContext &context, const std::string &table_name,
+                                            const TreeNameColumns &columns,
+                                            std::vector<std::optional<std::string>> &labels);
 
 // A built tree plus the caller's original node_index for each dense tree index. Because
 // ReadTreeTable sorts by node_index and NewickTree::build preserves input order, dense
