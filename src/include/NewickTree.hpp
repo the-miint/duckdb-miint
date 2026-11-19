@@ -271,8 +271,11 @@ public:
 	// false, throws std::runtime_error listing the missing names; otherwise the
 	// missing names are skipped. Throws std::runtime_error if no tip matches.
 	//
-	// The returned tree's node indices are reassigned 0-based (as with build()).
-	NewickTree shear(const std::unordered_set<std::string> &keep_names, bool collapse, bool ignore_missing) const;
+	// The returned tree's node indices are reassigned 0-based (as with build()). When `source` is
+	// given, it receives, for each node of the returned tree, the index in this tree of the node it
+	// came from, so a caller can carry per-node data the tree does not hold.
+	NewickTree shear(const std::unordered_set<std::string> &keep_names, bool collapse, bool ignore_missing,
+	                 std::vector<uint32_t> *source = nullptr) const;
 
 	// ========================================================================
 	// Resolution (make multifurcations bifurcating)

@@ -527,3 +527,88 @@ Negative branch_length
 
 statement ok
 DROP TABLE negative_bl;
+
+# =============================================================================
+# Labels. A tree table may carry text labels in a `label` VARCHAR column, so that `name` can keep
+# an id type (VARCHAR, BIGINT or UUID). A node's Newick label is its name, or its label where the
+# name is NULL or ''; a node with both a non-empty name and a non-empty label is an error, since
+# Newick holds one label per node.
+# =============================================================================
+
+statement ok
+COPY (SELECT node_index, parent_index, CASE WHEN is_tip THEN name END AS name, branch_length,
+             CASE WHEN NOT is_tip THEN 'n' || node_index END AS label
+      FROM read_newick('data/newick/simple.nwk'))
+TO '{TEST_DIR}/label_internal.nwk' (FORMAT NEWICK);
+
+query T
+SELECT trim(content) FROM read_text('{TEST_DIR}/label_internal.nwk');
+----
+((A:0.1,B:0.2)n2:0.3,C:0.4)n4;
+
+# read_newick reads the labels back as names: Newick has one label slot.
+query T
+SELECT name FROM read_newick('{TEST_DIR}/label_internal.nwk') WHERE NOT is_tip ORDER BY name;
+----
+n2
+n4
+
+# read_newick names an unnamed internal node '', which counts as no name.
+statement ok
+COPY (SELECT node_index, parent_index, name, branch_length,
+             CASE WHEN NOT is_tip THEN 'n' || node_index END AS label
+      FROM read_newick('data/newick/simple.nwk'))
+TO '{TEST_DIR}/label_empty_name.nwk' (FORMAT NEWICK);
+
+query T
+SELECT trim(content) FROM read_text('{TEST_DIR}/label_empty_name.nwk');
+----
+((A:0.1,B:0.2)n2:0.3,C:0.4)n4;
+
+# Typed tip ids and text labels in one tree.
+statement ok
+COPY (SELECT node_index, parent_index, CASE WHEN is_tip THEN node_index + 100 END AS name, branch_length,
+             CASE WHEN NOT is_tip THEN 'n' || node_index END AS label
+      FROM read_newick('data/newick/simple.nwk'))
+TO '{TEST_DIR}/label_bigint_name.nwk' (FORMAT NEWICK);
+
+query T
+SELECT trim(content) FROM read_text('{TEST_DIR}/label_bigint_name.nwk');
+----
+((100:0.1,101:0.2)n2:0.3,103:0.4)n4;
+
+# A decoration label holds spaces and ';', so it is quoted, and read back whole.
+statement ok
+COPY (SELECT node_index, parent_index, CASE WHEN is_tip THEN name END AS name, branch_length,
+             CASE WHEN node_index = 2 THEN 'f__Enterobacteriaceae; g__Escherichia' END AS label
+      FROM read_newick('data/newick/simple.nwk'))
+TO '{TEST_DIR}/label_quoted.nwk' (FORMAT NEWICK);
+
+query T
+SELECT name FROM read_newick('{TEST_DIR}/label_quoted.nwk') WHERE node_index = 2;
+----
+f__Enterobacteriaceae; g__Escherichia
+
+# A label of '' counts as no label.
+statement ok
+COPY (SELECT node_index, parent_index, name, branch_length, '' AS label
+      FROM read_newick('data/newick/simple.nwk'))
+TO '{TEST_DIR}/label_empty.nwk' (FORMAT NEWICK);
+
+query T
+SELECT trim(content) FROM read_text('{TEST_DIR}/label_empty.nwk');
+----
+((A:0.1,B:0.2):0.3,C:0.4);
+
+statement error
+COPY (SELECT node_index, parent_index, name, branch_length, 'x' AS label
+      FROM read_newick('data/newick/simple.nwk'))
+TO '{TEST_DIR}/label_and_name.nwk' (FORMAT NEWICK);
+----
+node 0 has both a name ('A') and a label ('x')
+
+statement error
+COPY (SELECT node_index, parent_index, name, node_index::INTEGER AS label FROM read_newick('data/newick/simple.nwk'))
+TO '{TEST_DIR}/integer_label.nwk' (FORMAT NEWICK);
+----
+Binder Error: COPY FORMAT NEWICK: column 'label' must be VARCHAR, got INTEGER

@@ -1026,8 +1026,8 @@ void NewickTree::insert_fully_resolved(const std::vector<Placement> &placements)
 // Modification
 // ============================================================================
 
-NewickTree NewickTree::shear(const std::unordered_set<std::string> &keep_names, bool collapse,
-                             bool ignore_missing) const {
+NewickTree NewickTree::shear(const std::unordered_set<std::string> &keep_names, bool collapse, bool ignore_missing,
+                             std::vector<uint32_t> *source) const {
 	const uint32_t n = static_cast<uint32_t>(nodes_.size());
 
 	// Map tip name -> tip node indices (only leaves; internal labels do not
