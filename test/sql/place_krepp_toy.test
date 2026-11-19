@@ -83,8 +83,10 @@ SELECT count(*) FROM (
 # as a branch, and a negative branch cannot be represented there. Before
 # 31205033 krepp computed it as the Jukes-Cantor distance minus half the edge,
 # and on this index 270 of 404 rows came out negative, down to -0.14971. krepp
-# now floors it at 0 in make_placement (ext/krepp/src/query.cpp). Over the older
-# krepp's output on this index, this clause matches those 270 rows.
+# now replaces a negative value with the Jukes-Cantor distance to the nearest
+# matched leaf below the edge, or 0 without one (compute_branch_lengths,
+# ext/krepp/src/query.hpp). Over the older krepp's output on this index, this
+# clause matches those 270 rows.
 query I
 SELECT count(*)
 FROM place_krepp(query_table='toy_reads', index_path='{MIINT_KREPP_TOY_INDEX}')
@@ -457,7 +459,7 @@ contains whitespace outside a quoted label
 # accumulating (ext/krepp/src/phytree.cpp:141-143); otherwise the space falls
 # through into the buffer and becomes part of the NEXT label, so the tip is
 # named ' B'. map_to_qtree then looks that up, misses, and skips it - its only
-# diagnostic for the miss is commented out (phytree.cpp:500-506). Nothing is
+# diagnostic for the miss is commented out (phytree.cpp:519-525). Nothing is
 # reported at any layer, so rejecting here is the one place a caller finds out.
 # (Mechanism read from krepp's source, not observed end to end: the CLI takes a
 # backbone only at index time, so there is no way to run the corrupted tree
@@ -548,8 +550,8 @@ true
 #
 # There is an oracle-free property that separates them. distal_length locates
 # the attachment point ON the edge, so it never exceeds the edge's branch length:
-# make_placement clamps it inside the edge, or takes min(t/2, d_c)
-# (ext/krepp/src/query.cpp:218-242). pendant_length is the length of a new branch
+# compute_branch_lengths takes it as a fraction in [0, 1] of the edge
+# (ext/krepp/src/query.hpp). pendant_length is the length of a new branch
 # hanging off that point and has no such bound. Swap the two and the bound check
 # below fails; the query after it shows the swap would have something to trip on.
 #
@@ -588,7 +590,7 @@ WHERE p.distal_length > coalesce(b.branch_length, 0.0);
 0
 
 # Anti-vacuity, and the other half of the discriminator: some pendant_length
-# exceeds its edge's branch length (105 of 404 rows, measured on this index), so
+# exceeds its edge's branch length (161 of 404 rows, measured on this index), so
 # a swap moves those values into distal_length and the query above fails.
 query I
 SELECT count(*) > 0
@@ -597,17 +599,22 @@ WHERE p.pendant_length > coalesce(b.branch_length, 0.0);
 ----
 true
 
-# pendant_length against distance and distal_length, the other two small doubles
-# on that scale. krepp floors pendant_length at 0 (make_placement,
-# ext/krepp/src/query.cpp:230, :233): on this index 205 of 404 rows sit on that
-# floor, and distance and distal_length are positive on every row. Reading
-# either of them into pendant_length leaves no row like that.
+# pendant_length against distance, the other small double on that scale.
+# compute_branch_lengths (ext/krepp/src/query.hpp) takes pendant_length as at
+# least d_x - distal_length, where d_x is the Jukes-Cantor distance krepp derives
+# from distance: -0.75 * ln(1 - 4/3 * distance) (Minfo::jukes_cantor_dist, CJC).
+# So pendant_length + distal_length >= d_x on every row except one whose pendant
+# fell back to a leaf distance; on this index that is every one of the 404 rows.
+# Swapping pendant_length with distance breaks it on 129 rows, reading distance
+# into pendant_length on 20, and reading distal_length into it on 168. The sum is
+# symmetric in pendant_length and distal_length, so it cannot see that swap; the
+# branch-length bound above does.
 query I
-SELECT count(*) > 0
+SELECT count(*)
 FROM distal_bound_placements
-WHERE pendant_length = 0 AND distance > 0 AND distal_length > 0;
+WHERE pendant_length + distal_length < -0.75 * ln(1 - 4.0 / 3.0 * distance);
 ----
-true
+0
 
 # --- jplace {N} edge decorations -------------------------------------------
 #
@@ -689,7 +696,7 @@ SELECT (SELECT count(*) FROM place_krepp(query_table='toy_reads',
 ----
 true
 
-# tau gates the placement filter (ext/krepp/src/query.cpp:247, :295: a
+# tau gates the placement filter (ext/krepp/src/query.cpp:294, :342: a
 # candidate survives when the k-mers within tau of it weigh more than 1). It is
 # inert at the default hdist_th on this corpus - 404 rows at tau 0, 1, 2 and 4
 # alike - because every surviving candidate already clears the bar at tau=0.
@@ -749,7 +756,7 @@ SELECT
 # --- a backbone whose labels are not the index's ---------------------------
 #
 # krepp's map_to_qtree skips a backbone leaf it cannot find in the index and
-# says nothing (its diagnostic is commented out, phytree.cpp:500-506). Every
+# says nothing (its diagnostic is commented out, phytree.cpp:519-525). Every
 # skipped leaf leaves eff_nchildren at 0 and collect_placements then rejects
 # every candidate, so the whole call returns zero rows - indistinguishable from
 # "these reads placed nowhere". Measured before the guard existed: one read
@@ -768,7 +775,7 @@ shares no tip labels
 # matches nothing either, but `backbone_tips_total == 0` is also how "no
 # newick_path was given" is represented internally, so it needs its own branch.
 # Verified reachable - miint's parser accepts empty tip labels, and krepp's
-# check_unique_labels skips unlabeled nodes (phytree.cpp:456) rather than
+# check_unique_labels skips unlabeled nodes (phytree.cpp:473) rather than
 # exiting, so nothing rejects this tree before the check runs.
 statement ok
 COPY (SELECT '(:1,:1):0;') TO '{TEST_DIR}/unlabeled.nwk'
@@ -812,7 +819,7 @@ WHERE message LIKE '%backbone tree tips are present in the index%';
 # --- {N} outside the range krepp represents --------------------------------
 #
 # miint's parser reads the decoration as int64; krepp narrows it to uint32 with
-# static_cast<se_t>(std::atol(...)) (phytree.cpp:232). Unbounded, {-5} would be
+# static_cast<se_t>(std::atol(...)) (phytree.cpp:236). Unbounded, {-5} would be
 # reported back as 4294967291 - breaking the promise that these numbers are
 # echoed verbatim - and {-1} would collide with {4294967295} inside krepp while
 # looking distinct to the uniqueness check, reaching an error_exit. Both are

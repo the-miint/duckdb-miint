@@ -336,7 +336,7 @@ unique_ptr<FunctionData> KreppIndexCreateTableFunction::Bind(ClientContext &cont
 	// out would take the number, run on one core anyway, and report success -
 	// and the only way to tell would be the wall clock.
 	// Nothing else bounds `threads` from above: set_num_threads does not clamp
-	// (ext/krepp/src/common.cpp:28) and neither does krepp's CLI, so the value
+	// (ext/krepp/src/common.cpp:33-41) and neither does krepp's CLI, so the value
 	// reaches omp_set_num_threads unchanged. libomp does not fail that call when
 	// it cannot create the threads - it calls abort(), taking the whole DuckDB
 	// process down with no SQL error and no chance to catch it:
@@ -377,7 +377,7 @@ unique_ptr<FunctionData> KreppIndexCreateTableFunction::Bind(ClientContext &cont
 
 // The filename suffix krepp will give every file this build writes. The shape
 // itself lives in krepp_detail::PartialSuffix, which mirrors the IndexMultiple
-// constructor (ext/krepp/src/index.cpp:249-251); this only supplies the options.
+// constructor (ext/krepp/src/index.cpp:406-408); this only supplies the options.
 std::string PartialSuffixFor(const miint::KreppIndexOptions &options) {
 	return miint::krepp_detail::PartialSuffix(options.m, options.r, options.frac);
 }
@@ -444,13 +444,13 @@ void CheckOutputPathAcceptsPartial(const KreppIndexCreateTableFunction::Data &da
 	// a partial that is already there.
 	//
 	// Compare the EFFECTIVE values, not the ones the caller typed. Unset w and h
-	// are derived from k (ext/krepp/src/index.cpp:237-238), so what has to agree
+	// are derived from k (ext/krepp/src/index.cpp:395-396), so what has to agree
 	// is what krepp will actually use - the partial on disk may have been built
 	// with an explicit h that a later job leaves unset. Gating these on
 	// has_value() let exactly that through: same k, one partial at h := 10 and
 	// the next with h unset (k - 16), accepted here and then rejected by krepp
 	// at query time, long after the build. w is worse - LSHF::check_compatible
-	// (ext/krepp/src/lshf.cpp:163-170) compares m, h, k, frac, r under
+	// (ext/krepp/src/lshf.cpp:161-168) compares m, h, k, frac, r under
 	// frac := true, and the positions, but never w, so a w mismatch is caught
 	// nowhere downstream and just leaves one index holding two different sets
 	// of minimizers.
@@ -461,7 +461,7 @@ void CheckOutputPathAcceptsPartial(const KreppIndexCreateTableFunction::Data &da
 	int32_t their_k = 0, their_w = 0, their_h = 0;
 	ReadIndexMetadata(data.output_path, existing.begin()->first, their_k, their_w, their_h);
 	// Narrowing to uint8_t before widening mirrors krepp: its k, w and h are all
-	// uint8_t (ext/krepp/src/index.hpp:107-109), so a k below 16 wraps there too
+	// uint8_t (ext/krepp/src/index.hpp:114-116), so a k below 16 wraps there too
 	// and the prediction has to wrap with it.
 	const auto our_w = static_cast<int32_t>(data.options.w.value_or(static_cast<uint8_t>(data.options.k + 6)));
 	const auto our_h = static_cast<int32_t>(data.options.h.value_or(static_cast<uint8_t>(data.options.k - 16)));

@@ -1,34 +1,35 @@
-# krepp phylogenetic placement (commit 31205033; VERSION string v0.10.0,
-# untagged). Header-only dependencies come from vcpkg rather than krepp's own
+# krepp phylogenetic placement (v0.12.1, commit 0991266). Its one header-only
+# dependency, parallel-hashmap, comes from vcpkg rather than krepp's own
 # submodules. ext/krepp/src/krepp.cpp is omitted: it holds main() and the CLI11
-# argument layer. KreppPlacer therefore reimplements krepp's index discovery,
-# which lives in that same file and will drift if krepp changes its index
-# layout. Off on Windows and under Emscripten.
+# argument layer. ext/krepp/src/api.cpp, krepp's embedding facade, is omitted
+# too: it reads queries from a file path, while miint hands reads over in
+# memory. KreppPlacer therefore reimplements krepp's index discovery
+# (TargetIndex::load_index in api.cpp), which will drift if krepp changes its
+# index layout. Off on Windows and under Emscripten.
 #
 # Like the HDF5 and SortMeRNA deps files: clang-tidy builds do not have vcpkg
-# wired up, so these headers can be absent there. Dropping krepp from the
+# wired up, so this header can be absent there. Dropping krepp from the
 # analysis set is the house response - a FATAL_ERROR here fails the whole tidy
 # pipeline for every other extension too, which is what it did on the first CI
-# run of this feature. Regular builds still require both headers.
+# run of this feature. Regular builds still require the header.
 find_path(PHMAP_INCLUDE_DIR parallel_hashmap/phmap.h)
-find_path(BOOST_MATH_INCLUDE_DIR boost/math/tools/minima.hpp)
 if(CLANG_TIDY)
-  if(NOT PHMAP_INCLUDE_DIR OR NOT BOOST_MATH_INCLUDE_DIR)
+  if(NOT PHMAP_INCLUDE_DIR)
     message(
       STATUS
-        "parallel-hashmap/boost-math not found for tidy-check - krepp placement support will be "
+        "parallel-hashmap not found for tidy-check - krepp placement support will be "
         "excluded from analysis")
     set(MIINT_ENABLE_KREPP OFF)
     return()
   endif()
   message(
     STATUS
-      "parallel-hashmap and boost-math found for tidy-check - krepp placement support enabled"
+      "parallel-hashmap found for tidy-check - krepp placement support enabled"
   )
-elseif(NOT PHMAP_INCLUDE_DIR OR NOT BOOST_MATH_INCLUDE_DIR)
+elseif(NOT PHMAP_INCLUDE_DIR)
   message(
     FATAL_ERROR
-      "krepp requires parallel-hashmap and boost-math headers (vcpkg). "
+      "krepp requires the parallel-hashmap headers (vcpkg). "
       "Configure with -DMIINT_ENABLE_KREPP=OFF to build without placement support."
   )
 endif()
@@ -126,8 +127,7 @@ if(MIINT_KREPP_OPENMP_OK)
   # target name and so inherit nothing from here.
   target_link_libraries(krepp PRIVATE miint_openmp)
 endif()
-target_include_directories(krepp PRIVATE ${KREPP_DIR}/src ${PHMAP_INCLUDE_DIR}
-                                         ${BOOST_MATH_INCLUDE_DIR})
+target_include_directories(krepp PRIVATE ${KREPP_DIR}/src ${PHMAP_INCLUDE_DIR})
 # PUBLIC here, unlike the two above, is deliberate: zlib is a real link
 # dependency any consumer of this archive needs, whereas the rename and the klib
 # include dir are things a consumer must NOT inherit.
@@ -143,7 +143,7 @@ target_link_libraries(krepp PUBLIC ZLIB::ZLIB)
 set_source_files_properties(
   src/KreppPlacer.cpp src/KreppIndexBuilder.cpp
   PROPERTIES INCLUDE_DIRECTORIES
-             "${KREPP_DIR}/src;${PHMAP_INCLUDE_DIR};${BOOST_MATH_INCLUDE_DIR}")
+             "${KREPP_DIR}/src;${PHMAP_INCLUDE_DIR}")
 # These three belong to the ONE translation unit that includes krepp's headers,
 # not to the targets. Applied target-wide they also rewrote the declaration in
 # src/KSW2Aligner.cpp, which declares minimap2's `unsigned char

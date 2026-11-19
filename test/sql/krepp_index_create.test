@@ -82,13 +82,13 @@ statement error
 SELECT * FROM krepp_index_create('refs', '{TEST_DIR}/idx_k_small',
                                  tree_table := 'backbone', k := 18, h := 11);
 ----
-The minimum allowed k-mer length (-k) is 19
+The k-mer length (-k) must be at least 19
 
 statement error
 SELECT * FROM krepp_index_create('refs', '{TEST_DIR}/idx_h_big',
                                  tree_table := 'backbone', k := 27, h := 16);
 ----
-The maximum number of LSH positions (-h) is 15
+The number of LSH positions (-h) must be at most 15
 
 # The session is still alive - the point of the two cases above.
 
