@@ -116,6 +116,8 @@ make format-fix                    # auto-fix differences
 
 Note: black ships breaking style changes between major versions — pinning to `24.*` is required, not optional.
 
+`make format-check` does not check files under `cmake/`; CI's separate `cmake-format (cmake/)` job does, with cmake-format 0.6.13. See `docs/internals/build-system.md` ("Format `cmake/` yourself").
+
 ## Testing
 
 If a test produces an **incorrect expected value**: DO NOT change the expected value without permission.
