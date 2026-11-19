@@ -174,8 +174,8 @@ SELECT * FROM place_krepp(query_table='reads', index_path='data/no_such_index', 
 ----
 krepp index directory does not exist
 
-# hdist_th has no upper bound in krepp - its CLI checks only NonNegativeNumber -
-# and the library path is memory-unsafe above k. HDistHistLLH sizes binom_coef_k
+# krepp's CLI bounds hdist_th to [0, 31], but its library path does not, and is
+# memory-unsafe above k. HDistHistLLH sizes binom_coef_k
 # to k + 1 and then reads binom_coef_k[i] for i up to hdist_th, and sizes
 # binom_coef_hnk to hdist_th + 1, which wraps to 0 at UINT32_MAX so the next
 # write is out of bounds. Measured before this check existed: hdist_th=64

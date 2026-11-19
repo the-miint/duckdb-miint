@@ -93,8 +93,8 @@ unique_ptr<FunctionData> PlaceKreppTableFunction::Bind(ClientContext &context, T
 		throw BinderException("place_krepp: tau (%d) must not exceed hdist_th (%d)", data->config.tau,
 		                      data->config.hdist_th);
 	}
-	// hdist_th has no upper bound of its own in krepp - the CLI checks only
-	// NonNegativeNumber - and the library path is memory-unsafe above k.
+	// krepp's CLI bounds hdist_th to [0, 31], but the library path this uses
+	// does not, and it is memory-unsafe above k.
 	// HDistHistLLH's constructor (ext/krepp/src/hdhistllh.hpp:28-37) sizes
 	// binom_coef_k to k + 1 and then reads binom_coef_k[i] for i up to
 	// hdist_th, and sizes binom_coef_hnk to hdist_th + 1, which wraps to 0 at

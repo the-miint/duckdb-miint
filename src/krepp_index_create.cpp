@@ -314,19 +314,19 @@ unique_ptr<FunctionData> KreppIndexCreateTableFunction::Bind(ClientContext &cont
 	}
 	data->options.m = ReadUIntParam(input.named_parameters, "m", data->options.m);
 	data->options.r = ReadUIntParam(input.named_parameters, "r", data->options.r);
-	// krepp's CLI bounds -m with CLI::PositiveNumber; the library path this uses
-	// does not, and BaseLSH::validate_configuration checks only w, h and k. So
-	// m = 0 reaches set_nrows(), which computes `hash_size % m` - division by
-	// zero, undefined behaviour whose symptom depends on the CPU. Measured on
-	// arm64 (AArch64 UDIV returns 0 rather than trapping) it does not crash: it
-	// builds an index with zero k-mers at every node and reports status='ok',
-	// which is worse than the SIGFPE the same code would raise on x86_64.
-	// r is deliberately not bounded below - krepp's CLI allows r = 0
-	// (CLI::NonNegativeNumber) and nothing divides by it.
+	// krepp refuses m = 0 and r >= m (LSHF::check_configuration,
+	// ext/krepp/src/lshf.cpp:35-40), but only in IndexMultiple's constructor,
+	// which BuildKreppIndex reaches after every reference has been written out.
+	// Checked here so a bad m or r stops at bind. r is not bounded below - krepp
+	// allows r = 0.
 	if (data->options.m < 1) {
 		throw BinderException("%s: m must be at least 1 (got %u); krepp partitions the LSH space modulo m and "
 		                      "divides by it",
 		                      kCallerName, data->options.m);
+	}
+	if (data->options.r >= data->options.m) {
+		throw BinderException("%s: r must be less than m (got r := %u, m := %u); r is a residue modulo m", kCallerName,
+		                      data->options.r, data->options.m);
 	}
 	data->options.threads = ReadUIntParam(input.named_parameters, "threads", data->options.threads);
 	if (data->options.threads < 1) {
@@ -627,8 +627,9 @@ unique_ptr<GlobalTableFunctionState> KreppIndexCreateTableFunction::InitGlobal(C
 					throw InvalidInputException("%s: reference '%s' has an empty sequence1", kCallerName, name);
 				}
 				// The same alphabet place_krepp holds query sequences to, for
-				// two reasons rather than one. A byte above 127 indexes past
-				// the end of krepp's 128-entry nucleotide table. And a newline
+				// two reasons rather than one. krepp reads a byte above 127 as
+				// N, so it would be indexed as an ambiguous base rather than
+				// reported. And a newline
 				// followed by '>' would open a SECOND FASTA record inside this
 				// reference's file - which krepp does not reject or even
 				// notice: DynHT::fill_table loops over every record in the file

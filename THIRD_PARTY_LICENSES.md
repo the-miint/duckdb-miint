@@ -505,8 +505,9 @@ OF SUCH DAMAGE.
 k-mer LSH index and maximum pseudo-likelihood phylogenetic placement. Used
 by `place_krepp`. Embedded as a statically linked C++ library built from
 11 of the upstream `src/*.cpp` files; `src/krepp.cpp` (the CLI entry point)
-is excluded. miint reads an index built by krepp's own command-line tool.
-Pinned at commit 31205033 (its VERSION string is v0.10.0; not tagged upstream).
+and `src/api.cpp` (its embedding facade) are excluded. miint reads an index
+built by krepp's own command-line tool or by `krepp_index_create`.
+Pinned at tag v0.12.1 (commit 0991266).
 
 - Repository: https://github.com/bo1929/krepp
 - License: MIT
@@ -545,6 +546,7 @@ it is recorded here.
 |---|---|---|
 | `src/hyperloglog.hpp` | [cpp-HyperLogLog](https://github.com/hideo55/cpp-HyperLogLog), Hideaki Ohno | MIT |
 | `src/kdq.h`, `src/kalloc.h`, `src/ketopt.h`, `src/kseq.h`, `src/kvec.h` | [klib](https://github.com/attractivechaos/klib), Attractive Chaos / Heng Li | MIT |
+| `src/minima.hpp` | [Boost.Math](https://github.com/boostorg/math) `boost/math/tools/minima.hpp`, John Maddock, with the Boost dependencies removed (added in krepp v0.12.0) | Boost Software License 1.0 — the file carries the notice inline |
 | `src/MurmurHash3.{cpp,hpp}` | MurmurHash3, Austin Appleby | Public domain — the file states "placed in the public domain. The author hereby disclaims copyright to this source code." (upstream described it as MIT; the vendored file's own header is the record here) |
 
 ---

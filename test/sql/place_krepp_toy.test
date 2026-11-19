@@ -335,8 +335,8 @@ SELECT (SELECT count(*) FROM (SELECT * FROM mixed EXCEPT SELECT * FROM expected)
 # --- non-nucleotide input raises -------------------------------------------
 #
 # A byte outside the IUPAC alphabet means the column does not hold what the
-# caller thinks it holds - a gapped alignment column, or protein. krepp indexes
-# a 128-entry table with a plain char, so a byte above 127 reads out of bounds.
+# caller thinks it holds - a gapped alignment column, or protein. krepp reads
+# any byte outside ACGT as N, so it would place such input as ambiguous bases.
 # Raising beats placing garbage.
 
 statement ok

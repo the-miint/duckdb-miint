@@ -582,8 +582,8 @@ size_t KreppPlacer::place(const std::vector<KreppQuery> &queries, std::vector<Kr
 	// reported. Sequences here come from a SQL column rather than a curated
 	// file, so reject instead.
 	//
-	// Anything shorter than k cannot place; search_mers computes `len - k + 1`
-	// into an unsigned type, so passing those through would underflow.
+	// Anything shorter than k has no k-mer, so it cannot place; it is skipped
+	// with one warning per call rather than searched for nothing.
 	const uint32_t k = impl_->shared->kmer_length();
 	size_t skipped_short = 0;
 	std::vector<const std::string *> sequences;
@@ -650,7 +650,8 @@ size_t KreppPlacer::place(const std::vector<KreppQuery> &queries, std::vector<Kr
 		const std::string &sequence = *sequences[i];
 		const uint64_t length = sequence.size();
 
-		// Fresh per query, exactly as place_sequences does. summarize_matches
+		// Fresh per query. place_sequences builds the two IMers once per batch and
+		// resets them per query, but that reset is private to IBatch. summarize_matches
 		// resets the rest of IBatch's per-query state (nd_closest, mi_closest,
 		// node_to_minfo), which is what makes reusing one IBatch correct.
 		imers_sptr_t imers_or = std::make_shared<IMers>(impl_->shared->impl_->index, length, impl_->config.hdist_th);

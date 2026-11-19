@@ -122,7 +122,7 @@ different hash configuration ('m4-no_frac' vs this build's 'm8-no_frac')
 # k is in no filename but decides the LSH positions just as much, so it is
 # compared against the metadata of a partial already there.
 statement error
-SELECT status FROM krepp_index_create('refs', '{TEST_DIR}/idx_parts', tree_table := 'backbone', k := 29, m := 4, r := 4, frac := false);
+SELECT status FROM krepp_index_create('refs', '{TEST_DIR}/idx_parts', tree_table := 'backbone', k := 29, m := 4, r := 0, frac := false);
 ----
 holds partials built with k := 25, but this build uses k := 29
 
