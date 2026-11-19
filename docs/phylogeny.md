@@ -38,8 +38,8 @@ SELECT * FROM shear_tree('ref_tree', 'keep');
 
 **Parameters:**
 
-- `tree_table` (VARCHAR): Name of a table or view containing tree data in [`read_newick`](reading.md#newick) schema (`node_index`, `parent_index`, `name`, `branch_length`, `edge_id`).
-- `tips_table` (VARCHAR): Name of a table or view with a `name` (VARCHAR) column listing the tip names to keep. Passing the tips as a table (rather than a list literal) keeps the call practical when the kept set is large. Duplicate and `NULL` names are ignored.
+- `tree_table` (VARCHAR): Name of a table or view containing tree data in [`read_newick`](reading.md#newick) schema (`node_index`, `parent_index`, `name`, `branch_length`, `edge_id`), with `name` VARCHAR, BIGINT or UUID and an optional `label` (VARCHAR) column (see "Tree tables" under [Newick](reading.md#newick)).
+- `tips_table` (VARCHAR): Name of a table or view with a `name` column listing the tip names to keep. Passing the tips as a table (rather than a list literal) keeps the call practical when the kept set is large. Duplicate and `NULL` names are ignored. Tips are matched to the tree's names by their text, so `name` may be VARCHAR, BIGINT or UUID whatever the tree's type: BIGINT tips `1, 2` match a VARCHAR tree's `'1', '2'`, with no cast.
 - `collapse` (BOOLEAN, default `true`): How to treat internal nodes left with a single child after pruning.
     - `true` — standard phylogenetic shear: remove single-descendant ancestors and **sum their branch lengths onto the surviving descendant edge**, so tip-to-tip distances are preserved. The lowest common ancestor (LCA) of the kept tips becomes the new root; nodes above it are dropped.
     - `false` — preserve every internal node that lies on a path to a kept tip, with original parent links and branch lengths unchanged (unifurcations retained).
@@ -47,15 +47,16 @@ SELECT * FROM shear_tree('ref_tree', 'keep');
 
 **Output schema:** Same as [`read_newick`](reading.md#newick) (without filepath), reindexed 0-based:
 
-- `node_index` (BIGINT), `name` (VARCHAR), `branch_length` (DOUBLE, nullable), `edge_id` (BIGINT, nullable), `parent_index` (BIGINT, nullable, NULL for root), `is_tip` (BOOLEAN).
+- `node_index` (BIGINT), `name` (the tree's type: VARCHAR, BIGINT or UUID), `branch_length` (DOUBLE, nullable), `edge_id` (BIGINT, nullable), `parent_index` (BIGINT, nullable, NULL for root), `is_tip` (BOOLEAN), and `label` (VARCHAR, nullable) last when the tree has one.
 
 The kept nodes keep their relative `node_index` order, so a tree in `read_newick`'s postorder numbering (see [Newick](reading.md#newick), "Node numbering") is sheared into a tree in postorder numbering.
 
-The schema is `UNION ALL`-compatible with `read_newick` and can be written straight back out with `COPY ... (FORMAT NEWICK)`.
+For a VARCHAR tree without `label`, the schema is `UNION ALL`-compatible with `read_newick`. The result can be written straight back out with `COPY ... (FORMAT NEWICK)`, which writes a node's `label` where it has no `name` and refuses a node with both.
 
 **Behavior / semantics:**
 
 - Only **tip** names are matched — an internal-node label in `tips_table` is treated as missing.
+- Every kept node keeps its `name` and `label`. A node that `collapse := true` removes takes its label with it, as it does its name; `collapse := false` keeps every label on the kept paths. An unnamed node's `name` is `''` in a VARCHAR tree and NULL in a BIGINT or UUID tree.
 - Branch-length summation (collapse mode) treats an unspecified length (NaN → `NULL`) as `0`, but a collapsed chain that is *entirely* unspecified stays `NULL`, so topology-only trees (cladograms) round-trip as cladograms.
 - A collapsed edge keeps the surviving (lower) node's `edge_id`; the `edge_id`s of merged intermediate nodes are dropped.
 - The new root has no incoming edge, so its `branch_length` is `NULL`.
@@ -81,6 +82,7 @@ COPY (
 
 - `tree_table` or `tips_table` does not exist.
 - `tree_table` missing required `node_index` / `parent_index` columns; `tips_table` missing required `name` column.
+- The tree's `name` is not VARCHAR, BIGINT or UUID, or its `label` is not VARCHAR.
 - A requested tip is not a tip in the tree and `ignore_missing := false`.
 - No requested tip matches any tip in the tree.
 
@@ -111,14 +113,14 @@ Resolve every multifurcation (a node with more than two children — a "polytomy
 
 **Parameters:**
 
-- `tree_table` (VARCHAR): Name of a table or view containing tree data in [`read_newick`](reading.md#newick) schema (requires `node_index` and `parent_index`; `name`, `branch_length`, `edge_id` optional).
+- `tree_table` (VARCHAR): Name of a table or view containing tree data in [`read_newick`](reading.md#newick) schema (requires `node_index` and `parent_index`; `name`, `branch_length`, `edge_id` optional), with `name` VARCHAR, BIGINT or UUID and an optional `label` (VARCHAR) column (see "Tree tables" under [Newick](reading.md#newick)).
 
-**Output schema:** Same as [`read_newick`](reading.md#newick) (without filepath), reindexed 0-based: `node_index`, `name`, `branch_length`, `edge_id`, `parent_index`, `is_tip`. The schema is `UNION ALL`-compatible with `read_newick`, can be written back out with `COPY ... (FORMAT NEWICK)`, and feeds directly into `phylo_independent_contrasts`. Original nodes keep their relative order and the new connector nodes are numbered after all of them, so when anything was resolved the output is **not** in `read_newick`'s postorder numbering.
+**Output schema:** Same as [`read_newick`](reading.md#newick) (without filepath), reindexed 0-based: `node_index`, `name` (in the tree's type), `branch_length`, `edge_id`, `parent_index`, `is_tip`, and `label` last when the tree has one. For a VARCHAR tree without `label`, the schema is `UNION ALL`-compatible with `read_newick`. The result can be written back out with `COPY ... (FORMAT NEWICK)` (which writes a node's `label` where it has no `name` and refuses a node with both) and feeds directly into `phylo_independent_contrasts`. Original nodes keep their relative order and the new connector nodes are numbered after all of them, so when anything was resolved the output is **not** in `read_newick`'s postorder numbering.
 
 **Behavior / semantics:**
 
 - A node with `m ≥ 3` children `c0, c1, …, c(m-1)` (in `node_index` order) is resolved into a **deterministic left-comb**: the node keeps `c0` and a new internal node `N1`; `N1` keeps `c1` and `N2`; … ; `N(m-2)` keeps `c(m-2)` and `c(m-1)`. This inserts `m-2` new internal nodes.
-- New connector nodes are **unnamed**, have **branch length `0`**, and no `edge_id`. Because the connectors are zero-length, the original edge lengths and all root-to-tip distances are unchanged.
+- New connector nodes are **unnamed** (`''` in a VARCHAR tree, NULL in a BIGINT or UUID tree), have **branch length `0`**, no `edge_id` and no `label`. Because the connectors are zero-length, the original edge lengths and all root-to-tip distances are unchanged. Every original node keeps its `name` and `label`.
 - Nodes with two or fewer children are left untouched. **Single-child unifurcations are not collapsed** — that is a different operation; use [`shear_tree`](#shear-subset-to-tips) with `collapse := true` for that.
 - A multifurcating root is resolved as well.
 - Child order follows `node_index` (the canonical order `read_newick` assigns, encoding the original Newick left-to-right order); the reader sorts input rows by `node_index`, so the result is reproducible regardless of how the tree relation is physically stored.
@@ -148,6 +150,7 @@ COPY (
 
 - `tree_table` does not exist.
 - `tree_table` missing required `node_index` / `parent_index` columns.
+- The tree's `name` is not VARCHAR, BIGINT or UUID, or its `label` is not VARCHAR.
 
 ### Nearest target tip
 
@@ -669,17 +672,20 @@ Resolve phylogenetic placements into a reference tree, returning a fully resolve
 
 **Parameters:**
 
-- `tree_table` (VARCHAR): Name of a table or view containing tree data in `read_newick` schema (requires `node_index` and `parent_index` columns; `name`, `branch_length`, `edge_id` are optional)
-- `placements_table` (VARCHAR): Name of a table or view containing placement data: `fragment_id` (VARCHAR, BIGINT or UUID, as a `read_id`, so `place_krepp`'s `fragment` of any id type can be used; the placed tip is named with its text), `edge_id` (BIGINT, INTEGER, UBIGINT or UINTEGER), and `like_weight_ratio`, `distal_length` and `pendant_length` (each DOUBLE or FLOAT)
+- `tree_table` (VARCHAR): Name of a table or view containing tree data in `read_newick` schema (requires `node_index` and `parent_index` columns; `name`, `branch_length`, `edge_id` are optional), with `name` VARCHAR, BIGINT or UUID and an optional `label` (VARCHAR) column (see "Tree tables" under [Newick](reading.md#newick))
+- `placements_table` (VARCHAR): Name of a table or view containing placement data: `fragment_id`, `edge_id` (BIGINT, INTEGER, UBIGINT or UINTEGER), and `like_weight_ratio`, `distal_length` and `pendant_length` (each DOUBLE or FLOAT). A fragment's id names the tip it becomes, so its type depends on the tree's `name`:
+    - a VARCHAR tree takes a `fragment_id` of VARCHAR, BIGINT or UUID, as a `read_id`, so `place_krepp`'s `fragment` of any id type can be used; the placed tip is named with its text;
+    - a BIGINT or UUID tree takes a `fragment_id` of its own type.
 
 **Output schema:** Same as [`read_newick`](reading.md#newick) (without filepath):
 
 - `node_index` (BIGINT): 0-based index of node in resolved tree. Original nodes keep their relative order and the nodes created for placements are numbered after all of them, so the output is **not** in `read_newick`'s postorder numbering.
-- `name` (VARCHAR): Node label (placed fragments use their fragment_id as name)
+- `name` (the tree's type: VARCHAR, BIGINT or UUID): Node name (placed fragments use their fragment_id as name; the internal node a placement creates is unnamed: `''` in a VARCHAR tree, NULL in a BIGINT or UUID tree)
 - `branch_length` (DOUBLE, nullable): Branch length
 - `edge_id` (BIGINT, nullable): Edge identifier (NULL for newly created nodes)
 - `parent_index` (BIGINT, nullable): Parent node's node_index (NULL for root)
 - `is_tip` (BOOLEAN): Whether node is a tip/leaf
+- `label` (VARCHAR, nullable), last, when the tree has one: each original node keeps its label; the nodes a placement creates have none
 
 **Behavior:**
 
@@ -690,7 +696,7 @@ Resolve phylogenetic placements into a reference tree, returning a fully resolve
 - Multiple placements on the same edge are sorted by `distal_length` and inserted as a chain
 - Preserves original tip-to-tip distances in the tree
 - Works with both tables and views for either parameter
-- Schema is UNION ALL-compatible with `read_newick`
+- For a VARCHAR tree without `label`, the schema is UNION ALL-compatible with `read_newick`
 
 **Reproducibility:** The resolved tree is a function of the placement rows, not
 of the order they arrive in or of how they hash. Two things secure that.
@@ -758,6 +764,8 @@ WHERE is_tip = true;
 
 - Tree table or placements table does not exist
 - Tree table missing required `node_index` or `parent_index` columns
+- The tree's `name` is not VARCHAR, BIGINT or UUID, or its `label` is not VARCHAR
+- On a BIGINT or UUID tree, a `fragment_id` of another type
 - Placements table missing required columns (`fragment_id`, `edge_id`, `like_weight_ratio`, `distal_length`, `pendant_length`), or a column of another type than listed above, when the query is planned and again when the placements are read
 - Placement references an `edge_id` not present in the tree
 - `distal_length` exceeds the edge's branch length

@@ -554,11 +554,14 @@ Write query results to Newick phylogenetic tree format. Reconstructs a tree from
 
 | Column | Type | Description |
 | --- | --- | --- |
-| `name` | VARCHAR, BIGINT or UUID | Node label, written as its text |
+| `name` | VARCHAR, BIGINT or UUID | Node id, written as its text |
+| `label` | VARCHAR | Text label, written where the node has no `name` |
 | `branch_length` | DOUBLE | Branch length |
 | `edge_id` | BIGINT | Edge identifier for jplace format |
 
 Each column takes only the types listed. A column of another type, such as the INTEGER and DECIMAL that untyped literals like `1` and `0.1` are, is refused when the COPY is planned; cast it in the query (`node_index::BIGINT`). `name` takes the types a `read_id` does. An untyped `NULL` column is cast to the column's type, so `NULL AS name` writes no names.
+
+A node's Newick label is its `name`, or its `label` where the name is NULL or `''`, so a tree with BIGINT or UUID tip ids and text labels on its internal nodes (see "Tree tables" under [Newick](reading.md#newick)) is written whole. A `label` of `''` is no label. Newick holds one label per node, so a node with both a non-empty `name` and a non-empty `label` is an error naming its `node_index`. `read_newick` reads every label back into `name`.
 
 **Parameters:**
 
@@ -627,6 +630,18 @@ COPY (SELECT * FROM my_tree)
 TO 'new_tree.nwk' (FORMAT NEWICK);
 -- Produces: (A:0.1,B:0.2);
 
+-- BIGINT tip ids, with a text label on the internal node
+CREATE TABLE labeled_tree AS
+SELECT * FROM (VALUES
+    (0::BIGINT, NULL::BIGINT, NULL::BIGINT, 'g__Escherichia'),  -- root
+    (1, 0, 101, NULL),                                          -- tip 101
+    (2, 0, 102, NULL)                                           -- tip 102
+) AS t(node_index, parent_index, name, label);
+
+COPY (SELECT * FROM labeled_tree)
+TO 'labeled_tree.nwk' (FORMAT NEWICK);
+-- Produces: (101,102)g__Escherichia;
+
 -- Filter to subtree (advanced - requires careful node_index management)
 -- Note: Ensure parent references remain valid after filtering
 
@@ -659,6 +674,7 @@ TO 'resolved_tree.nwk' (FORMAT NEWICK, PLACEMENTS 'jplace_placements');
 - "invalid parent reference" - parent_index references non-existent node
 - "cycle detected" - Circular parent-child relationship
 - "disconnected nodes" - Nodes not reachable from root
+- "node N has both a name ('...') and a label ('...')" - A node with a non-empty `name` and a non-empty `label`
 
 **Placement-specific errors (when using PLACEMENTS):**
 

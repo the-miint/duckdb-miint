@@ -1259,6 +1259,22 @@ For `((A,B)C,(D,E)F)G;` the indices are A 0, B 1, C 2, D 3, E 4, F 5, G 6. [`she
 keeps this order; `tree_resolve_multifurcations` and `tree_resolve_placement` append the nodes they create, so their
 output is not postorder.
 
+**Tree tables:** the functions that take a tree read it from a table or view in this schema, so a tree can be built in
+SQL or persisted (in Parquet, say) as well as read from Newick.
+
+- `name` holds node ids and may be VARCHAR, BIGINT or UUID, the types a `read_id` takes. The functions that return a
+  tree ([`shear_tree`](phylogeny.md#shear-subset-to-tips),
+  [`tree_resolve_multifurcations`](phylogeny.md#resolve-multifurcations),
+  [`tree_resolve_placement`](phylogeny.md#resolve-placements)) return `name` in the type it came in, so tip ids
+  keep their type. A `name` of another type is an error; cast it.
+- Text labels, such as taxonomy names on internal nodes, go in an optional `label` column (VARCHAR), so that a tree
+  with BIGINT or UUID tip ids can still carry them. The functions that return a tree return `label` when the input
+  has it: each node keeps its label, and the nodes a function creates have none (NULL).
+- An unnamed node's `name` is `''` in a VARCHAR tree, as `read_newick` writes it, and NULL in a BIGINT or UUID tree.
+- Newick holds one label per node, so `read_newick` puts every node's text in `name` and returns no `label`.
+  [`COPY ... (FORMAT NEWICK)`](writing.md#newick) writes a node's `label` where its `name` is NULL or `''`, so a
+  tree written out and read back has its labels in `name`.
+
 **Examples:**
 ```sql
 -- Read a single Newick file
