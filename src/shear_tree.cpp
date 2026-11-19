@@ -58,11 +58,10 @@ std::unordered_set<std::string> ReadTipNames(ClientContext &context, const std::
 
 } // namespace
 
-ShearTreeTableFunction::Data::Data(std::string tree_table, std::string tips_table, bool collapse_, bool ignore_missing_,
-                                   TreeNameColumns tree_columns_)
-    : tree_table_name(std::move(tree_table)), tips_table_name(std::move(tips_table)), collapse(collapse_),
-      ignore_missing(ignore_missing_), tree_columns(std::move(tree_columns_)) {
-	tree_columns.OutputSchema(names, types);
+ShearTreeTableFunction::Data::Data(std::string tree_table, TreeNameColumns tree_columns, std::string tips_table,
+                                   bool collapse_, bool ignore_missing_)
+    : TreeOutputData(std::move(tree_table), std::move(tree_columns)), tips_table_name(std::move(tips_table)),
+      collapse(collapse_), ignore_missing(ignore_missing_) {
 }
 
 unique_ptr<FunctionData> ShearTreeTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
@@ -73,47 +72,22 @@ unique_ptr<FunctionData> ShearTreeTableFunction::Bind(ClientContext &context, Ta
 	RejectCTERelationName(input, tips_table_name);
 
 	// Validate schemas at bind time for early error detection.
-	ValidateTreeTableSchema(context, tree_table_name);
-	auto tree_columns = BindTreeNameColumns(context, "shear_tree", tree_table_name);
+	auto tree_columns = BindTreeOutput(context, "shear_tree", tree_table_name, return_types, names);
 	ValidateTipsTableSchema(context, tips_table_name);
 
 	bool collapse = GetBoolParam(input, "collapse", true);
 	bool ignore_missing = GetBoolParam(input, "ignore_missing", false);
 
-	auto data = duckdb::make_uniq<Data>(std::move(tree_table_name), std::move(tips_table_name), collapse,
-	                                    ignore_missing, std::move(tree_columns));
-
-	for (const auto &name : data->names) {
-		names.emplace_back(name);
-	}
-	for (const auto &type : data->types) {
-		return_types.emplace_back(type);
-	}
-
-	return data;
+	return duckdb::make_uniq<Data>(std::move(tree_table_name), std::move(tree_columns), std::move(tips_table_name),
+	                               collapse, ignore_missing);
 }
 
 unique_ptr<GlobalTableFunctionState> ShearTreeTableFunction::InitGlobal(ClientContext &context,
                                                                         TableFunctionInitInput &input) {
 	auto &bind_data = input.bind_data->Cast<Data>();
-	auto gstate = duckdb::make_uniq<GlobalState>();
+	auto gstate = duckdb::make_uniq<TreeOutputState>();
 
-	std::vector<std::optional<std::string>> labels;
-	auto node_inputs = ReadTreeTable(context, bind_data.tree_table_name, bind_data.tree_columns, labels);
-
-	miint::NewickTree tree;
-	try {
-		tree = miint::NewickTree::build(node_inputs);
-	} catch (const std::exception &e) {
-		throw InvalidInputException("Failed to build tree from '%s': %s", bind_data.tree_table_name, e.what());
-	}
-
-	// The NodeInput vector is not needed once the tree is built; release it
-	// before shearing so it doesn't add to peak memory. shear() itself
-	// allocates an intermediate NodeInput vector plus the result tree, so for
-	// large trees this trims roughly one full copy off the transient peak.
-	node_inputs = {};
-
+	auto tree = BuildTree(context, bind_data.tree_table_name, bind_data.tree_columns, gstate->labels);
 	auto keep_names = ReadTipNames(context, bind_data.tips_table_name);
 
 	miint::NewickTree sheared;
@@ -124,40 +98,13 @@ unique_ptr<GlobalTableFunctionState> ShearTreeTableFunction::InitGlobal(ClientCo
 		throw InvalidInputException("shear_tree failed: %s", e.what());
 	}
 
-	gstate->rows = ReadNewickTableFunction::TreeToRows(sheared);
 	// Each kept node keeps its label; a node the collapse removed takes its label with it
-	if (bind_data.tree_columns.has_label) {
-		gstate->labels.reserve(source.size());
-		for (auto orig : source) {
-			gstate->labels.push_back(std::move(labels[orig]));
-		}
-	}
-
+	gstate->SetRows(sheared, &source);
 	return gstate;
 }
 
-void ShearTreeTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
-	auto &bind_data = data_p.bind_data->Cast<Data>();
-	auto &global_state = data_p.global_state->Cast<GlobalState>();
-
-	if (global_state.current_row_idx >= global_state.rows.size()) {
-		output.SetChildCardinality(0);
-		return;
-	}
-
-	size_t rows_to_output =
-	    std::min<size_t>(STANDARD_VECTOR_SIZE, global_state.rows.size() - global_state.current_row_idx);
-
-	ReadNewickTableFunction::EmitNodeRows(global_state.rows, global_state.current_row_idx, rows_to_output, output, 0,
-	                                      false, "", bind_data.tree_columns.name_type,
-	                                      bind_data.tree_columns.has_label ? &global_state.labels : nullptr);
-
-	global_state.current_row_idx += rows_to_output;
-	output.SetChildCardinality(rows_to_output);
-}
-
 TableFunction ShearTreeTableFunction::GetFunction() {
-	TableFunction tf("shear_tree", {LogicalType::VARCHAR, LogicalType::VARCHAR}, Execute, Bind, InitGlobal);
+	TableFunction tf("shear_tree", {LogicalType::VARCHAR, LogicalType::VARCHAR}, TreeOutputExecute, Bind, InitGlobal);
 	AddNamedParameter(tf, "collapse", LogicalType::BOOLEAN);
 	AddNamedParameter(tf, "ignore_missing", LogicalType::BOOLEAN);
 	return tf;

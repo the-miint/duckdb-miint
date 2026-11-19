@@ -165,16 +165,9 @@ std::vector<miint::NodeInput> ReadTreeTable(ClientContext &context, const std::s
 	return ReadTreeRows(context, table_name, name_proj, LogicalType::VARCHAR, nullptr);
 }
 
-void TreeNameColumns::OutputSchema(std::vector<std::string> &names, std::vector<LogicalType> &types) const {
-	ReadNewickTableFunction::GetSchema(names, types, false);
-	types[1] = name_type;
-	if (has_label) {
-		names.emplace_back("label");
-		types.emplace_back(LogicalType::VARCHAR);
-	}
-}
-
-TreeNameColumns BindTreeNameColumns(ClientContext &context, const char *fn, const std::string &table_name) {
+TreeNameColumns BindTreeOutput(ClientContext &context, const char *fn, const std::string &table_name,
+                               vector<LogicalType> &return_types, vector<Identifier> &names) {
+	ValidateTreeTableSchema(context, table_name);
 	auto info = GetTableOrViewColumns(context, table_name, "Tree table");
 	TreeNameColumns columns;
 	columns.has_name = HasColumn(info, "name");
@@ -189,15 +182,71 @@ TreeNameColumns BindTreeNameColumns(ClientContext &context, const char *fn, cons
 		}
 		columns.has_label = true;
 	}
+
+	std::vector<std::string> schema_names;
+	std::vector<LogicalType> schema_types;
+	ReadNewickTableFunction::GetSchema(schema_names, schema_types, false);
+	schema_types[1] = columns.name_type;
+	if (columns.has_label) {
+		schema_names.emplace_back("label");
+		schema_types.emplace_back(LogicalType::VARCHAR);
+	}
+	for (const auto &name : schema_names) {
+		names.emplace_back(name);
+	}
+	return_types.insert(return_types.end(), schema_types.begin(), schema_types.end());
 	return columns;
 }
 
-std::vector<miint::NodeInput> ReadTreeTable(ClientContext &context, const std::string &table_name,
-                                            const TreeNameColumns &columns,
-                                            std::vector<std::optional<std::string>> &labels) {
+miint::NewickTree BuildTree(ClientContext &context, const std::string &table_name, const TreeNameColumns &columns,
+                            std::vector<std::optional<std::string>> &labels) {
 	labels.clear();
-	return ReadTreeRows(context, table_name, columns.has_name ? "name" : "CAST(NULL AS VARCHAR)", columns.name_type,
-	                    columns.has_label ? &labels : nullptr);
+	// The rows are released on return, before the caller's operation, so they don't add to its peak
+	// memory: an operation that builds a new tree (shear, resolution) holds two trees at once.
+	auto node_inputs = ReadTreeRows(context, table_name, columns.has_name ? "name" : "CAST(NULL AS VARCHAR)",
+	                                columns.name_type, columns.has_label ? &labels : nullptr);
+	// build() keeps the rows' order, so node i is row i, the row labels[i] came from
+	try {
+		return miint::NewickTree::build(node_inputs);
+	} catch (const std::exception &e) {
+		throw InvalidInputException("Failed to build tree from '%s': %s", table_name, e.what());
+	}
+}
+
+void TreeOutputState::SetRows(const miint::NewickTree &tree, const std::vector<uint32_t> *source) {
+	rows = ReadNewickTableFunction::TreeToRows(tree);
+	if (labels.empty()) {
+		return;
+	}
+	if (source) {
+		std::vector<std::optional<std::string>> carried;
+		carried.reserve(source->size());
+		for (auto orig : *source) {
+			carried.push_back(std::move(labels[orig]));
+		}
+		labels = std::move(carried);
+	} else {
+		labels.resize(tree.num_nodes());
+	}
+}
+
+void TreeOutputExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &bind_data = data_p.bind_data->Cast<TreeOutputData>();
+	auto &state = data_p.global_state->Cast<TreeOutputState>();
+
+	if (state.current_row_idx >= state.rows.size()) {
+		output.SetChildCardinality(0);
+		return;
+	}
+
+	size_t rows_to_output = std::min<size_t>(STANDARD_VECTOR_SIZE, state.rows.size() - state.current_row_idx);
+
+	ReadNewickTableFunction::EmitNodeRows(state.rows, state.current_row_idx, rows_to_output, output, 0, false, "",
+	                                      bind_data.tree_columns.name_type,
+	                                      bind_data.tree_columns.has_label ? &state.labels : nullptr);
+
+	state.current_row_idx += rows_to_output;
+	output.SetChildCardinality(rows_to_output);
 }
 
 TreeWithNodeIds BuildTreeAndNodeIds(ClientContext &context, const std::string &table_name) {
