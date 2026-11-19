@@ -331,19 +331,13 @@ SELECT * FROM krepp_index_create('refs', '{TEST_DIR}/idx_neg_m', tree_table := '
 ----
 m must not be negative
 
-# Zero is refused at bind. krepp itself refuses m = 0 only once the references
-# have been written out (LSHF::check_configuration); before v0.11 it did not
-# refuse it at all, and m = 0 reached a `hash_size % m`.
+# m = 0 and r >= m are refused at bind; why there, in krepp_index_create.cpp's
+# Bind. m - 1 is the largest r krepp accepts, and is the control.
 
 statement error
 SELECT * FROM krepp_index_create('refs', '{TEST_DIR}/idx_zero_m', tree_table := 'backbone', m := 0);
 ----
 m must be at least 1
-
-# r must be below m: krepp refuses r >= m too, but only in IndexMultiple's
-# constructor (LSHF::check_configuration), after every reference has been
-# written out. Refusing it here, at bind, stops before that work. m - 1 is the
-# largest r krepp accepts, and is the control.
 
 statement error
 SELECT * FROM krepp_index_create('refs', '{TEST_DIR}/idx_r_eq_m', tree_table := 'backbone', m := 4, r := 4);

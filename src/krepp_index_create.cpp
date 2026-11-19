@@ -315,7 +315,7 @@ unique_ptr<FunctionData> KreppIndexCreateTableFunction::Bind(ClientContext &cont
 	data->options.m = ReadUIntParam(input.named_parameters, "m", data->options.m);
 	data->options.r = ReadUIntParam(input.named_parameters, "r", data->options.r);
 	// krepp refuses m = 0 and r >= m (LSHF::check_configuration,
-	// ext/krepp/src/lshf.cpp:35-40), but only in IndexMultiple's constructor,
+	// ext/krepp/src/lshf.cpp:36-41), but only in IndexMultiple's constructor,
 	// which BuildKreppIndex reaches after every reference has been written out.
 	// Checked here so a bad m or r stops at bind. r is not bounded below - krepp
 	// allows r = 0.
@@ -325,8 +325,8 @@ unique_ptr<FunctionData> KreppIndexCreateTableFunction::Bind(ClientContext &cont
 		                      kCallerName, data->options.m);
 	}
 	if (data->options.r >= data->options.m) {
-		throw BinderException("%s: r must be less than m (got r := %u, m := %u); r is a residue modulo m", kCallerName,
-		                      data->options.r, data->options.m);
+		throw BinderException("%s: r must be less than m (got r := %u, m := %u)", kCallerName, data->options.r,
+		                      data->options.m);
 	}
 	data->options.threads = ReadUIntParam(input.named_parameters, "threads", data->options.threads);
 	if (data->options.threads < 1) {
