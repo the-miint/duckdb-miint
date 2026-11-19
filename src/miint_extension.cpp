@@ -79,6 +79,7 @@
 #endif
 #ifdef MIINT_HAS_HMMER
 #include "HmmerProfile.hpp"
+#include "read_hmm.hpp"
 #endif
 #ifdef MIINT_HAS_KREPP
 #include "krepp_index_create.hpp"
@@ -519,6 +520,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// default handler aborts the process. Also fills HMMER's logsum table,
 	// which HMMER would otherwise fill on first use, racing.
 	miint::hmmer::Initialize();
+	ReadHmmTableFunction::Register(loader);
 #endif
 #ifdef MIINT_HAS_KREPP
 	// Before any krepp call can happen, which is what krepp's set_error_handler

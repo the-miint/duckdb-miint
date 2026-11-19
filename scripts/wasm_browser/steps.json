@@ -157,5 +157,32 @@
     "name": "sourcetracker",
     "sql": "SELECT count(*) || ' rows, md5=' || md5(string_agg(sink_id || ':' || source || ':' || proportion::VARCHAR || ':' || proportion_std::VARCHAR || ':' || map_entries(assignments)::VARCHAR, ';' ORDER BY sink_id, source)) FROM sourcetracker('st_counts', 'st_samples', assignments := true, seed := 42, source_rarefaction_depth := 0, sink_rarefaction_depth := 0)",
     "expect": "6 rows, md5=1a6a4cf3ea0a75f0073785d9c17265cd"
+  },
+  {
+    "name": "setup_read_hmm_m1",
+    "sql": "COPY (SELECT 'HMMER3/e [3.0 | March 2010]\nNAME  M1\nLENG  1\nALPH  amino\nRF    no\nCONS  yes\nCS    no\nMAP   yes\nDATE  Thu Jun 16 11:49:23 2011\nNSEQ  2\nEFFN  2.000000\nCKSUM 0\nSTATS LOCAL MSV       -4.9046  1.46065\nSTATS LOCAL VITERBI   -5.1999  1.46065\nSTATS LOCAL FORWARD   -0.0517  1.46065\nHMM          A        C        D        E        F        G        H        I        K        L        M        N        P        Q        R        S        T        V        W        Y\n            m->m     m->i     m->d     i->m     i->i     d->m     d->d\n  COMPO   0.35624  4.75100  4.29053  4.19828  4.88306  3.48560  5.11004  4.21322  4.22519  4.00099  5.04236  4.13232  4.23379  4.52899  4.38323  3.09073  3.42594  3.72730  6.17838  5.12044\n          2.68618  4.42225  2.77519  2.73123  3.46354  2.40513  3.72494  3.29354  2.67741  2.69355  4.24690  2.90347  2.73739  3.18146  2.89801  2.37887  2.77519  2.98518  4.58477  3.61503\n          0.01467  4.62483  5.34718  0.61958  0.77255  0.00000        *\n      1   0.32372  4.76536  4.42980  4.32857  5.00499  3.55951  5.22620  4.27004  4.37081  4.10495  5.08789  4.22499  4.36948  4.63911  4.51684  3.12947  3.46009  3.76842  6.33337  5.25783      1 A - -\n          2.68618  4.42225  2.77519  2.73123  3.46354  2.40513  3.72494  3.29354  2.67741  2.69355  4.24690  2.90347  2.73739  3.18146  2.89801  2.37887  2.77519  2.98518  4.58477  3.61503\n          0.00990  4.62006        *  0.61958  0.77255  0.00000        *\n//') TO '/tmp/miint_l4_hmm_m1.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\\x01')"
+  },
+  {
+    "name": "read_hmm_m1",
+    "sql": "SELECT concat_ws(' ', hmm_name, hmm_length, alphabet, format, consensus, checksum, msv_mu, coalesce(hmm_accession, 'no-accession')) FROM read_hmm('/tmp/miint_l4_hmm_m1.hmm')",
+    "expect": "M1 1 amino HMMER3/e A 0 -4.9046 no-accession"
+  },
+  {
+    "name": "setup_read_hmm_hmmer2",
+    "sql": "COPY (SELECT 'HMMER2.0  [2.3.2]\nNAME  ecori\nLENG  6\nALPH  Nucleic\nRF    no\nCS    no\nMAP   yes\nCOM   hmmbuild ecori.hmm testsuite/ecori.sto\nNSEQ  2\nDATE  Tue May 18 13:30:52 2010\nCKSUM 3108\nXT      -9967     -1  -1000  -1000  -9967     -1  -9967     -1\nNULT      -1  -9967\nNULE       0      0      0      0\nHMM        A      C      G      T\n         m->m   m->i   m->d   i->m   i->i   d->m   d->d   b->m   m->e\n         -415      *  -2000\n     1   -585   -585   1000   -585     1\n     -      0      0      0      0\n     -    -21  -6672  -7714   -894  -1115   -701  -1378   -415      *\n     2   1000   -585   -585   -585     2\n     -      0      0      0      0\n     -    -21  -6672  -7714   -894  -1115   -701  -1378      *      *\n     3   1000   -585   -585   -585     3\n     -      0      0      0      0\n     -    -21  -6672  -7714   -894  -1115   -701  -1378      *      *\n     4   -585   -585   -585   1000     4\n     -      0      0      0      0\n     -    -21  -6672  -7714   -894  -1115   -701  -1378      *      *\n     5   -585   -585   -585   1000     5\n     -      0      0      0      0\n     -    -21  -6672  -7714   -894  -1115   -701  -1378      *      *\n     6   -585   1000   -585   -585     6\n     -      *      *      *      *\n     -      *      *      *      *      *      *      *      *      0\n//') TO '/tmp/miint_l4_hmm_ecori.hmm2' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\\x01')"
+  },
+  {
+    "name": "read_hmm_hmmer2_stats",
+    "sql": "SELECT concat_ws(' ', hmm_name, format, alphabet, consensus, abs(msv_mu::DOUBLE - -8.4900) <= 0.00005 AND abs(msv_lambda::DOUBLE - 1.84961) <= 0.000005 AND abs(viterbi_mu::DOUBLE - -8.7980) <= 0.00005 AND abs(viterbi_lambda::DOUBLE - 1.84961) <= 0.000005 AND abs(forward_tau::DOUBLE - -0.8137) <= 0.00005 AND abs(forward_lambda::DOUBLE - 1.84961) <= 0.000005) FROM read_hmm('/tmp/miint_l4_hmm_ecori.hmm2')",
+    "expect": "ecori HMMER2.0 DNA gaattc true"
+  },
+  {
+    "name": "setup_read_hmm_bad",
+    "sql": "COPY (SELECT 'HMMER3/e [3.0 | March 2010]\nNAME  M1\nLENG  1\nALPH  custom\nRF    no\nCONS  yes\nCS    no\nMAP   yes\nDATE  Thu Jun 16 11:49:23 2011\nNSEQ  2\nEFFN  2.000000\nCKSUM 0\nSTATS LOCAL MSV       -4.9046  1.46065\nSTATS LOCAL VITERBI   -5.1999  1.46065\nSTATS LOCAL FORWARD   -0.0517  1.46065\nHMM          A        C        D        E        F        G        H        I        K        L        M        N        P        Q        R        S        T        V        W        Y\n            m->m     m->i     m->d     i->m     i->i     d->m     d->d\n  COMPO   0.35624  4.75100  4.29053  4.19828  4.88306  3.48560  5.11004  4.21322  4.22519  4.00099  5.04236  4.13232  4.23379  4.52899  4.38323  3.09073  3.42594  3.72730  6.17838  5.12044\n          2.68618  4.42225  2.77519  2.73123  3.46354  2.40513  3.72494  3.29354  2.67741  2.69355  4.24690  2.90347  2.73739  3.18146  2.89801  2.37887  2.77519  2.98518  4.58477  3.61503\n          0.01467  4.62483  5.34718  0.61958  0.77255  0.00000        *\n      1   0.32372  4.76536  4.42980  4.32857  5.00499  3.55951  5.22620  4.27004  4.37081  4.10495  5.08789  4.22499  4.36948  4.63911  4.51684  3.12947  3.46009  3.76842  6.33337  5.25783      1 A - -\n          2.68618  4.42225  2.77519  2.73123  3.46354  2.40513  3.72494  3.29354  2.67741  2.69355  4.24690  2.90347  2.73739  3.18146  2.89801  2.37887  2.77519  2.98518  4.58477  3.61503\n          0.00990  4.62006        *  0.61958  0.77255  0.00000        *\n//') TO '/tmp/miint_l4_hmm_bad.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\\x01')"
+  },
+  {
+    "name": "read_hmm_error",
+    "sql": "SELECT * FROM read_hmm('/tmp/miint_l4_hmm_bad.hmm')",
+    "expect_error": "read_hmm: /tmp/miint_l4_hmm_bad.hmm: model 1 (line 4): Unrecognized alphabet type custom"
   }
 ]

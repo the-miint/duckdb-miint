@@ -1,0 +1,544 @@
+# name: test/sql/read_hmm.test
+# description: read_hmm reads profile HMMs, one row per model, and fails loudly on a malformed model
+# group: [sql]
+
+require miint
+
+# The fixtures are HMMER's and Easel's own model files (data/hmmer/README.md). Each expected
+# header value is as written in the file, and is checked field by field: a query turns a
+# model's row into (field, value) pairs, every value as VARCHAR, so a FLOAT prints as the
+# shortest decimal that reads back as it, and is compared exactly. A consensus is the file's
+# CONS column. HMMER computes two kinds of value as it reads a model, and for those the
+# expected value is what the fork's hmmconvert prints for the same file: the consensus of a
+# model with no CONS column (HMMER3/b and HMMER2.0 here), and a HMMER2 model's statistics,
+# compared within the precision hmmconvert prints them with.
+
+# --- Errors: arguments ---
+
+statement error
+SELECT * FROM read_hmm('data/hmmer/does_not_exist.hmm');
+----
+File not found: data/hmmer/does_not_exist.hmm
+
+statement error
+SELECT * FROM read_hmm(NULL);
+----
+read_hmm: first argument cannot be NULL
+
+statement error
+SELECT * FROM read_hmm(42);
+----
+read_hmm: first argument must be VARCHAR or VARCHAR[]
+
+statement error
+SELECT * FROM read_hmm('-');
+----
+read_hmm: stdin is not supported
+
+statement error
+SELECT * FROM read_hmm([]::VARCHAR[]);
+----
+read_hmm: at least one file path must be provided
+
+# --- Schema ---
+
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM read_hmm('data/hmmer/XYPPX.hmm'));
+----
+hmm_name	VARCHAR
+hmm_accession	VARCHAR
+hmm_description	VARCHAR
+hmm_length	BIGINT
+alphabet	VARCHAR
+format	VARCHAR
+max_length	BIGINT
+sequence_count	BIGINT
+effective_sequence_count	FLOAT
+checksum	UINTEGER
+gathering_sequence	FLOAT
+gathering_domain	FLOAT
+trusted_sequence	FLOAT
+trusted_domain	FLOAT
+noise_sequence	FLOAT
+noise_domain	FLOAT
+consensus	VARCHAR
+msv_mu	FLOAT
+msv_lambda	FLOAT
+viterbi_mu	FLOAT
+viterbi_lambda	FLOAT
+forward_tau	FLOAT
+forward_lambda	FLOAT
+
+# --- Every column of each tutorial model ---
+
+# No accession, description, MAXL or cutoffs: each is NULL.
+query TT
+FROM (SELECT COLUMNS(*)::VARCHAR FROM read_hmm('data/hmmer/globins4.hmm.gz'))
+UNPIVOT INCLUDE NULLS (value FOR field IN (COLUMNS(*)));
+----
+hmm_name	globins4
+hmm_accession	NULL
+hmm_description	NULL
+hmm_length	149
+alphabet	amino
+format	HMMER3/f
+max_length	NULL
+sequence_count	4
+effective_sequence_count	0.964844
+checksum	2027839109
+gathering_sequence	NULL
+gathering_domain	NULL
+trusted_sequence	NULL
+trusted_domain	NULL
+noise_sequence	NULL
+noise_domain	NULL
+consensus	vvLseaektkvkavWakveadveesGadiLvrlfkstPatqefFekFkdLstedelkksadvkkHgkkvldAlsdalakldekleaklkdLselHakklkvdpkyfkllsevlvdvlaarlpkeftadvqaaleKllalvakllaskYk
+msv_mu	-9.9014
+msv_lambda	0.70957
+viterbi_mu	-10.7224
+viterbi_lambda	0.70957
+forward_tau	-4.1637
+forward_lambda	0.70957
+
+# Pfam models with all three cutoffs.
+query TT
+FROM (SELECT COLUMNS(*)::VARCHAR FROM read_hmm('data/hmmer/fn3.hmm.gz'))
+UNPIVOT INCLUDE NULLS (value FOR field IN (COLUMNS(*)));
+----
+hmm_name	fn3
+hmm_accession	PF00041.13
+hmm_description	Fibronectin type III domain
+hmm_length	86
+alphabet	amino
+format	HMMER3/f
+max_length	NULL
+sequence_count	106
+effective_sequence_count	11.415833
+checksum	3564431818
+gathering_sequence	8.0
+gathering_domain	7.2
+trusted_sequence	8.0
+trusted_domain	7.2
+noise_sequence	7.9
+noise_domain	7.9
+consensus	psaPenlsvsevtstsltlsWsppkdgggpitgYeveyqekgegeewqevtvprtttsvtltgLepgteYefrVqavngagegpes
+msv_mu	-9.4043
+msv_lambda	0.71847
+viterbi_mu	-9.7737
+viterbi_lambda	0.71847
+forward_tau	-3.8341
+forward_lambda	0.71847
+
+query TT
+FROM (SELECT COLUMNS(*)::VARCHAR FROM read_hmm('data/hmmer/Pkinase.hmm.gz'))
+UNPIVOT INCLUDE NULLS (value FOR field IN (COLUMNS(*)));
+----
+hmm_name	Pkinase
+hmm_accession	PF00069.17
+hmm_description	Protein kinase domain
+hmm_length	260
+alphabet	amino
+format	HMMER3/f
+max_length	NULL
+sequence_count	54
+effective_sequence_count	3.358521
+checksum	3106786190
+gathering_sequence	70.3
+gathering_domain	70.3
+trusted_sequence	70.3
+trusted_domain	70.3
+noise_sequence	70.2
+noise_domain	70.2
+consensus	yelleklGsGsfGkVykakkkktgkkvAvKilkkeeekskkektavrElkilkklsHpnivkllevfetkdelylvleyveggdlfdllkkegklseeeikkialqilegleylHsngiiHrDLKpeNiLldkkgevkiaDFGlakkleksseklttlvgtreYmAPEvllkakeytkkvDvWslGvilyelltgklpfsgeseedqleliekilkkkleedepkssskseelkdlikkllekdpakRltaeeilkhpwl
+msv_mu	-10.7215
+msv_lambda	0.70254
+viterbi_mu	-11.6541
+viterbi_lambda	0.70254
+forward_tau	-5.2305
+forward_lambda	0.70254
+
+# A DNA model with MAXL.
+query TT
+FROM (SELECT COLUMNS(*)::VARCHAR FROM read_hmm('data/hmmer/MADE1.hmm.gz'))
+UNPIVOT INCLUDE NULLS (value FOR field IN (COLUMNS(*)));
+----
+hmm_name	MADE1
+hmm_accession	DF0000629.2
+hmm_description	MADE1 (MAriner Derived Element 1), a TcMar-Mariner DNA transposon
+hmm_length	80
+alphabet	DNA
+format	HMMER3/f
+max_length	426
+sequence_count	1997
+effective_sequence_count	3.911818
+checksum	3015610723
+gathering_sequence	NULL
+gathering_domain	NULL
+trusted_sequence	NULL
+trusted_domain	NULL
+noise_sequence	NULL
+noise_domain	NULL
+consensus	ttaggttggtgcaaaagtaattgcggtttttgccattacttttaatggcaaaaaccgcaattacttttgcaccaacctaa
+msv_mu	-8.5786
+msv_lambda	0.71858
+viterbi_mu	-9.3632
+viterbi_lambda	0.71858
+forward_tau	-3.4823
+forward_lambda	0.71858
+
+# --- Files of several models: a row each, in the file's order ---
+
+query TTT
+SELECT hmm_name, format, alphabet FROM read_hmm('data/hmmer/example.hmm.gz');
+----
+US2	HMMER3/b	amino
+Glyco_transf_28	HMMER3/b	amino
+
+# HMMER3/b has no CONS column, so HMMER computes each consensus.
+query TT
+FROM (SELECT COLUMNS(*)::VARCHAR FROM read_hmm('data/hmmer/example.hmm.gz') WHERE hmm_name = 'US2')
+UNPIVOT INCLUDE NULLS (value FOR field IN (COLUMNS(*)));
+----
+hmm_name	US2
+hmm_accession	PF02476.8
+hmm_description	US2 family
+hmm_length	126
+alphabet	amino
+format	HMMER3/b
+max_length	NULL
+sequence_count	15
+effective_sequence_count	2.047119
+checksum	2472745667
+gathering_sequence	25.0
+gathering_domain	25.0
+trusted_sequence	30.9
+trusted_domain	30.0
+noise_sequence	19.5
+noise_domain	18.8
+consensus	lLnsgiignrpyhLWvlGAADLCkpvlelipgpkRlvavkvpdawagksWalPdelkplltvewtpfeeaalskleallsakrlvYavvdpealreeaslrppepakrseresskeapsraaccis
+msv_mu	-9.7952
+msv_lambda	0.71252
+viterbi_mu	-10.9655
+viterbi_lambda	0.71252
+forward_tau	-3.6497
+forward_lambda	0.71252
+
+query TT
+FROM (SELECT COLUMNS(*)::VARCHAR FROM read_hmm('data/hmmer/example.hmm.gz') WHERE hmm_name = 'Glyco_transf_28')
+UNPIVOT INCLUDE NULLS (value FOR field IN (COLUMNS(*)));
+----
+hmm_name	Glyco_transf_28
+hmm_accession	PF03033.13
+hmm_description	Glycosyltransferase family 28 N-terminal domain
+hmm_length	139
+alphabet	amino
+format	HMMER3/b
+max_length	NULL
+sequence_count	43
+effective_sequence_count	7.057312
+checksum	3380827595
+gathering_sequence	26.2
+gathering_domain	26.2
+trusted_sequence	26.2
+trusted_domain	26.2
+noise_sequence	26.1
+noise_domain	26.1
+consensus	vvlaggGTrGdvePavAlareLqrrGheVrlatppgleefveeagleavpigpdvklwakleslktlkelaeglkalrkakeilkeakpdvvvgfggyvadlaliaallagipanvaEqngipglvnkllprrangvlv
+msv_mu	-10.0618
+msv_lambda	0.71071
+viterbi_mu	-10.4218
+viterbi_lambda	0.71071
+forward_tau	-4.4128
+forward_lambda	0.71071
+
+query TTT
+SELECT hmm_name, format, alphabet FROM read_hmm('data/hmmer/example.hmm2.gz');
+----
+Orn_DAP_Arg_deC	HMMER2.0	amino
+NIF3	HMMER2.0	amino
+
+# HMMER2 has no EFFN or MAXL, and HMMER ignores its CKSUM, which is a different checksum:
+# all three are NULL. Every HMMER2 consensus is computed. The statistics are checked below.
+query TT
+FROM (SELECT COLUMNS(* EXCLUDE (msv_mu, msv_lambda, viterbi_mu, viterbi_lambda, forward_tau, forward_lambda))::VARCHAR
+      FROM read_hmm('data/hmmer/example.hmm2.gz') WHERE hmm_name = 'Orn_DAP_Arg_deC')
+UNPIVOT INCLUDE NULLS (value FOR field IN (COLUMNS(*)));
+----
+hmm_name	Orn_DAP_Arg_deC
+hmm_accession	PF00278.15
+hmm_description	Pyridoxal-dependent decarboxylase, C-terminal sheet domain
+hmm_length	123
+alphabet	amino
+format	HMMER2.0
+max_length	NULL
+sequence_count	105
+effective_sequence_count	NULL
+checksum	NULL
+gathering_sequence	20.1
+gathering_domain	20.1
+trusted_sequence	20.4
+trusted_domain	20.1
+noise_sequence	19.8
+noise_domain	20.0
+consensus	tLvtnVigvkerggdrkldlnerlafvyylddGvygslpdpalydalhpilpvsrldeeptepvtlaGPtCdsgDvlarFdvsLPlHlelevGDllvffdaGAYteslasnFNgfprpaeVlv
+
+query TT
+FROM (SELECT COLUMNS(* EXCLUDE (msv_mu, msv_lambda, viterbi_mu, viterbi_lambda, forward_tau, forward_lambda))::VARCHAR
+      FROM read_hmm('data/hmmer/example.hmm2.gz') WHERE hmm_name = 'NIF3')
+UNPIVOT INCLUDE NULLS (value FOR field IN (COLUMNS(*)));
+----
+hmm_name	NIF3
+hmm_accession	PF01784.11
+hmm_description	NIF3 (NGG1p interacting factor 3)
+hmm_length	350
+alphabet	amino
+format	HMMER2.0
+max_length	NULL
+sequence_count	122
+effective_sequence_count	NULL
+checksum	NULL
+gathering_sequence	23.4
+gathering_domain	23.4
+trusted_sequence	24.1
+trusted_domain	24.0
+noise_sequence	22.0
+noise_domain	23.3
+consensus	eiieileelaPpslAedwDnvGLqvGapdpegkrevkkilvaLDaTeevieeAielgadlIitHHPliFkkplkritgddpkgrlikkLiknnIslYsaHTNlDaapglGvNdwLAelLvGLesniepldpskaekyyKlvvFVPeheVrAlsaGAGiGnYshCtfsvGtGtFrPEGanPfiGeGlErVeERiEtivpqllkvikallaHPYEEvAydlyplenkgegeGlGriGeLpeplsleelakrvkekLglegilrpvlrvvdldkkikkVAvcgGSGgdslieeAkaaGAlDlyiTGdlkyHdaldAkelGiavIdaGHyatErpglkaLaelLkekgfddaev
+
+# A HMMER2 model's statistics are calibrated by HMMER as it reads the model, as hmmconvert
+# does. Each must be within the precision hmmconvert prints it with: mu and tau to 4
+# decimals, lambda to 5. This runs HMMER's SIMD filters, on whichever implementation the
+# build uses.
+query TT
+SELECT r.hmm_name,
+       abs(r.msv_mu::DOUBLE - e.msv_mu) <= 0.00005 AND abs(r.msv_lambda::DOUBLE - e.msv_lambda) <= 0.000005
+       AND abs(r.viterbi_mu::DOUBLE - e.viterbi_mu) <= 0.00005 AND abs(r.viterbi_lambda::DOUBLE - e.viterbi_lambda) <= 0.000005
+       AND abs(r.forward_tau::DOUBLE - e.forward_tau) <= 0.00005 AND abs(r.forward_lambda::DOUBLE - e.forward_lambda) <= 0.000005
+FROM read_hmm(['data/hmmer/example.hmm2.gz', 'data/hmmer/ecori.hmm2']) r
+JOIN (VALUES ('Orn_DAP_Arg_deC', -9.0990, 0.70304, -9.4619, 0.70304, -5.4947, 0.70304),
+             ('NIF3', -10.4048, 0.69634, -10.7694, 0.69634, -6.5945, 0.69634),
+             ('ecori', -8.4900, 1.84961, -8.7980, 1.84961, -0.8137, 1.84961))
+     e(hmm_name, msv_mu, msv_lambda, viterbi_mu, viterbi_lambda, forward_tau, forward_lambda)
+ON r.hmm_name = e.hmm_name
+ORDER BY r.hmm_name;
+----
+NIF3	true
+Orn_DAP_Arg_deC	true
+ecori	true
+
+# HMMER's own programs refuse a file whose alphabet changes from one model to the next.
+# read_hmm reads each model on its own, so a file may mix alphabets and format versions.
+statement ok
+COPY (SELECT rtrim(x.content || h2.content, chr(10))
+      FROM read_text('data/hmmer/XYPPX.hmm') x, read_text('data/hmmer/ecori.hmm2') h2)
+TO '{TEST_DIR}/mixed.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+query TTTT
+SELECT hmm_name, format, alphabet, consensus FROM read_hmm('{TEST_DIR}/mixed.hmm');
+----
+XYPPX	HMMER3/e	amino	GYPPq
+ecori	HMMER2.0	DNA	gaattc
+
+# --- Inputs ---
+
+# gzip is read transparently and changes nothing.
+query I
+SELECT count(*) FROM (
+    SELECT * FROM read_hmm('data/hmmer/XYPPX.hmm')
+    EXCEPT
+    SELECT * FROM read_hmm('data/hmmer/XYPPX.hmm.gz'));
+----
+0
+
+# Nor do Windows line endings.
+statement ok
+COPY (SELECT rtrim(replace(content, chr(10), chr(13) || chr(10)), chr(10)) FROM read_text('data/hmmer/XYPPX.hmm'))
+TO '{TEST_DIR}/crlf.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+query I
+SELECT count(*) FROM (
+    SELECT * FROM read_hmm('{TEST_DIR}/crlf.hmm')
+    EXCEPT
+    SELECT * FROM read_hmm('data/hmmer/XYPPX.hmm'));
+----
+0
+
+query TI
+SELECT replace(filepath, '\', '/'), count(*)
+FROM read_hmm('data/hmmer/XYPPX.hmm*', include_filepath := true)
+GROUP BY ALL ORDER BY 1;
+----
+data/hmmer/XYPPX.hmm	1
+data/hmmer/XYPPX.hmm.gz	1
+
+# globins4, fn3, Pkinase, MADE1, two in example.hmm.gz, and XYPPX.
+query I
+SELECT count(*) FROM read_hmm('data/hmmer/*.hmm.gz');
+----
+7
+
+query I
+SELECT count(*) FROM read_hmm(['data/hmmer/example.hmm.gz', 'data/hmmer/example.hmm2.gz', 'data/hmmer/ecori.hmm2']);
+----
+5
+
+# The scan has a row estimate that grows with the files, not DuckDB's default of one row (why:
+# EstimateFileScanCardinality in src/include/table_function_common.hpp).
+query II
+EXPLAIN SELECT * FROM read_hmm('data/hmmer/*.gz');
+----
+physical_plan	<!REGEX>:.*~1 row.*
+
+# A file with no model in it, empty or holding only blank and comment lines, gives no rows.
+# HMMER reads a line starting with # as a comment, and so does read_hmm.
+statement ok
+COPY (SELECT 'unused' AS line WHERE false) TO '{TEST_DIR}/empty.hmm'
+(FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement ok
+COPY (SELECT chr(10) || '   ' || chr(10) || '# no models here') TO '{TEST_DIR}/blank.hmm'
+(FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+query II
+SELECT (SELECT count(*) FROM read_hmm('{TEST_DIR}/empty.hmm')), (SELECT count(*) FROM read_hmm('{TEST_DIR}/blank.hmm'));
+----
+0	0
+
+# Blank and comment lines after the last model are not a model either.
+statement ok
+COPY (SELECT content || chr(10) || '# end of models' || chr(10) FROM read_text('data/hmmer/XYPPX.hmm'))
+TO '{TEST_DIR}/trailing_comment.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+query I
+SELECT count(*) FROM read_hmm('{TEST_DIR}/trailing_comment.hmm');
+----
+1
+
+# --- Malformed models ---
+
+# Each is written here from XYPPX.hmm, or ecori.hmm2 for HMMER2, so the defect sits beside its
+# assertion; COPY ends the text with one newline. Every message names the function, the file,
+# the model's number in the file and the line HMMER stopped at, then HMMER's own message.
+
+# A cutoff line before ALPH: HMMER needs the alphabet to know how many values the line holds.
+statement ok
+COPY (SELECT rtrim(replace(content, 'ALPH  amino', 'GA    25.00 25.00' || chr(10) || 'ALPH  amino'), chr(10))
+      FROM read_text('data/hmmer/XYPPX.hmm'))
+TO '{TEST_DIR}/ga_before_alph.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT * FROM read_hmm('{TEST_DIR}/ga_before_alph.hmm');
+----
+read_hmm: {TEST_DIR}/ga_before_alph.hmm: model 1 (line 6): ALPH must precede GA
+
+statement ok
+COPY (SELECT rtrim(replace(content, 'ALPH  amino', 'TC    25.00 25.00' || chr(10) || 'ALPH  amino'), chr(10))
+      FROM read_text('data/hmmer/XYPPX.hmm'))
+TO '{TEST_DIR}/tc_before_alph.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT * FROM read_hmm('{TEST_DIR}/tc_before_alph.hmm');
+----
+read_hmm: {TEST_DIR}/tc_before_alph.hmm: model 1 (line 6): ALPH must precede TC
+
+statement ok
+COPY (SELECT rtrim(replace(content, 'ALPH  amino', 'NC    25.00 25.00' || chr(10) || 'ALPH  amino'), chr(10))
+      FROM read_text('data/hmmer/XYPPX.hmm'))
+TO '{TEST_DIR}/nc_before_alph.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT * FROM read_hmm('{TEST_DIR}/nc_before_alph.hmm');
+----
+read_hmm: {TEST_DIR}/nc_before_alph.hmm: model 1 (line 6): ALPH must precede NC
+
+# An alphabet Easel has no name for.
+statement ok
+COPY (SELECT rtrim(replace(content, 'ALPH  amino', 'ALPH  custom'), chr(10)) FROM read_text('data/hmmer/XYPPX.hmm'))
+TO '{TEST_DIR}/alph_custom.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT * FROM read_hmm('{TEST_DIR}/alph_custom.hmm');
+----
+read_hmm: {TEST_DIR}/alph_custom.hmm: model 1 (line 6): Unrecognized alphabet type custom
+
+# No LENG line: found at the HMM line, where the header ends.
+statement ok
+COPY (SELECT rtrim(replace(content, 'LENG  5' || chr(10), ''), chr(10)) FROM read_text('data/hmmer/XYPPX.hmm'))
+TO '{TEST_DIR}/no_leng.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT * FROM read_hmm('{TEST_DIR}/no_leng.hmm');
+----
+read_hmm: {TEST_DIR}/no_leng.hmm: model 1 (line 20): No LENG found for HMM (or LENG <= 0)
+
+# A HMMER2 model with no NULE line, whose null model its scores are relative to.
+statement ok
+COPY (SELECT rtrim(regexp_replace(content, 'NULE[^\n]*\n', ''), chr(10)) FROM read_text('data/hmmer/ecori.hmm2'))
+TO '{TEST_DIR}/no_nule.hmm2' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT * FROM read_hmm('{TEST_DIR}/no_nule.hmm2');
+----
+read_hmm: {TEST_DIR}/no_nule.hmm2: model 1 (line 14): No NULE line (null model emissions)
+
+# An MM line, which HMMER3/f introduced, in a HMMER3/e model: HMMER would read no mask column.
+statement ok
+COPY (SELECT rtrim(replace(content, 'LENG  5', 'MM    yes' || chr(10) || 'LENG  5'), chr(10)) FROM read_text('data/hmmer/XYPPX.hmm'))
+TO '{TEST_DIR}/mm_before_3f.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT * FROM read_hmm('{TEST_DIR}/mm_before_3f.hmm');
+----
+read_hmm: {TEST_DIR}/mm_before_3f.hmm: model 1 (line 5): MM line in a file older than HMMER3/f
+
+# A last model cut off before its closing //: an error, not a model dropped.
+statement ok
+COPY (SELECT rtrim(content || regexp_replace(content, '//\n$', ''), chr(10)) FROM read_text('data/hmmer/XYPPX.hmm'))
+TO '{TEST_DIR}/truncated.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT * FROM read_hmm('{TEST_DIR}/truncated.hmm');
+----
+read_hmm: {TEST_DIR}/truncated.hmm: model 2 (line 81): Premature end of data: missing //?
+
+# A file that is not a profile at all.
+statement ok
+COPY (SELECT '>seq1 not a model' || chr(10) || 'ACGT') TO '{TEST_DIR}/not_a_model.hmm'
+(FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT * FROM read_hmm('{TEST_DIR}/not_a_model.hmm');
+----
+read_hmm: {TEST_DIR}/not_a_model.hmm: model 1 (line 1): Format tag is '>seq1': unrecognized (expected HMMER3/a to HMMER3/f, or HMMER2.0)
+
+# A bad second model: the model number and the line count the whole file, not the model.
+statement ok
+COPY (SELECT rtrim(content || replace(content, 'ALPH  amino', 'ALPH  custom'), chr(10)) FROM read_text('data/hmmer/XYPPX.hmm'))
+TO '{TEST_DIR}/second_bad.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT * FROM read_hmm('{TEST_DIR}/second_bad.hmm');
+----
+read_hmm: {TEST_DIR}/second_bad.hmm: model 2 (line 47): Unrecognized alphabet type custom
+
+# More models than one output vector holds (2048), and a defect past the first vector, so the
+# model number and line are checked where a per-chunk counter would reset. XYPPX.hmm is 41
+# lines: model 2050 starts at line 2049 * 41 + 1, and its ALPH line is its sixth.
+statement ok
+COPY (SELECT rtrim(string_agg(content, '' ORDER BY i), chr(10)) FROM read_text('data/hmmer/XYPPX.hmm'), range(2100) t(i))
+TO '{TEST_DIR}/many.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+query III
+SELECT count(*), count(DISTINCT hmm_name), sum(hmm_length) FROM read_hmm('{TEST_DIR}/many.hmm');
+----
+2100	1	10500
+
+statement ok
+COPY (SELECT rtrim(string_agg(CASE WHEN i = 2049 THEN replace(content, 'ALPH  amino', 'ALPH  custom') ELSE content END, '' ORDER BY i), chr(10))
+      FROM read_text('data/hmmer/XYPPX.hmm'), range(2100) t(i))
+TO '{TEST_DIR}/many_damaged.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT count(*) FROM read_hmm('{TEST_DIR}/many_damaged.hmm');
+----
+read_hmm: {TEST_DIR}/many_damaged.hmm: model 2050 (line 84015): Unrecognized alphabet type custom

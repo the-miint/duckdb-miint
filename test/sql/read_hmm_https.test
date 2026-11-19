@@ -1,0 +1,23 @@
+# name: test/sql/read_hmm_https.test
+# description: read_hmm reads profile HMMs over HTTP, plain or gzipped
+# group: [sql]
+
+# `make test` skips this file because httpfs is not linked into unittest;
+# run_tests.sh runs it in its httpfs pass.
+
+require miint
+
+require httpfs
+
+require-env MIINT_HTTPS_TEST_URL
+
+query TTI
+SELECT hmm_name, hmm_accession, hmm_length FROM read_hmm('{MIINT_HTTPS_TEST_URL}/hmmer/XYPPX.hmm');
+----
+XYPPX	PF02162.8	5
+
+query TI
+SELECT hmm_name, hmm_length FROM read_hmm('{MIINT_HTTPS_TEST_URL}/hmmer/example.hmm.gz');
+----
+US2	126
+Glyco_transf_28	139

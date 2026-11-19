@@ -199,7 +199,7 @@ endif()
 miint_git_version(HMMER ext/hmmer)
 miint_git_version(EASEL ext/hmmer/easel)
 list(APPEND MIINT_DEFINITIONS MIINT_HAS_HMMER)
-list(APPEND MIINT_EXTENSION_SOURCES src/HmmerProfile.cpp)
+list(APPEND MIINT_EXTENSION_SOURCES src/HmmerProfile.cpp src/read_hmm.cpp)
 list(APPEND MIINT_TEST_SOURCES src/HmmerProfile.cpp
      test/cpp/test_HmmerConfig.cpp test/cpp/test_HmmerProfile.cpp)
 # Linked by archive path, not target name: miint_extension goes into DuckDB's
