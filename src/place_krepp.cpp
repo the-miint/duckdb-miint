@@ -82,27 +82,27 @@ unique_ptr<FunctionData> PlaceKreppTableFunction::Bind(ClientContext &context, T
 
 	// Both of these re-do a validation krepp performs in its CLI layer, which
 	// this build excludes (ext/krepp/src/krepp.hpp holds
-	// validate_configuration_place, ext/krepp/src/krepp.cpp:844 the --chisq
+	// validate_configuration_place, ext/krepp/src/krepp.cpp:420 the --chisq
 	// CLI::PositiveNumber check). Without them the library path is entered with
 	// arguments krepp itself would have refused.
 	//
 	// tau > hdist_th is memory-unsafe, not merely useless: Minfo sizes
-	// hdisthist_v to hdist_th + 1 (query.hpp:144-146) and get_leq_tau sums
-	// hdisthist_v[0..tau] with unchecked operator[] (query.hpp:200-206).
+	// hdisthist_v to hdist_th + 1 (query.hpp:320-322) and get_leq_tau sums
+	// hdisthist_v[0..tau] with unchecked operator[] (query.hpp:358-364).
 	if (data->config.hdist_th < data->config.tau) {
 		throw BinderException("place_krepp: tau (%d) must not exceed hdist_th (%d)", data->config.tau,
 		                      data->config.hdist_th);
 	}
-	// hdist_th has no upper bound of its own in krepp - the CLI checks only
-	// NonNegativeNumber - and the library path is memory-unsafe above k.
-	// HDistHistLLH's constructor (ext/krepp/src/hdhistllh.hpp:58-67) sizes
+	// krepp's CLI bounds hdist_th to [0, 31], but the library path this uses
+	// does not, and it is memory-unsafe above k.
+	// HDistHistLLH's constructor (ext/krepp/src/hdhistllh.hpp:28-37) sizes
 	// binom_coef_k to k + 1 and then reads binom_coef_k[i] for i up to
 	// hdist_th, and sizes binom_coef_hnk to hdist_th + 1, which wraps to 0 at
 	// UINT32_MAX and makes the very next write out of bounds. Measured: 64
 	// returns a different row count off the end of the array, and 4294967295
 	// segfaults the DuckDB process outright.
 	//
-	// 31 is krepp's own hard maximum for k (krepp.hpp:72-74 refuses to build an
+	// 31 is krepp's own hard maximum for k (lshf.cpp:27-29 refuses to build an
 	// index above it), so nothing past that can ever be valid and it is
 	// rejected here rather than after loading what may be tens of gigabytes.
 	// The exact bound needs the index's k and is applied in InitGlobal.
