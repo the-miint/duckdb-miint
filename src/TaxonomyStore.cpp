@@ -94,12 +94,122 @@ const std::vector<std::string> &DefaultBadNameTokens() {
 	return tokens;
 }
 
-std::vector<RowViolation> FindRowViolations(const std::vector<TaxonomyRow> &) {
-	return {};
+std::vector<RowViolation> FindRowViolations(const std::vector<TaxonomyRow> &rows) {
+	// How many rows carry each id. An empty id names no feature, so it is never a repeat.
+	std::unordered_map<std::string_view, size_t> id_count;
+	for (const auto &row : rows) {
+		if (!row.feature_id.empty()) {
+			id_count[row.feature_id]++;
+		}
+	}
+
+	std::vector<RowViolation> violations;
+	for (size_t i = 0; i < rows.size(); i++) {
+		const auto &row = rows[i];
+		if (row.feature_id.empty()) {
+			violations.push_back({TaxonomyViolationKind::InvalidId, i, 0, nullptr, 0});
+		} else if (const size_t count = id_count.at(row.feature_id); count > 1) {
+			violations.push_back({TaxonomyViolationKind::DuplicateId, i, 0, nullptr, count});
+		}
+		for (size_t r = 0; r < kRanks; r++) {
+			if (!row.ranks[r]) {
+				continue;
+			}
+			if (const char *why = ValueProblem(*row.ranks[r])) {
+				violations.push_back({TaxonomyViolationKind::InvalidValue, i, r, why, 0});
+			}
+		}
+		// The first NULL rank is a gap when any deeper rank is set.
+		size_t first_null = 0;
+		while (first_null < kRanks && row.ranks[first_null]) {
+			first_null++;
+		}
+		for (size_t deeper = first_null + 1; deeper < kRanks; deeper++) {
+			if (row.ranks[deeper]) {
+				violations.push_back({TaxonomyViolationKind::Gap, i, first_null, nullptr, 0});
+				break;
+			}
+		}
+	}
+	return violations;
 }
 
-std::vector<MultipleParents> FindMultipleParents(const std::vector<TaxonomyRow> &, const std::vector<size_t> *) {
-	return {};
+std::vector<MultipleParents> FindMultipleParents(const std::vector<TaxonomyRow> &rows,
+                                                 const std::vector<size_t> *depths) {
+	if (depths && depths->size() != rows.size()) {
+		throw std::invalid_argument("FindMultipleParents: " + std::to_string(depths->size()) + " depths for " +
+		                            std::to_string(rows.size()) + " rows");
+	}
+	// The row's value at `rank`, or nullptr when it is NULL or at or below the row's depth.
+	auto value = [&](size_t row, size_t rank) -> const std::string * {
+		if (depths && rank >= (*depths)[row]) {
+			return nullptr;
+		}
+		const auto &v = rows[row].ranks[rank];
+		return v ? &*v : nullptr;
+	};
+	// Parents compare by text, and a NULL parent equals only another NULL.
+	auto same_parent = [](const std::string *a, const std::string *b) {
+		return a == b || (a && b && *a == *b);
+	};
+
+	constexpr size_t kNone = std::numeric_limits<size_t>::max();
+	struct Label {
+		const std::string *first_parent;
+		// The label's index in `found` once a second parent is seen, else kNone.
+		size_t conflict;
+	};
+	// First pass: each label's first parent, and the labels seen under a second one, in the
+	// order that happens. A label is a rank and a name, so each rank has its own map.
+	std::array<std::unordered_map<std::string_view, Label>, kRanks> labels;
+	std::vector<MultipleParents> found;
+	for (size_t i = 0; i < rows.size(); i++) {
+		for (size_t r = 1; r < kRanks; r++) {
+			const std::string *name = value(i, r);
+			if (!name) {
+				continue;
+			}
+			const std::string *parent = value(i, r - 1);
+			auto [it, inserted] = labels[r].try_emplace(*name, Label {parent, kNone});
+			if (!inserted && it->second.conflict == kNone && !same_parent(it->second.first_parent, parent)) {
+				it->second.conflict = found.size();
+				found.push_back({r, {}});
+			}
+		}
+	}
+	if (found.empty()) {
+		return found;
+	}
+
+	// Second pass: every row under each parent of those labels, the parents in the order each
+	// was first seen, which input order gives.
+	struct ParentSlots {
+		std::unordered_map<std::string_view, size_t> named;
+		size_t null_parent = kNone;
+	};
+	std::vector<ParentSlots> slots(found.size());
+	for (size_t i = 0; i < rows.size(); i++) {
+		for (size_t r = 1; r < kRanks; r++) {
+			const std::string *name = value(i, r);
+			if (!name) {
+				continue;
+			}
+			const size_t conflict = labels[r].at(*name).conflict;
+			if (conflict == kNone) {
+				continue;
+			}
+			auto &by_parent = found[conflict].rows_by_parent;
+			auto &slot = slots[conflict];
+			const std::string *parent = value(i, r - 1);
+			size_t &index = parent ? slot.named.try_emplace(*parent, kNone).first->second : slot.null_parent;
+			if (index == kNone) {
+				index = by_parent.size();
+				by_parent.emplace_back();
+			}
+			by_parent[index].push_back(i);
+		}
+	}
+	return found;
 }
 
 TaxonomyStore::TaxonomyStore(const std::vector<TaxonomyRow> &rows, const std::vector<std::string> &bad_name_tokens) {
