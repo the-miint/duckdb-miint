@@ -27,15 +27,26 @@ Subset ("shear" / prune) a tree down to a specified set of tips. This is the ope
 
 `shear_tree(tree_table, tips_table, collapse := true, ignore_missing := false)`
 
+```sql
+-- Persisted reference tree in Parquet, and the tips this analysis cares about.
+CREATE TABLE ref_tree AS SELECT * FROM 'reference_tree.parquet';
+CREATE TABLE keep AS SELECT feature_id AS name FROM my_feature_table;
+
+-- Standard shear: collapse single-child ancestors, preserve distances.
+SELECT * FROM shear_tree('ref_tree', 'keep');
+```
+
 **Parameters:**
+
 - `tree_table` (VARCHAR): Name of a table or view containing tree data in [`read_newick`](reading.md#newick) schema (`node_index`, `parent_index`, `name`, `branch_length`, `edge_id`).
 - `tips_table` (VARCHAR): Name of a table or view with a `name` (VARCHAR) column listing the tip names to keep. Passing the tips as a table (rather than a list literal) keeps the call practical when the kept set is large. Duplicate and `NULL` names are ignored.
 - `collapse` (BOOLEAN, default `true`): How to treat internal nodes left with a single child after pruning.
-  - `true` — standard phylogenetic shear: remove single-descendant ancestors and **sum their branch lengths onto the surviving descendant edge**, so tip-to-tip distances are preserved. The lowest common ancestor (LCA) of the kept tips becomes the new root; nodes above it are dropped.
-  - `false` — preserve every internal node that lies on a path to a kept tip, with original parent links and branch lengths unchanged (unifurcations retained).
+    - `true` — standard phylogenetic shear: remove single-descendant ancestors and **sum their branch lengths onto the surviving descendant edge**, so tip-to-tip distances are preserved. The lowest common ancestor (LCA) of the kept tips becomes the new root; nodes above it are dropped.
+    - `false` — preserve every internal node that lies on a path to a kept tip, with original parent links and branch lengths unchanged (unifurcations retained).
 - `ignore_missing` (BOOLEAN, default `false`): When `false`, a requested tip name not present as a tip in the tree is an error (the message lists the missing names). When `true`, absent names are skipped. Either way, if *no* requested tip matches, the call errors (a tree cannot be sheared to nothing).
 
 **Output schema:** Same as [`read_newick`](reading.md#newick) (without filepath), reindexed 0-based:
+
 - `node_index` (BIGINT), `name` (VARCHAR), `branch_length` (DOUBLE, nullable), `edge_id` (BIGINT, nullable), `parent_index` (BIGINT, nullable, NULL for root), `is_tip` (BOOLEAN).
 
 The kept nodes keep their relative `node_index` order, so a tree in `read_newick`'s postorder numbering (see [Newick](reading.md#newick), "Node numbering") is sheared into a tree in postorder numbering.
@@ -43,6 +54,7 @@ The kept nodes keep their relative `node_index` order, so a tree in `read_newick
 The schema is `UNION ALL`-compatible with `read_newick` and can be written straight back out with `COPY ... (FORMAT NEWICK)`.
 
 **Behavior / semantics:**
+
 - Only **tip** names are matched — an internal-node label in `tips_table` is treated as missing.
 - Branch-length summation (collapse mode) treats an unspecified length (NaN → `NULL`) as `0`, but a collapsed chain that is *entirely* unspecified stays `NULL`, so topology-only trees (cladograms) round-trip as cladograms.
 - A collapsed edge keeps the surviving (lower) node's `edge_id`; the `edge_id`s of merged intermediate nodes are dropped.
@@ -51,13 +63,6 @@ The schema is `UNION ALL`-compatible with `read_newick` and can be written strai
 
 **Examples:**
 ```sql
--- Persisted reference tree in Parquet, and the tips this analysis cares about.
-CREATE TABLE ref_tree AS SELECT * FROM 'reference_tree.parquet';
-CREATE TABLE keep AS SELECT feature_id AS name FROM my_feature_table;
-
--- Standard shear: collapse single-child ancestors, preserve distances.
-SELECT * FROM shear_tree('ref_tree', 'keep');
-
 -- Keep every internal node on the retained paths instead.
 SELECT * FROM shear_tree('ref_tree', 'keep', collapse := false);
 
@@ -73,6 +78,7 @@ COPY (
 ```
 
 **Error conditions:**
+
 - `tree_table` or `tips_table` does not exist.
 - `tree_table` missing required `node_index` / `parent_index` columns; `tips_table` missing required `name` column.
 - A requested tip is not a tip in the tree and `ignore_missing := false`.
@@ -104,11 +110,13 @@ Resolve every multifurcation (a node with more than two children — a "polytomy
 `tree_resolve_multifurcations(tree_table)`
 
 **Parameters:**
+
 - `tree_table` (VARCHAR): Name of a table or view containing tree data in [`read_newick`](reading.md#newick) schema (requires `node_index` and `parent_index`; `name`, `branch_length`, `edge_id` optional).
 
 **Output schema:** Same as [`read_newick`](reading.md#newick) (without filepath), reindexed 0-based: `node_index`, `name`, `branch_length`, `edge_id`, `parent_index`, `is_tip`. The schema is `UNION ALL`-compatible with `read_newick`, can be written back out with `COPY ... (FORMAT NEWICK)`, and feeds directly into `phylo_independent_contrasts`. Original nodes keep their relative order and the new connector nodes are numbered after all of them, so when anything was resolved the output is **not** in `read_newick`'s postorder numbering.
 
 **Behavior / semantics:**
+
 - A node with `m ≥ 3` children `c0, c1, …, c(m-1)` (in `node_index` order) is resolved into a **deterministic left-comb**: the node keeps `c0` and a new internal node `N1`; `N1` keeps `c1` and `N2`; … ; `N(m-2)` keeps `c(m-2)` and `c(m-1)`. This inserts `m-2` new internal nodes.
 - New connector nodes are **unnamed**, have **branch length `0`**, and no `edge_id`. Because the connectors are zero-length, the original edge lengths and all root-to-tip distances are unchanged.
 - Nodes with two or fewer children are left untouched. **Single-child unifurcations are not collapsed** — that is a different operation; use [`shear_tree`](#shear-subset-to-tips) with `collapse := true` for that.
@@ -137,6 +145,7 @@ COPY (
 ```
 
 **Error conditions:**
+
 - `tree_table` does not exist.
 - `tree_table` missing required `node_index` / `parent_index` columns.
 
@@ -149,6 +158,7 @@ For each query tip, find the nearest tip among a set of target tips, measured al
 `tree_nearest_tip(tree_table, targets_table, queries_table, scope := 'path', exclude_self := true, ignore_missing := false)`
 
 **Parameters:**
+
 - `tree_table` (VARCHAR): Name of a table or view containing tree data in [`read_newick`](reading.md#newick) schema. `node_index`, `parent_index`, `name` and `branch_length` are required. The rows may be stored in any order and numbered with any distinct `node_index` values. It cannot also be `targets_table` or `queries_table`: pass the tip names as a relation of their own, such as a view `CREATE VIEW tips AS SELECT name FROM tree WHERE is_tip`.
 - `targets_table` (VARCHAR): Name of a table or view with a `name` column of target tip names, and optionally a `grp` column.
 - `queries_table` (VARCHAR): Name of a table or view with a `name` column of query tip names, and optionally a `grp` column.
@@ -170,6 +180,7 @@ A query's **eligible targets** are the target tips in its group (every target, w
 | `lca_index` | BIGINT | The `node_index` (in `tree_table`'s numbering) of the query–target lowest common ancestor, or `NULL` |
 
 **Behavior / semantics:**
+
 - **Distance.** The path length is `(D(q) - D(lca)) + (D(t) - D(lca))`, where `D` is the sum of branch lengths from the root down to a node. It depends only on the two tips: not on child order, and not on the other targets in the group. Because it is a difference of root distances, each summed edge by edge from the root, its rounding error grows with the root distances involved (about `1e-16` of them for each edge on the way down): where root distances are far larger than the branches near the tips, two nearby distances can round to the same double (a tie) or swap.
 - **Ties.** A tie means exactly equal `DOUBLE` distances. The tie goes to the smallest target name: by bytes for `VARCHAR`, whatever its collation; by value for `BIGINT` (so `9` before `10`); in DuckDB's own order for `UUID`. `n_tied` counts every tied target. Zero-length branches tie exactly, but two paths of mathematically equal length can round to different doubles and then do not tie.
 - **Groups.** A query competes only with targets that have the same `grp` value. A query in two groups gives two rows. A `NULL` `grp` matches nothing: a target with `NULL` `grp` is in no group, and a query with `NULL` `grp` gets a row with no target.
@@ -217,6 +228,7 @@ SELECT * FROM tree_nearest_tip('tree_clamped', 'label_targets', 'label_queries')
 ```
 
 **Error conditions:**
+
 - A table does not exist, or lacks its `name` column; `tree_table` lacks `node_index`, `parent_index` or `branch_length`, or is also passed as `targets_table` or `queries_table`.
 - The three `name` columns differ in type, or are not `VARCHAR`, `BIGINT` or `UUID`.
 - `grp` is in only one of `targets_table` and `queries_table`, or has different types in them.
@@ -237,6 +249,7 @@ Every node's depth (the number of edges from the root) and its distance from the
 `tree_node_depths(tree_table)`
 
 **Parameters:**
+
 - `tree_table` (VARCHAR): Name of a table or view containing tree data in [`read_newick`](reading.md#newick) schema. `node_index` and `parent_index` are required; `branch_length` is optional, and without it every distance is `NULL` except the root's (0). The rows may be stored in any order and numbered with any distinct `node_index` values. Names are not read.
 
 **Output schema:** One row per node:
@@ -248,6 +261,7 @@ Every node's depth (the number of edges from the root) and its distance from the
 | `distance_to_root` | DOUBLE | The sum of the branch lengths from the root down to the node, or `NULL` when one of them is unknown |
 
 **Behavior / semantics:**
+
 - **Branch lengths.** A `NULL` (or NaN) length is unknown: every node below it has a `NULL` distance, and its depth is unchanged. A negative length is summed like any other. An infinite length, or a distance outside `DOUBLE`'s range, is an error: not an unknown, but a value no distance can use. The root's own length is ignored. [`tree_nearest_tip`](#nearest-target-tip) refuses `NULL` and negative lengths as well as infinite ones (see "Branch lengths" there). This function and the ones after it, to [Ancestors](#ancestors), only add lengths up, so an unknown length leaves only the distances across it unknown.
 - **Distance.** The distance is summed edge by edge from the root. The functions from [Nearest target tip](#nearest-target-tip) to [Ancestors](#ancestors) all measure along the tree from this root distance, so their distances agree to the bit.
 - **Row order** is not promised; use `ORDER BY`. Rows are produced in parallel.
@@ -276,6 +290,7 @@ ORDER BY d.depth, t.name;
 ```
 
 **Error conditions:**
+
 - `tree_table` does not exist, or lacks `node_index` or `parent_index`.
 - The tree cannot be read: a `NULL` or repeated `node_index`, a `parent_index` that is no row's `node_index`, no rows, not exactly one root, a cycle, an infinite branch length below the root, or a root distance outside `DOUBLE`'s range.
 
@@ -290,6 +305,7 @@ For each pair of tips, their lowest common ancestor (the smallest clade holding 
 `tree_lca(tree_table, pairs_table, ignore_missing := false)`
 
 **Parameters:**
+
 - `tree_table` (VARCHAR): Name of a table or view containing tree data in [`read_newick`](reading.md#newick) schema. `node_index`, `parent_index` and `name` are required; `branch_length` is optional, and without it every distance is `NULL` except a tip's distance to itself (0). The rows may be stored in any order and numbered with any distinct `node_index` values. It cannot also be `pairs_table`.
 - `pairs_table` (VARCHAR): Name of a table or view with columns `a` and `b`, the tip names of each pair. Both must have the type of the tree's `name` column: `VARCHAR`, `BIGINT` or `UUID`. Use a cast when they differ.
 - `ignore_missing` (BOOLEAN, default `false`): When `false`, a name in `pairs_table` that is not a tip in the tree is an error (the message lists the names). When `true`, a pair with such a name gets no row.
@@ -304,6 +320,7 @@ For each pair of tips, their lowest common ancestor (the smallest clade holding 
 | `distance` | DOUBLE | The path length between the two tips, or `NULL` when a branch length on the path is unknown |
 
 **Behavior / semantics:**
+
 - **Distance.** The path length is `(D(a) - D(lca)) + (D(b) - D(lca))`, where `D` is the [distance from the root](#node-depths). It is the same double [`tree_nearest_tip`](#nearest-target-tip) reports for the same two tips, so the two can be joined on distance, and either order of a pair gives the same double. It is also exactly the sum of the two tips' [`tree_ancestors`](#ancestors) distances to the LCA. Its rounding is the same as `tree_nearest_tip`'s (see "Distance" there).
 - **Branch lengths.** A `NULL` (or NaN) length is unknown: a path that crosses it has a `NULL` distance, while a path that avoids it, even between tips below it, has a distance. The LCA does not depend on lengths. A negative length is summed like any other. An infinite length, or a root distance or path length outside `DOUBLE`'s range, is an error. See [Node depths](#node-depths) for how these rules relate to `tree_nearest_tip`'s.
 - **Pairs.** `(a, b)` and `(b, a)` are different pairs, and a repeated pair gives one row. A pair with a `NULL` name gets no row. A tip paired with itself has itself as LCA, at distance 0.
@@ -335,6 +352,7 @@ SELECT a, b, distance FROM tree_lca('tree', 'all_pairs');
 ```
 
 **Error conditions:**
+
 - A table does not exist; `tree_table` lacks `node_index`, `parent_index` or `name`, or is also passed as `pairs_table`; `pairs_table` lacks `a` or `b`.
 - `a`, `b` and the tree's `name` differ in type, or are not `VARCHAR`, `BIGINT` or `UUID`.
 - A name is not a tip and `ignore_missing := false`, or names two or more tips.
@@ -353,6 +371,7 @@ Every node's ancestors as rows: the node itself, its parent, and so on up to the
 `tree_ancestors(tree_table, nodes_table := NULL)`
 
 **Parameters:**
+
 - `tree_table` (VARCHAR): Name of a table or view containing tree data in [`read_newick`](reading.md#newick) schema. `node_index` and `parent_index` are required; `branch_length` is optional, and without it every distance is `NULL` except a node's distance to itself (0). The rows may be stored in any order and numbered with any distinct `node_index` values. Names are not read.
 - `nodes_table` (VARCHAR, default `NULL`): Name of a table or view with a `node_index` column, of any integer type, listing the nodes whose ancestors are wanted, in `tree_table`'s numbering. `NULL` ids and repeats are ignored. Without it (or with `NULL`), every node's ancestors are listed. It cannot be `tree_table` itself: leave it out for every node.
 
@@ -368,6 +387,7 @@ Every node's ancestors as rows: the node itself, its parent, and so on up to the
 A node has `depth + 1` rows, so every node of a tree gives `sum(depth + 1)` rows in all: use [`tree_node_depths`](#node-depths) to size a call before running it on a large tree. To leave the node itself out, filter `WHERE edges > 0`.
 
 **Behavior / semantics:**
+
 - **Branch lengths.** A `NULL` (or NaN) length is unknown: a distance across it is `NULL`, while a node's distances to the ancestors below that edge stay known. A negative length is summed like any other. An infinite length, or a root distance or distance outside `DOUBLE`'s range, is an error. See [Node depths](#node-depths) for how these rules relate to `tree_nearest_tip`'s.
 - **Distance.** `D` is the [distance from the root](#node-depths), so a node's row for the root has its `distance_to_root`, and the distances of two tips to their LCA add up exactly to [`tree_lca`](#lowest-common-ancestor)'s distance.
 - **Streaming.** Rows stream out as they are produced and are never all held at once, so a call can produce billions of rows, for an aggregate or a `COPY` to consume.
@@ -412,6 +432,7 @@ GROUP BY a.name;
 ```
 
 **Error conditions:**
+
 - A table does not exist; `tree_table` lacks `node_index` or `parent_index`; `nodes_table` lacks `node_index`, has a `node_index` that is not an integer type, or is `tree_table`.
 - A `node_index` in `nodes_table` is not a node of the tree (the message lists them), or is outside `BIGINT`'s range.
 - `nodes_table`'s `node_index` is read with a type other than the one the statement was bound with, as for [`tree_lca`](#lowest-common-ancestor).
@@ -428,9 +449,10 @@ Requires an index built beforehand, either by [`krepp_index_create`](#build-a-kr
 
 **Function signature**:
 
-`place_krepp(query_table, index_path [, newick_path, hdist_th, tau, chisq, multi, filter])`
+`place_krepp(query_table, index_path [, newick_path, hdist_th, tau, chisq, multi, filter, batch_size, batch_bases])`
 
 **Parameters:**
+
 - `query_table` (VARCHAR, required): Name of a table or view holding the query sequences. Requires `read_id` and `sequence1` columns, the same contract as the aligners; `read_id` may be VARCHAR, BIGINT or UUID.
 - `index_path` (VARCHAR, required): Path to a krepp index directory.
 - `newick_path` (VARCHAR): Backbone tree in Newick format. Required only when the index was built without a guide tree (`krepp index` without `-t`); otherwise the tree stored in the index is used. When the Newick carries jplace-style `{N}` edge decorations those numbers are reported verbatim, which is what lets placements accumulate against a phylogeny whose edge IDs are assigned elsewhere. krepp requires the decoration on every node or none.
@@ -467,8 +489,16 @@ Requires an index built beforehand, either by [`krepp_index_create`](#build-a-kr
 - `chisq` (DOUBLE, default 2.706): Chi-square cutoff for distinguishing candidate edges. Must be positive, and is rejected at bind time if it is not (krepp's CLI applies the same constraint); a non-positive cutoff discards every candidate and returns nothing. The default is the 90th percentile of the chi-square distribution with 1 degree of freedom, i.e. a significance level of 0.10. (krepp's own help text calls this "alpha = 90%"; alpha conventionally names the significance level, so read it as the percentile.)
 - `multi` (BOOLEAN, default true): Report every candidate edge rather than only the best one. `multi=false` is markedly less reproducible than the default — see **Reproducibility** below.
 - `filter` (BOOLEAN, default true): Drop placements without enough *k*-mer support.
+- `batch_size` (BIGINT, default 2048, the DuckDB vector size): Queries per unit of work. Each thread places one batch at a time, so a call whose queries fit in fewer batches than there are threads leaves the rest idle. Lower it for a few thousand long queries, such as assembled contigs. Must be at least 1. It changes how the work is split, not the placements. A batch, and its placements, are held in memory while it is placed, so a `batch_size` near the relation's row count holds the whole relation at once.
+- `batch_bases` (BIGINT, default none): Also cap each batch at this many bases of `sequence1`: a query that would take a batch past the limit starts the next one, and a query longer than the limit is a batch of its own. Where query lengths vary widely, a row count alone can put most of the bases in a few batches; this caps them without shrinking batches of short reads. Must be at least 1. When both are given, a batch closes at whichever limit it reaches first.
+
+  ```sql
+  -- 3,000 contigs of 30,000 bases: 91 batches of up to 33 contigs, where batch_size alone gives 2.
+  SELECT * FROM place_krepp(query_table := 'contigs', index_path := 'idx', batch_bases := 1000000);
+  ```
 
 **Output schema:**
+
 - `fragment` (same type as the query relation's `read_id`: VARCHAR, BIGINT or UUID): The `read_id` of the placed query, so it joins back to `query_table` without a cast
 - `edge_num` (BIGINT): Edge of the backbone tree the placement sits on
 - `likelihood` (DOUBLE): Log likelihood of the placement
@@ -478,6 +508,7 @@ Requires an index built beforehand, either by [`krepp_index_create`](#build-a-kr
 - `distance` (DOUBLE): krepp's estimated distance to the placement. Not part of jplace; `read_jplace` has no equivalent column.
 
 **Behavior:**
+
 - One row per candidate edge, so rows are *not* one-to-one with reads. With `multi` off there is at most one row per read.
 - Reads that krepp cannot support are absent from the output entirely, so `fragment` is a subset of the input `read_id`s.
 - Sequences shorter than the index's *k* are skipped, with one warning per `place_krepp` call — not one per skipped sequence (see [`miint_warnings`](utilities.md)). A sequence containing anything outside the IUPAC nucleotide alphabet raises rather than being silently dropped.
@@ -487,18 +518,21 @@ Requires an index built beforehand, either by [`krepp_index_create`](#build-a-kr
 
 **Reproducibility:** krepp's output is not bit-reproducible, and neither is this function. krepp accumulates and normalizes placements through hash maps keyed by tree-node *pointer*, so iteration order moves with the heap layout. What that costs you, measured on the toy index:
 
-The unit that matters is the **index load**, not the process: each `place_krepp` call loads its own copy in `InitGlobal`, so two calls in one session are already in different regimes. Everything below was re-measured on krepp v0.10.0 (`31205033`) against the toy index that `run_tests.sh` builds, and every figure is an observation on that index rather than a bound.
+The unit that matters is the **index load**, not the process: each `place_krepp` call loads its own copy in `InitGlobal`, so two calls in one session are already in different regimes. Everything below was re-measured on krepp v0.10.0 (`31205033`) against the toy index that `run_tests.sh` builds with krepp's CLI, except the CI-build runs described after the table, which used an index built with `krepp_index_create`. Every figure is an observation on its index rather than a bound.
 
 krepp v0.9.1 added a de-duplication pass to its k-mer match accumulation, described upstream as a consistent tie break. Measured on v0.9.1, it did not make the output reproducible; the figures were essentially unchanged from v0.9.0.
 
 | Quantity | Reproducible? |
 |---|---|
-| Which reads place at all (`fragment` set), and the total row count | Stable in every run measured — 5 separate processes, identical (404 rows over 92 fragments) |
-| `likelihood`, `distance`, `distal_length`, `pendant_length` | Bit-identical across repeated calls, and across 5 separate processes |
-| Which candidate edges appear (the `(fragment, edge_num)` set) | Identical across repeated calls |
+| Which reads place at all (`fragment` set) | Stable in every run measured — 5 separate processes (92 fragments), and in the CI-build runs described below (93 fragments) |
+| The total row count | Stable in the 5 processes above (404 rows). **Not in the CI-build runs below:** 385 or 386 rows from calls with identical arguments |
+| `likelihood`, `distance`, `distal_length`, `pendant_length` | Bit-identical across repeated calls, and across 5 separate processes; in the CI-build runs below, bit-identical on every `(fragment, edge_num)` that both calls return |
+| Which candidate edges appear (the `(fragment, edge_num)` set) | Identical across repeated calls above. **Not in the CI-build runs below:** one edge comes and goes |
 | `like_weight_ratio` | **No.** Three processes were each asked for the same placements twice; the two answers differed in 59, 55 and 73 of 404 rows respectively, by up to 2.5e-4 absolute. Per-fragment sums still come to 1 (measured max deviation 2.2e-16; the test pins 1e-9). |
 | Which candidate edges appear, with `multi` on | Identical across two loads in one process, across 5 separate processes, and across 6 runs of krepp's own CLI |
 | Which single edge is chosen, with `multi=false` | **No.** Over 6 runs of `krepp place --no-multi`, 1 of 92 fragments alternated between two edges. |
+
+The CI-build runs used the x86_64 Linux (Ubuntu 24.04) build that CI produces, at the same krepp commit (`31205033`), against an index built with `krepp_index_create` from the same toy references and tree (`k=27, w=35, h=11`) rather than the CLI-built index above. A macOS build that built its index the same way, with `krepp_index_create` and the same arguments, placed 92 reads in 404 rows, matching the figures above, so the 93 here is not explained by building the index with `krepp_index_create` instead of the CLI. Over 5 processes of 6 calls each, with and without `batch_size`/`batch_bases`, one candidate edge (fragment `||61435-6176`, edge 38) appeared in some calls and not in others, including two calls with identical arguments, so the row count moved between 385 and 386. Three things held in every call: the same reads placed, no `(fragment, edge_num)` appeared twice, and `likelihood`, `distance`, `distal_length` and `pendant_length` were bit-identical on every edge two calls shared. `like_weight_ratio` and `multi=false` were not re-measured in these runs. Compare placements across calls per read, not row for row.
 
 The `multi=false` case is worth understanding rather than just avoiding: krepp ranks candidates with a non-stable `std::sort` over a vector built by iterating a hash map keyed by tree-node *pointer*, then takes the last element. Equal-ranking candidates therefore land in an order that moves with the heap. The observed rate is low, but which read it hits is not something you can predict or pin.
 
@@ -534,7 +568,15 @@ FROM place_krepp(query_table='reads', index_path='index_toy');
 SELECT * FROM tree_resolve_placement('ref_tree', 'placements');
 ```
 
-**Availability:** built when `MIINT_ENABLE_KREPP` is on, which excludes WASM and Windows. Check with `SELECT * FROM miint_versions() WHERE library = 'krepp';`, which reports the `git describe --tags --dirty --always` output that the build records for the submodule: `v0.9.1-11-g3120503` for the current pin when the checkout has the v0.9.1 tag and the commits from it to the pin, `3120503` when it lacks either, and `-dirty` appended when the submodule has local changes. krepp's own version string for this pin is v0.10.0; upstream has no tag after v0.9.1.
+**Availability:** built when `MIINT_ENABLE_KREPP` is on, which excludes WASM and Windows. Check with `SELECT * FROM miint_versions() WHERE library = 'krepp';`, which reports the `git describe --tags --dirty --always` output that the build records for the submodule: `v0.9.1-11-g3120503` for the current pin when the checkout has the v0.9.1 tag and the commits from it to the pin, `3120503` when it lacks either, and `-dirty` appended when the submodule has local changes. krepp's own version string for this pin is v0.10.0; upstream has no tag after v0.9.1. That string is the `krepp-version` row, and it is what an index records as `krepp version:` in each partial's `metadata*.txt`, so a caller loading a prebuilt index can compare the two before placing:
+
+```sql
+SELECT regexp_extract(content, '(?m)^krepp version: ([^\r\n]*)', 1) AS index_version,
+       (SELECT version FROM miint_versions() WHERE library = 'krepp-version') AS miint_krepp_version
+FROM read_text('/path/to/index/metadata*.txt');
+```
+
+A mismatch means the index was written by a different krepp. A match is not proof of compatibility: krepp's `VERSION` does not change with every commit, and two commits reporting the same string have written incompatible indexes (see the krepp section of [`docs/internals/embedded-tools.md`](internals/embedded-tools.md)). The `.txt` is optional to krepp (it loads a partial without one), so a partial missing it has no recorded version and returns no row from the query above.
 
 ### Build a krepp index
 
@@ -545,6 +587,7 @@ Build the index [`place_krepp`](#phylogenetic-placement-krepp) reads, from relat
 `krepp_index_create(sequence_table, output_path [, tree_table | newick_path, k, w, h, m, r, frac, sdust_t, sdust_w, threads])`
 
 **Parameters:**
+
 - `sequence_table` (VARCHAR, required, positional): Name of a table or view holding the reference sequences. Requires `read_id` and `sequence1` columns, the same contract as the aligners and [`save_bowtie2_index`](alignment_reference.md); `read_id` may be VARCHAR, BIGINT or UUID, as it may for `place_krepp`'s `query_table`.
 
   **Every distinct `read_id` becomes one krepp reference, and every row carrying that `read_id` becomes one record inside it.** A multi-contig genome is therefore just several rows sharing a `read_id` — there is no separate mapping table. Reassemble chunked storage first, e.g. `SELECT feature_id AS read_id, string_agg(chunk_data ORDER BY chunk_index) AS sequence1 FROM chunks GROUP BY feature_id`.
@@ -569,6 +612,7 @@ Build the index [`place_krepp`](#phylogenetic-placement-krepp) reads, from relat
   Scaling is sublinear and flattens early. Measured through `krepp_index_create` on a ten-core Apple M1 Max over the 25-genome corpus in `ext/krepp/test`, one run per point: about 10.1 s at one thread, 5.0 s at four, 4.6 s at eight.
 
 **Output schema:** one row.
+
 - `output_path` (VARCHAR): The directory written.
 - `k`, `w`, `h` (INTEGER): The resolved parameters, **read back from the index krepp wrote** rather than echoed from the request — so a `w` or `h` left to default reports what was actually derived.
 - `num_references` (BIGINT): Distinct `read_id`s indexed.
@@ -604,6 +648,7 @@ SELECT * FROM place_krepp(query_table := 'reads', index_path := 'my_index');
 ```
 
 **Behavior:**
+
 - **The build is single-threaded unless you ask otherwise.** krepp parallelises its index build with OpenMP; whether those regions are compiled in depends on an OpenMP runtime being present at build time. Where one was, `threads` (above) spreads the build; where one was not, the pragmas are off and `threads := 1` is the only accepted value. `SELECT * FROM miint_versions() WHERE library = 'krepp-openmp'` returns a row on a build that has them.
 - **krepp writes progress to stderr** — one line per tree node — which appears in the terminal rather than in the query result.
 - **The index depends on the order rows arrive in.** krepp's k-mer extraction for one reference is sensitive to the order of the records inside that reference's FASTA, and those records are written in the order `sequence_table` yields them — which SQL does not guarantee without an `ORDER BY`. Measured on a two-reference fixture, the same three rows grouped by `read_id` produce a k-mer table 8 bytes (one k-mer) larger than the same rows interleaved. The indexes are equally valid; they are not byte-identical. Add an `ORDER BY` to `sequence_table` if you need a reproducible artifact.
@@ -623,10 +668,12 @@ Resolve phylogenetic placements into a reference tree, returning a fully resolve
 `tree_resolve_placement(tree_table, placements_table)`
 
 **Parameters:**
+
 - `tree_table` (VARCHAR): Name of a table or view containing tree data in `read_newick` schema (requires `node_index` and `parent_index` columns; `name`, `branch_length`, `edge_id` are optional)
 - `placements_table` (VARCHAR): Name of a table or view containing placement data: `fragment_id` (VARCHAR, BIGINT or UUID, as a `read_id`, so `place_krepp`'s `fragment` of any id type can be used; the placed tip is named with its text), `edge_id` (BIGINT, INTEGER, UBIGINT or UINTEGER), and `like_weight_ratio`, `distal_length` and `pendant_length` (each DOUBLE or FLOAT)
 
 **Output schema:** Same as [`read_newick`](reading.md#newick) (without filepath):
+
 - `node_index` (BIGINT): 0-based index of node in resolved tree. Original nodes keep their relative order and the nodes created for placements are numbered after all of them, so the output is **not** in `read_newick`'s postorder numbering.
 - `name` (VARCHAR): Node label (placed fragments use their fragment_id as name)
 - `branch_length` (DOUBLE, nullable): Branch length
@@ -635,6 +682,7 @@ Resolve phylogenetic placements into a reference tree, returning a fully resolve
 - `is_tip` (BOOLEAN): Whether node is a tip/leaf
 
 **Behavior:**
+
 - Reads tree data from the tree table and builds a `NewickTree`
 - Reads placements and inserts each fragment as a new tip on the specified edge
 - Each placement creates 2 new nodes: an internal node (splitting the edge) and a fragment tip
@@ -707,6 +755,7 @@ WHERE is_tip = true;
 ```
 
 **Error conditions:**
+
 - Tree table or placements table does not exist
 - Tree table missing required `node_index` or `parent_index` columns
 - Placements table missing required columns (`fragment_id`, `edge_id`, `like_weight_ratio`, `distal_length`, `pendant_length`), or a column of another type than listed above, when the query is planned and again when the placements are read
@@ -724,6 +773,7 @@ Build an approximately-maximum-likelihood phylogenetic tree from a multiple sequ
 **Architecture:** FastTree is statically linked into a separate process (`gpl-boundary`) that miint launches per query. The daemon is GPL-licensed; miint stays BSD-clean by communicating with it over POSIX shared memory and Arrow IPC. See [`docs/internals/embedded-tools.md`](internals/embedded-tools.md) for the protocol details and process-lifecycle invariants.
 
 **Requirements:**
+
 - The `gpl-boundary` binary must be on `PATH`. Use [`phylogeny_fasttree_available()`](utilities.md#phylogeny_fasttree_available) to check at runtime.
 
 **Parameters:**
@@ -887,11 +937,12 @@ Reference: Felsenstein, J. (1985) "Phylogenies and the Comparative Method." *The
 `phylo_independent_contrasts(tree_table, traits_table)`
 
 **Parameters:**
+
 - `tree_table` (VARCHAR): Name of a table or view containing tree data in [`read_newick`](reading.md#newick) schema (requires `node_index` and `parent_index`; `name` and `branch_length` are needed for a meaningful contrast; `edge_id` optional). The tree must be **strictly bifurcating** with **finite, non-negative branch lengths** (see requirements below).
 - `traits_table` (VARCHAR): Name of a table or view in **long form** with columns `name`, `trait`, `value`:
-  - `name`: the tip identifier, matched to the tree's tip labels. Type-flexible — `VARCHAR`, `UUID`, and `BIGINT` are all accepted and matched to tip labels by their canonical text form (the same posture as `read_id` elsewhere), so a numeric or UUID feature key works directly.
-  - `trait` (VARCHAR): the trait name; one trait is computed per distinct value.
-  - `value` (DOUBLE): the numeric trait value for that tip.
+    - `name`: the tip identifier, matched to the tree's tip labels. Type-flexible — `VARCHAR`, `UUID`, and `BIGINT` are all accepted and matched to tip labels by their canonical text form (the same posture as `read_id` elsewhere), so a numeric or UUID feature key works directly.
+    - `trait` (VARCHAR): the trait name; one trait is computed per distinct value.
+    - `value` (DOUBLE): the numeric trait value for that tip.
 
   Every trait must cover **exactly** the tree's tip set — no missing tips, no extra names, no `NULL` values. To analyze a subset of tips, [`shear_tree`](#shear-subset-to-tips) the tree to those tips first: pruning re-sums branch lengths, which changes the contrasts, so it cannot be skipped by simply omitting tips from the traits.
 
@@ -908,12 +959,14 @@ Reference: Felsenstein, J. (1985) "Phylogenies and the Comparative Method." *The
 For a rooted bifurcating tree with `n` tips there are `n-1` internal nodes and thus `n-1` contrasts per trait.
 
 **Behavior / semantics:**
+
 - Computed by Felsenstein's post-order pruning. At each internal node with children `i`, `j` and variance-extended branch lengths `v_i`, `v_j`: `contrast = (X_i − X_j)/sqrt(v_i+v_j)`; the ancestral estimate is the inverse-variance-weighted mean `(X_i·v_j + X_j·v_i)/(v_i+v_j)`; and the node's branch length is extended by `(v_i·v_j)/(v_i+v_j)` for use higher in the tree.
 - **The sign of a contrast is arbitrary** — it depends on which child is `i` vs `j` (here, `node_index` order). This is why the standard two-trait analysis is a regression *through the origin* over the paired contrasts (or a correlation after fixing one axis's sign). Results are reproducible: child order follows `node_index`.
 - `contrast_variance` is identical across traits for a given node, which is what makes multi-trait computation cheap (the tree is validated and its variances precomputed once).
 - The two-trait correlation / regression is intentionally **not** built in — layer it in SQL over the per-node output (example below).
 
 **Requirements and error conditions:**
+
 - **Strictly bifurcating.** Every internal node must have exactly two children. A polytomy (`> 2` children) errors and points to [`tree_resolve_multifurcations`](#resolve-multifurcations); a unifurcation (`1` child) errors and points to [`shear_tree`](#shear-subset-to-tips). Common gotcha: an *unrooted* Newick tree has a trifurcating root and must be resolved (or rooted) first.
 - **Finite, non-negative branch lengths on every non-root edge.** PIC divides by `v_i + v_j`, so an unspecified (`NULL`/NaN) or infinite length errors, and a negative length errors. The root's own branch length is unused. Zero-length internal edges are allowed (e.g. the connectors from `tree_resolve_multifurcations`); only a contrast whose variance `v_i + v_j` is exactly zero (both children zero-length) errors.
 - **Trait coverage.** A tip with no trait value, a trait value for a name that is not a tip, a duplicate `(name, trait)` pair, or a `NULL` `value` all error.
@@ -956,6 +1009,7 @@ References: Felsenstein, J. (1985) *The American Naturalist* 125(1):1–15; Schl
 `phylo_ancestral_states(tree_table, traits_table)`
 
 **Parameters:**
+
 - `tree_table` (VARCHAR): a table/view in [`read_newick`](reading.md#newick) schema. Unlike PIC, the tree **may be multifurcating** (polytomies are handled directly — no need to `tree_resolve_multifurcations`).
 - `traits_table` (VARCHAR): long form `name`, `trait`, `value` — identical to PIC. `name` is type-flexible (`VARCHAR`/`UUID`/`BIGINT`, matched by canonical text); `value` is `DOUBLE`. Every trait must cover exactly the tree's tip set.
 
@@ -971,11 +1025,13 @@ References: Felsenstein, J. (1985) *The American Naturalist* 125(1):1–15; Schl
 | `ci_high` | DOUBLE | 95% CI upper bound: `estimate + 1.959964·sqrt(variance)` |
 
 **Behavior / semantics:**
+
 - Computed by Gaussian belief propagation on the tree: a post-order down-pass (each internal node is the **precision-weighted** mean of its children's messages — this reduces to PIC at a bifurcation but is correct for any arity) plus a pre-order up-pass (an O(n) leave-one-out that folds in the rest of the tree). The result is exact on a tree.
 - **The root estimate equals PIC's root `ancestral_estimate`** (a free cross-check); interior estimates generally differ from PIC's down-pass values because the up-pass adds information from outside each subtree.
 - The BM rate `σ̂²` is estimated by **REML** (sum of squared standardized contrasts divided by `n_tips − 1`, the unbiased/PIC-consistent estimator). The alternative full-ML divisor `n_tips` would differ by a factor `(n_tips−1)/n_tips`. `variance` and the CI are `σ̂²` times each node's rate-independent structural variance; `z = 1.959964 = qnorm(0.975)`.
 
 **Requirements and error conditions:**
+
 - Multifurcations are supported; a **unifurcation** (internal node with a single child) errors and points to [`shear_tree`](#shear-subset-to-tips) (it carries no information).
 - **Finite, non-negative branch lengths on every non-root edge, and a strictly positive length on every tip edge.** A zero-length *tip* edge would pin the estimate and break the leave-one-out, so it errors (a deliberate difference from PIC, which tolerates one zero-length tip per contrast). Zero-length *internal* edges are allowed.
 - **Trait coverage** (missing tip, extra name, duplicate `(name, trait)`, `NULL` value) errors as in PIC. A **non-finite** (`NaN`/infinite) trait value also errors — it would silently poison the shared rate and the whole output, so it fails loud.
@@ -1010,6 +1066,7 @@ References: Sankoff, D. (1975) *SIAM J. Appl. Math.* 28(1):35–42; Fitch, W.M. 
 `phylo_ancestral_parsimony(tree_table, traits_table [, cost_matrix_table])`
 
 **Parameters:**
+
 - `tree_table` (VARCHAR): a table/view in [`read_newick`](reading.md#newick) schema. **Branch lengths are ignored** — topology-only trees are fine. Multifurcations and unifurcations are both supported.
 - `traits_table` (VARCHAR): long form `name`, `trait`, `value`. `name` is type-flexible as elsewhere; `value` is the categorical **state**, cast to `VARCHAR` (so integer- or text-coded states both work). Every trait must cover exactly the tree's tip set.
 - `cost_matrix_table` (VARCHAR, optional): long form `from_state`, `to_state`, `cost` (a `DOUBLE ≥ 0`, the cost of a change from `from_state` to `to_state`). When supplied it **defines the state alphabet** (the sorted union of `from_state`/`to_state`), which may include states not observed at any tip (a Sankoff intermediate). Every off-diagonal ordered pair over that alphabet must be present (a missing transition cost errors — there is no sensible default); the diagonal defaults to `0`. Omit it for the unit-cost (Fitch) default, whose alphabet is that trait's sorted distinct observed states.
@@ -1025,11 +1082,13 @@ References: Sankoff, D. (1975) *SIAM J. Appl. Math.* 28(1):35–42; Fitch, W.M. 
 | `min_cost` | DOUBLE | The minimum total tree cost with this node fixed to this state |
 
 **Behavior / semantics:**
+
 - A post-order Sankoff down-pass computes, per node/state, the min cost of the subtree below it; a pre-order pass computes the rest-of-tree cost; their sum is `min_cost` (the min total cost with the node pinned to that state). The whole-tree parsimony **score** is `min(min_cost)`, and `in_mpr` is true exactly when `min_cost` equals that score.
 - **Ties are first-class:** an ambiguous node simply has more than one `in_mpr = true` state. Filter with `WHERE in_mpr` for the MPR set; the non-MPR rows give the extra cost of each alternative state.
 - Multifurcation and unifurcation are both handled by the same recurrence (arity-agnostic).
 
 **Requirements and error conditions:**
+
 - Tip names must be unique; **trait coverage** (missing tip, extra name, duplicate `(name, trait)`, `NULL`) errors.
 - A `cost_matrix_table` with a missing off-diagonal entry, a non-zero diagonal, a duplicate pair, a negative/non-finite cost, or a tip whose observed state is absent from the matrix alphabet all error.
 
@@ -1066,6 +1125,7 @@ References: Lewis, P.O. (2001) *Systematic Biology* 50(6):913–925 (Mk model); 
 `phylo_ancestral_ml(tree_table, traits_table, model := 'ER', rate := NULL)`
 
 **Parameters:**
+
 - `tree_table` (VARCHAR): a table/view in [`read_newick`](reading.md#newick) schema. **Branch lengths are used** (the transition probabilities depend on them). Multifurcations and unifurcations are supported.
 - `traits_table` (VARCHAR): long form `name`, `trait`, `value` (state cast to `VARCHAR`), as for parsimony. The per-trait alphabet is its sorted distinct observed states.
 - `model` (VARCHAR, named, default `'ER'`): the substitution model — `'ER'` (equal rates), `'SYM'` (symmetric rates), or `'ARD'` (all rates different). Any other value errors.
@@ -1083,6 +1143,7 @@ References: Lewis, P.O. (2001) *Systematic Biology* 50(6):913–925 (Mk model); 
 | `log_likelihood` | DOUBLE | The model log-likelihood at the fitted/fixed parameters — the same value on every row of the trait |
 
 **Behavior / semantics:**
+
 - Computed by Felsenstein's pruning algorithm with per-node rescaling (numerically stable on deep trees), a uniform root prior (the stationary distribution `1/k`, shared by ER and SYM), and a marginal two-pass so every internal node conditions on the whole tree.
 - **ER**: the transition matrix is closed-form (`P(t)[i][j] = 1/k + (δ_ij − 1/k)·e^{−k·rate·t}`), so no eigendecomposition is needed and it scales to large trees. The single rate is fitted by a grid-scan + golden-section search on the log-likelihood.
 - **SYM**: the transition matrix `P(t) = exp(Q·t)` is built from a symmetric eigendecomposition of `Q` (`P(t) = U·diag(e^{λt})·Uᵀ`); the `k(k−1)/2` off-diagonal rates are fitted jointly by a Nelder–Mead simplex search (warm-started from the ER fit, so SYM's log-likelihood is always at least ER's). At `k = 2` SYM has one free rate and reduces exactly to ER.
@@ -1092,6 +1153,7 @@ References: Lewis, P.O. (2001) *Systematic Biology* 50(6):913–925 (Mk model); 
 - ER and SYM output match `ape::ace(type="discrete", model=...)` posteriors closely — to ~1e-8 (ER) and ~1e-6 (SYM), i.e. optimizer/iteration tolerance — and the ER rate to ~1e-8. For **ARD the reported fit is not guaranteed to be the global optimum**: the search is in log-rate space, so it cannot reach *boundary* solutions where a rate is exactly 0 (a common true MLE for sparse discrete data with rare or absent transitions) — a box- or gradient-constrained optimizer (e.g. `ape`) may find a higher-likelihood fit on the same data. ARD's *machinery* (pruning, `P(t)`, the marginal up-pass) is nonetheless validated exactly against an independent brute-force likelihood at whatever rates are fitted; only the optimizer, not the reconstruction math, is best-effort.
 
 **Requirements and error conditions:**
+
 - **Finite, non-negative branch lengths on every non-root edge, and a strictly positive length on every tip edge** (as in [ancestral states](#ancestral-states-brownian-motion)); zero-length internal edges are allowed. A branch so small that `e^{−k·rate·t}` rounds to exactly 1 (an *effectively-zero* edge) can make the likelihood degenerate and errors (rather than emitting a `NaN`/`−inf` silently).
 - Tip names unique; **trait coverage** errors as elsewhere. An unsupported `model`, a non-positive / non-finite `rate`, a `rate` combined with `model := 'SYM'`/`'ARD'`, or a state count above a model's cap (`SYM` `k > 8`, `ARD` `k > 6`), errors.
 

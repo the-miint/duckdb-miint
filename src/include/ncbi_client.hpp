@@ -4,8 +4,6 @@
 #include "duckdb/common/http_util.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
-#include <chrono>
-#include <mutex>
 #include <string>
 
 namespace miint {
@@ -17,7 +15,9 @@ namespace miint {
 // Rate Limiting Behavior:
 // - Without API key: Limited to 3 requests/second
 // - With API key: Limited to 10 requests/second
-// - Rate limiting is enforced per NCBIClient instance
+// - Requests are spaced PACING_MARGIN times the interval those limits allow
+// - The spacing is shared by every NCBIClient in the process that sends to the same server
+//   with the same API key (RequestPacer in ncbi_client.cpp says why)
 // - Thread-safe: Multiple threads can share a single client instance
 //
 // Retry Behavior:
@@ -37,6 +37,12 @@ public:
 	// Rate limits (requests per second)
 	static constexpr double RATE_LIMIT_NO_KEY = 3.0;
 	static constexpr double RATE_LIMIT_WITH_KEY = 10.0;
+	// Requests are spaced this many times the interval the limit allows: at most 2.5 a second
+	// without a key and about 8.3 with one. NCBI counts requests as they arrive, and network
+	// jitter bunches requests sent exactly at the limit: measured on 2026-11-16 (native, no key,
+	// back-to-back queries through a logging proxy), 3 of 28 requests paced at exactly 3 a second
+	// drew a 429, and none of 48 paced at 1.2 times the interval did.
+	static constexpr double PACING_MARGIN = 1.2;
 
 	// Retry configuration
 	// 6 retries with exponential backoff (1s, 2s, 4s, 8s, 16s, 32s) gives ~63s of
@@ -98,13 +104,18 @@ public:
 		return NCBIParser::ParseFasta(fasta_text);
 	}
 
+	// Waits until this client may send a request to `url`: requests from every client in the
+	// process to the same server with the same API key are spaced to stay under NCBI's limit.
+	// Every request NCBIClient sends goes through it, its own retries included. DuckDB's HTTP
+	// client may itself re-send a GET answered 429 or 5xx after its own backoff, which does not
+	// ("Interrupts and max_execution_time" in docs/internals/duckdb-engine-notes.md).
+	void RespectRateLimit(const std::string &url);
+
 private:
 	duckdb::ClientContext &context;
 	duckdb::DatabaseInstance &db;
 	std::string eutils_base;
 	std::string api_key;
-	std::chrono::steady_clock::time_point last_request_time;
-	mutable std::mutex rate_limit_mutex; // Protects last_request_time
 
 	// HTTP request helper with retry logic
 	std::string MakeRequest(const std::string &url, bool use_api_key_header = false);
@@ -118,8 +129,7 @@ private:
 	// Check if HTTP status code is retryable
 	static bool IsRetryableStatus(int status);
 
-	// Rate limiting (thread-safe)
-	void RespectRateLimit();
+	// The requests per second NCBI allows this client: RATE_LIMIT_WITH_KEY or RATE_LIMIT_NO_KEY.
 	double GetRateLimit() const;
 };
 

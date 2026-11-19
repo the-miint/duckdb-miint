@@ -60,6 +60,10 @@ bool KreppIndexThreadsSupported() {
 #endif
 }
 
+const char *KreppVersionString() {
+	return VERSION;
+}
+
 void BuildKreppIndex(const KreppIndexOptions &options) {
 	// krepp keeps its thread count in a plain global - `uint32_t num_threads` in
 	// common.cpp - written just below and read much later, inside build_index().

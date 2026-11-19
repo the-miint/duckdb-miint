@@ -19,12 +19,19 @@ Odds and ends that support the main workflows: transforming sequence strings, a 
 
 Calculate the reverse complement of DNA or RNA sequences. Supports full IUPAC nucleotide ambiguity codes and preserves case.
 
+```sql
+-- Basic DNA reverse complement
+SELECT sequence_dna_reverse_complement('ATCG');
+```
+
 **Parameters:**
+
 - `sequence` (VARCHAR): DNA or RNA sequence string
 
 **Returns:** VARCHAR — the reverse complement of the input sequence
 
 **Behavior:**
+
 - Reverses the sequence order (5' to 3' becomes 3' to 5')
 - Complements each base according to Watson-Crick pairing rules
 - Preserves uppercase/lowercase in the input
@@ -32,13 +39,12 @@ Calculate the reverse complement of DNA or RNA sequences. Supports full IUPAC nu
 - Strict molecular type validation: DNA function rejects U bases, RNA function rejects T bases
 
 **Supported bases:**
+
 - **DNA**: A<->T, C<->G, plus IUPAC codes (R<->Y, S<->S, W<->W, K<->M, B<->V, D<->H, N<->N)
 - **RNA**: A<->U, C<->G, plus IUPAC codes (R<->Y, S<->S, W<->W, K<->M, B<->V, D<->H, N<->N)
 
 **Examples:**
 ```sql
--- Basic DNA reverse complement
-SELECT sequence_dna_reverse_complement('ATCG');
 -- Returns: CGAT
 
 -- Basic RNA reverse complement
@@ -72,12 +78,19 @@ R = A/G · Y = C/T(U) · S = G/C · W = A/T(U) · K = G/T(U) · M = A/C · B = C
 
 Convert DNA or RNA sequences with IUPAC ambiguity codes to regular expression patterns. Useful for pattern matching with degenerate primers and probes.
 
+```sql
+-- Degenerate primer with ambiguous positions
+SELECT sequence_dna_as_regexp('ATNGG');
+```
+
 **Parameters:**
+
 - `sequence` (VARCHAR): DNA or RNA sequence string with IUPAC codes
 
 **Returns:** VARCHAR — regular expression pattern
 
 **Behavior:**
+
 - Unambiguous bases (A, C, G, T/U) remain unchanged
 - Ambiguous IUPAC codes expand to character classes (e.g., R -> `[AG]`, N -> `[ACGT]`)
 - Preserves uppercase/lowercase in the output
@@ -85,6 +98,7 @@ Convert DNA or RNA sequences with IUPAC ambiguity codes to regular expression pa
 - Strict molecular type validation: DNA function rejects U bases, RNA function rejects T bases
 
 **Expansion rules:**
+
 - **Unambiguous bases**: A, C, G, T (DNA) or U (RNA) -> no brackets
 - **Two-base codes**: R -> `[AG]`, Y -> `[CT]` or `[CU]`, S -> `[CG]`, W -> `[AT]` or `[AU]`, K -> `[GT]` or `[GU]`, M -> `[AC]`
 - **Three-base codes**: B -> `[CGT]` or `[CGU]`, D -> `[AGT]` or `[AGU]`, H -> `[ACT]` or `[ACU]`, V -> `[ACG]`
@@ -93,8 +107,6 @@ Convert DNA or RNA sequences with IUPAC ambiguity codes to regular expression pa
 
 **Examples:**
 ```sql
--- Degenerate primer with ambiguous positions
-SELECT sequence_dna_as_regexp('ATNGG');
 -- Returns: AT[ACGT]GG
 
 -- Multiple IUPAC codes
@@ -129,13 +141,24 @@ SELECT sequence_dna_as_regexp('AUNGG');
 
 Split a sequence into fixed-width chunks in a single linear pass. Returns a list of `{chunk_index, chunk_data}` structs; `UNNEST` it to get one row per chunk. Intended for emitting very large records (host reference genomes, hundreds of MB to multi-GB) as bounded-width rows for chunked storage, without the quadratic blow-up of the `list_transform` + `substring` idiom.
 
+```sql
+-- Fixed-width chunks; last chunk is the remainder
+SELECT c.chunk_index, c.chunk_data
+FROM (SELECT UNNEST(sequence_split('ACGTACGTAC', 4)) AS c)
+ORDER BY c.chunk_index;
+```
+
 **Parameters:**
-- `sequence` (VARCHAR): the sequence (or any string) to split
-- `chunk_size` (INTEGER): chunk width in bytes; must be `> 0`
+
+| Parameter | Type and default | Description |
+| --- | --- | --- |
+| `sequence` | VARCHAR | the sequence (or any string) to split |
+| `chunk_size` | INTEGER | chunk width in bytes; must be `> 0` |
 
 **Returns:** `LIST(STRUCT(chunk_index INTEGER, chunk_data VARCHAR))`
 
 **Behavior:**
+
 - Chunks are exactly `chunk_size` bytes; the last chunk is the remainder (no padding).
 - `chunk_index` is dense, 0-based, and ascending within a sequence.
 - Byte-exact: concatenating `chunk_data` in `chunk_index` order reproduces the input.
@@ -146,10 +169,6 @@ Split a sequence into fixed-width chunks in a single linear pass. Returns a list
 
 **Examples:**
 ```sql
--- Fixed-width chunks; last chunk is the remainder
-SELECT c.chunk_index, c.chunk_data
-FROM (SELECT UNNEST(sequence_split('ACGTACGTAC', 4)) AS c)
-ORDER BY c.chunk_index;
 -- 0 | ACGT
 -- 1 | ACGT
 -- 2 | AC
@@ -172,22 +191,28 @@ FROM (SELECT UNNEST(sequence_split('ACGTACGTAC', 4)) AS c);
 
 DUST low-complexity masking, powered by the [vsearch](https://github.com/torognes/vsearch) library (Rognes et al. 2016, PeerJ 4:e2584). Identifies low-complexity regions (e.g., homopolymers, dinucleotide repeats) and masks them.
 
+```sql
+-- Soft-mask (lowercase low-complexity regions)
+SELECT mask_dust('AAAAAAAAAAAACCCCCCCC');
+```
+
 **Parameters:**
-- `sequence` (VARCHAR): DNA sequence to mask.
-- `hardmask` (BOOLEAN, default false): If false, soft-mask by lowercasing. If true, replace low-complexity regions with `N`.
+
+| Parameter | Type and default | Description |
+| --- | --- | --- |
+| `sequence` | VARCHAR | DNA sequence to mask. |
+| `hardmask` | BOOLEAN, default false | If false, soft-mask by lowercasing. If true, replace low-complexity regions with `N`. |
 
 **Returns:** VARCHAR — the masked sequence.
 
 **Behavior:**
+
 - High-complexity sequences are returned unchanged
 - NULL input returns NULL
 - Empty string returns empty string
 
 **Examples:**
 ```sql
--- Soft-mask (lowercase low-complexity regions)
-SELECT mask_dust('AAAAAAAAAAAACCCCCCCC');
-
 -- Hard-mask (replace with N)
 SELECT mask_dust('AAAAAAAAAAAACCCCCCCC', true);
 
@@ -202,13 +227,23 @@ FROM read_fastx('sequences.fasta');
 
 Paired-end read merging, powered by the [vsearch](https://github.com/torognes/vsearch) library (Rognes et al. 2016, PeerJ 4:e2584). Merges overlapping forward and reverse reads into a single consensus sequence with merged quality scores.
 
+```sql
+-- Merge paired-end reads
+SELECT read_id,
+       (merge_pairs_vsearch(sequence1, qual1, sequence2, qual2)).merged AS merged,
+       (merge_pairs_vsearch(sequence1, qual1, sequence2, qual2)).sequence AS merged_seq
+FROM read_fastx('forward.fq', sequence2 = 'reverse.fq');
+```
+
 **Parameters (4-arg form, default tuning):**
+
 - `fwd_seq` (VARCHAR): Forward read sequence.
 - `fwd_qual` (LIST(UTINYINT)): Forward read quality scores (numeric Phred, as output by `read_fastx`).
 - `rev_seq` (VARCHAR): Reverse read sequence.
 - `rev_qual` (LIST(UTINYINT)): Reverse read quality scores.
 
 **Parameters (10-arg form, with tuning):**
+
 - Same first 4 arguments, plus:
 - `minovlen` (INTEGER): Minimum overlap length.
 - `maxdiffs` (INTEGER): Maximum differences in overlap region.
@@ -232,18 +267,13 @@ Paired-end read merging, powered by the [vsearch](https://github.com/torognes/vs
 | `overlap` | INTEGER | Length of overlap region |
 
 **Behavior:**
+
 - NULL inputs return a STRUCT with `merged=false` and NULL fields
 - Input length guard: throws if forward + reverse > 9,999 bases (vsearch fixed buffer)
 - Quality inputs and outputs use numeric Phred (LIST(UTINYINT)), matching `read_fastx` output
 
 **Examples:**
 ```sql
--- Merge paired-end reads
-SELECT read_id,
-       (merge_pairs_vsearch(sequence1, qual1, sequence2, qual2)).merged AS merged,
-       (merge_pairs_vsearch(sequence1, qual1, sequence2, qual2)).sequence AS merged_seq
-FROM read_fastx('forward.fq', sequence2 = 'reverse.fq');
-
 -- Filter to only successfully merged reads
 SELECT read_id, m.*
 FROM read_fastx('forward.fq', sequence2 = 'reverse.fq'),
@@ -279,6 +309,19 @@ Within each call, anchored matching is tried first; the partial-overlap fallback
 Only the first `^` on `anchor5` and the last `$` on `anchor3` are recognized as sigils — they are stripped exactly once. Repeated sigils (e.g., `'^^X'`) leave the second character in place and the result is searched literally. Post-strip anchor characters must be IUPAC bases (`[ACGTURYSWKMBDHVN]` plus DNA/RNA case-insensitive); other characters will simply never match and the row will return NULL. If you are driving anchors from a column whose values may include a literal `^` or `$` as part of the base sequence (non-standard but possible in dirty data), strip such characters at the call site before passing them in.
 
 > **Migration note (changed in this release).** Before this release the function silently behaved like cutadapt's anchored-both `-g ^X...Y$` mode regardless of input — reads with primers partially clipped off the read edges returned NULL. With this release the default is cutadapt's non-anchored `-g X...Y` mode (matching the docs as written), so calls with no sigil will now match a class of reads they previously rejected. If you were relying on the old NULL-as-quality-signal behavior, restore it by switching to `'^X', 'Y$'` (a one-line per-call-site change).
+
+```sql
+-- UMI extraction: pull out the 18-bp UMI between fixed flanking primers
+SELECT read_id,
+       (e).sequence AS umi,
+       (e).qual AS umi_qual
+FROM (
+    SELECT read_id,
+           extract_linked_amplicon(sequence1, qual1, 'GTAATACG', 'AGAGCACAC',
+                                   18, 18, 0.10) AS e
+    FROM 'reads.fq'
+) WHERE umi IS NOT NULL;
+```
 
 **Parameters (4-arg form, default tuning):**
 
@@ -318,17 +361,6 @@ Returns `NULL` if either anchor cannot be located within its error budget, or if
 
 **Examples:**
 ```sql
--- UMI extraction: pull out the 18-bp UMI between fixed flanking primers
-SELECT read_id,
-       (e).sequence AS umi,
-       (e).qual AS umi_qual
-FROM (
-    SELECT read_id,
-           extract_linked_amplicon(sequence1, qual1, 'GTAATACG', 'AGAGCACAC',
-                                   min_len := 18, max_len := 18) AS e
-    FROM read_fastx('reads.fq')
-) WHERE umi IS NOT NULL;
-
 -- Long-read amplicon primer trimming with edge-clip recovery: PacBio CCS
 -- reads often have 4-15 bp clipped off the primer at the read termini.
 -- The default non-anchored mode recovers these reads via partial overlap.
@@ -350,6 +382,7 @@ FROM read_fastx('reads.fq');
 ```
 
 **Behavior:**
+
 - NULL `seq` or `qual` returns NULL.
 - Anchors are searched in order: 5' first across the full sequence, then 3' in `seq[stop5:]`. The 3' search will not find anchors that overlap the 5' anchor.
 - Each row's qual list must have the same length as its sequence; otherwise the row throws.
@@ -370,13 +403,13 @@ SELECT miint_version();
 
 ### `miint_versions()`
 
-Returns a table of the pinned versions of miint and every embedded library, one row per component. Which rows appear depends on the build's compile-time features (HDF5, vsearch, mafft, abpoa, sylph, st3, krepp, unifrac, sortmerna, parasail, libcurl, libdeflate are conditional). The `krepp-openmp` row, whose version is `enabled`, appears only when krepp's OpenMP regions are compiled in, which is what lets [`krepp_index_create`](phylogeny.md#build-a-krepp-index) accept `threads` > 1.
+Returns a table of the pinned versions of miint and every embedded library, one row per component. Which rows appear depends on the build's compile-time features (HDF5, vsearch, mafft, abpoa, sylph, st3, krepp, unifrac, sortmerna, parasail, libcurl, libdeflate are conditional). The `krepp-openmp` row, whose version is `enabled`, appears only when krepp's OpenMP regions are compiled in, which is what lets [`krepp_index_create`](phylogeny.md#build-a-krepp-index) accept `threads` > 1. The `krepp-version` row, present whenever `krepp` is, is krepp's own `VERSION` string, the one a krepp index records as `krepp version:` in each `metadata*.txt`; the `krepp` row is `git describe` of the submodule and agrees with it only on a clean, tagged checkout. See the [`place_krepp` Availability note](phylogeny.md#phylogenetic-placement-krepp) for comparing it against a prebuilt index.
 
 **Output schema:**
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `library` | VARCHAR | Component name (`miint`, `htslib`, `minimap2`, `kseq++`, `LBFGS++`, `WFA2-lib`, `zlib`, `rype`, and conditionally `HDF5`, `libdeflate`, `libcurl`, `vsearch`, `mafft`, `abpoa`, `sylph`, `st3`, `krepp`, `krepp-openmp`, `unifrac`, `scikit-bio-binaries`, `sortmerna`, `parasail`) |
+| `library` | VARCHAR | Component name (`miint`, `htslib`, `minimap2`, `kseq++`, `LBFGS++`, `WFA2-lib`, `zlib`, `rype`, and conditionally `HDF5`, `libdeflate`, `libcurl`, `vsearch`, `mafft`, `abpoa`, `sylph`, `st3`, `krepp`, `krepp-version`, `krepp-openmp`, `unifrac`, `scikit-bio-binaries`, `sortmerna`, `parasail`) |
 | `version` | VARCHAR | Version / git description for that component |
 
 ```sql
@@ -406,11 +439,13 @@ SELECT timestamp, message FROM miint_warnings();
 ```
 
 **Behavior:**
+
 - The log is process-scoped and in-memory by default; entries accumulate across queries within a single DuckDB session.
 - Warnings are captured regardless of the `enable_logging` / `logging_level` settings — miint writes directly to DuckDB's global log sink so `miint_warnings()` works without any setup.
 - Under the hood, entries have type `'MiintWarning'` and live alongside DuckDB's own logs in `duckdb_logs()`; the macro just filters on type.
 
 **Interactions with DuckDB logging settings:**
+
 - `SET logging_storage='stderr'` — entries go straight to stderr instead of the in-memory sink, so `miint_warnings()` stops returning rows in that mode (the stderr output is the workaround). Default storage is in-memory; leave it alone unless you have reason to change it.
 - `SET warnings_as_errors=true` — miint suppresses the log-storage write for that query so a skip-warning doesn't abort the retry or the partial-data path it was designed to allow. The stderr message still fires, so nothing is silently dropped, but `miint_warnings()` will not see the row for that call.
 
@@ -425,6 +460,7 @@ The [scikit-bio methods](scikit_bio.md) run in a different helper, skb-arrow, wi
 Returns `BOOLEAN` indicating whether the `gpl-boundary` binary (which embeds FastTree) is installed and reachable on `PATH`. Used to gate calls to [`phylogeny_fasttree`](phylogeny.md#fasttree) when the daemon may not be present (e.g., distributed builds, environments without the optional binary).
 
 **Behavior:**
+
 - Cached after the first call (uses `std::call_once`); subsequent calls are O(1).
 - The probe finds `gpl-boundary` on `PATH`, runs it with `--list-tools`, and checks whether the output advertises `fasttree`. Returns `false` if any of those steps fails.
 - Returns `false` (compile-time constant) on builds where gpl-boundary support was disabled at CMake time (`MIINT_ENABLE_GPL_BOUNDARY=OFF`, including Emscripten and Windows).
@@ -443,6 +479,7 @@ SELECT
 Returns `BOOLEAN` indicating whether the `gpl-boundary` binary (which embeds bowtie2) is installed and reachable, so you can gate calls to [`align_bowtie2`](alignment_reference.md) / `align_bowtie2_sharded` when the daemon may not be present. Mirrors `phylogeny_fasttree_available()`.
 
 **Behavior:**
+
 - Cached after the first call (uses `std::call_once`); subsequent calls are O(1).
 - The probe finds `gpl-boundary` (via `MIINT_GPL_BOUNDARY_PATH`, miint's cache, or `PATH`), runs it with `--list-tools`, and returns `true` only if the output advertises both `bowtie2-align` and `bowtie2-build`. Returns `false` if any step fails.
 - Returns `false` (compile-time constant) on builds where gpl-boundary support was disabled at CMake time (Emscripten, Windows).
@@ -463,6 +500,7 @@ Download a prebuilt `gpl-boundary` binary from the upstream GitHub releases and 
 Drives the upstream `install.sh` (https://github.com/the-miint/GPL-boundary/releases/latest/download/install.sh), which detects the platform, downloads the matching tarball, verifies its SHA256 against the release's `SHA256SUMS`, and extracts the binary. Miint sets `INSTALL_DIR` to its cache (`$XDG_CACHE_HOME/miint/bin` or `$HOME/.cache/miint/bin`); `FindGplBoundary()` checks that location before falling through to `PATH`, so no user-side PATH editing is needed.
 
 **Parameters:**
+
 - `force` (BOOLEAN, optional, default `false`): when `true`, bypass the existing-binary probe and re-download latest into the miint cache unconditionally. Use this to escape a stale binary on `PATH` (for example `~/.cargo/bin/gpl-boundary` left behind by an old `cargo install`) that the probe considers good enough but predates a protocol bump. The cache install does NOT shadow `MIINT_GPL_BOUNDARY_PATH`; if that env var is set, unset it after a forced install or `FindGplBoundary()` will keep returning the override.
 
 **Returns:** `STRUCT(installed BOOLEAN, path VARCHAR, version VARCHAR, message VARCHAR)`
@@ -475,6 +513,7 @@ Drives the upstream `install.sh` (https://github.com/the-miint/GPL-boundary/rele
 | `message` | Human-readable description of what happened ("already available", "Installed gpl-boundary 0.1.0 to ...", or a diagnostic on failure). |
 
 **Behavior:**
+
 - **Idempotent (default):** if `gpl-boundary` is already discoverable (via `MIINT_GPL_BOUNDARY_PATH`, miint's cache, or `PATH`), the function probes it with `--version` and returns `installed=true` without touching the network. Pass `force=true` to skip this probe and re-download regardless.
 - **Mutex-protected within a process:** concurrent calls within ONE DuckDB process serialize through a lock. Two SEPARATE DuckDB processes calling `install_gpl_boundary()` concurrently are not coordinated — they will both run install.sh against the same cache dir; install.sh's final `mv` is atomic on the same filesystem so the on-disk binary is always one of the two valid downloads (bit-identical for the same `latest` release), but tmpdirs and download bandwidth are wasted.
 - **Network access required** for the download path (the idempotent fast path is offline-only).

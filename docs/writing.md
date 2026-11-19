@@ -3,7 +3,7 @@
 MIINT provides custom COPY formats for writing bioinformatics file formats. The writers extend the native SQL methods for writing files through the `COPY ... TO '...' (FORMAT csv)` style. A quick example is below, where we read a FASTQ file and write it as FASTA:
 
 ```sql
-COPY (SELECT * FROM read_fastx('some_file.fastq')) 
+COPY (SELECT * FROM 'some_file.fastq')
 TO 'some_other_file.fasta' (FORMAT FASTA);
 ```
 
@@ -33,25 +33,42 @@ FASTQ, FASTA and NEWICK write a path with a URI scheme other than `file://` (`s3
 
 Write query results to FASTQ format files. Requires `read_id`, `sequence1`, and `qual1` columns from `read_fastx` output.
 
+```sql
+COPY (SELECT * FROM 'input.fastq')
+TO 'output.fastq' (FORMAT FASTQ);
+```
+
+The writer treats the NULL mate columns from a single-end read as single-end input. Set `INCLUDE_COMMENT true` to preserve FASTQ header comments on a round trip.
+
 **Required columns:**
+
 - `read_id` (VARCHAR, BIGINT, or UUID): Sequence identifier. `BIGINT` is stringified to decimal and `UUID` to its canonical 36-char lowercase form; the record name on disk is always text. Round-trip via `read_fastx` returns `read_id` as `VARCHAR` (the `BIGINT`/`UUID` type is not preserved on disk — recover it with e.g. `read_id::BIGINT`).
 - `sequence1` (VARCHAR): DNA/RNA sequence
-- `qual1` (BLOB): Quality scores as raw bytes
+- `qual1` (`UTINYINT[]`): Decoded Phred scores for R1
 
 **Optional columns:**
+
 - `comment` (VARCHAR): Comment line (only included if `INCLUDE_COMMENT=true`). Note this defaults to **false**, so a `read_fastx` → `COPY` round trip drops the comment unless you pass `INCLUDE_COMMENT true`. For Illumina data the comment carries the read number, filter flag and index (`1:N:0:ATCACG`), so pass it when a faithful round trip matters.
 - `sequence_index` (BIGINT): Used as identifier if `ID_AS_SEQUENCE_INDEX=true`
 - `sequence2` (VARCHAR): Second read for paired-end data
-- `qual2` (BLOB): Quality scores for second read
+- `qual2` (`UTINYINT[]`): Decoded Phred scores for R2
 
-**Parameters:**
-- `QUAL_OFFSET` (default: 33): Quality score encoding offset (33 or 64)
-- `INCLUDE_COMMENT` (default: false): Include comment field in output
-- `ID_AS_SEQUENCE_INDEX` (default: false): Use `sequence_index` as identifier instead of `read_id`
-- `INTERLEAVE` (default: false): When the data is paired-end, write R1/R2 interleaved into a single file. Optional — see "Single-end vs paired-end output" below. Cannot be combined with the `{ORIENTATION}` placeholder.
-- `COMPRESSION` (default: auto): Enable gzip compression (auto-detected from `.gz` extension). Local `.gz` output is written as **BGZF** (block-gzip via htslib): a fully standard gzip file readable by any gzip tool, but compressed in parallel — it follows DuckDB's thread count (`PRAGMA threads`) and runs ~10x faster than single-threaded gzip on multi-core hosts, while staying block-indexable. Compression keeps the records in the order they are written (see "Threads, order and memory" below). (Remote `scheme://` targets fall back to single-threaded gzip.)
-- `COMPRESSION_LEVEL` (0-9, default: 1): BGZF compression level for local `.gz` output, as for BAM. Lower is faster and writes larger files. Refused for uncompressed output and for remote targets, whose gzip writer takes no level.
-- `ROW_GROUP_SIZE`, `ROW_GROUP_SIZE_BYTES` (defaults: 64 and `'8MB'`): how DuckDB batches the records it hands the writer; see "Threads, order and memory" below.
+**COPY options**
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `QUAL_OFFSET` | `33` | Encode quality scores with offset `33` or `64`. |
+| `INCLUDE_COMMENT` | `false` | Include the comment from the input. |
+| `ID_AS_SEQUENCE_INDEX` | `false` | Use `sequence_index` as the identifier. |
+| `INTERLEAVE` | `false` | Write paired reads into one file. Incompatible with `{ORIENTATION}`. |
+| `COMPRESSION` | Auto | Infer gzip from the `.gz` extension or set explicitly. |
+| `COMPRESSION_LEVEL` | `1` | Set the local gzip compression level from `0` to `9`. |
+| `ROW_GROUP_SIZE` | `64` | Rows in each batch DuckDB hands the writer. See "Threads, order and memory" below. |
+| `ROW_GROUP_SIZE_BYTES` | `'8MB'` | Bytes in each batch, as DuckDB measures the rows. See "Threads, order and memory" below. |
+
+**Compression**
+
+Local gzip output uses BGZF (block gzip via HTSlib), which standard gzip tools can read. It uses DuckDB's thread count, does not change the record order (see "Threads, order and memory" below), supports block indexing, and runs about 10× faster than single-threaded gzip on multi-core hosts. Lower compression levels are faster and produce larger files. Remote targets use single-threaded gzip. `COMPRESSION_LEVEL` is available only for local gzip output.
 
 **Single-end vs paired-end output:**
 
@@ -62,6 +79,7 @@ You do not need to project away `sequence2`/`qual2` or pre-declare whether the d
 - A record is **paired** when both `sequence2` and `qual2` are non-NULL, and **single-end** when both are NULL. A single COPY must be all one or all the other.
 
 The writer fails loud (rather than guessing or silently dropping data) when:
+
 - paired data is sent to a single-file path without `INTERLEAVE=true` (add `{ORIENTATION}` to split, or `INTERLEAVE=true` to interleave),
 - `{ORIENTATION}` is combined with `INTERLEAVE=true` (contradictory),
 - `sequence2` and `qual2` disagree on NULL-ness within a record, or
@@ -80,13 +98,9 @@ An error about a record's data names its `read_id`: a NULL `sequence1`, `qual1` 
 - **Batches.** DuckDB hands the writer its rows in batches. Unless the COPY sets them, `ROW_GROUP_SIZE 64` and `ROW_GROUP_SIZE_BYTES '8MB'` are added; a value given replaces its default, and the other default stays. A batch ends at whichever it reaches first: `ROW_GROUP_SIZE` rows (a pair is one row), or `ROW_GROUP_SIZE_BYTES`, measured as DuckDB's in-memory size of the rows rather than the text written. A batch can pass either: DuckDB adds rows a chunk at a time and cuts a chunk only at the byte cap, and keeps the row that crosses it. `FORMAT _miint_fastq`, the writer behind `FORMAT FASTQ`, adds no defaults. How a batch is written: [architecture notes](internals/architecture.md#record-writers-on-duckdbs-batch-api).
 - **Memory.** The writer's text buffers sit outside DuckDB's `memory_limit`; the rows themselves are held by DuckDB and counted against it.
 
-**Examples:**
-```sql
--- Basic single-end FASTQ output. SELECT * carries NULL sequence2/qual2 columns;
--- they are recognized as single-end and a single file is written.
-COPY (SELECT * FROM read_fastx('input.fastq'))
-TO 'output.fastq' (FORMAT FASTQ);
+**More examples**
 
+```sql
 -- Paired-end interleaved output (single file)
 COPY (SELECT * FROM read_fastx('R1.fastq', sequence2 = 'R2.fastq'))
 TO 'output.fastq' (FORMAT FASTQ, INTERLEAVE true);
@@ -124,23 +138,42 @@ TO 'all_runs.fastq.gz' (FORMAT FASTQ, PRESERVE_ORDER true);
 
 Write query results to FASTA format files. Requires `read_id` and `sequence1` columns from `read_fastx` output.
 
+```sql
+COPY (SELECT * FROM 'input.fasta')
+TO 'output.fasta' (FORMAT FASTA);
+```
+
 **Required columns:**
+
 - `read_id` (VARCHAR, BIGINT, or UUID): Sequence identifier. `BIGINT` is stringified to decimal and `UUID` to its canonical 36-char lowercase form; the record name on disk is always text. Round-trip via `read_fastx` returns `read_id` as `VARCHAR` (the `BIGINT`/`UUID` type is not preserved on disk — recover it with e.g. `read_id::BIGINT`).
 - `sequence1` (VARCHAR): DNA/RNA/protein sequence
 
 **Optional columns:**
-- `comment` (VARCHAR): Comment line (only included if `INCLUDE_COMMENT=true`)
-- `sequence_index` (BIGINT): Used as identifier if `ID_AS_SEQUENCE_INDEX=true`
-- `sequence2` (VARCHAR): Second read for paired-end data
 
-**Parameters:**
-- `INCLUDE_COMMENT` (default: false): Include comment field in output
-- `ID_AS_SEQUENCE_INDEX` (default: false): Use `sequence_index` as identifier instead of `read_id`
-- `INTERLEAVE` (default: false): When the data is paired-end, write R1/R2 interleaved into a single file. Optional — see "Single-end vs paired-end output" below. Cannot be combined with the `{ORIENTATION}` placeholder.
-- `COMPRESSION` (default: auto): Enable gzip compression (auto-detected from `.gz` extension). Local `.gz` output is written as **BGZF** (block-gzip via htslib): a fully standard gzip file readable by any gzip tool, but compressed in parallel — it follows DuckDB's thread count (`PRAGMA threads`) and runs ~10x faster than single-threaded gzip on multi-core hosts, while staying block-indexable. Compression keeps the records in the order they are written (see "Threads, order and memory" below). (Remote `scheme://` targets fall back to single-threaded gzip.)
-- `COMPRESSION_LEVEL` (0-9, default: 1): BGZF compression level for local `.gz` output, as for BAM. Lower is faster and writes larger files. Refused for uncompressed output and for remote targets, whose gzip writer takes no level.
-- `ROW_GROUP_SIZE`, `ROW_GROUP_SIZE_BYTES` (defaults: 64 and `'8MB'`): how DuckDB batches the records it hands the writer; see "Threads, order and memory" below.
-- `LINE_WIDTH` (integer, at least 1; default: none): wrap each sequence at this many characters, the last line shorter; a sequence whose length is a multiple of it ends without an empty line. Without it each sequence is one line. The header is never wrapped. FASTA only.
+| Column | Type | Description |
+| --- | --- | --- |
+| `comment` | VARCHAR | Comment line (only included if `INCLUDE_COMMENT=true`) |
+| `sequence_index` | BIGINT | Used as identifier if `ID_AS_SEQUENCE_INDEX=true` |
+| `sequence2` | VARCHAR | Second read for paired-end data |
+
+**COPY options**
+
+| Option | Default | Purpose |
+| --- | --- | --- |
+| `INCLUDE_COMMENT` | `false` | Include the comment from the input. |
+| `ID_AS_SEQUENCE_INDEX` | `false` | Use `sequence_index` as the identifier. |
+| `INTERLEAVE` | `false` | Write paired reads into one file. Incompatible with `{ORIENTATION}`. |
+| `COMPRESSION` | Auto | Infer gzip from the `.gz` extension or set explicitly. |
+| `COMPRESSION_LEVEL` | `1` | Set the local gzip compression level from `0` to `9`. |
+| `ROW_GROUP_SIZE` | `64` | Rows in each batch DuckDB hands the writer. See "Threads, order and memory" below. |
+| `ROW_GROUP_SIZE_BYTES` | `'8MB'` | Bytes in each batch, as DuckDB measures the rows. See "Threads, order and memory" below. |
+| `LINE_WIDTH` | One line per sequence | Wrap sequences at this many characters. The minimum is `1`. |
+
+**Compression**
+
+Local gzip output uses BGZF (block gzip via HTSlib), which standard gzip tools can read. It uses DuckDB's thread count, does not change the record order (see "Threads, order and memory" below), supports block indexing, and runs about 10× faster than single-threaded gzip on multi-core hosts. Lower compression levels are faster and produce larger files. Remote targets use single-threaded gzip. `COMPRESSION_LEVEL` is available only for local gzip output.
+
+`LINE_WIDTH` wraps the sequence only. The last line may be shorter, and an exact multiple of the width adds no empty line.
 
 **Single-end vs paired-end output:**
 
@@ -154,12 +187,9 @@ An error about a record's data (a NULL `sequence1`, or with `ID_AS_SEQUENCE_INDE
 
 **Threads, order and memory:** as for [FASTQ](#fastq), with files named `data_0.fasta` (`data_0.fasta.gz` with gzip), and `FORMAT _miint_fasta` as the writer behind `FORMAT FASTA`.
 
-**Examples:**
-```sql
--- Basic FASTA output (single-end; NULL sequence2 columns are recognized as single-end)
-COPY (SELECT * FROM read_fastx('input.fasta'))
-TO 'output.fasta' (FORMAT FASTA);
+**More examples**
 
+```sql
 -- Paired-end split files (the {ORIENTATION} placeholder selects split output)
 COPY (SELECT * FROM read_fastx('R1.fasta', sequence2 = 'R2.fasta'))
 TO 'output_{ORIENTATION}.fasta' (FORMAT FASTA);
@@ -188,17 +218,21 @@ Prodigal's `-a` (proteins) and `-d` (gene nucleotides) FASTA, from `predict_gene
 Write query results to SAM or BAM format files. Requires all mandatory SAM columns from `read_alignments` output.
 
 **Required columns:**
-- `read_id` (VARCHAR, BIGINT, or UUID): Query template name
-- `flags` (USMALLINT): Bitwise flags
-- `reference` (VARCHAR, BIGINT, or UUID): Reference sequence name
-- `position` (BIGINT): 1-based leftmost mapping position
-- `mapq` (UTINYINT): Mapping quality
-- `cigar` (VARCHAR): CIGAR string
-- `mate_reference` (VARCHAR, BIGINT, or UUID): Reference name of mate/next read
-- `mate_position` (BIGINT): Position of mate/next read
-- `template_length` (BIGINT): Observed template length
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `read_id` | VARCHAR, BIGINT, or UUID | Query template name |
+| `flags` | USMALLINT | Bitwise flags |
+| `reference` | VARCHAR, BIGINT, or UUID | Reference sequence name |
+| `position` | BIGINT | 1-based leftmost mapping position |
+| `mapq` | UTINYINT | Mapping quality |
+| `cigar` | VARCHAR | CIGAR string |
+| `mate_reference` | VARCHAR, BIGINT, or UUID | Reference name of mate/next read |
+| `mate_position` | BIGINT | Position of mate/next read |
+| `template_length` | BIGINT | Observed template length |
 
 **Identifier-column types (`read_id`, `reference`, `mate_reference`):**
+
 - Each column is independently `VARCHAR`, `BIGINT`, or `UUID`. The three need not match. Other numeric types are rejected at bind time with the message `Column '<name>' must be VARCHAR, BIGINT, or UUID`.
 - `BIGINT` values are stringified to decimal on write; `UUID` values are stringified to their canonical 36-char lowercase form. The on-disk SAM/BAM record always carries text.
 - A NULL in any of these three columns is written as the SAM `*` sentinel, whatever the column's type. So a single-end record can carry `NULL` (or `'*'`) for `mate_reference` interchangeably.
@@ -221,6 +255,7 @@ BAM stores POS, PNEXT and TLEN in 32 bits, so a record past that range (or with 
 A data error fails the COPY. The writer raises it before it writes any of the batch the record is in, but earlier batches may be written by then; DuckDB then removes the file the COPY created (each of them, with `PARTITION_BY` or `PER_THREAD_OUTPUT`), and a file that was already there keeps its old contents. A failed write, as on a full disk, does the same, with an error naming the format and the file, such as `COPY FORMAT BAM: cannot write 'out.bam': sam_close failed: File too large` (the end of a file is written when it is closed). Over an existing file, DuckDB writes to a temporary file beside it, `tmp_out.bam`, and the error names that.
 
 **Optional columns:**
+
 - `tag_as`, `tag_xs`, `tag_ys`, `tag_xn`, `tag_xm`, `tag_xo`, `tag_xg`, `tag_nm` (BIGINT): Optional integer tags
 - `tag_yt`, `tag_md`, `tag_sa` (VARCHAR): Optional string tags
 
@@ -229,8 +264,9 @@ A tag column of another type is refused before anything is written (`Column 'tag
 SAM and BAM are written to local files only; a remote target (`s3://...`) is refused.
 
 **Parameters:**
+
 - `INCLUDE_HEADER` (default: true): Include header with reference sequences
-  - **Note:** BAM format requires `INCLUDE_HEADER=true` (headers are mandatory in BAM files)
+    - **Note:** BAM format requires `INCLUDE_HEADER=true` (headers are mandatory in BAM files)
 - `REFERENCE_LENGTHS` (VARCHAR, required if INCLUDE_HEADER=true): Table or view name containing reference sequences. Must have at least 2 columns: first column = reference name (VARCHAR, BIGINT or UUID, as `reference` takes, matched as its text (BIGINT in decimal, UUID in the lowercase hyphenated form)), second column = reference length (INTEGER/BIGINT). Column names don't matter. Views are fully supported and can include computed columns. Duplicate reference names are collapsed, keeping the first occurrence.
 
 **`@SQ` order, and how to write a coordinate-sorted BAM:**
@@ -256,6 +292,7 @@ Two consequences worth knowing:
 With `INCLUDE_HEADER=false` no `@SQ` lines are written at all, so the ordering above does not apply; each record's RNAME is written verbatim from its `reference` value. A `REFERENCE_LENGTHS` given with it is still read and checked (an empty table, a NULL name or length, or a negative length fails the COPY), but changes nothing in the file. (This mode is SAM-only — BAM requires a header.)
 
 > **`REFERENCE_LENGTHS` must be exhaustive when a header is written.** Supplying the table asserts it is the complete reference set, so a record whose `reference` (or `mate_reference`) is absent from it is rejected: `Column 'reference' is 'ctg000002' for read 'r2', which is not in the REFERENCE_LENGTHS table`. The header is serialized before the records are, so it cannot gain `@SQ` lines afterwards — a missing reference has no representation in the file being written, and earlier versions lost such records silently (SAM read the name back as `*`, BAM dropped the record). Derive the table from the same relation you are writing, e.g. `SELECT DISTINCT reference … FROM aln`. With `INCLUDE_HEADER=false` there are no `@SQ` lines to be exhaustive about, so any reference is accepted and written verbatim.
+
 - `SEQUENCE_DATA` (VARCHAR, optional): Table or view name containing original read sequences from `read_fastx`. When provided, writes actual SEQ and QUAL fields into the output instead of `*`. See [Sequence Data](#sequence-data) below.
 - `COMPRESSION` (default: auto): Enable gzip compression for SAM (auto-detected from `.gz` extension); values as for the other text formats, [above](#writing-files). BAM is always BGZF-compressed: it accepts `'gzip'` or `'gz'`, in any case, and refuses any other value, which it would ignore; `COMPRESSION_LEVEL 0` writes its BGZF blocks uncompressed.
 - `COMPRESSION_LEVEL` (BAM, and gzip SAM): BGZF compression level 0-9 (default: 6). Higher = better compression, slower speed. Refused for uncompressed SAM, as for FASTQ, FASTA and NEWICK.
@@ -346,11 +383,13 @@ The `SEQUENCE_DATA` parameter allows writing actual SEQ and QUAL fields into SAM
 This design avoids duplicating immutable sequence data across alignment records. The original FASTQ sequences are stored once and joined at write time.
 
 **Required columns in the SEQUENCE_DATA table:**
+
 - `read_id` (VARCHAR, BIGINT or UUID): Read identifier, matched as its text (BIGINT in decimal, UUID in the lowercase hyphenated form) against the alignment's read_id values, so a BIGINT or UUID read_id needs no cast
 - `sequence1` (VARCHAR): Forward-strand DNA sequence for read 1
 - `qual1` (LIST(UTINYINT)): Phred quality scores for read 1 (raw values 0-93, no ASCII offset)
 
 **Optional columns (for paired-end):**
+
 - `sequence2` (VARCHAR): Forward-strand DNA sequence for read 2
 - `qual2` (LIST(UTINYINT)): Phred quality scores for read 2
 
@@ -369,6 +408,7 @@ TO 'output.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table', SEQUENCE_DATA 'seque
 ```
 
 **Behavior:**
+
 - **Paired-end reads**: Uses SAM flag bit 0x80 (second in pair) to select `sequence2`/`qual2` vs `sequence1`/`qual1`
 - **Reverse strand**: When flag bit 0x10 is set, the sequence is reverse-complemented and quality scores are reversed
 - **Hard clipping**: CIGAR H operations trim the original sequence accordingly (leading H trims from start, trailing H from end)
@@ -377,6 +417,7 @@ TO 'output.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table', SEQUENCE_DATA 'seque
 - **Missing reads**: An error is thrown if any alignment's `read_id` is not found in the SEQUENCE_DATA table
 
 **Notes:**
+
 - The SEQUENCE_DATA table is loaded entirely into memory at initialization. For very large datasets, ensure sufficient RAM is available.
 - Reference lengths must be provided explicitly when writing headers - they cannot be inferred from the data
 - All optional tags present in the input are preserved in the output
@@ -389,15 +430,19 @@ Write query results to an **unaligned reads BAM** (uBAM): reads with SEQ/QUAL an
 Every record is written unmapped (`FLAG=4`), with no `@SQ` header and no reference table. `read_id` is written **verbatim** as the record name (QNAME) — the writer makes no assumption about its contents. Output is always BAM (block-gzip).
 
 **Required columns:**
-- `read_id` (VARCHAR, BIGINT, or UUID): Record name (QNAME), written verbatim. `BIGINT`/`UUID` are stringified as for FASTQ.
-- `sequence1` (VARCHAR): Read sequence.
-- `qual1` (UTINYINT[]): Phred quality scores, raw values 0–93 (no ASCII offset) — exactly what `read_fastx` / `read_sequences_sam` emit. Must be the same length as `sequence1`.
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `read_id` | VARCHAR, BIGINT, or UUID | Record name (QNAME), written verbatim. `BIGINT`/`UUID` are stringified as for FASTQ. |
+| `sequence1` | VARCHAR | Read sequence. |
+| `qual1` | UTINYINT[] | Phred quality scores, raw values 0–93 (no ASCII offset) — exactly what `read_fastx` / `read_sequences_sam` emit. Must be the same length as `sequence1`. |
 
 Single-end only (no `sequence2`/`qual2`). Any additional projected columns are ignored unless referenced by `TAGS`.
 
 UBAM is written to local files only; a remote target is refused.
 
 **Parameters:**
+
 - `READ_GROUP` (STRUCT, optional): Emits an `@RG` header line and a per-record `RG:Z` tag. An `ID` field is required; any other fields (`PL`, `DS`, `SM`, `LB`, `PU`, `CN`, …) are passed through. Field names are case-insensitive (upper-cased to the SAM codes). Example: `READ_GROUP {ID: 'qiita', PL: 'PACBIO', DS: 'READTYPE=CCS'}`. `DS:READTYPE=CCS` is the field `lima` keys on to treat the input as CCS.
 - `TAGS` (STRUCT, optional): Maps a 2-character BAM aux tag to a projected **integer** column, written as a signed 32-bit (`i`) tag per record. A NULL cell omits the tag for that record. Example: `TAGS {zm: 'zmw'}` writes `zm:i:<zmw>` (PacBio ZMW hole number). Non-integer columns are rejected at bind. Note: struct keys are lower-cased unless quoted, so an uppercase tag needs a quoted key (e.g. `TAGS {'NM': 'edit_distance'}`); the `RG` tag is reserved for `READ_GROUP`.
 - `COMPRESSION_LEVEL` (0–9, optional): BAM compression level (default: HTSlib's level 6).
@@ -427,9 +472,12 @@ Round-trip via `read_sequences_sam('out.bam')` returns `read_id`/`sequence1`/`qu
 Write query results to BIOM (Biological Observation Matrix) format files. BIOM is an HDF5-based format commonly used for representing OGU/OTU/ASV tables in microbiome analyses.
 
 **Required columns:**
-- `feature_id` (VARCHAR, BIGINT or UUID): Feature/OGU/OTU/ASV identifier
-- `sample_id` (VARCHAR, BIGINT or UUID): Sample identifier
-- `value` (DOUBLE): Abundance/count value
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `feature_id` | VARCHAR, BIGINT or UUID | Feature/OGU/OTU/ASV identifier |
+| `sample_id` | VARCHAR, BIGINT or UUID | Sample identifier |
+| `value` | DOUBLE | Abundance/count value |
 
 An id is written as its text, as `read_id` is elsewhere: BIGINT in decimal, UUID in the lowercase hyphenated form. `read_biom` returns ids as VARCHAR. A column of another type is refused when the COPY is planned, with an error naming the column. An untyped decimal literal such as `45.0` is DECIMAL, so cast a literal `value` to DOUBLE.
 
@@ -438,11 +486,13 @@ BIOM is written to local files only; a remote target is refused. `PARTITION_BY` 
 A target file that already exists is refused, and so is one made between `PREPARE` and `EXECUTE`; the file is left as it was. The error is `Cannot overwrite existing file`, or `H5Fcreate failed: File exists` when DuckDB does not bind the COPY again at `EXECUTE`. `USE_TMP_FILE true`, which has DuckDB rename a temporary file over the target, is refused when the COPY runs. With `PARTITION_BY` or `PER_THREAD_OUTPUT` and `OVERWRITE_OR_IGNORE`, a file of the same name already in the directory is replaced, as that option asks. A write that fails partway, on a full disk for example, fails the COPY with an IO Error naming the file, the HDF5 call that failed and the system's reason, such as `No space left on device`, and DuckDB removes the file the failed COPY created.
 
 **Parameters:**
+
 - `COMPRESSION` (default: 'gzip'): HDF5's compression of the datasets inside the file, `'gzip'` or `'gz'` (deflate level 4, h5py's default), or `'none'` or `'uncompressed'`, in any case. Any other value, zstd included, is refused. The `.biom` file itself is always HDF5, never gzip, whatever its name.
 - `ID` (default: 'No Table ID'): Custom table identifier for BIOM metadata
 - `GENERATED_BY` (default: 'miint'): Tool/version string for provenance tracking
 
 **Behavior:**
+
 - **Automatic deduplication**: Duplicate (feature_id, sample_id) pairs are automatically summed
 - **Sparse optimization**: Zero values are automatically removed from output
 - **Ordering**: Feature and sample IDs appear in order of first occurrence in the input data
@@ -539,13 +589,15 @@ TO 'sparse.biom' (FORMAT BIOM);
 ```
 
 **Compatibility:**
+
 - Output files are compatible with:
-  - QIIME2 (qiime tools import --type FeatureTable[Frequency])
-  - phyloseq (import_biom)
-  - biom-format Python package
-  - The `read_biom()` function in this extension
+    - QIIME2 (qiime tools import --type FeatureTable[Frequency])
+    - phyloseq (import_biom)
+    - biom-format Python package
+    - The `read_biom()` function in this extension
 
 **Notes:**
+
 - BIOM format uses HDF5, which provides efficient storage for sparse matrices
 - The format automatically handles very large feature/sample counts
 - Feature and sample metadata columns are not currently supported (data only)
@@ -556,36 +608,44 @@ TO 'sparse.biom' (FORMAT BIOM);
 Write query results to Newick phylogenetic tree format. Reconstructs a tree from tabular node data and serializes to standard Newick format.
 
 **Required columns:**
-- `node_index` (BIGINT): Unique identifier for each node
-- `parent_index` (BIGINT, nullable): Parent node's node_index (NULL for root)
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `node_index` | BIGINT | Unique identifier for each node |
+| `parent_index` | BIGINT, nullable | Parent node's node_index (NULL for root) |
 
 **Optional columns:**
-- `name` (VARCHAR, BIGINT or UUID): Node label, written as its text
-- `branch_length` (DOUBLE): Branch length
-- `edge_id` (BIGINT): Edge identifier for jplace format
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `name` | VARCHAR, BIGINT or UUID | Node label, written as its text |
+| `branch_length` | DOUBLE | Branch length |
+| `edge_id` | BIGINT | Edge identifier for jplace format |
 
 Each column takes only the types listed. A column of another type, such as the INTEGER and DECIMAL that untyped literals like `1` and `0.1` are, is refused when the COPY is planned; cast it in the query (`node_index::BIGINT`). `name` takes the types a `read_id` does. An untyped `NULL` column is cast to the column's type, so `NULL AS name` writes no names.
 
 **Parameters:**
+
 - `EDGE_IDS` (BOOLEAN, default: auto): Include edge identifiers `{n}` in output
-  - Default: true if `edge_id` column exists, false otherwise
-  - Set to `false` to explicitly exclude edge IDs
+    - Default: true if `edge_id` column exists, false otherwise
+    - Set to `false` to explicitly exclude edge IDs
 - `COMPRESSION` (default: auto): Enable gzip compression, auto-detected from the `.gz` extension; values as for the other text formats, [above](#writing-files)
 - `COMPRESSION_LEVEL` (0-9, default: 6): BGZF compression level for local `.gz` output, as for FASTQ and FASTA. Refused for uncompressed output and for remote targets, whose gzip writer takes no level.
 - `PLACEMENTS` (VARCHAR): Name of a table containing phylogenetic placement data to insert
-  - Inserts fragment sequences into the tree at their placement locations
-  - Requires tree to have `edge_id` column with valid edge identifiers
-  - Required table columns: `fragment_id` (VARCHAR, BIGINT or UUID, as a `read_id`; the placed tip is named with its text), `edge_id` (BIGINT, INTEGER, UBIGINT or UINTEGER), `like_weight_ratio`, `distal_length` and `pendant_length` (each DOUBLE or FLOAT). A column of another type is refused, when the COPY is planned and again when the placements are read
-  - Duplicate fragment_ids are deduplicated as in [`tree_resolve_placement`](phylogeny.md#resolve-placements), which does not always keep the placement with the highest `like_weight_ratio`
-  - Multiple placements on same edge are handled correctly
+    - Inserts fragment sequences into the tree at their placement locations
+    - Requires tree to have `edge_id` column with valid edge identifiers
+    - Required table columns: `fragment_id` (VARCHAR, BIGINT or UUID, as a `read_id`; the placed tip is named with its text), `edge_id` (BIGINT, INTEGER, UBIGINT or UINTEGER), `like_weight_ratio`, `distal_length` and `pendant_length` (each DOUBLE or FLOAT). A column of another type is refused, when the COPY is planned and again when the placements are read
+    - Duplicate fragment_ids are deduplicated as in [`tree_resolve_placement`](phylogeny.md#resolve-placements), which does not always keep the placement with the highest `like_weight_ratio`
+    - Multiple placements on same edge are handled correctly
 
 **Behavior:**
+
 - Reconstructs tree structure from parent-child relationships
 - Validates tree structure:
-  - Exactly one root (node with NULL parent_index)
-  - All parent references valid
-  - No cycles
-  - All nodes connected
+    - Exactly one root (node with NULL parent_index)
+    - All parent references valid
+    - No cycles
+    - All nodes connected
 - Serializes to standard Newick format with semicolon terminator
 - Extra columns (e.g., `is_tip`, `filepath`) are ignored
 - Writes one tree to one file: `PER_THREAD_OUTPUT`, `PARTITION_BY` and `ORDER_BY` (which DuckDB writes as a directory of files) are refused, as each file would hold only part of the tree. The error comes when the COPY runs, not when it is planned (`EXPLAIN` and `PREPARE` do not raise it), and a partitioned or ordered COPY of no rows succeeds and writes no file
@@ -656,6 +716,7 @@ TO 'resolved_tree.nwk' (FORMAT NEWICK, PLACEMENTS 'jplace_placements');
 ```
 
 **Validation errors:**
+
 - "No data to write" - Empty result set
 - "no root" - All nodes have a parent_index
 - "multiple roots" - More than one node has NULL parent_index
@@ -664,6 +725,7 @@ TO 'resolved_tree.nwk' (FORMAT NEWICK, PLACEMENTS 'jplace_placements');
 - "disconnected nodes" - Nodes not reachable from root
 
 **Placement-specific errors (when using PLACEMENTS):**
+
 - "Placement table does not exist" - The specified table doesn't exist
 - "Placement table is empty" - The table has no rows
 - "missing required column" - Missing one of: fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length
@@ -685,6 +747,7 @@ SELECT * FROM read_newick('copy.nwk');
 ```
 
 **Newick Format Output:**
+
 - Node names are included without quotes (unless containing special characters)
 - Branch lengths are included after colon (`:0.123`)
 - Edge IDs are included in braces when EDGE_IDS=true (`{0}`)
@@ -695,22 +758,23 @@ SELECT * FROM read_newick('copy.nwk');
 `COPY ... TO 'out.gff' (FORMAT GFF)` writes GFF, a line per row. A path ending in `.gff` is FORMAT GFF without saying so. The rows are made into lines in SQL and DuckDB's CSV writer writes them (as DuckDB's own `FORMAT JSON` does), so `COMPRESSION` (and gzip for a path ending in `.gz`), `PARTITION_BY`, `FILE_EXTENSION`, `OVERWRITE`, `OVERWRITE_OR_IGNORE`, `FILENAME_PATTERN`, `USE_TMP_FILE` and `RETURN_FILES` are the CSV writer's. Options that would break the file (`APPEND`, `PER_THREAD_OUTPUT`, `FILE_SIZE_BYTES`, `WRITE_PARTITION_COLUMNS`, `PRESERVE_ORDER`, and CSV's own) are refused, and so is `PARTITION_PATH`. The lines come out in the query's order, and the count COPY returns is the lines written, the version and header lines included.
 
 **Parameters:**
+
 - `DIALECT` (VARCHAR, default `'gff3'`): `'gff3'` or `'prodigal'`.
 - `SOURCE` (VARCHAR, default `'Prodigal_v2.6.5'`, `'prodigal'` only): column 2.
 - `PARTITION_BY (genome_id)` (`'prodigal'` only): a file per genome.
 
 - **DIALECT `'gff3'`**, from **[`read_gff`](reading.md#gff)'s columns**, `seqid`, `source`, `type` (VARCHAR), `position`, `stop_position` (integers), `score` (a number), `strand` (VARCHAR), `phase` (an integer) and `attributes` (`MAP(VARCHAR, VARCHAR)`, or VARCHAR written as given): GFF3, a `##gff-version 3` line, then a line per row. What `read_gff` reads, this writes and `read_gff` reads back the same. A missing column or a column of another type is refused as the query is bound, even when every value is NULL.
-  - `stop_position` is half-open, as `read_gff` returns it, so the GFF `end` written is `stop_position - 1`. `position` must be at least 1 and `stop_position` greater than `position`.
-  - A NULL `score`, `strand`, `phase` or `attributes` is `.`. `strand` is `+`, `-`, `.` or `?`; `phase` 0, 1 or 2.
-  - A MAP's keys and values are percent-encoded where GFF3 reserves the character (`;`, `=`, `&`, `,`, `%`, tab, line breaks and other control characters), and `read_gff` decodes them. A key with a NULL value is written alone, without `=`, as `read_gff` reads such a token (an attributes column ending in `;`, or `.`, reads back the same). Text `attributes` is written as given and may not hold a control character (a tab or line break, say).
-  - A value is one value: `read_gff` reads `Parent=a,b` as the text `a,b` (it does not split GFF3's comma-separated lists), so this writes it back as `Parent=a%2Cb`, which a reader that splits lists takes as one parent. To write a list, give `attributes` as text.
-  - `seqid`, `source` and `type` are written as given (`read_gff` does not decode them), so a NULL or empty one, a control character, or a `seqid` starting with `#` (which would make the line a comment) is refused.
+    - `stop_position` is half-open, as `read_gff` returns it, so the GFF `end` written is `stop_position - 1`. `position` must be at least 1 and `stop_position` greater than `position`.
+    - A NULL `score`, `strand`, `phase` or `attributes` is `.`. `strand` is `+`, `-`, `.` or `?`; `phase` 0, 1 or 2.
+    - A MAP's keys and values are percent-encoded where GFF3 reserves the character (`;`, `=`, `&`, `,`, `%`, tab, line breaks and other control characters), and `read_gff` decodes them. A key with a NULL value is written alone, without `=`, as `read_gff` reads such a token (an attributes column ending in `;`, or `.`, reads back the same). Text `attributes` is written as given and may not hold a control character (a tab or line break, say).
+    - A value is one value: `read_gff` reads `Parent=a,b` as the text `a,b` (it does not split GFF3's comma-separated lists), so this writes it back as `Parent=a%2Cb`, which a reader that splits lists takes as one parent. To write a list, give `attributes` as text.
+    - `seqid`, `source` and `type` are written as given (`read_gff` does not decode them), so a NULL or empty one, a control character, or a `seqid` starting with `#` (which would make the line a comment) is refused.
 - **DIALECT `'prodigal'`**, from **[`predict_genes`](gene_prediction.md)' columns**: Prodigal's own GFF, as `prodigal -f gff` writes it (but for column 6 in metagenomic mode, below), with a `# Sequence Data` and a `# Model Data` line before each contig's genes. CheckM reads the translation table from the Model Data line. Its columns' types are checked as the query is bound (`read_id` may be any type). Without DIALECT, predict_genes' columns (with `gene_index` and without read_gff's) are refused with a pointer to it.
-  - The rows must be in contig order, as `predict_genes` returns them: the header lines are written each time the contig (`genome_id` and `read_id`) changes. Without a `genome_id` column, the rows are one genome's.
-  - A contig without genes (its `predict_genes` row has a NULL `gene_index`) gets its header lines and no feature, as in the CLI's file, and is counted in `seqnum`, which numbers the contigs from 1. A genome's own row (`training_failed`, or `no_genes` with a NULL `read_id`) is skipped.
-  - `seqhdr` is the `read_id`. A value a line needs that is NULL, a `read_id` with a control character or starting with `#`, and a `strand` other than `+` or `-` are refused.
-  - Column 6 is `score` (column 9's `score=`) to one decimal, which is what the CLI writes there in single-genome mode. In metagenomic mode the CLI writes the gene's score (`cscore + sscore`) computed a second time under the chosen model, which can differ from `score=` and which `predict_genes` does not return, so there column 6 can differ from the CLI's. CheckM does not read column 6 (`checkm/prodigal.py`, 1.2.5 and 1.3.0).
-  - With `PARTITION_BY (genome_id)`, each genome is a file of its own, with its own version line and `seqnum` from 1.
+    - The rows must be in contig order, as `predict_genes` returns them: the header lines are written each time the contig (`genome_id` and `read_id`) changes. Without a `genome_id` column, the rows are one genome's.
+    - A contig without genes (its `predict_genes` row has a NULL `gene_index`) gets its header lines and no feature, as in the CLI's file, and is counted in `seqnum`, which numbers the contigs from 1. A genome's own row (`training_failed`, or `no_genes` with a NULL `read_id`) is skipped.
+    - `seqhdr` is the `read_id`. A value a line needs that is NULL, a `read_id` with a control character or starting with `#`, and a `strand` other than `+` or `-` are refused.
+    - Column 6 is `score` (column 9's `score=`) to one decimal, which is what the CLI writes there in single-genome mode. In metagenomic mode the CLI writes the gene's score (`cscore + sscore`) computed a second time under the chosen model, which can differ from `score=` and which `predict_genes` does not return, so there column 6 can differ from the CLI's. CheckM does not read column 6 (`checkm/prodigal.py`, 1.2.5 and 1.3.0).
+    - With `PARTITION_BY (genome_id)`, each genome is a file of its own, with its own version line and `seqnum` from 1.
 
 ```sql
 -- Round trip

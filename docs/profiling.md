@@ -16,24 +16,35 @@ Compute [Woltka](https://github.com/qiyunzhu/woltka) OGU (Operational Genomic Un
 
 `woltka_ogu(relation, sequence_id_field [, sample_id])`
 
+```sql
+-- Global aggregation across the whole relation
+SELECT * FROM woltka_ogu('my_alignments', 'read_id');
+```
+
 **Parameters:**
-- `relation` (VARCHAR): Name of a table or view containing SAM-like alignment data (must be a resolvable catalog name; pass as a string literal)
-- `sequence_id_field` (VARCHAR): Name of the column holding sequence identifiers — typically `read_id`, or a numeric index column for better hash performance
-- `sample_id` (VARCHAR, named, optional): Name of the column holding sample identifiers. When supplied, adds that column to the output and runs the aggregation per distinct sample value in parallel.
+
+| Parameter | Type and default | Description |
+| --- | --- | --- |
+| `relation` | VARCHAR | Name of a table or view containing SAM-like alignment data (must be a resolvable catalog name; pass as a string literal) |
+| `sequence_id_field` | VARCHAR | Name of the column holding sequence identifiers — typically `read_id`, or a numeric index column for better hash performance |
+| `sample_id` | VARCHAR, named, optional | Name of the column holding sample identifiers. When supplied, adds that column to the output and runs the aggregation per distinct sample value in parallel. |
 
 **Required columns in relation:**
+
 - Column named by `sequence_id_field`: read/sequence identifier
 - `reference` (VARCHAR, BIGINT, or UUID): reference sequence name (becomes `feature_id`, preserving the storage type). A non-identifier type is rejected at bind time.
 - `flags` (USMALLINT): SAM alignment flags
 - When `sample_id` is supplied: the named column (any comparable type) — NULLs are rejected at bind time
 
 **Output schema:**
+
 - When `sample_id` is omitted: `(feature_id <reference_type>, value DOUBLE)` — `feature_id` preserves the `reference` column's storage type (VARCHAR/BIGINT/UUID), mirroring `align_minimap2`/`alignment_slice` id-type preservation.
 - When `sample_id` is supplied: `(<sample_id_column> <its_type>, feature_id <reference_type>, value DOUBLE)` — the first column's name matches the value you passed to `sample_id`, and both id columns preserve their input storage types.
 
 This long-form `(sample_id, feature_id, value)` shape is exactly what the [diversity functions](diversity.md) consume and what [`COPY ... (FORMAT BIOM)`](writing.md) writes.
 
 **Algorithm:**
+
 1. Orients reads using alignment flags (forward/reverse via [`alignment_is_read1`](alignment_analysis.md#sam-flag-functions)).
 2. For each read orientation, divides 1 by the number of unique features aligned to.
 3. Aggregates fractional counts per feature (and per sample, when `sample_id` is used).
@@ -42,9 +53,6 @@ This long-form `(sample_id, feature_id, value)` shape is exactly what the [diver
 
 **Examples:**
 ```sql
--- Global aggregation across the whole relation
-SELECT * FROM woltka_ogu('my_alignments', 'read_id');
-
 -- Per-sample aggregation — one aggregation per distinct sample value, in parallel
 SELECT * FROM woltka_ogu(
     'my_alignments',
@@ -83,6 +91,7 @@ COPY (
 ```
 
 **Behavior:**
+
 - Arguments `relation` and `sequence_id_field` (and `sample_id` if used) must be quoted string literals; they are catalog/column names resolved at bind time.
 - Multi-mapped reads are fractionally assigned: each mapping receives weight 1/N where N is the number of unique references the read maps to, within the same orientation.
 - Read orientation (forward/reverse) is considered separately via the [`alignment_is_read1()`](alignment_analysis.md#sam-flag-functions) flag — paired-end reads are handled automatically.
@@ -173,6 +182,18 @@ Embedded as a Rust static library (sylph 1.0.0-miint fork; MIT). Linux and macOS
 
 `sylph_profile(source_table, syldb_path, [sample_id='col'], [options])`
 
+```sql
+-- Profile a metagenome against the GTDB sylph DB (single sample).
+CREATE TABLE reads AS
+  SELECT read_id, sequence1, sequence2
+  FROM read_fastx('sample_R1.fq.gz', sequence2 := 'sample_R2.fq.gz');
+
+SELECT genome_name, taxonomic_abundance, adjusted_ani, eff_cov
+FROM sylph_profile('reads', '/refs/gtdb-r220-c200-dbv1.syldb')
+ORDER BY taxonomic_abundance DESC
+LIMIT 20;
+```
+
 **Parameters:**
 
 - `source_table` (VARCHAR, positional): Name of a table or view with columns `read_id` (VARCHAR), `sequence1` (VARCHAR), and optionally `sequence2` (VARCHAR). When `sequence2` is present and non-empty per row, the read pair is processed paired-end; otherwise the call is single-end.
@@ -212,19 +233,7 @@ Adding columns at the end is non-breaking; reordering is.
 - **Ordering:** `order_preservation_type = NO_ORDER` — rows may interleave across genomes when running per-sample. Sort downstream if needed.
 - **Numerical parity:** bit-identical to upstream `sylph profile --reads` on the same data, modulo a small documented set of divergences in the embedded library.
 
-**Examples:**
-
-```sql
--- Profile a metagenome against the GTDB sylph DB (single sample).
-CREATE TABLE reads AS
-  SELECT read_id, sequence1, sequence2
-  FROM read_fastx('sample_R1.fq.gz', sequence2 := 'sample_R2.fq.gz');
-
-SELECT genome_name, taxonomic_abundance, adjusted_ani, eff_cov
-FROM sylph_profile('reads', '/refs/gtdb-r220-c200-dbv1.syldb')
-ORDER BY taxonomic_abundance DESC
-LIMIT 20;
-```
+**Per-sample example**
 
 ```sql
 -- Per-sample profiling: one row stream per sample_accession, parallelized.

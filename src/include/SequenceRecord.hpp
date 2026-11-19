@@ -55,27 +55,39 @@ struct SequenceRecordBatch {
 		quals2.clear();
 	}
 
-	// Extract a sub-range [offset, offset+count) into a new batch.
-	// Each element is copied (safe for concurrent access by multiple threads).
-	// Returns empty batch if offset >= size().
-	SequenceRecordBatch SubRange(size_t offset, size_t count) const {
+	// Move rows [offset, offset+count) into a new batch. The rows left behind
+	// are moved-from, to be removed with DropFront. Clamped to size().
+	SequenceRecordBatch MoveRange(size_t offset, size_t count) {
+		SequenceRecordBatch result(is_paired);
 		if (offset >= size()) {
-			return SequenceRecordBatch(is_paired);
+			return result;
 		}
 		count = std::min(count, size() - offset);
-		SequenceRecordBatch result(is_paired);
 		result.reserve(count);
 		for (size_t i = offset; i < offset + count; i++) {
-			result.read_ids.push_back(read_ids[i]);
-			result.comments.push_back(comments[i]);
-			result.sequences1.push_back(sequences1[i]);
-			result.quals1.push_back(quals1[i]);
+			result.read_ids.push_back(std::move(read_ids[i]));
+			result.comments.push_back(std::move(comments[i]));
+			result.sequences1.push_back(std::move(sequences1[i]));
+			result.quals1.push_back(std::move(quals1[i]));
 			if (is_paired) {
-				result.sequences2.push_back(sequences2[i]);
-				result.quals2.push_back(quals2[i]);
+				result.sequences2.push_back(std::move(sequences2[i]));
+				result.quals2.push_back(std::move(quals2[i]));
 			}
 		}
 		return result;
+	}
+
+	// Remove the first `count` rows.
+	void DropFront(size_t count) {
+		auto drop = [count](auto &column) {
+			column.erase(column.begin(), column.begin() + static_cast<std::ptrdiff_t>(std::min(count, column.size())));
+		};
+		drop(read_ids);
+		drop(comments);
+		drop(sequences1);
+		drop(sequences2);
+		drop(quals1);
+		drop(quals2);
 	}
 
 	SequenceRecordBatch() : is_paired(false) {

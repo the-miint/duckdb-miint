@@ -319,6 +319,12 @@ if [ "${MIINT_LOAD_RACE_TEST:-0}" = "1" ]; then
     fi
 fi
 
+# A file's sha256, compared by the downloads below. Not `sha256sum -c`: macOS's reads a
+# checklist from stdin only when given `-`.
+sha256_of() {
+    sha256sum "$1" | awk '{print $1}'
+}
+
 # Download and cache MassQL test data if not present
 CACHE_DIR="data/cache"
 mkdir -p "$CACHE_DIR"
@@ -332,7 +338,7 @@ if [ ! -f "$MZML_FILE" ]; then
         echo "Warning: MassQL test data download failed, skipping MassQL tests"
     fi
 fi
-if echo "$EXPECTED_SHA  $MZML_FILE" | sha256sum -c --quiet 2>/dev/null; then
+if [ -f "$MZML_FILE" ] && [ "$(sha256_of "$MZML_FILE")" = "$EXPECTED_SHA" ]; then
     export MASSQL_TEST_DATA="$MZML_FILE"
 fi
 
@@ -359,8 +365,44 @@ if [ ! -f "$MZXML_FILE" ]; then
         echo "Warning: mzXML test data download failed, skipping mzXML real data tests"
     fi
 fi
-if echo "$MZXML_EXPECTED_SHA  $MZXML_FILE" | sha256sum -c --quiet 2>/dev/null; then
+if [ -f "$MZXML_FILE" ] && [ "$(sha256_of "$MZXML_FILE")" = "$MZXML_EXPECTED_SHA" ]; then
     export MZXML_REAL_DATA="$MZXML_FILE"
+fi
+
+# Download and cache the real SRA runs whose fasterq-dump md5s are committed in
+# data/sra/real_oracles.csv, which also records their sha256s. Each is downloaded to a .part file
+# and only renamed once whole, so an interrupted download is retried rather than kept.
+SRA_CACHE_DIR="$CACHE_DIR/sra"
+mkdir -p "$SRA_CACHE_DIR"
+SRA_REAL_OK=1
+SRA_CAN_CHECK=1
+if ! command -v sha256sum > /dev/null; then
+    echo "Warning: no sha256sum command, so the SRA real data downloads cannot be checked; skipping SRA real data tests"
+    SRA_REAL_OK=0
+    SRA_CAN_CHECK=0
+fi
+# One line per run: real_oracles.csv's run and sra_sha256 columns.
+while [ "$SRA_CAN_CHECK" = 1 ] && read -r SRA_RUN SRA_SHA; do
+    SRA_FILE="$SRA_CACHE_DIR/$SRA_RUN.sra"
+    if [ ! -f "$SRA_FILE" ]; then
+        echo "Downloading SRA run $SRA_RUN..."
+        if curl -sSfL -o "$SRA_FILE.part" "https://sra-pub-run-odp.s3.amazonaws.com/sra/$SRA_RUN/$SRA_RUN"; then
+            mv "$SRA_FILE.part" "$SRA_FILE"
+        else
+            echo "Warning: SRA run $SRA_RUN download failed, skipping SRA real data tests"
+            SRA_REAL_OK=0
+            continue
+        fi
+    fi
+    # A mismatch is not a network failure: NCBI replaced the object, or the file is
+    # damaged, and the oracles in real_oracles.csv no longer apply to it.
+    if [ "$(sha256_of "$SRA_FILE")" != "$SRA_SHA" ]; then
+        echo "ERROR: $SRA_FILE does not match the sha256 in data/sra/real_oracles.csv. Remove it to download it again; if it still differs, NCBI replaced the object." >&2
+        exit 1
+    fi
+done < <(awk -F, 'NR > 1 { print $1, $3 }' data/sra/real_oracles.csv | sort -u)
+if [ "$SRA_REAL_OK" = 1 ]; then
+    export SRA_REAL_DATA="$SRA_CACHE_DIR"
 fi
 
 # Detect compile-time optional features by querying the built extension

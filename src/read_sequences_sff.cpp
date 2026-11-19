@@ -16,20 +16,7 @@ unique_ptr<FunctionData> ReadSequencesSFFTableFunction::Bind(ClientContext &cont
                                                              vector<Identifier> &names) {
 	FileSystem &fs = FileSystem::GetFileSystem(context);
 
-	std::vector<std::string> file_paths;
-
-	if (input.inputs[0].IsNull()) {
-		throw InvalidInputException("read_sequences_sff: first argument cannot be NULL");
-	}
-	// Handle VARCHAR (single path, potentially a glob) or VARCHAR[] (array of literal paths)
-	if (input.inputs[0].type().id() == LogicalTypeId::VARCHAR) {
-		auto result = ExpandGlobPatternWithInfo(fs, context, input.inputs[0].ToString());
-		file_paths = std::move(result.paths);
-	} else if (input.inputs[0].type().id() == LogicalTypeId::LIST) {
-		file_paths = ExpandPathList(fs, input.inputs[0], "read_sequences_sff");
-	} else {
-		throw InvalidInputException("read_sequences_sff: first argument must be VARCHAR or VARCHAR[]");
-	}
+	std::vector<std::string> file_paths = ExpandPathArgument(fs, context, input.inputs[0], "read_sequences_sff").paths;
 
 	// SFF is a binary format that requires seeking - stdin is not supported
 	for (const auto &path : file_paths) {
@@ -39,12 +26,7 @@ unique_ptr<FunctionData> ReadSequencesSFFTableFunction::Bind(ClientContext &cont
 		}
 	}
 
-	// Validate all files exist (skip remote paths)
-	for (const auto &path : file_paths) {
-		if (!miint::RemoteFileHelper::IsRemotePath(path) && !fs.FileExists(path)) {
-			throw IOException("File not found: " + path);
-		}
-	}
+	RequireLocalFilesExist(fs, file_paths);
 
 	bool include_filepath = ParseIncludeFilepathParameter(input.named_parameters);
 
