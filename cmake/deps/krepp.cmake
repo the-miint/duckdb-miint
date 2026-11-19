@@ -50,10 +50,10 @@ add_library(
   ${KREPP_DIR}/src/table.cpp)
 set_target_properties(krepp PROPERTIES POSITION_INDEPENDENT_CODE ON)
 # krepp and minimap2 both define a global `seq_nt4_table`, and they are not the
-# same table: minimap2's is `unsigned char [256]`, krepp's is `const unsigned
-# char [128]`. Linking both is a duplicate-symbol error, and letting one win
-# would be worse than the error - minimap2 indexes bytes above 127, which would
-# read off the end of krepp's array. Renaming krepp's copy keeps the two apart.
+# same table: both are 256 bytes, but krepp's maps every byte from 0x80 up to N
+# and minimap2's does not. Linking both is a duplicate-symbol error, and letting
+# one win would be worse than the error - the losing library would encode bases
+# with a table it was not written for. Renaming krepp's copy keeps the two apart.
 # This line covers krepp's own sources; the single miint TU that includes
 # krepp's headers gets the same define via a source-file property below -
 # deliberately not target-wide, for the reason recorded there. PRIVATE, not
@@ -148,9 +148,9 @@ set_source_files_properties(
 # not to the targets. Applied target-wide they also rewrote the declaration in
 # src/KSW2Aligner.cpp, which declares minimap2's `unsigned char
 # seq_nt4_table[256]` and indexes it over the full byte range - so it bound
-# krepp's `const unsigned char [128]` instead and read up to 128 bytes past the
-# end for any input byte >= 128. That is precisely the out-of-bounds the rename
-# exists to prevent, pointed the wrong way. Source-file properties are
+# krepp's table instead, which before v0.12.1 was `[128]`, and read up to 128
+# bytes past the end for any input byte >= 128: the collision the rename exists
+# to prevent, pointed the wrong way. Source-file properties are
 # directory-scoped, so this reaches miint_extension, miint_loadable_extension
 # and tests alike.
 set_source_files_properties(
