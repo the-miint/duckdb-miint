@@ -6,6 +6,10 @@
 
 namespace duckdb {
 
+namespace {
+constexpr const char *kFn = "tree_resolve_multifurcations";
+} // namespace
+
 unique_ptr<FunctionData> TreeResolveMultifurcationsTableFunction::Bind(ClientContext &context,
                                                                        TableFunctionBindInput &input,
                                                                        vector<LogicalType> &return_types,
@@ -14,7 +18,7 @@ unique_ptr<FunctionData> TreeResolveMultifurcationsTableFunction::Bind(ClientCon
 	RejectCTERelationName(input, tree_table_name);
 
 	// Validate schema at bind time for early error detection.
-	auto tree_columns = BindTreeOutput(context, "tree_resolve_multifurcations", tree_table_name, return_types, names);
+	auto tree_columns = BindTreeOutput(context, kFn, tree_table_name, return_types, names);
 	return duckdb::make_uniq<Data>(std::move(tree_table_name), std::move(tree_columns));
 }
 
@@ -23,8 +27,7 @@ TreeResolveMultifurcationsTableFunction::InitGlobal(ClientContext &context, Tabl
 	auto &bind_data = input.bind_data->Cast<Data>();
 	auto gstate = duckdb::make_uniq<TreeOutputState>();
 
-	auto tree = BuildTree(context, "tree_resolve_multifurcations", bind_data.tree_table_name, bind_data.tree_columns,
-	                      gstate->labels);
+	auto tree = BuildTree(context, kFn, bind_data.tree_table_name, bind_data.tree_columns, gstate->labels);
 
 	miint::NewickTree resolved;
 	try {
@@ -39,7 +42,7 @@ TreeResolveMultifurcationsTableFunction::InitGlobal(ClientContext &context, Tabl
 }
 
 TableFunction TreeResolveMultifurcationsTableFunction::GetFunction() {
-	return TableFunction("tree_resolve_multifurcations", {LogicalType::VARCHAR}, TreeOutputExecute, Bind, InitGlobal);
+	return TableFunction(kFn, {LogicalType::VARCHAR}, TreeOutputExecute, Bind, InitGlobal);
 }
 
 void TreeResolveMultifurcationsTableFunction::Register(ExtensionLoader &loader) {

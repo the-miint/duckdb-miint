@@ -40,10 +40,8 @@ void RejectTreeAs(const char *fn, const std::string &tree_table, const std::stri
 // expression, so pass constants of your own (a column name, or a cast of one), never
 // anything a user supplied; the relation's name is quoted.
 //
-// Bind fixed the output types. A relation can change type without a catalog change (a
-// view over a file that is rewritten, under a prepared statement), so a column read with
-// another type is refused rather than emitted under the old one. The check uses the types
-// of the read itself (docs/internals/reading-tables-views.md says why not the catalog's).
+// Bind fixed the output types, so a column read with another type is refused rather than
+// emitted under the old one (CheckBoundType, which says why).
 void ReadRelation(ClientContext &context, const char *fn, const std::string &relation,
                   const std::vector<std::pair<std::string, LogicalType>> &columns,
                   const std::function<void(DataChunk &)> &consume);

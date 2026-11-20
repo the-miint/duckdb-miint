@@ -7,6 +7,10 @@
 
 namespace duckdb {
 
+namespace {
+constexpr const char *kFn = "tree_resolve_placement";
+} // namespace
+
 TreeResolvePlacementTableFunction::Data::Data(std::string tree_table, TreeNameColumns tree_columns,
                                               std::string placements_table)
     : TreeOutputData(std::move(tree_table), std::move(tree_columns)),
@@ -22,16 +26,16 @@ unique_ptr<FunctionData> TreeResolvePlacementTableFunction::Bind(ClientContext &
 	RejectCTERelationName(input, placements_table_name);
 
 	// Validate schemas at bind time for early error detection
-	auto tree_columns = BindTreeOutput(context, "tree_resolve_placement", tree_table_name, return_types, names);
+	auto tree_columns = BindTreeOutput(context, kFn, tree_table_name, return_types, names);
 	auto fragment_type = ValidatePlacementTableSchema(context, placements_table_name);
 
 	// A fragment's id names the tip it becomes. A VARCHAR tree takes any id type and names the tip
 	// with its text; a BIGINT or UUID tree takes its own type, so the tip's name is one.
 	const bool typed_tree = tree_columns.name_type.id() != LogicalTypeId::VARCHAR;
 	if (typed_tree && fragment_type.id() != tree_columns.name_type.id()) {
-		throw BinderException("tree_resolve_placement: the tree's names are %s, but 'fragment_id' is %s; a "
-		                      "BIGINT or UUID tree takes fragment ids of its own type, which name its new tips",
-		                      tree_columns.name_type.ToString(), fragment_type.ToString());
+		throw BinderException("%s: the tree's names are %s, but 'fragment_id' is %s; a BIGINT or UUID tree takes "
+		                      "fragment ids of its own type, which name its new tips",
+		                      kFn, tree_columns.name_type.ToString(), fragment_type.ToString());
 	}
 
 	auto data =
@@ -47,9 +51,8 @@ unique_ptr<GlobalTableFunctionState> TreeResolvePlacementTableFunction::InitGlob
 	auto &bind_data = input.bind_data->Cast<Data>();
 	auto gstate = duckdb::make_uniq<TreeOutputState>();
 
-	auto tree =
-	    BuildTree(context, "tree_resolve_placement", bind_data.tree_table_name, bind_data.tree_columns, gstate->labels);
-	auto placements = ReadPlacementTable(context, bind_data.placements_table_name, "tree_resolve_placement",
+	auto tree = BuildTree(context, kFn, bind_data.tree_table_name, bind_data.tree_columns, gstate->labels);
+	auto placements = ReadPlacementTable(context, bind_data.placements_table_name, kFn,
 	                                     bind_data.bound_fragment_type ? &*bind_data.bound_fragment_type : nullptr);
 
 	// Resolve placements
@@ -65,8 +68,7 @@ unique_ptr<GlobalTableFunctionState> TreeResolvePlacementTableFunction::InitGlob
 }
 
 TableFunction TreeResolvePlacementTableFunction::GetFunction() {
-	return TableFunction("tree_resolve_placement", {LogicalType::VARCHAR, LogicalType::VARCHAR}, TreeOutputExecute,
-	                     Bind, InitGlobal);
+	return TableFunction(kFn, {LogicalType::VARCHAR, LogicalType::VARCHAR}, TreeOutputExecute, Bind, InitGlobal);
 }
 
 void TreeResolvePlacementTableFunction::Register(ExtensionLoader &loader) {

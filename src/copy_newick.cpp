@@ -248,7 +248,7 @@ static unique_ptr<GlobalFunctionData> NewickCopyInitializeGlobal(ClientContext &
 	auto &fdata = bind_data.Cast<NewickCopyBindData>();
 	std::vector<miint::Placement> placements;
 	if (fdata.placements_table) {
-		placements = ReadPlacementTable(context, *fdata.placements_table);
+		placements = ReadPlacementTable(context, *fdata.placements_table, "COPY FORMAT NEWICK");
 	}
 	return make_uniq<NewickCopyGlobalState>(file_path, fdata.compression, fdata.compression_level,
 	                                        fdata.include_edge_ids, std::move(placements));

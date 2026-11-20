@@ -29,9 +29,9 @@ namespace duckdb {
 //   - A column's type is not one listed above (checked again here, as it can change after
 //     ValidatePlacementTableSchema ran)
 //   - With `bound_fragment_type`, fragment_id no longer has that type: a caller whose fragment ids
-//     must keep the type Bind saw passes it, and `fn` names the caller (CheckBoundType)
-std::vector<miint::Placement> ReadPlacementTable(ClientContext &context, const std::string &table_name,
-                                                 const char *fn = nullptr,
+//     must keep the type Bind saw passes it (CheckBoundType)
+// `fn` names the caller in that error.
+std::vector<miint::Placement> ReadPlacementTable(ClientContext &context, const std::string &table_name, const char *fn,
                                                  const LogicalType *bound_fragment_type = nullptr);
 
 // Validate that a placement table or view has the required columns with correct types, and

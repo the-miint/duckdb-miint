@@ -14,6 +14,8 @@ namespace duckdb {
 
 namespace {
 
+constexpr const char *kFn = "shear_tree";
+
 // Validate that the tips table/view has the required `name` column.
 void ValidateTipsTableSchema(ClientContext &context, const std::string &table_name) {
 	auto info = GetTableOrViewColumns(context, table_name, "Tips table");
@@ -72,7 +74,7 @@ unique_ptr<FunctionData> ShearTreeTableFunction::Bind(ClientContext &context, Ta
 	RejectCTERelationName(input, tips_table_name);
 
 	// Validate schemas at bind time for early error detection.
-	auto tree_columns = BindTreeOutput(context, "shear_tree", tree_table_name, return_types, names);
+	auto tree_columns = BindTreeOutput(context, kFn, tree_table_name, return_types, names);
 	ValidateTipsTableSchema(context, tips_table_name);
 
 	bool collapse = GetBoolParam(input, "collapse", true);
@@ -87,7 +89,7 @@ unique_ptr<GlobalTableFunctionState> ShearTreeTableFunction::InitGlobal(ClientCo
 	auto &bind_data = input.bind_data->Cast<Data>();
 	auto gstate = duckdb::make_uniq<TreeOutputState>();
 
-	auto tree = BuildTree(context, "shear_tree", bind_data.tree_table_name, bind_data.tree_columns, gstate->labels);
+	auto tree = BuildTree(context, kFn, bind_data.tree_table_name, bind_data.tree_columns, gstate->labels);
 	auto keep_names = ReadTipNames(context, bind_data.tips_table_name);
 
 	miint::NewickTree sheared;
@@ -104,7 +106,7 @@ unique_ptr<GlobalTableFunctionState> ShearTreeTableFunction::InitGlobal(ClientCo
 }
 
 TableFunction ShearTreeTableFunction::GetFunction() {
-	TableFunction tf("shear_tree", {LogicalType::VARCHAR, LogicalType::VARCHAR}, TreeOutputExecute, Bind, InitGlobal);
+	TableFunction tf(kFn, {LogicalType::VARCHAR, LogicalType::VARCHAR}, TreeOutputExecute, Bind, InitGlobal);
 	AddNamedParameter(tf, "collapse", LogicalType::BOOLEAN);
 	AddNamedParameter(tf, "ignore_missing", LogicalType::BOOLEAN);
 	return tf;
