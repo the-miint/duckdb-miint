@@ -6,6 +6,7 @@
 #include "duckdb/common/serializer/memory_stream.hpp"
 #include "duckdb/common/enums/file_compression_type.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
 #include "duckdb/common/types/column/column_data_collection.hpp"
 #include "duckdb/planner/bound_statement.hpp"
 // ResolveSequenceRecordId is header-inline (hot path) so it needs the id codec,
@@ -16,6 +17,10 @@
 
 // htslib's BGZF handle; defined in <htslib/bgzf.h>, only included in the .cpp.
 struct BGZF;
+// htslib's file, header and BAM record (<htslib/sam.h>), for the BAM record writers below; only included in the .cpp.
+struct htsFile;
+struct sam_hdr_t;
+struct bam1_t;
 
 namespace duckdb {
 
@@ -37,7 +42,7 @@ constexpr const char *SEQUENCE_DEFAULT_BATCH_BYTES = "8MB";
 // A batch whose output is larger than this is formatted in flush_batch and written out each time
 // DEFAULT_COPY_FLUSH_SIZE has gathered, rather than formatted into one buffer when it is prepared: that buffer would
 // sit outside DuckDB's memory_limit. A record larger than DEFAULT_COPY_FLUSH_SIZE is still held whole. FASTA/FASTQ
-// defer the whole batch; SAM/BAM keep the records that fit and defer the rest (RecordPrepareBatch).
+// defer the whole batch; the writers on RecordPrepareBatch keep the records that fit and defer the rest.
 constexpr idx_t SEQUENCE_DEFER_FORMAT_BYTES = 64ULL * 1024 * 1024;
 // FASTQ/FASTA gzip level when COMPRESSION_LEVEL is not given. COPY usually writes whole read sets,
 // such as every read that survives a host filter; there, level 1 compressed about three times as fast
@@ -278,7 +283,7 @@ void SequenceCopyFinalize(SequenceCopyGlobalState &gstate);
 // Each format here is two registrations: the public one ("fasta") declares the options, the extension and a plan
 // callback, SequenceCopyPlan, which rebinds the statement as the writer ("_miint_fasta"). See
 // docs/internals/architecture.md, "Record writers on DuckDB's batch API". The batch data and prepare/flush below are
-// FASTA/FASTQ's; SAM/BAM's follow under "Record Writers".
+// FASTA/FASTQ's; RecordPrepareBatch and RecordFlushBatch, for the other writers, follow under "Record Writers".
 
 // REGULAR when insertion order is kept, PARALLEL when it is not; never BATCH (see the architecture notes).
 CopyFunctionExecutionMode SequenceCopyExecutionMode(bool preserve_insertion_order, bool supports_batch_index);
@@ -308,6 +313,50 @@ struct SequenceBatchData : public PreparedBatchData {
 
 // Writes `data` to the R1 or R2 file, creating the R2 file on its first write. Caller holds gstate.lock.
 void WriteSequenceStream(SequenceCopyGlobalState &gstate, SequenceStream stream, MemoryStream &data);
+
+// The data error for a NULL in `column`, naming the row's read_id.
+[[noreturn]] inline void ThrowNullColumn(const char *column, const string &read_id) {
+	throw InvalidInputException("NULL value in %s column (read_id '%s')", column, read_id);
+}
+
+// A UTINYINT[] quality column of one chunk: raw Phred scores, one per base, none NULL.
+struct QualColumn {
+	UnifiedVectorFormat data;
+	const uint8_t *scores = nullptr;
+	const ValidityMask *score_validity = nullptr;
+	// Whether any score in the chunk is NULL, found 64 scores at a time; only then are a read's scores checked.
+	bool has_null_score = false;
+
+	void Init(Vector &quals) {
+		quals.ToUnifiedFormat(data);
+		auto &child = ListVector::GetChildMutable(quals);
+		scores = FlatVector::GetData<uint8_t>(child);
+		score_validity = &FlatVector::Validity(child);
+		has_null_score = !score_validity->CheckAllValid(ListVector::GetListSize(quals));
+	}
+
+	// The scores of row `qual_row` (a list cell that is not NULL), checked against a sequence of `seq_size` bases: one
+	// score per base, and none NULL. Errors name `column` and the read, `read_id()`, called only for an error; `suffix`
+	// follows the read in the length error (" (R2)" for FASTQ's mate).
+	template <class READ_ID>
+	const list_entry_t &Check(idx_t qual_row, idx_t seq_size, const char *column, const char *suffix,
+	                          READ_ID &&read_id) const {
+		auto &entry = UnifiedVectorFormat::GetData<list_entry_t>(data)[qual_row];
+		if (entry.length != seq_size) {
+			throw InvalidInputException(
+			    "Quality score length (%llu) does not match sequence length (%llu) for read_id '%s'%s", entry.length,
+			    seq_size, read_id(), suffix);
+		}
+		if (has_null_score) {
+			for (idx_t k = 0; k < entry.length; k++) {
+				if (!score_validity->RowIsValid(entry.offset + k)) {
+					throw InvalidInputException("NULL quality score in %s (read_id '%s')", column, read_id());
+				}
+			}
+		}
+		return entry;
+	}
+};
 
 // The columns FASTA and FASTQ read alike, for one chunk: the id (read_id, or sequence_index with ID_AS_SEQUENCE_INDEX),
 // comment, sequence1 and sequence2, with the checks and the R2 routing the two writers share. Each writer's Visit
@@ -409,7 +458,7 @@ public:
 
 	// The data error for a NULL in `column`, naming the row's read_id.
 	[[noreturn]] void ThrowNull(const char *column, idx_t row) const {
-		throw InvalidInputException("NULL value in %s column (read_id '%s')", column, ReadId(row));
+		ThrowNullColumn(column, ReadId(row));
 	}
 
 private:
@@ -508,12 +557,12 @@ void SequenceFlushBatch(ClientContext &context, SequenceCopyGlobalState &gstate,
 }
 
 //===--------------------------------------------------------------------===//
-// Record Writers on DuckDB's Batch API (SAM, BAM)
+// Record Writers on DuckDB's Batch API (SAM, BAM, UBAM)
 //===--------------------------------------------------------------------===//
-// The SAM and BAM writers write one stream of records, each built from one row. A record's size is known only once it
-// is built, so a batch's records are kept as they are built, up to SEQUENCE_DEFER_FORMAT_BYTES; the rows after that
-// are built again in flush_batch. DuckDB caps a batch by its input rows, and SEQUENCE_DATA's reads are not part of
-// them, so a batch of small rows can make records of any size.
+// These writers write one stream of records, each built from one row. A record's size is known only once it is
+// built, so a batch's records are kept as they are built, up to SEQUENCE_DEFER_FORMAT_BYTES; the rows after that are
+// built again in flush_batch. DuckDB caps a batch by its input rows, and SEQUENCE_DATA's reads are not part of them,
+// so a batch of small SAM/BAM rows can make records of any size.
 
 // A batch's records in output order, each starting on an 8-byte boundary (a BAM record's fields are read as integers).
 // Kept in blocks, so a record never moves once built.
@@ -572,6 +621,35 @@ struct RecordBatchData : public PreparedBatchData {
 	unique_ptr<ColumnDataCollection> deferred;
 	idx_t deferred_from = 0; // a row index across the collection's chunks
 };
+
+// A failed write or close of a SAM, BAM or uBAM file, naming the format, the file and the call. Callers clear errno
+// before the call, so a reason is given only when the call set one; a write on htslib's own threads sets none on this
+// one.
+[[noreturn]] void ThrowCopyWriteFailed(const char *format, const string &file_path, const char *call);
+
+// The longest read name a BAM record holds: l_read_name is one byte, and counts the terminating NUL. SAM text holds no
+// more.
+constexpr idx_t BAM_MAX_READ_NAME_BYTES = 254;
+
+// Refuses a read name longer than a BAM record holds, naming the read. htslib's bam_set1 refuses it without saying why.
+inline void CheckBAMReadName(const char *name, idx_t size) {
+	if (size > BAM_MAX_READ_NAME_BYTES) {
+		throw InvalidInputException(
+		    "Column 'read_id' is %llu bytes for read '%s', past %llu, the longest a BAM record holds", size,
+		    string(name, size), BAM_MAX_READ_NAME_BYTES);
+	}
+}
+
+// BAM and UBAM store a record as its bam1_t's core, then its data, which starts on the 8-byte boundary a RecordBuffer
+// gives the record.
+void StoreBAMRecord(const bam1_t &record, RecordBuffer &out);
+
+// Writes a record StoreBAMRecord stored, through sam_write1 itself on a bam1_t over the stored bytes: htslib has no
+// call that serializes a bam1_t to bytes, and bam_write1 ends a BGZF block before a record that does not fit, so the
+// bytes are those of writing each record with sam_write1, whatever the batches. A failure names `format` and
+// `file_path`. Caller holds the file's lock.
+void WriteBAMRecord(htsFile *fp, const sam_hdr_t *header, const_data_ptr_t data, idx_t size, const char *format,
+                    const string &file_path);
 
 // What a writer supplies, ENCODER:
 //   SetChunk(chunk)      the chunk the next rows are in

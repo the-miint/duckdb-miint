@@ -38,6 +38,7 @@ const Output OUTPUTS[] = {
     {"SAM", "aln", ".sam", "FORMAT SAM, REFERENCE_LENGTHS 'ref_lens'"},
     {"headerless SAM", "aln", ".sam", "FORMAT SAM, INCLUDE_HEADER false"},
     {"BAM", "aln", ".bam", "FORMAT BAM, REFERENCE_LENGTHS 'ref_lens'"},
+    {"uBAM", "fastq_rows", ".bam", "FORMAT UBAM"},
 };
 
 struct OrderFixture {

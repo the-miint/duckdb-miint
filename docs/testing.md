@@ -80,7 +80,7 @@ File not found: nonexistent.fastq
 - `test/sql/read_fastx.test` - FASTA/FASTQ reading functionality
 - `test/sql/alignment_functions.test` - Alignment analysis functions
 - `test/sql/copy_sam.test` - SAM/BAM writing functionality
-- `test/sql/copy_sam_bytes.test`, `copy_sam_batches.test`, `copy_sam_parallel.test` - SAM/BAM output pinned by md5 at 1 and 8 threads, DuckDB's batches, and writing with order off (`copy_fastx_*.test` do the same for FASTA/FASTQ); `test/cpp/test_CopySequenceOrder.cpp` (`tests_duckdb`) checks which COPYs keep order
+- `test/sql/copy_sam_bytes.test`, `copy_sam_batches.test`, `copy_sam_parallel.test` - SAM/BAM output pinned by md5 at 1 and 8 threads, DuckDB's batches, and writing with order off (`copy_fastx_*.test` do the same for FASTA/FASTQ, and `copy_ubam_*.test` for UBAM); `test/cpp/test_CopySequenceOrder.cpp` (`tests_duckdb`) checks which COPYs keep order
 
 **Good practices for SQL tests:**
 

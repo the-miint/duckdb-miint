@@ -238,23 +238,6 @@ public:
 	}
 
 private:
-	// A UTINYINT[] quality column of one chunk.
-	struct QualColumn {
-		UnifiedVectorFormat data;
-		const uint8_t *scores = nullptr;
-		const ValidityMask *score_validity = nullptr;
-		// Whether any score in the chunk is NULL, found 64 scores at a time; only then are a read's scores checked.
-		bool has_null_score = false;
-
-		void Init(Vector &quals) {
-			quals.ToUnifiedFormat(data);
-			auto &child = ListVector::GetChildMutable(quals);
-			scores = FlatVector::GetData<uint8_t>(child);
-			score_validity = &FlatVector::Validity(child);
-			has_null_score = !score_validity->CheckAllValid(ListVector::GetListSize(quals));
-		}
-	};
-
 	// The encoder refuses a score that would encode past '~'; the error then names the record.
 	void Encode(const FastqRecord &record, const FastqEncoder::Sink &sink) {
 		try {
@@ -273,27 +256,15 @@ private:
 	// the row's read_id, and R2 for the mate.
 	void SetRead(FastqRecord &record, const string_t &seq, const QualColumn &quals, idx_t qual_row,
 	             const SequenceChunkReader &reader, idx_t row, bool r2) const {
-		auto &entry = UnifiedVectorFormat::GetData<list_entry_t>(quals.data)[qual_row];
 		record.seq = seq.GetData();
 		record.seq_size = seq.GetSize();
+		auto &entry = quals.Check(qual_row, record.seq_size, r2 ? "qual2" : "qual1", r2 ? " (R2)" : "",
+		                          [&]() { return reader.ReadId(row); });
 		record.qual = quals.scores + entry.offset;
 		record.qual_size = entry.length;
 		record.reader = &reader;
 		record.row = row;
 		record.r2 = r2;
-		if (record.qual_size != record.seq_size) {
-			throw InvalidInputException(
-			    "Quality score length (%llu) does not match sequence length (%llu) for read_id '%s'%s",
-			    record.qual_size, record.seq_size, reader.ReadId(row), r2 ? " (R2)" : "");
-		}
-		if (quals.has_null_score) {
-			for (idx_t k = 0; k < entry.length; k++) {
-				if (!quals.score_validity->RowIsValid(entry.offset + k)) {
-					throw InvalidInputException("NULL quality score in %s (read_id '%s')", r2 ? "qual2" : "qual1",
-					                            reader.ReadId(row));
-				}
-			}
-		}
 	}
 
 	const FastqCopyBindData &fdata;

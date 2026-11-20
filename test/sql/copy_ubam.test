@@ -3,11 +3,12 @@
 # group: [sql]
 
 #   FORMAT UBAM is the reads-side counterpart of FORMAT FASTQ: it writes SEQ/QUAL
-#   from read_id/sequence1/qual1 into a headerless (no @SQ) unaligned BAM, with an
-#   optional settable @RG and per-read integer aux tags. This file covers the
+#   from read_id/sequence1/qual1 into an unaligned BAM, whose header has no @SQ, with
+#   an optional settable @RG and per-read integer aux tags. This file covers the
 #   miint-observable behavior (SEQ/QUAL/read_id round-trip + bind errors); the
-#   header/@RG/zm/no-@SQ structure that miint's readers don't expose is asserted
-#   with htslib in test/cpp/test_copy_ubam.cpp.
+#   header/@RG/zm/no-@SQ structure that miint's readers don't expose is pinned byte
+#   for byte in copy_ubam_bytes.test, and read with htslib from a committed golden
+#   in test/cpp/test_copy_ubam.cpp.
 
 require miint
 
@@ -83,8 +84,8 @@ SELECT COUNT(*) FROM read_sequences_sam('{TEST_DIR}/level0.bam');
 3
 
 # ---------------------------------------------------------------------------
-# Empty input still produces a valid header-only BAM (0 records) -- exercises
-# the Finalize header-write path.
+# Empty input still produces a valid header-only BAM (0 records): the header is
+# written when the file is opened.
 # ---------------------------------------------------------------------------
 statement ok
 COPY (SELECT read_id, sequence1, qual1 FROM reads WHERE false)
@@ -125,6 +126,13 @@ TO '{TEST_DIR}/e.bam' (FORMAT UBAM, TAGS {zm: 'notint'});
 ----
 must be an integer type
 
+# A HUGEINT is an integer, but wider than any type TAGS takes.
+statement error
+COPY (SELECT read_id, sequence1, qual1, zmw::HUGEINT AS big FROM reads)
+TO '{TEST_DIR}/e.bam' (FORMAT UBAM, TAGS {zm: 'big'});
+----
+TAGS column 'big' (for tag 'zm') must be an integer type of at most 64 bits (TINYINT, SMALLINT, INTEGER, BIGINT, UTINYINT, USMALLINT, UINTEGER or UBIGINT), not HUGEINT
+
 # TAGS pointing at a column that isn't in the projection.
 statement error
 COPY (SELECT read_id, sequence1, qual1 FROM reads)
@@ -153,7 +161,7 @@ TO '{TEST_DIR}/e.bam' (FORMAT UBAM, READ_GROUP {ID: 'x', DESCRIPTION: 'y'});
 ----
 must be a 2-character SAM @RG code
 
-# REFERENCE_LENGTHS is rejected — a uBAM is headerless by construction.
+# REFERENCE_LENGTHS is rejected: a uBAM's header has no @SQ lines.
 statement error
 COPY (SELECT read_id, sequence1, qual1 FROM reads)
 TO '{TEST_DIR}/e.bam' (FORMAT UBAM, REFERENCE_LENGTHS 'reads');
@@ -166,3 +174,101 @@ COPY (SELECT 'r' AS read_id, 'ACGT' AS sequence1, [35, 35]::UTINYINT[] AS qual1)
 TO '{TEST_DIR}/e.bam' (FORMAT UBAM);
 ----
 does not match
+
+# ---------------------------------------------------------------------------
+# Data errors name the read, worded as FORMAT FASTQ's are. Each bad row is the
+# 3,000th, in the second chunk, so that a message naming the row's place in its
+# chunk (951) cannot pass for one naming the read.
+# ---------------------------------------------------------------------------
+statement ok
+CREATE TABLE many_reads AS
+SELECT i, 'r' || i AS read_id, 'ACGT' AS sequence1, [30, 31, 32, 33]::UTINYINT[] AS qual1 FROM range(5000) t(i);
+
+# A NULL read_id has no name to give.
+statement error
+COPY (SELECT CASE WHEN i = 2999 THEN NULL ELSE read_id END AS read_id, sequence1, qual1 FROM many_reads)
+TO '{TEST_DIR}/e.bam' (FORMAT UBAM);
+----
+NULL value in read_id column
+
+statement error
+COPY (SELECT read_id, CASE WHEN i = 2999 THEN NULL ELSE sequence1 END AS sequence1, qual1 FROM many_reads)
+TO '{TEST_DIR}/e.bam' (FORMAT UBAM);
+----
+NULL value in sequence1 column (read_id 'r2999')
+
+statement error
+COPY (SELECT read_id, sequence1, CASE WHEN i = 2999 THEN NULL ELSE qual1 END AS qual1 FROM many_reads)
+TO '{TEST_DIR}/e.bam' (FORMAT UBAM);
+----
+NULL value in qual1 column (read_id 'r2999')
+
+statement error
+COPY (SELECT read_id, sequence1, CASE WHEN i = 2999 THEN qual1[2:] ELSE qual1 END AS qual1 FROM many_reads)
+TO '{TEST_DIR}/e.bam' (FORMAT UBAM);
+----
+Quality score length (3) does not match sequence length (4) for read_id 'r2999'
+
+# A NULL score inside qual1 is an error, not a score of 0.
+statement error
+COPY (SELECT read_id, sequence1, CASE WHEN i = 2999 THEN [30, NULL, 32, 33]::UTINYINT[] ELSE qual1 END AS qual1
+      FROM many_reads)
+TO '{TEST_DIR}/e.bam' (FORMAT UBAM);
+----
+NULL quality score in qual1 (read_id 'r2999')
+
+# A BIGINT read_id is named as written.
+statement error
+COPY (SELECT i AS read_id, CASE WHEN i = 2999 THEN NULL ELSE sequence1 END AS sequence1, qual1 FROM many_reads)
+TO '{TEST_DIR}/e.bam' (FORMAT UBAM);
+----
+NULL value in sequence1 column (read_id '2999')
+
+# A BAM record holds a read name of up to 254 bytes. One longer is a data error
+# naming it, like BAM's other limits.
+statement ok
+COPY (SELECT 'long_' || repeat('x', 249) AS read_id, 'ACGT' AS sequence1, [30, 31, 32, 33]::UTINYINT[] AS qual1)
+TO '{TEST_DIR}/name254.bam' (FORMAT UBAM);
+
+query I
+SELECT length(read_id) FROM read_sequences_sam('{TEST_DIR}/name254.bam');
+----
+254
+
+statement error
+COPY (SELECT CASE WHEN i = 2999 THEN 'long_' || repeat('x', 250) ELSE read_id END AS read_id, sequence1, qual1
+      FROM many_reads)
+TO '{TEST_DIR}/e.bam' (FORMAT UBAM);
+----
+<REGEX>:.*Column 'read_id' is 255 bytes for read 'long_x{250}', past 254, the longest a BAM record holds.*
+
+# What a BAM record cannot hold as given is refused rather than changed: an empty name (htslib writes '*'), an empty
+# sequence (a record without bases reads as one whose sequence was left out, which read_sequences_sam refuses), and a
+# score past 93, the highest SAM text can show (a first score of 255 marks a record as having no scores at all).
+statement error
+COPY (SELECT CASE WHEN i = 2999 THEN '' ELSE read_id END AS read_id, sequence1, qual1 FROM many_reads)
+TO '{TEST_DIR}/e.bam' (FORMAT UBAM);
+----
+Column 'read_id' is empty, and a BAM record cannot hold an empty name
+
+statement error
+COPY (SELECT read_id, CASE WHEN i = 2999 THEN '' ELSE sequence1 END AS sequence1,
+             CASE WHEN i = 2999 THEN []::UTINYINT[] ELSE qual1 END AS qual1
+      FROM many_reads)
+TO '{TEST_DIR}/e.bam' (FORMAT UBAM);
+----
+Column 'sequence1' is empty for read 'r2999': a BAM record without bases reads as one whose sequence was left out
+
+statement error
+COPY (SELECT read_id, sequence1, CASE WHEN i = 2999 THEN [30, 31, 94, 33]::UTINYINT[] ELSE qual1 END AS qual1
+      FROM many_reads)
+TO '{TEST_DIR}/e.bam' (FORMAT UBAM);
+----
+Column 'qual1' has a quality score of 94 for read 'r2999', past 93, the highest SAM text can show
+
+statement error
+COPY (SELECT read_id, sequence1, CASE WHEN i = 2999 THEN [255, 31, 32, 33]::UTINYINT[] ELSE qual1 END AS qual1
+      FROM many_reads)
+TO '{TEST_DIR}/e.bam' (FORMAT UBAM);
+----
+Column 'qual1' has a quality score of 255 for read 'r2999', past 93, the highest SAM text can show
