@@ -565,9 +565,8 @@ are listed in `ext/hmmer/miint/README.md` and `ext/hmmer/easel/miint/README.md`.
   technology limited to HMMER's use, modification and redistribution (in the
   text below); Easel, BSD-2-Clause
 - Test fixtures: the model files in `data/hmmer/`, and the models written out
-  in `test/cpp/test_HmmerProfile.cpp` and `scripts/wasm_browser/steps.json`
-  (HMMER's `testsuite/M1.hmm`, and a HMMER2 model `testsuite/i15-hmmconvert.pl` writes), come from HMMER's
-  and Easel's source distributions, under the same licences;
+  in `test/cpp/test_HmmerProfile.cpp` and `scripts/wasm_browser/steps.json`,
+  come from HMMER's and Easel's source distributions, under the same licences;
   `data/hmmer/README.md` and the test file's header give each one's source.
 
 ### HMMER license (`ext/hmmer/LICENSE`)
@@ -754,7 +753,7 @@ links (none of HMMER's linked files carries one):
 | `esl_rand64.c` | The 64-bit Mersenne Twister; `esl_rand64_Deal()` | "derived from MT19937-64 (2004/9/29) by Takuji Nishimura and Makoto Matsumoto … Copyright (C) 2004, Makoto Matsumoto and Takuji Nishimura. All rights reserved." `esl_rand64_Deal()`: "derived from code by Kevin Lawler (Brave Software; brave.com). Copyright (2016) Kevin Lawler. Released under ISC License." Both licenses are below |
 | `esl_random.c` | The Mersenne Twister MT19937; `esl_rnd_Gaussian()`; `esl_mix3()` | MT19937 after Matsumoto and Nishimura; `esl_rnd_Gaussian()` "derived from the public domain RANLIB.c `gennor()` function, written by Barry W. Brown and James Lovato"; `esl_mix3()` after Bob Jenkins. The file carries no license text for these; Easel's license names their authors |
 | `esl_stats.c` | `esl_erfc()` | "Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved. Developed at SunPro, a Sun Microsystems, Inc. business. Permission to use, copy, modify, and distribute this software is freely granted, provided that this notice is preserved." |
-| `easel.c` | `esl_tmpfile()` | "Substantially copied from David Wheeler, 'Secure Programming for Linux and Unix HOWTO' … Copyright (C) 1999-2001 David A. Wheeler. Licensed under the MIT license" |
+| `easel.c` | `esl_tmpfile()` | "Substantially copied from David Wheeler, 'Secure Programming for Linux and Unix HOWTO' … Copyright (C) 1999-2001 David A. Wheeler. Licensed under the MIT license". The license is below |
 | `easel.c` | `esl_strsep()` | Taken from FreeBSD, under the BSD license below |
 
 `esl_sse.c` and `esl_neon.c`:
@@ -832,6 +831,32 @@ Moshier for their clear code.
     LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
     OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
     SUCH DAMAGE.
+```
+
+`easel.c`, `esl_tmpfile()`. The file says "Copyright (C) 1999-2001 David A.
+Wheeler. Licensed under the MIT license"; the MIT License's text, as SPDX gives
+it (https://spdx.org/licenses/MIT.html, read 2026-11-20), with that copyright
+line:
+
+```
+MIT License
+
+Copyright (C) 1999-2001 David A. Wheeler
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+associated documentation files (the "Software"), to deal in the Software without restriction, including
+without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the
+following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial
+portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT
+LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO
+EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+USE OR OTHER DEALINGS IN THE SOFTWARE.
 ```
 
 `esl_rand64.c`, the 64-bit Mersenne Twister. The file names its source,
