@@ -439,6 +439,43 @@ SELECT * FROM taxonomy_violations('nope');
 ----
 taxonomy table or view 'nope' does not exist
 
+# A NULL name is refused as such, not looked up as a relation called 'NULL'.
+statement error
+SELECT * FROM taxonomy_violations(NULL);
+----
+taxonomy_violations: the taxonomy must be a relation name, not NULL
+
+# The id error names the taxonomy, so a query over several of them says which one to fix.
+statement ok
+CREATE TABLE double_ids AS
+SELECT 1.5::DOUBLE AS feature_id, domain, phylum, class, "order", family, genus, species, strain FROM clean;
+
+statement error
+SELECT * FROM taxonomy_violations('double_ids');
+----
+taxonomy_violations: feature_id must be VARCHAR, BIGINT, or UUID, but it is DOUBLE in taxonomy 'double_ids'
+
+# =============================================================================
+# Values compare byte for byte, whatever the columns' collation, as tax2tree and the files it
+# reads compare them: under NOCASE, 'D' and 'd' are still two parents, and 'a' and 'A' two ids.
+# =============================================================================
+
+statement ok
+CREATE TABLE nocase_tx (feature_id VARCHAR COLLATE NOCASE, domain VARCHAR COLLATE NOCASE,
+                        phylum VARCHAR COLLATE NOCASE, class VARCHAR, "order" VARCHAR, family VARCHAR,
+                        genus VARCHAR, species VARCHAR, strain VARCHAR);
+
+statement ok
+INSERT INTO nocase_tx VALUES
+    ('a', 'D', 'P', NULL, NULL, NULL, NULL, NULL, NULL),
+    ('A', 'd', 'P', NULL, NULL, NULL, NULL, NULL, NULL);
+
+query TTTTT
+SELECT kind, feature_id, rank, name, parent FROM taxonomy_violations('nocase_tx') ORDER BY parent;
+----
+multiple_parents	a	phylum	P	D
+multiple_parents	A	phylum	P	d
+
 # =============================================================================
 # An id type that changes after the statement was prepared is refused, not emitted under the
 # old type (views over CSV files change type without a catalog change).

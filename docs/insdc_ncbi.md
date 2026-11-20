@@ -702,7 +702,8 @@ one parent. It also suits a pipeline that builds taxonomies and keeps their prob
 every problem comes back, each naming the row at fault.
 
 ```sql
--- A Greengenes2 or GTDB taxonomy file of (id, lineage) lines
+-- tax2tree's input, (id, lineage) lines with no header, as in Greengenes2's backbone taxonomy.
+-- A QIIME 2 taxonomy.tsv has a header instead: read it as parse_lineage's example does.
 CREATE VIEW tx AS
 SELECT column0 AS feature_id, unnest(parse_lineage(column1))
 FROM read_csv('taxonomy.tsv', delim = '\t', header = false);
@@ -740,6 +741,7 @@ A column a kind does not use is NULL.
 - Names are taken as given: nothing is trimmed, nothing is cut at a placeholder such as `uncultured` or `Incertae Sedis`, and no row is left out. So an invalid value is a name of its own in the parent check: `' fA'` is not `fA`, and fixing it can remove a `multiple_parents` row as well as its `invalid_value` row.
 - Each row of a repeated id is reported, and each still takes part in the parent check. To check parents across files that may share ids, but ids within each file, run it on the union for `multiple_parents` and on each file for the rest (last example).
 - Trailing empty ranks are not gaps: a lineage may stop at any rank, or be empty throughout.
+- Ids and names compare byte for byte, whatever the columns' collation, as tax2tree and the files it reads compare them: under `COLLATE NOCASE`, `Bacillus` and `bacillus` are still two names, and `a` and `A` two ids.
 - To count how many rows carry a repeated id, or put a name under a parent, group the rows: `count(*)`.
 
 **Errors**, raised before any row is read:

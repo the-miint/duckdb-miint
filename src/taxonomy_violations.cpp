@@ -26,7 +26,9 @@ constexpr size_t kRanks = miint::kLineageRanks.size();
 struct BindData : public TableFunctionData {
 	std::string taxonomy;
 	LogicalType id_type;
-	// The rank columns' types as bound, in kLineageRanks order: all VARCHAR, collations kept.
+	// The rank columns' types as bound, in kLineageRanks order: all VARCHAR, with any collation,
+	// so that ReadRelation's type check matches what the read returns. The checks compare bytes
+	// whatever the collation, as tax2tree and the files it reads do.
 	std::array<LogicalType, kRanks> rank_types;
 };
 
@@ -70,8 +72,8 @@ LogicalType ValidateLineageSchema(const std::string &taxonomy, const TableOrView
 		throw BinderException("%s: taxonomy '%s' has no 'feature_id' column", kFn, taxonomy);
 	}
 	if (!IsAllowedIdType(id_type)) {
-		throw BinderException("%s: feature_id must be %s, but it is %s; cast it", kFn, AllowedIdTypeList(),
-		                      id_type.ToString());
+		throw BinderException("%s: feature_id must be %s, but it is %s in taxonomy '%s'; cast it", kFn,
+		                      AllowedIdTypeList(), id_type.ToString(), taxonomy);
 	}
 	for (size_t r = 0; r < kRanks; r++) {
 		const char *column = miint::kLineageRanks[r].column;
@@ -88,6 +90,9 @@ LogicalType ValidateLineageSchema(const std::string &taxonomy, const TableOrView
 
 unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &return_types,
                               vector<Identifier> &names) {
+	if (input.inputs[0].IsNull()) {
+		throw BinderException("%s: the taxonomy must be a relation name, not NULL", kFn);
+	}
 	auto data = make_uniq<BindData>();
 	data->taxonomy = input.inputs[0].ToString();
 	RejectCTERelationName(input, data->taxonomy);
