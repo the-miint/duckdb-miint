@@ -352,6 +352,14 @@ SELECT count(*) FROM (
 ----
 0
 
+query I
+SELECT count(*) FROM (
+    SELECT * FROM read_hmm('data/hmmer/XYPPX.hmm.gz')
+    EXCEPT
+    SELECT * FROM read_hmm('data/hmmer/XYPPX.hmm'));
+----
+0
+
 # Nor do Windows line endings.
 statement ok
 COPY (SELECT rtrim(replace(content, chr(10), chr(13) || chr(10)), chr(10)) FROM read_text('data/hmmer/XYPPX.hmm'))
@@ -362,6 +370,19 @@ SELECT count(*) FROM (
     SELECT * FROM read_hmm('{TEST_DIR}/crlf.hmm')
     EXCEPT
     SELECT * FROM read_hmm('data/hmmer/XYPPX.hmm'));
+----
+0
+
+query II
+SELECT count(*), count(*) FILTER (WHERE hmm_name = 'XYPPX') FROM read_hmm('{TEST_DIR}/crlf.hmm');
+----
+1	1
+
+query I
+SELECT count(*) FROM (
+    SELECT * FROM read_hmm('data/hmmer/XYPPX.hmm')
+    EXCEPT
+    SELECT * FROM read_hmm('{TEST_DIR}/crlf.hmm'));
 ----
 0
 
@@ -390,6 +411,12 @@ query II
 EXPLAIN SELECT * FROM read_hmm('data/hmmer/*.gz');
 ----
 physical_plan	<!REGEX>:.*~1 row.*
+
+# A model per 1000 bytes: XYPPX.hmm is 3399 bytes.
+query II
+EXPLAIN SELECT * FROM read_hmm('data/hmmer/XYPPX.hmm');
+----
+physical_plan	<REGEX>:.*~3 rows.*
 
 # A file with no model in it, empty or holding only blank and comment lines, gives no rows.
 # HMMER reads a line starting with # as a comment, and so does read_hmm.
@@ -529,6 +556,95 @@ statement error
 SELECT * FROM read_hmm('{TEST_DIR}/second_bad.hmm');
 ----
 read_hmm: {TEST_DIR}/second_bad.hmm: model 2 (line 47): Unrecognized alphabet type custom
+
+# One thread reads one file after another; each file's models and lines count from 1.
+statement ok
+SET threads = 1;
+
+query TI
+SELECT replace(filepath, '\', '/'), count(*)
+FROM read_hmm(['data/hmmer/example.hmm.gz', 'data/hmmer/XYPPX.hmm'], include_filepath := true)
+GROUP BY ALL ORDER BY 1;
+----
+data/hmmer/XYPPX.hmm	1
+data/hmmer/example.hmm.gz	2
+
+statement error
+SELECT * FROM read_hmm(['data/hmmer/example.hmm.gz', '{TEST_DIR}/second_bad.hmm']);
+----
+read_hmm: {TEST_DIR}/second_bad.hmm: model 2 (line 47): Unrecognized alphabet type custom
+
+statement ok
+RESET threads;
+
+# Defects no fixture has, each written from XYPPX, with the message and line HMMER gives
+# (p7_hmmfile_Read on the same text).
+statement ok
+COPY (SELECT rtrim(replace(content, 'LENG  5' || chr(10), 'LENG  100001' || chr(10)), chr(10)) FROM read_text('data/hmmer/XYPPX.hmm'))
+TO '{TEST_DIR}/leng_big.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT * FROM read_hmm('{TEST_DIR}/leng_big.hmm');
+----
+read_hmm: {TEST_DIR}/leng_big.hmm: model 1 (line 5): Invalid model length 100001 on LENG line (must be 1..100000)
+
+statement ok
+COPY (SELECT rtrim(replace(content, 'NAME  XYPPX' || chr(10), ''), chr(10)) FROM read_text('data/hmmer/XYPPX.hmm'))
+TO '{TEST_DIR}/no_name.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT * FROM read_hmm('{TEST_DIR}/no_name.hmm');
+----
+read_hmm: {TEST_DIR}/no_name.hmm: model 1 (line 40): No NAME found for HMM
+
+# Without its cutoff lines too, which HMMER otherwise rejects first (ALPH must precede them).
+statement ok
+COPY (SELECT rtrim(regexp_replace(content, '\n(ALPH|GA|TC|NC) [^\n]*', '', 'g'), chr(10)) FROM read_text('data/hmmer/XYPPX.hmm'))
+TO '{TEST_DIR}/no_alph.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT * FROM read_hmm('{TEST_DIR}/no_alph.hmm');
+----
+read_hmm: {TEST_DIR}/no_alph.hmm: model 1 (line 17): No alphabet defined (no ALPH line?)
+
+statement ok
+COPY (SELECT rtrim(regexp_replace(content, '\nHMM [^\n]*', ''), chr(10)) FROM read_text('data/hmmer/XYPPX.hmm'))
+TO '{TEST_DIR}/no_hmm_line.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT * FROM read_hmm('{TEST_DIR}/no_hmm_line.hmm');
+----
+read_hmm: {TEST_DIR}/no_hmm_line.hmm: model 1 (line 40): Premature end of data in the header: no HMM line
+
+# A match line cut to its node number and three of its 20 emissions.
+statement ok
+COPY (SELECT rtrim(regexp_replace(content, '\n      1 [^\n]*', chr(10) || '      1   0.91707  5.48468  5.65823'), chr(10)) FROM read_text('data/hmmer/XYPPX.hmm'))
+TO '{TEST_DIR}/short_node.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT * FROM read_hmm('{TEST_DIR}/short_node.hmm');
+----
+read_hmm: {TEST_DIR}/short_node.hmm: model 1 (line 26): Too few probability fields on match line, node 1: expected 20, got 3
+
+# A HMMER3 model without NSEQ has no sequence_count.
+statement ok
+COPY (SELECT rtrim(replace(content, 'NSEQ  7' || chr(10), ''), chr(10)) FROM read_text('data/hmmer/XYPPX.hmm'))
+TO '{TEST_DIR}/no_nseq.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+query II
+SELECT sequence_count IS NULL, effective_sequence_count FROM read_hmm('{TEST_DIR}/no_nseq.hmm');
+----
+true	7.0
+
+# HMMER reads a cutoff that is not a number as 0, unchecked (atof), and read_hmm with it.
+statement ok
+COPY (SELECT rtrim(replace(content, 'GA    14.30 0.70' || chr(10), 'GA    xx yy;' || chr(10)), chr(10)) FROM read_text('data/hmmer/XYPPX.hmm'))
+TO '{TEST_DIR}/ga_not_numbers.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+query III
+SELECT gathering_threshold_sequence, gathering_threshold_domain, trusted_cutoff_sequence FROM read_hmm('{TEST_DIR}/ga_not_numbers.hmm');
+----
+0.0	0.0	14.4
 
 # Blank and comment lines before and between models count toward the line: a comment and a blank
 # line, XYPPX (lines 3 to 43), a blank line and a comment, then the bad model from line 46, whose
