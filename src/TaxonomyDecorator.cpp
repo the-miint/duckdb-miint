@@ -388,7 +388,54 @@ NameAssignment AssignNames(const CladeCountIndex &index, uint32_t min_count) {
 }
 
 Backfill BackfillNames(const NameAssignment &assignment, const TaxonomyStore &store, const TreeIndex &tree) {
-	return {};
+	const uint32_t n = static_cast<uint32_t>(tree.size());
+	constexpr uint32_t kNone = TreeIndex::NO_PARENT;
+
+	// Per node, itself if it has a preliminary name, else its nearest ancestor that has one, else
+	// kNone; filled in preorder, so a node's parent is filled before it.
+	std::vector<uint32_t> preorder(n);
+	for (uint32_t v = 0; v < n; v++) {
+		preorder[tree.pre(v)] = v;
+	}
+	std::vector<uint32_t> named(n, kNone);
+	for (const uint32_t v : preorder) {
+		const uint32_t parent = tree.parent(v);
+		named[v] = assignment.Preliminary(v) ? v : parent == kNone ? kNone : named[parent];
+	}
+
+	Backfill out;
+	out.labels.resize(n);
+	for (uint32_t v = 0; v < n; v++) {
+		const NameScore *own = assignment.Preliminary(v);
+		if (own == nullptr) {
+			continue;
+		}
+		// The shallowest rank the label reaches: 0 with no named ancestor, else the rank below the
+		// ancestor's, and the node's own when that is deeper than the node's.
+		size_t from = 0;
+		const uint32_t parent = tree.parent(v);
+		if (const uint32_t ancestor = parent == kNone ? kNone : named[parent]; ancestor != kNone) {
+			const size_t ancestor_rank = assignment.Preliminary(ancestor)->rank;
+			if (own->rank < ancestor_rank) {
+				out.inverted.push_back({v, own->rank, own->name, ancestor, ancestor_rank});
+			}
+			from = std::min(ancestor_rank + 1, own->rank);
+		}
+		// The names at ranks from..own->rank up the hierarchy from the preliminary name. Every name
+		// below rank 0 has a parent one rank shallower (TaxonomyStore::Parent), so the walk never
+		// meets a gap.
+		auto &label = out.labels[v];
+		label.resize(own->rank - from + 1);
+		NameId name = own->name;
+		for (size_t r = own->rank;; r--) {
+			label[r - from] = {r, name};
+			if (r == from) {
+				break;
+			}
+			name = store.Parent(r, name);
+		}
+	}
+	return out;
 }
 
 } // namespace miint
