@@ -8,9 +8,10 @@ require miint
 # with examples, and can write its files anyway to measure them. So the check returns every
 # violation as a row, each with the feature_id of the row at fault, and never raises for one.
 # No violation is an error; only a call that cannot be checked is (no relation, a missing
-# column, or the wrong types). The checks are TaxonomyStore's own, run over the names as given rather than
-# over its cleaned lineages. Cleaning cuts a lineage from a rank down, or empties it, so it never
-# gives a name a new parent: a taxonomy with no violations is one TaxonomyStore accepts.
+# column, or the wrong types). The checks are TaxonomyStore's own, run over the names as given
+# rather than over its cleaned lineages. Cleaning cuts a lineage from a rank down, or empties
+# it, so it never gives a name a new parent: a taxonomy with no violations is one TaxonomyStore
+# accepts.
 
 # =============================================================================
 # A clean taxonomy gives no rows: GTDB's suffixed and placeholder names, accession ids, a
@@ -59,7 +60,9 @@ SELECT count(*) FROM taxonomy_violations('shuffled');
 
 # Other columns are ignored, whatever their type, so a table that carries more than a taxonomy
 # (here taxonomy_lineage's name, rank and lineage, with its taxid as feature_id) is checked as
-# it is. Its rank columns are still read: Bacillota under two domains is reported.
+# it is. Its rank columns are still read: Bacillota under two domains is reported. The input's
+# own name and rank ('Firmicutes', 'clade') differ from the violation's, so the output's name
+# and rank cannot be the input's passed through.
 statement ok
 CREATE TABLE lineage_shaped (feature_id BIGINT, name VARCHAR, rank VARCHAR, domain VARCHAR, phylum VARCHAR,
                              class VARCHAR, "order" VARCHAR, family VARCHAR, genus VARCHAR, species VARCHAR,
@@ -67,14 +70,45 @@ CREATE TABLE lineage_shaped (feature_id BIGINT, name VARCHAR, rank VARCHAR, doma
 
 statement ok
 INSERT INTO lineage_shaped VALUES
-    (1239, 'Bacillota', 'phylum', 'Bacteria', 'Bacillota', NULL, NULL, NULL, NULL, NULL, NULL, 'd__Bacteria;p__Bacillota', [1]),
-    (9999, 'Bacillota', 'phylum', 'Archaea', 'Bacillota', NULL, NULL, NULL, NULL, NULL, NULL, 'd__Archaea;p__Bacillota', [2]);
+    (1239, 'Firmicutes', 'clade', 'Bacteria', 'Bacillota', NULL, NULL, NULL, NULL, NULL, NULL, 'd__Bacteria;p__Bacillota', [1]),
+    (9999, 'Firmicutes', 'clade', 'Archaea', 'Bacillota', NULL, NULL, NULL, NULL, NULL, NULL, 'd__Archaea;p__Bacillota', [2]);
 
-query TITT
-SELECT kind, feature_id, name, parent FROM taxonomy_violations('lineage_shaped') ORDER BY feature_id;
+query TITTT
+SELECT kind, feature_id, rank, name, parent FROM taxonomy_violations('lineage_shaped') ORDER BY feature_id;
 ----
-multiple_parents	1239	Bacillota	Bacteria
-multiple_parents	9999	Bacillota	Archaea
+multiple_parents	1239	phylum	Bacillota	Bacteria
+multiple_parents	9999	phylum	Bacillota	Archaea
+
+# taxonomy_lineage's own output, as the docs describe: checked as it is once taxid is renamed,
+# and refused, naming the column, when the rename is forgotten. The synthetic taxdump is one
+# consistent tree, so its 12 lineages have no violations.
+statement ok
+CREATE VIEW ncbi_tx AS
+SELECT taxid AS feature_id, * EXCLUDE (taxid)
+FROM taxonomy_lineage(taxids := [1, 10, 20, 30, 40, 50, 60, 70, 80, 90, 21, 31], source := 'data/taxonomy/synthetic');
+
+query II
+SELECT (SELECT count(*) FROM ncbi_tx), (SELECT count(*) FROM taxonomy_violations('ncbi_tx'));
+----
+12	0
+
+statement ok
+CREATE VIEW ncbi_unrenamed AS
+SELECT * FROM taxonomy_lineage(taxids := [90], source := 'data/taxonomy/synthetic');
+
+statement error
+SELECT * FROM taxonomy_violations('ncbi_unrenamed');
+----
+taxonomy_violations: taxonomy 'ncbi_unrenamed' has no 'feature_id' column
+
+# An ignored column is not even evaluated: a view whose extra column would raise is checked.
+statement ok
+CREATE VIEW extra_boom AS SELECT *, error('extra column read') AS e FROM clean;
+
+query I
+SELECT count(*) FROM taxonomy_violations('extra_boom');
+----
+0
 
 # =============================================================================
 # A taxonomy split over two files, a primary and a secondary, kept as lines. One parent per
