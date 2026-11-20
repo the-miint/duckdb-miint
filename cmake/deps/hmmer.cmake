@@ -1,7 +1,8 @@
 # HMMER 3.4 and Easel 0.49 (the-miint forks; Easel is a submodule inside
 # ext/hmmer): profile HMMs. Compiled here from a curated source list, with the
 # two config headers generated from the forks' own templates, instead of running
-# HMMER's autotools. Off on Windows.
+# HMMER's autotools. Off on Windows: never built there, and the generated config
+# headers declare a POSIX system (unistd.h, fseeko, times).
 #
 # The forks' patch series, and why each patch exists, is in
 # ext/hmmer/miint/README.md (Easel's in ext/hmmer/easel/miint/README.md).
@@ -16,7 +17,8 @@ endif()
 
 # One SIMD implementation, chosen by target: SSE on x86-64, NEON on arm64, and
 # under Emscripten the same SSE code on its SSE emulation (lowered to wasm
-# SIMD128), as minimap2 does. HMMER 3.4 has no scalar implementation.
+# SIMD128), as minimap2 does. HMMER 3.4 has no scalar implementation, and miint
+# does not build its VMX (POWER) one.
 if(EMSCRIPTEN)
   set(HMMER_SIMD sse)
 elseif(APPLE AND OSX_BUILD_ARCH)
@@ -32,8 +34,8 @@ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64")
 else()
   message(
     FATAL_ERROR
-      "HMMER needs SSE or NEON; no implementation for ${CMAKE_SYSTEM_PROCESSOR}. "
-      "Configure with -DMIINT_ENABLE_HMMER=OFF.")
+      "miint builds HMMER's SSE or NEON implementation; neither runs on "
+      "${CMAKE_SYSTEM_PROCESSOR}. Configure with -DMIINT_ENABLE_HMMER=OFF.")
 endif()
 
 # Generate <out> from the autoconf template <in>: each NAME=VALUE in ARGN turns
@@ -52,8 +54,7 @@ function(miint_hmmer_config in out)
     string(REGEX REPLACE "\n#undef ${name}([ \t][^\n]*)?\n"
                          "\n#define ${name} ${value}\n" text "${text}")
   endforeach()
-  # Written only when its text changes: every HMMER source includes it, so a
-  # rewrite on each configure would recompile them all.
+  # Written only when its text changes (docs/internals/build-system.md, Rules).
   set(old "")
   if(EXISTS ${out})
     file(READ ${out} old)
@@ -67,13 +68,9 @@ function(miint_hmmer_config in out)
     PROPERTY CMAKE_CONFIGURE_DEPENDS ${in})
 endfunction()
 
-# Only the macros the compiled sources below read are defined. Never defined:
-# HAVE_FLUSH_ZERO_MODE / HAVE_DENORMALS_ZERO_MODE (FTZ/DAZ would change
-# floating-point results and leak into DuckDB's threads), HMMER_THREADS /
-# HAVE_PTHREAD (the library's hot path is single-threaded; threads live in the
-# CLI programs), MPI, and HAVE_POPEN (HMMER never opens a file or pipe here;
-# models are parsed from memory). HAVE_ERFC stays undefined, as HMMER's own
-# configure leaves it, so every platform uses Easel's erfc.
+# Only macros the sources below read are defined. Which are never defined, and
+# why, is in docs/internals/embedded-tools.md (HMMER, generated config headers);
+# test/cpp/test_HmmerConfig.cpp fails to compile if one of them is.
 if(HMMER_SIMD STREQUAL "neon")
   set(HMMER_SIMD_DEFINES eslENABLE_NEON=1)
   set(EASEL_SIMD_DEFINES eslENABLE_NEON=1 eslHAVE_NEON_AARCH64=1)
@@ -99,7 +96,6 @@ miint_hmmer_config(
   "EASEL_DATE=\"Aug 2023\""
   "EASEL_COPYRIGHT=\"Copyright (C) 2023 Howard Hughes Medical Institute.\""
   "EASEL_LICENSE=\"Freely distributed under the BSD open source license.\""
-  "EASEL_URL=\"http://bioeasel.org/\""
   eslDEBUGLEVEL=0
   ${EASEL_SIMD_DEFINES}
   HAVE_INTTYPES_H=1
@@ -115,13 +111,9 @@ miint_hmmer_config(
   HAVE_TIMES=1
   HAVE_FSEEKO=1)
 
-# The link closure of what miint calls, and nothing else: the profile parser
-# (p7_hmmfile_OpenBuffer/Read), and HMMER2 calibration, which a HMMER2 profile
-# runs on read and which reaches the SIMD filters. Programs, the daemon
-# (hmmpgmd), threads, MPI and the FM-index are not compiled; neither are
-# esl_buffer and esl_cpu. Determined from a link map of a program calling those
-# functions against the fork's own libhmmer.a / libeasel.a; a missing file fails
-# the native link, and the wasm import check (scripts/build_wasm.sh).
+# The link closure of what miint calls, and nothing else; how it was found is in
+# docs/internals/embedded-tools.md (HMMER, Build). A missing file fails the
+# native link, and the wasm import check (scripts/build_wasm.sh).
 set(HMMER_IMPL_DIR ${HMMER_DIR}/src/impl_${HMMER_SIMD})
 add_library(
   hmmer STATIC

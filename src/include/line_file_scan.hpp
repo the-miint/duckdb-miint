@@ -16,10 +16,11 @@
 
 namespace duckdb {
 
-// Shared machinery for table functions that turn each line of a text file into at most
-// one row (read_paf, read_gfa). Files go through DuckDB's file system, so gzip,
-// multi-member gzip and remote paths share one code path. Each file is read start to end
-// by one thread; several files are read in parallel.
+// Shared machinery for table functions that read text files line by line. BindLineScan,
+// MakeLineScanFunction, ClaimNextFile and LineFile serve any such reader; ScanLines is for a
+// reader that turns each line into at most one row. Files go through DuckDB's file system,
+// so gzip, multi-member gzip and remote paths share one code path. Each file is read start
+// to end by one thread; several files are read in parallel.
 
 struct LineScanData : public TableFunctionData {
 	std::string function_name;

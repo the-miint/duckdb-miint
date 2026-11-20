@@ -57,8 +57,9 @@ jobs:
       # so this one line covers both.
       # HMMER_AVAILABLE, which run_tests.sh detects, is set here instead: every lane
       # that runs tests builds HMMER (it is off only on Windows, excluded below, and
-      # the wasm job has no test target). Without it the read_hmm tests skip, and
-      # HMMER's NEON code, which only the arm64 lanes build, goes untested.
+      # the wasm job has no test target). Without it the read_hmm tests skip, also
+      # on osx_arm64, the one lane that tests HMMER's NEON code (linux_arm64 runs
+      # no tests).
       test_config: '{"test_env_variables": {"MIINT_SIMD": "baseline", "HMMER_AVAILABLE": "1"}}'
       # Restore caches everywhere, but only SAVE on push to a tracked branch
       # or tag. The reusable workflow keys each arch's ccache with a timestamp,

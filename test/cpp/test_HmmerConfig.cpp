@@ -12,12 +12,8 @@
 
 #include <string>
 
-// Flush-to-zero and denormals-are-zero change floating-point results, so scores
-// would no longer match the HMMER command-line programs, and they are set per
-// thread, so they would leak into DuckDB's worker threads.
-//
-// HMMER_THREADS changes the layout of P7_HMMFILE, and the library's hot path
-// needs no threads of its own: DuckDB runs it on its worker threads.
+// Why each of these must stay undefined is in docs/internals/embedded-tools.md
+// (HMMER, generated config headers).
 
 #include "p7_config.h"
 #if defined(HAVE_FLUSH_ZERO_MODE)
@@ -55,7 +51,7 @@
 #endif
 
 // The fork's limit on model length (upstream #350): the parsers reject a larger
-// LENG before allocating anything.
+// LENG before allocating the model's body.
 static_assert(p7_MAXM == 100000, "p7_MAXM comes from the fork's p7_config.h.in");
 
 TEST_CASE("HMMER config - versions of the vendored sources", "[hmmer]") {

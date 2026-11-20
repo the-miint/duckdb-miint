@@ -529,11 +529,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	AlignSortMeRNARRNATableFunction::Register(loader);
 #endif
 #ifdef MIINT_HAS_HMMER
-	// Before any HMMER call can happen. Easel's exception handler is one
-	// process-global pointer, read without a lock, so installing it later -
-	// once a query might already be inside HMMER - would be a data race; the
-	// default handler aborts the process. Also fills HMMER's logsum table,
-	// which HMMER would otherwise fill on first use, racing.
+	// Before any HMMER call can happen; why is in miint::hmmer::Initialize().
 	miint::hmmer::Initialize();
 	ReadHmmTableFunction::Register(loader);
 #endif

@@ -148,9 +148,10 @@ unique_ptr<LocalTableFunctionState> ReadHmmTableFunction::InitLocal(ExecutionCon
 // first line. Text after the last "//" that isn't blank or comment is a model too: one cut off
 // before its "//" then fails in HMMER, as it should, rather than being dropped.
 //
-// A record goes to HMMER early when it can't be a model: when its first line holds no format tag
-// (HMMER rejects it from that line alone), or when it has outgrown what HMMER can read. Reading on
-// to a "//" would otherwise hold all of a file that isn't HMMER's, a FASTA file say, in memory.
+// A record is read early when it can't be a model: when its first line holds no format tag
+// (HMMER rejects it from that line alone), or when it has outgrown hmmer::MAX_RECORD_BYTES
+// (ParseProfile rejects it). Reading on to a "//" would otherwise hold all of a file that isn't
+// HMMER's, a FASTA file say, in memory.
 //
 // As ScanLines does, each thread reads its files one at a time, start to end, and a chunk holds
 // one file's rows only, so the filepath column is constant.

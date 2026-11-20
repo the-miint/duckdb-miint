@@ -16,10 +16,11 @@ namespace hmmer {
 // Prepares HMMER for use in this process. Call it once at extension load,
 // before anything can call into HMMER; later calls do nothing, from any thread.
 //
-// - Installs Easel's exception handler. It is one process-global pointer, and
-//   the default handler aborts the process. This one records the message for
-//   the thread that raised it (TakeExceptionMessage) and returns, so the HMMER
-//   call that raised returns its error code instead.
+// - Installs Easel's exception handler. It is one process-global pointer, read
+//   without a lock, so it is set before any query can be inside HMMER; the
+//   default handler aborts the process. This one records the message for the
+//   thread that raised it (TakeExceptionMessage) and returns, so the HMMER call
+//   that raised returns its error code instead.
 // - Fills HMMER's logsum lookup table, which HMMER's Forward filter (run by
 //   HMMER2 calibration) reads, and which only the caller fills: p7_FLogsumInit
 //   must run before any p7_FLogsum (logsum.c). Its "first time" flag is

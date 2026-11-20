@@ -72,8 +72,7 @@ if(EMSCRIPTEN)
 elseif(WIN32)
   # All of these rely on POSIX APIs (mkdtemp, process pipes, shm, autotools);
   # MAFFT segfaults on MinGW. SortMeRNA's RocksDB and parasail have never been
-  # built for MinGW (upstream CI tests MSVC only). HMMER has never been built
-  # for Windows here (upstream supports POSIX only).
+  # built for MinGW (upstream CI tests MSVC only). HMMER: see its deps file.
   set(MIINT_ENABLE_VSEARCH OFF)
   set(MIINT_ENABLE_HMMER OFF)
   set(MIINT_ENABLE_MAFFT OFF)

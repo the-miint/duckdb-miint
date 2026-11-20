@@ -1498,7 +1498,7 @@ SELECT hmm_name, hmm_accession, hmm_length FROM read_hmm('models/*.hmm');
     - **Arrays**: VARCHAR[] elements are treated as literal paths (no glob expansion)
 - `include_filepath` (BOOLEAN, optional, default false): Add a `filepath` column to the output
 
-**Output schema.** Each column is a line of the model's header, which HMMER's documentation describes under the same tag. A field the model does not have is NULL. So is a `MAXL` or `NSEQ` of 0 or less, which HMMER holds as unset and does not write back out (`hmmconvert` drops the line).
+**Output schema.** Each column is a line of the model's header, which HMMER's documentation describes under the same tag. A field the model does not have is NULL. So is a negative `MAXL` or `NSEQ`, which HMMER3's parser accepts, and a `HMMER2.0` model's `NSEQ 0`: HMMER holds these as unset and does not write them back out (`hmmconvert` drops the line).
 
 | Column | Type | HMMER header line |
 |---|---|---|
@@ -1506,7 +1506,7 @@ SELECT hmm_name, hmm_accession, hmm_length FROM read_hmm('models/*.hmm');
 | `hmm_accession` | VARCHAR | `ACC` |
 | `hmm_description` | VARCHAR | `DESC` |
 | `hmm_length` | BIGINT | `LENG`, the number of match states |
-| `alphabet` | VARCHAR | `ALPH`, under Easel's names: `amino`, `DNA` or `RNA` |
+| `alphabet` | VARCHAR | `ALPH`: `amino`, `DNA` or `RNA`, or HMMER's toy alphabets `coins` and `dice` (Easel 0.49 reports a `dice` model as `coins`) |
 | `format` | VARCHAR | The format tag on the model's first line: `HMMER3/a` to `HMMER3/f`, or `HMMER2.0` |
 | `max_instance_length` | BIGINT | `MAXL`, the longest an instance of the model is expected to be, in residues (nhmmer uses it) |
 | `sequence_count` | BIGINT | `NSEQ` |
@@ -1526,7 +1526,7 @@ HMMER holds the cutoffs, `EFFN` and the statistics as 32-bit floats; as `FLOAT` 
 **Behavior:**
 
 - Each model is read by HMMER 3.4 itself, one model at a time. So a file may mix format versions and alphabets, which HMMER's own programs refuse, and a model reads the same whichever file it is in.
-- A `DNA` or `RNA` model has one value on each of its `GA`, `TC` and `NC` lines; HMMER uses it for both the per-sequence and per-domain columns.
+- A HMMER3 `DNA` or `RNA` model has one value on each of its `GA`, `TC` and `NC` lines; HMMER uses it for both the per-sequence and per-domain columns. A `HMMER2.0` model has two, whatever its alphabet.
 - `consensus` is the file's `CONS` column when the model has one (`CONS yes`, in `HMMER3/e` and `HMMER3/f`). Otherwise HMMER computes it from the match emissions, as it does for every older model: each match state's most probable residue, upper case when its probability is at least 0.5 (`amino`) or 0.9 (`DNA`, `RNA`).
 - A `HMMER2.0` model is converted as HMMER 3 reads one, the way `hmmconvert` converts it:
     - its E-value statistics are calibrated by HMMER as the model is read. The random seed is fixed, so a model always gets the same values;
@@ -1535,14 +1535,14 @@ HMMER holds the cutoffs, `EFFN` and the statistics as 32-bit floats; as `FLOAT` 
 - For a HMMER3 model, `checksum` is NULL only when the model has no `CKSUM` line; `CKSUM 0` gives 0.
 - Header lines with no column are not output: `DATE`, `COM`, `RF`, `MM`, `CS`, `MAP`, and HMMER2's null-model and statistics lines.
 - Blank lines and lines whose first word starts with `#` are skipped, as HMMER skips them. A file of nothing else returns no rows.
-- HMMER checks `LENG`, `MAXL`, `NSEQ` and `EFFN`, but reads the cutoffs, the statistics and the model's probabilities without checking them: a value there that is not a number reads as 0 (`GA xx yy;` gives 0.0 and 0.0), in read_hmm as in HMMER's own programs.
+- HMMER checks few of a model's numbers. It rejects a `LENG` outside 1 to 100000, a `MAXL` or `NSEQ` that reads as 0, and an `EFFN` that is not positive, reading each by its leading number (`LENG 5x` is 5). It reads the cutoffs, the statistics and the model's probabilities without checking them: a value there that is not a number reads as 0 (`GA xx yy;` gives 0.0 and 0.0), in read_hmm as in HMMER's own programs.
 - gzip-compressed files (`.gz`) are decompressed transparently, including multi-member (bgzip) files. Remote paths (`s3://`, `https://`) are read through DuckDB's file system.
 - One thread reads each file; several files are read in parallel.
 - An empty file returns no rows.
 - stdin is not supported.
 - Available in builds with HMMER (`MIINT_ENABLE_HMMER`), which is every build except Windows.
 
-**Malformed models fail the scan.** The error names the file, the model's number in the file, the line HMMER stopped at, and HMMER's own message:
+**A model HMMER rejects fails the scan.** The error names the file, the model's number in the file, the line HMMER stopped at, and HMMER's own message:
 
 ```
 read_hmm: models.hmm: model 2 (line 47): Unrecognized alphabet type custom
@@ -1554,8 +1554,10 @@ Among the defects HMMER rejects:
 - a model cut off before its closing `//`;
 - no `NAME`, `LENG`, `ALPH` or `HMM` line; an alphabet HMMER doesn't know; a `GA`, `TC` or `NC` line before `ALPH`;
 - an `MM` line in a file older than `HMMER3/f`; a `HMMER2.0` model with no `NULE` line;
-- a model longer than 100000 match states, or a single model of more than 2 GiB of text;
+- a model longer than 100000 match states;
 - a node line with too few fields.
+
+read_hmm also rejects a single model of more than 1 GiB of text, which Easel's line reader cannot hold safely.
 
 **Differences from HMMER's programs:**
 
