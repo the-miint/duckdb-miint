@@ -7,13 +7,14 @@ require miint
 # A caller that builds taxonomies keeps the violations: it stores them, reports their totals
 # with examples, and can write its files anyway to measure them. So the check returns every
 # violation as a row, each with the feature_id of the row at fault, and never raises for one.
-# Only a relation that is not a taxonomy (wrong columns or types) is an error. The checks are
-# TaxonomyStore's own, run over the names as given rather than over its cleaned lineages.
-# Cleaning only removes names, so a taxonomy with no violations is one TaxonomyStore accepts.
+# No violation is an error; only a call that cannot be checked is (no relation, or the wrong
+# columns or types). The checks are TaxonomyStore's own, run over the names as given rather than
+# over its cleaned lineages. Cleaning cuts a lineage from a rank down, or empties it, so it never
+# gives a name a new parent: a taxonomy with no violations is one TaxonomyStore accepts.
 
 # =============================================================================
 # A clean taxonomy gives no rows: GTDB's suffixed and placeholder names, accession ids, a
-# lineage that stops above species, one with every rank empty, and no strains
+# lineage that stops above species, one NULL throughout, and no strains
 # =============================================================================
 
 statement ok
@@ -174,7 +175,7 @@ WHERE kind <> 'duplicate_id' ORDER BY ALL;
 multiple_parents	G1	species	gA sA	gA
 multiple_parents	L1	species	gA sA	gB
 
-# G1 twice in the primary file, even with equal lineages, is two lineages for one tip.
+# G1 twice in the primary file, even with equal lineages, is two lineages for one id.
 statement ok
 DELETE FROM lines;
 
@@ -459,8 +460,8 @@ FROM taxonomy_violations('uu_tx');
 duplicate_id	true	UUID
 duplicate_id	true	UUID
 
-# DuckDB stores a UUID with its top bit flipped, so a UUID with the top bit set is the one an
-# id round trip would get wrong: it comes back as the same id.
+# DuckDB stores a UUID with its top bit flipped, and the id goes to text and back on its way
+# through. An id with that bit set, in the upper half of the range, comes back unchanged too.
 statement ok
 CREATE TABLE uu_sign_tx AS
 SELECT '80000000-0000-0000-0000-000000000000'::UUID AS feature_id, 'dA' AS domain, NULL::VARCHAR AS phylum,

@@ -452,7 +452,8 @@ TEST_CASE("FindRowViolations reports every occurrence of a repeated id", "[taxon
 }
 
 // A gap is a NULL rank above a set one; the first NULL rank is the one reported, once per row.
-// NULLs at the end of a lineage are not gaps: a lineage may stop at any rank, or be empty.
+// NULLs at the end of a lineage are not gaps: a lineage may stop at any rank, or be NULL
+// throughout.
 TEST_CASE("FindRowViolations reports a gap at its first NULL rank", "[taxonomy_store]") {
 	CHECK(Describe(FindRowViolations({Row("G1", {"A", std::nullopt, "C"})})) == Lines {"row 0 gap phylum"});
 	// d__dA; p__; c__cZ; o__; f__fZ: two NULLs above set ranks, one gap, at the phylum.
