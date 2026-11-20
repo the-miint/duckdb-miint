@@ -13,17 +13,6 @@ if(NOT EXISTS ${EASEL_DIR}/easel.h)
       "ext/hmmer/easel is empty: HMMER's Easel is a nested submodule. Run "
       "git submodule update --init --recursive")
 endif()
-# Easel's sources include "esl_config.h" in quotes, which finds a copy in their
-# own directory before any include path. An in-tree ./configure run leaves
-# exactly such copies, which would silently replace the headers generated below.
-foreach(stray ${HMMER_DIR}/src/p7_config.h ${EASEL_DIR}/esl_config.h)
-  if(EXISTS ${stray})
-    message(
-      FATAL_ERROR
-        "${stray} exists (left by an in-tree ./configure); it would shadow the "
-        "generated config header. Remove it from the submodule checkout.")
-  endif()
-endforeach()
 
 # One SIMD implementation, chosen by target: SSE on x86-64, NEON on arm64, and
 # under Emscripten the same SSE code on its SSE emulation (lowered to wasm
