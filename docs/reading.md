@@ -9,18 +9,18 @@ A reader expands each path it is given as DuckDB's own readers do: a `file:` URI
 - [Reading a file by its name](#reading-a-file-by-its-name) - `FROM 'reads.fq.gz'`, as DuckDB reads `FROM 'x.parquet'`.
 - [FASTA / FASTQ](#fasta-and-fastq) - FASTA and FASTQ sequence files.
 - [SAM / BAM](#sam-and-bam) - SAM and BAM alignment files.
-  - [`read_alignment_header(path)`](#read_alignment_headerpath) - A header's `@SQ` lines as `(tid, reference, length)`.
+    - [`read_alignment_header(path)`](#read_alignment_headerpath) - A header's `@SQ` lines as `(tid, reference, length)`.
 - [PAF](#paf) - PAF pairwise alignment files, as written by minimap2 and other long-read tools.
 - [GFA](#gfa) - GFA 1 assembly graphs.
-  - [`read_gfa_segments(filename)`](#read_gfa_segmentsfilename) - A graph's segments as typed columns.
-  - [`read_gfa_links(filename)`](#read_gfa_linksfilename) - A graph's links as typed columns.
+    - [`read_gfa_segments(filename)`](#read_gfa_segmentsfilename) - A graph's segments as typed columns.
+    - [`read_gfa_links(filename)`](#read_gfa_linksfilename) - A graph's links as typed columns.
 - [myloasm](#myloasm) - A myloasm assembly's output directory as tables.
-  - [`read_myloasm_contigs(dir)`](#read_myloasm_contigsdir) - Contigs, with dereplication status, lengths and depths.
-  - [`read_myloasm_layout(dir)`](#read_myloasm_layoutdir) - The read slices each contig is built from.
-  - [`read_myloasm_mappings(dir)`](#read_myloasm_mappingsdir) - Every read's mappings to the contigs.
-  - [`read_myloasm_links(dir)`](#read_myloasm_linksdir) - The contig graph's edges.
-  - [`read_myloasm_splits(dir)`](#read_myloasm_splitsdir) - Where chimeric reads were split.
-  - [`read_myloasm_run(dir)`](#read_myloasm_rundir) - Each invocation's version, command, k and c.
+    - [`read_myloasm_contigs(dir)`](#read_myloasm_contigsdir) - Contigs, with dereplication status, lengths and depths.
+    - [`read_myloasm_layout(dir)`](#read_myloasm_layoutdir) - The read slices each contig is built from.
+    - [`read_myloasm_mappings(dir)`](#read_myloasm_mappingsdir) - Every read's mappings to the contigs.
+    - [`read_myloasm_links(dir)`](#read_myloasm_linksdir) - The contig graph's edges.
+    - [`read_myloasm_splits(dir)`](#read_myloasm_splitsdir) - Where chimeric reads were split.
+    - [`read_myloasm_run(dir)`](#read_myloasm_rundir) - Each invocation's version, command, k and c.
 - [SFF](#sff) - SFF sequence files.
 - [SRA](#sra) - NCBI SRA archives (`.sra`), read as fasterq-dump reads them.
 - [mzML / mzXML](#mzml-and-mzxml) - mzML and mzXML files.
@@ -32,9 +32,10 @@ A reader expands each path it is given as DuckDB's own readers do: a `file:` URI
 
 ### Reading a file by its name
 
-With miint loaded, a file named in `FROM` is read by the reader its suffix names, as DuckDB reads `FROM 'x.parquet'` with `read_parquet`. `FROM 'reads.fq.gz'` is `FROM read_fastx('reads.fq.gz')`:
+Load miint, then put a supported filename in `FROM`. DuckDB chooses the reader from the suffix. For example, `FROM 'reads.fq.gz'` calls `read_fastx('reads.fq.gz')`.
 
 ```sql
+LOAD miint;
 SELECT * FROM 'reads.fq.gz';
 SELECT * FROM 'alignments/*.bam';  -- a glob, which the reader expands
 SELECT * FROM tree.nwk;            -- a name made of plain words needs no quotes
@@ -66,79 +67,102 @@ SELECT * FROM tree.nwk;            -- a name made of plain words needs no quotes
 
 ### FASTA and FASTQ
 
-Reading FASTA and FASTQ sequence files occurs through the `read_fastx` table function.
-
-**Basic example:**
+After [loading miint](#reading-a-file-by-its-name), read a FASTA or FASTQ file directly by name. DuckDB calls `read_fastx` for these suffixes.
 
 ```sql
-SELECT * FROM read_fastx('some_file.fasta');
+SELECT * FROM 'sequences.fasta';
+SELECT * FROM 'reads.fastq.gz';
 ```
 
-**Parameters:**
-- `filename` (VARCHAR or VARCHAR[]): Path to FASTA/FASTQ file(s), glob pattern (e.g., `'data/*.fastq'`), or R1 files for paired-end
-  - **Glob patterns**: When a single VARCHAR contains glob characters (`*`, `?`, `[`), files are expanded and sorted alphabetically
-  - **Arrays**: VARCHAR[] elements are treated as literal paths (no glob expansion)
-- `sequence2` (VARCHAR or VARCHAR[], optional): Path to R2 file(s) for paired-end reads. Must have same number of files as `filename`
-  - **Paired-end with globs**: When `filename` is a glob pattern, `sequence2` must also be a glob pattern. Both are expanded and sorted independently, then paired by position. The expanded file counts must match.
-- `include_filepath` (BOOLEAN, optional, default false): Add filepath column to output
-- `qual_offset` (INTEGER, optional, default 33): Quality score offset (33 for Phred+33, 64 for Phred+64)
-- `allow_empty` (BOOLEAN, optional, default false): Read an empty file as no records instead of failing, for tools that write a file whether or not they have records for it. A pair with exactly one empty mate still fails: the other mate's records would have no mates.
-- `max_batch_bytes` (VARCHAR, optional, default `'512MiB'`): Soft cap on the uncompressed sequence+quality bytes buffered per output chunk, given as a formatted byte size (e.g. `'256MiB'`, `'2GB'`). The reader stops adding records to a chunk once their combined bytes reach this budget, which bounds memory when individual records are very large (e.g. assembled genomes at multiple MB each). Short-read data is unaffected — a chunk fills to the standard vector size long before the cap. Must be greater than 0.
+Use the [file suffix table](#reading-a-file-by-its-name) to see which names DuckDB recognizes. Call `read_fastx` when you need to pass options, read from stdin, or use a path with an unrecognized suffix.
 
-**Output schema:**
-- `sequence_index` (BIGINT): 1-based sequential index per file (resets to 1 for each file when reading multiple files)
-- `read_id` (VARCHAR): Sequence identifier (without '@' or '>' prefix)
-- `comment` (VARCHAR, nullable): Comment line after identifier
-- `sequence1` (VARCHAR): DNA/RNA sequence (R1 for paired-end)
-- `sequence2` (VARCHAR, nullable): Second sequence for paired-end reads
-- `qual1` (UINT8[], nullable): Quality scores as array of integers (NULL for FASTA)
-- `qual2` (UINT8[], nullable): Quality scores for R2 (NULL for FASTA or single-end)
-- `filepath` (VARCHAR, optional): File path when include_filepath=true
+#### Read paired FASTQ or several files
 
-**Behavior:**
-- Detects FASTA (`>` headers) or FASTQ (`@` headers) from the file's content, whatever its extension. Both files of a pair must be the same format: a FASTA file paired with a FASTQ file fails the query
-- Reads gzip-compressed files. A local file is recognized as gzip by its content, whatever its name; a remote file (`s3://`, `https://`) only by a `.gz` extension
-- Supports stdin input using `-` or `/dev/stdin` (single file only, no paired-end)
-- Quality scores converted to integers using specified offset (Phred+33 or Phred+64)
-- FASTQ records, those whose header starts with `@`, must be four lines each: header, sequence, `+`, quality, with the quality as long as the sequence. Blank lines, including lines of nothing but whitespace, may come before the first record and between records, and are ignored. Wrapped (multi-line) FASTQ is rejected; FASTA sequences may span any number of lines, and text before the first FASTA header (such as `;` comments) is skipped
-- A malformed record, a file that ends inside a FASTQ record, a truncated or corrupt gzip file, or NUL bytes where a record should start (such as the zero-filled block a crash can leave) fail the query rather than returning the records before it. The error names the file, and either the malformed record or how many records were read before the read failed; for damaged gzip data that count can stop short of the damage, since the data is inflated in blocks
-- Reads files in parallel, one thread per file (per pair of files for paired input), up to DuckDB's `threads` setting; stdin is read on one thread
-- An `http://` or `https://` file whose connection drops while it opens or partway through is retried by DuckDB's HTTP settings, `http_retries`, `http_retry_wait_ms` and `http_retry_backoff`. A retried read asks for the same byte range again, not the whole file. An HTTP error status DuckDB does not treat as transient, such as a 404, or a file whose ETag changed since it opened, fails at once. The defaults give up within a few seconds, which a long download will outlast; for one, raise them, for example `SET http_retries = 8; SET http_retry_wait_ms = 500; SET http_retry_backoff = 2;`. DuckDB also limits retries per host, so once many requests to one host have failed, later drops to that host can fail at once, even on a file that would have recovered
-- Each local regular file can be decompressed and parsed on a thread of its own, ahead of the rows being produced. This is decided once for the whole scan: it happens only if every file in the scan, each taking one of DuckDB's threads plus one more thread (two for a pair), fits in `threads` at once. With `SET threads = 8` that is up to four single-end files or two pairs. The count covers every file even when DuckDB reads them one at a time, as it does for a sink that keeps insertion order (a `CREATE TABLE ... AS` under the default `preserve_insertion_order`). Each read-ahead stops once it holds 4 MiB of records, or `max_batch_bytes` if that is smaller, passing it by about a record (by up to sixteen where record lengths jump). Remote files and pipes (stdin from a pipe included) are read without it, as is everything in DuckDB-Wasm
-- For paired-end data, reads are matched by position in files (not by ID)
-
-**Examples:**
 ```sql
--- Read single-end FASTQ file
-SELECT * FROM read_fastx('reads.fastq');
+SELECT * FROM read_fastx('R1.fastq', sequence2 = 'R2.fastq');
 
--- Read single-end FASTA file
-SELECT * FROM read_fastx('sequences.fasta');
+SELECT * FROM 'samples/*.fastq';
 
--- Read gzip-compressed FASTQ
-SELECT * FROM read_fastx('reads.fastq.gz');
+SELECT * FROM read_fastx('samples/*.fastq', include_filepath = true)
+ORDER BY filepath, sequence_index;
+```
 
--- Read paired-end FASTQ files
-SELECT * FROM read_fastx('R1.fastq', sequence2='R2.fastq');
+Reads are paired by position. Ensure the read IDs appear in the same order in both mates. `read_fastx` does not validate the IDs.
 
--- Read multiple single-end files
-SELECT * FROM read_fastx(['sample1.fastq', 'sample2.fastq', 'sample3.fastq']);
+#### Parameters
 
--- Read multiple paired-end files
+| Parameter | Type | Default | Purpose |
+| --- | --- | --- | --- |
+| `filename` | `VARCHAR` or `VARCHAR[]` | Required | Path, glob, or list of paths for a single-end input or R1. |
+| `sequence2` | `VARCHAR` or `VARCHAR[]` | Omitted | R2 path, glob, or list of paths. |
+| `include_filepath` | `BOOLEAN` | `false` | Include the source path. |
+| `qual_offset` | `INTEGER` | `33` | Decode quality scores using Phred+33 or Phred+64. |
+| `allow_empty` | `BOOLEAN` | `false` | Accept empty files as zero records. A pair with exactly one empty mate fails. |
+| `max_batch_bytes` | `VARCHAR` | `'512MiB'` | Set the soft limit on uncompressed sequence and quality bytes per chunk. |
+
+#### Output columns
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `sequence_index` | `BIGINT` | 1-based record index, starting over for each file. |
+| `read_id` | `VARCHAR` | Sequence ID without the leading `@` or `>`. |
+| `comment` | `VARCHAR` | Comment after the ID, or `NULL` if absent. |
+| `sequence1` | `VARCHAR` | Sequence, or R1 for paired reads. |
+| `sequence2` | `VARCHAR` | R2 sequence, or `NULL` for single-end reads. |
+| `qual1` | `UINT8[]` | Integer quality scores for R1, or `NULL` for FASTA. |
+| `qual2` | `UINT8[]` | Integer quality scores for R2, or `NULL` for FASTA or single-end reads. |
+| `filepath` | `VARCHAR` | Source path, included only with `include_filepath = true`. |
+
+#### Paths and file pairing
+
+A single path containing `*`, `?`, or `[` is expanded and sorted alphabetically. List elements are literal paths. For paired-end reads, give the same number of files on each side. If R1 is a glob, R2 must also be a glob. Each glob is expanded and sorted independently, then files are paired by position.
+
+```sql
+SELECT * FROM read_fastx(['sample1.fastq', 'sample2.fastq']);
+
 SELECT * FROM read_fastx(
     ['sample1_R1.fastq', 'sample2_R1.fastq'],
-    sequence2=['sample1_R2.fastq', 'sample2_R2.fastq']
+    sequence2 = ['sample1_R2.fastq', 'sample2_R2.fastq']
 );
 
--- Read all FASTQ files matching a glob pattern (sorted alphabetically)
-SELECT * FROM read_fastx('samples/*.fastq', include_filepath=true);
+SELECT * FROM read_fastx('samples/*_R1.fastq', sequence2 = 'samples/*_R2.fastq');
+```
 
--- Paired-end with glob patterns (both must be globs, paired by sorted order)
-SELECT * FROM read_fastx(
-    'samples/*_R1.fastq',
-    sequence2='samples/*_R2.fastq'
-);
+#### Formats, compression, and invalid input
 
+Detects FASTA (`>` headers) or FASTQ (`@` headers) from the file's content, whatever its extension. Both files of a pair must use the same format. A FASTA file paired with a FASTQ file fails the query.
+
+Reads gzip-compressed files. The reader detects gzip from content for local files and from the `.gz` suffix for remote files (`s3://`, `https://`).
+
+Supports stdin input using `-` or `/dev/stdin` (single file only, no paired-end).
+
+Each FASTQ record takes four lines: header, sequence, `+`, and quality. The quality and sequence must have the same length. Blank or whitespace-only lines before the first record and between records are ignored. FASTA sequences may span multiple lines, and text before the first FASTA header is skipped. Wrapped FASTQ records fail.
+
+A malformed record, a file that ends inside a FASTQ record, a truncated or corrupt gzip file, or NUL bytes where a record should start (such as the zero-filled block a crash can leave) fail the query rather than returning the records before it. The error names the file, and either the malformed record or how many records were read before the read failed; for damaged gzip data that count can stop short of the damage, since the data is inflated in blocks.
+
+#### Memory and parallel reads
+
+The reader streams records. `max_batch_bytes` is a positive formatted byte size such as `'256MiB'` or `'2GB'`. The reader stops adding records to a chunk once the combined sequence and quality bytes reach that budget. This bounds buffering for large records such as assembled genomes. With short reads, the chunk normally reaches DuckDB's standard vector size first.
+
+The reader uses one thread per file or file pair, up to DuckDB's `threads` setting. It reads stdin on one thread.
+
+Each local regular file can be decompressed and parsed on a thread of its own, ahead of the rows being produced. This is decided once for the whole scan: it happens only if every file in the scan, each taking one of DuckDB's threads plus one more thread (two for a pair), fits in `threads` at once. With `SET threads = 8` that is up to four single-end files or two pairs. The count covers every file even when DuckDB reads them one at a time, as it does for a sink that keeps insertion order (a `CREATE TABLE ... AS` under the default `preserve_insertion_order`). Each read-ahead stops once it holds 4 MiB of records, or `max_batch_bytes` if that is smaller, passing it by about a record (by up to sixteen where record lengths jump). Remote files and pipes (stdin from a pipe included) are read without it, as is everything in DuckDB-Wasm.
+
+#### Remote reads and retries
+
+An `http://` or `https://` file whose connection drops while it opens or partway through is retried by DuckDB's HTTP settings, `http_retries`, `http_retry_wait_ms` and `http_retry_backoff`. A retried read asks for the same byte range again, not the whole file. An HTTP error status DuckDB does not treat as transient, such as a 404, or a file whose ETag changed since it opened, fails at once. DuckDB also limits retries per host. After many failures on one host, a later drop can fail immediately.
+
+The default retry settings give up within a few seconds. Raise them for a long download if needed.
+
+```sql
+SET http_retries = 8;
+SET http_retry_wait_ms = 500;
+SET http_retry_backoff = 2;
+```
+
+#### More SQL examples
+
+```sql
 -- Include source filepath for tracking (recommended for multiple files)
 -- Note: sequence_index resets to 1 for each file
 SELECT * FROM read_fastx(['batch1.fastq', 'batch2.fastq'], include_filepath=true)
@@ -181,16 +205,6 @@ GROUP BY read_id
 HAVING AVG(q) >= 30;
 ```
 
-**Performance:**
-- Streaming I/O minimizes memory usage
-- Quality scores stored as efficient UINT8 arrays
-
-**Notes:**
-- Read IDs must match between R1 and R2 files for paired-end data (not validated, matched by position)
-- For FASTA files, `qual1` and `qual2` are NULL
-- The `sequence_index` resets to 1 for each file. To distinguish sequences from different files, use `include_filepath=true` and order by `filepath, sequence_index`
-- Comment field is NULL if no comment is present in the sequence header
-
 ### SAM and BAM
 
 Reading SAM/BAM alignment files occurs through the `read_alignments` table function. Header information is optional. SEQ and QUAL fields are by default not included. 
@@ -200,18 +214,21 @@ Sequence data can be read from SAM/BAM into a `read_fastx` compatible schema usi
 **Basic example:**
 
 ```sql
-SELECT * FROM read_alignments('some_alignments.sam')
+SELECT * FROM 'alignments.sam';
+SELECT * FROM 'alignments.bam';
 ```
 
 **Parameters:**
+
 - `filename` (VARCHAR or VARCHAR[]): Path to SAM/BAM file(s), glob pattern (e.g., `'data/*.bam'`), or `-` / `/dev/stdin` for standard input
-  - **Glob patterns**: When a single VARCHAR contains glob characters (`*`, `?`, `[`), files are expanded and sorted alphabetically
-  - **Arrays**: VARCHAR[] elements are treated as literal paths (no glob expansion)
+    - **Glob patterns**: When a single VARCHAR contains glob characters (`*`, `?`, `[`), files are expanded and sorted alphabetically
+    - **Arrays**: VARCHAR[] elements are treated as literal paths (no glob expansion)
 - `reference_lengths` (VARCHAR, optional): Table or view name containing reference sequences for headerless SAM files. Must have at least 2 columns: first column = reference name (VARCHAR, BIGINT or UUID, matched as its text (BIGINT in decimal, UUID in the lowercase hyphenated form)), second column = reference length (INTEGER/BIGINT). Column names don't matter. Views are fully supported and can include computed columns.
 - `include_filepath` (BOOLEAN, optional, default false): Add filepath column to output
 - `include_seq_qual` (BOOLEAN, optional, default false): Add sequence and quality score columns to output. When enabled, primary alignments (non-secondary, non-supplementary) and unmapped reads must have SEQ/QUAL data or an error will be raised.
 
 **Output schema includes:**
+
 - `position` (BIGINT): 1-based start position
 - `stop_position` (BIGINT): 1-based stop position (computed from CIGAR using `bam_endpos`)
 - `cigar` (VARCHAR): CIGAR string; `''` for a record whose CIGAR field is `*`, never NULL
@@ -220,6 +237,7 @@ SELECT * FROM read_alignments('some_alignments.sam')
 - Plus other standard SAM fields and optional tags
 
 **Behavior:**
+
 - Supports both SAM (text) and BAM (binary) formats
 - Auto-detects file format from content
 - Supports gzip-compressed SAM files
@@ -276,6 +294,7 @@ SELECT * FROM read_sam('alignments.sam');
 ```
 
 **Stdin limitations:**
+
 - Cannot be used in multi-file arrays (e.g., `['/dev/stdin', 'file.sam']` will error)
 - Data with headers works without `reference_lengths`
 - Headerless data requires `reference_lengths` parameter
@@ -295,9 +314,12 @@ SELECT tid, reference, length FROM read_alignment_header('reads.bam') ORDER BY t
 ```
 
 **Output schema:**
-- `tid` (INTEGER): the reference's index in the `@SQ` list — this *is* the record's `refID` on disk
-- `reference` (VARCHAR): reference name (`SN:`)
-- `length` (BIGINT): reference length (`LN:`). BIGINT, not INTEGER: `LN` can exceed 2^31
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `tid` | INTEGER | the reference's index in the `@SQ` list — this *is* the record's `refID` on disk |
+| `reference` | VARCHAR | reference name (`SN:`) |
+| `length` | BIGINT | reference length (`LN:`). BIGINT, not INTEGER: `LN` can exceed 2^31 |
 
 **Why it exists.** A BAM is coordinate-sorted by **tid**, not by reference name, and no other function
 exposes tid. `read_alignments` / `read_sam` decode each record's `reference` through the file's own
@@ -307,6 +329,7 @@ readers, which is why the `@SQ` ordering contract in [Writing](writing.md#sam-an
 checked for BAM from SQL before this function existed.
 
 **Behavior:**
+
 - Reads **only** the header. `sam_read1` is never called, so a file with intact `@SQ` lines and a
   corrupt *record* is read successfully here even though `read_alignments` fails the scan on it.
 - A header with **no `@SQ` lines returns zero rows, not an error** — unaligned BAM/SAM legitimately has
@@ -332,16 +355,18 @@ Read PAF (Pairwise mApping Format) files, the tab-separated alignment format min
 **Basic example:**
 
 ```sql
-SELECT * FROM read_paf('alignments.paf');
+SELECT * FROM 'alignments.paf';
 ```
 
 **Parameters:**
+
 - `filename` (VARCHAR or VARCHAR[]): Path to PAF file(s), or a glob pattern (e.g., `'data/*.paf.gz'`)
-  - **Glob patterns**: When a single VARCHAR contains glob characters (`*`, `?`, `[`), files are expanded and sorted alphabetically
-  - **Arrays**: VARCHAR[] elements are treated as literal paths (no glob expansion)
+    - **Glob patterns**: When a single VARCHAR contains glob characters (`*`, `?`, `[`), files are expanded and sorted alphabetically
+    - **Arrays**: VARCHAR[] elements are treated as literal paths (no glob expansion)
 - `include_filepath` (BOOLEAN, optional, default false): Add a `filepath` column to the output
 
 **Output schema:**
+
 - `read_id` (VARCHAR): Query sequence name (PAF column 1)
 - `query_length` (BIGINT): Query sequence length
 - `query_start` (BIGINT): Start of the aligned block on the query, 1-based; PAF's 0-based start `+ 1`
@@ -378,6 +403,7 @@ SELECT * FROM read_paf('alignments.paf');
 - `filepath` (VARCHAR, optional): File path when `include_filepath=true`
 
 **Behavior:**
+
 - Both intervals move to miint's 1-based half-open convention ([Coordinate conventions](#coordinate-conventions)): the target interval matches `read_alignments`, so `stop_position - position` is the aligned target length, and `query_stop - query_start` is the aligned query length. The query interval is on the read as sequenced, even on the `-` strand, as PAF writes it (see [Reads](#reads)).
 - An unmapped record (`minimap2 --paf-no-hit`) reports `strand` and `reference` as `*` and `position` / `stop_position` as 0, as `read_alignments` does for an unplaced unmapped SAM record (RNAME `*`, POS 0). It has no aligned block on the query either, so `query_start` / `query_stop` are 0 too.
 - minimap2's tags are typed as they are read: `NM:i:3` becomes `tag_nm = 3`. Any other tag goes into `tags` as text, `zz:i:7` as `tags['zz'] = '7'`, its type letter checked against its value and dropped; a single map has one value type, so cast these when you need numbers. A float (`f`) may also be `nan`, `inf` or `infinity`, in any case and with an optional sign, as htslib (and so `read_alignments`) reads one; a float too large for a DOUBLE reads as an infinity, as htslib's `strtod` gives. Untyped `key:value` fields, which some tools write instead of SAM-style tags, are accepted as well. An untyped field with one of minimap2's names is read as its column's type.
@@ -387,6 +413,7 @@ SELECT * FROM read_paf('alignments.paf');
 - stdin is not supported.
 
 **Malformed records fail the scan.** The error names the file, the line and the defect:
+
 - fewer than 12 fields, or a blank line
 - an empty query or target name
 - a field that is not a whole non-negative integer, or a mapping quality above 255
@@ -423,18 +450,20 @@ Read GFA 1 assembly graphs (GFA 1.0–1.2), the format most assemblers use for t
 **Basic example:**
 
 ```sql
-SELECT * FROM read_gfa('assembly_graph.gfa');
+SELECT * FROM 'assembly_graph.gfa';
 ```
 
 #### `read_gfa(filename)`
 
 **Parameters:**
+
 - `filename` (VARCHAR or VARCHAR[]): Path to GFA file(s), or a glob pattern (e.g., `'graphs/*.gfa'`)
-  - **Glob patterns**: When a single VARCHAR contains glob characters (`*`, `?`, `[`), files are expanded and sorted alphabetically
-  - **Arrays**: VARCHAR[] elements are treated as literal paths (no glob expansion)
+    - **Glob patterns**: When a single VARCHAR contains glob characters (`*`, `?`, `[`), files are expanded and sorted alphabetically
+    - **Arrays**: VARCHAR[] elements are treated as literal paths (no glob expansion)
 - `include_filepath` (BOOLEAN, optional, default false): Add a `filepath` column to the output
 
 **Output schema:**
+
 - `line_number` (BIGINT): 1-based line of the record in its file. Comment lines are counted, so this matches what an editor shows; it is also the record order, which matters for records such as myloasm's read placements
 - `record_type` (VARCHAR): The first field: `H`, `S`, `L`, `C`, `P`, `W`, `J`, or any other printable text as written
 - `fields` (VARCHAR[]): The record type's mandatory positional fields, verbatim (table below). For a record type GFA 1 does not define, every field after the type
@@ -452,6 +481,7 @@ SELECT * FROM read_gfa('assembly_graph.gfa');
 | `J` jump | from, from orientation, to, to orientation, distance (or `*`) |
 
 **Behavior:**
+
 - Lines starting with `#` are comments and produce no row.
 - `fields` are the file's own text. No coordinate conversion is applied: a `W` walk's start and end, and a `C` containment's position, stay 0-based as GFA writes them. See [Coordinate conventions](#coordinate-conventions).
 - Tags must be typed (`TAG:TYPE:VALUE`); the type letter is validated and dropped. `read_gfa` keeps every record type, and each type has its own tags, so they stay in one text map: cast values when you need numbers, `tags['LN']::BIGINT`. `read_gfa_segments` and `read_gfa_links` type the specification's tags as columns. A float (`f`) may also be `nan`, `inf` or `infinity`, in any case and with an optional sign, as htslib reads one. A tag name may be any identifier (letters, digits and `_`, not starting with a digit), not only the specification's two characters: assemblers write longer ones, such as myloasm's `MEDIAN_DP1:f:33.0`.
@@ -524,12 +554,14 @@ The formats were verified against myloasm 0.6.0's and 0.7.0's source and their r
 myloasm tells strains apart with **SNPmers**: k-mers that span a variable site. Two reads, or a read and a contig, that share many SNPmers and contradict few come from the same strain.
 
 **Coordinates.** Every interval is 1-based half-open, as everywhere in miint ([Coordinate conventions](#coordinate-conventions)). Contig intervals (`position`, `stop_position`) are on the **unpolished** contig: the coordinates of the GFA and the PAF. Polishing shifts positions slightly, and trims the overlapping ends of a circular contig, whose unpolished length then exceeds its polished length by the overlap. Use the polished FASTA for which contig a read belongs to, not for positions in it. Read intervals (`query_start`, `query_stop`) are on the **original read as sequenced**. myloasm writes every interval 0-based half-open, and its read intervals on something other than the read, so these functions convert them:
+
 - For a `-` alignment, myloasm writes the query interval on the reverse complement of the read. It is flipped back.
 - myloasm splits reads it judges chimeric and renames each piece `<read>+split<i>`. A second cleaning round can split a piece again, giving `<read>+split<i>+split<j>`. Coordinates are written relative to the piece. `read_id` is the read's own name, `split_suffix` keeps the suffix, `piece_offset` is the number of read bases before the piece (0 for the first), and `query_start` / `query_stop` are moved onto the read. A `+split0` suffix does not by itself mean the read was split. In each cleaning round, myloasm checks for chimeras only the reads no other read contains (its "outer" reads); each of those gets a suffix, and one with no breakpoint becomes a single full-length `+split0` piece.
 
 See [Coordinate conventions](#coordinate-conventions).
 
 **Behavior:**
+
 - Every member file a function reads is required. A missing one fails with the reader's file error, which names it.
 - A directory path containing `*`, `?` or `[` is refused: the readers would expand it as a glob, so `run[1]` would read a directory named `run1`.
 - Values that are not in myloasm's format fail the scan, naming the record. This covers headers, `a` lines, tags, breakpoint lines and PAF names, as well as files that contradict each other: a FASTA contig with no `S` record, or a split piece no breakpoint creates. The checks fire whichever columns are selected.
@@ -657,28 +689,33 @@ Read SFF (Standard Flowgram Format) files from 454/Roche sequencing platforms.
 **Basic example:**
 
 ```sql
-SELECT * FROM read_sequences_sff('some_file.sff');
+SELECT * FROM 'reads.sff';
 ```
 
 **Parameters:**
+
 - `filename` (VARCHAR or VARCHAR[]): Path to SFF file(s) or glob pattern (e.g., `'data/*.sff'`)
-  - **Glob patterns**: When a single VARCHAR contains glob characters (`*`, `?`, `[`), files are expanded and sorted alphabetically
-  - **Arrays**: VARCHAR[] elements are treated as literal paths (no glob expansion)
-  - **Stdin not supported**: SFF is a binary format that requires seeking, so `-` and `/dev/stdin` are not allowed
+    - **Glob patterns**: When a single VARCHAR contains glob characters (`*`, `?`, `[`), files are expanded and sorted alphabetically
+    - **Arrays**: VARCHAR[] elements are treated as literal paths (no glob expansion)
+    - **Stdin not supported**: SFF is a binary format that requires seeking, so `-` and `/dev/stdin` are not allowed
 - `include_filepath` (BOOLEAN, optional, default false): Add filepath column to output
 - `trim` (BOOLEAN, optional, default true): Apply quality and adapter clip positions from the SFF header to trim sequences and quality scores
 
 **Output schema:**
-- `sequence_index` (BIGINT): 1-based sequential index per file (resets to 1 for each file)
-- `read_id` (VARCHAR): Read name from the SFF read header
-- `comment` (VARCHAR, nullable): Always NULL (SFF format has no comment field)
-- `sequence1` (VARCHAR): DNA sequence (trimmed by default)
-- `sequence2` (VARCHAR, nullable): Always NULL (SFF is single-end only)
-- `qual1` (UINT8[], nullable): Quality scores as array of integers (trimmed by default)
-- `qual2` (UINT8[], nullable): Always NULL (SFF is single-end only)
-- `filepath` (VARCHAR, optional): File path when include_filepath=true
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `sequence_index` | BIGINT | 1-based sequential index per file (resets to 1 for each file) |
+| `read_id` | VARCHAR | Read name from the SFF read header |
+| `comment` | VARCHAR, nullable | Always NULL (SFF format has no comment field) |
+| `sequence1` | VARCHAR | DNA sequence (trimmed by default) |
+| `sequence2` | VARCHAR, nullable | Always NULL (SFF is single-end only) |
+| `qual1` | UINT8[], nullable | Quality scores as array of integers (trimmed by default) |
+| `qual2` | UINT8[], nullable | Always NULL (SFF is single-end only) |
+| `filepath` | VARCHAR, optional | File path when include_filepath=true |
 
 **Behavior:**
+
 - Schema matches `read_fastx` for `UNION ALL` compatibility
 - When `trim=true` (default), quality and adapter clip positions from the SFF header are applied. Overlapping clips produce an empty sequence
 - When `trim=false`, the full untrimmed sequence and quality scores are returned
@@ -712,6 +749,7 @@ WHERE list_avg(qual1) >= 30;
 ```
 
 **Notes:**
+
 - The `comment`, `sequence2`, and `qual2` columns are always NULL for SFF files
 - The `sequence_index` resets to 1 for each file. Use `include_filepath=true` to distinguish sequences from different files
 - Stdin is not supported because SFF is a binary format that requires file seeking
@@ -727,18 +765,20 @@ SELECT * FROM read_sra('SRR4424282.sra');
 ```
 
 **Parameters:**
+
 - `path` (VARCHAR or VARCHAR[]): Path to `.sra` file(s) or a glob pattern
-  - **Glob patterns**: a single VARCHAR containing `*`, `?` or `[` is expanded and sorted alphabetically
-  - **Arrays**: VARCHAR[] elements are literal paths (no glob expansion)
-  - Remote paths (`https://`, `s3://`) are read by byte range through `httpfs`
-  - **Stdin not supported**: an `.sra` file is read at random positions
+    - **Glob patterns**: a single VARCHAR containing `*`, `?` or `[` is expanded and sorted alphabetically
+    - **Arrays**: VARCHAR[] elements are literal paths (no glob expansion)
+    - Remote paths (`https://`, `s3://`) are read by byte range through `httpfs`
+    - **Stdin not supported**: an `.sra` file is read at random positions
 - `split` (VARCHAR, optional, default `'split_3'`): How reads are laid out, matching `fasterq-dump`'s modes
-  - `'split_3'` (`--split-3`): one row per spot. A spot with two biological reads fills `sequence1`/`qual1` and `sequence2`/`qual2`; a spot with fewer (what `fasterq-dump` writes to its unpaired file) fills `sequence1` only. Technical reads (barcodes, indexes) are always skipped. A run described as paired, by its archive or by ENA, can hold some or only such spots, so filtering on `sequence2 IS NOT NULL` keeps the pairs and drops the rest.
-  - `'spot'` (`--split-spot`): one row per read, with its position in the spot in `read_number`
+    - `'split_3'` (`--split-3`): one row per spot. A spot with two biological reads fills `sequence1`/`qual1` and `sequence2`/`qual2`; a spot with fewer (what `fasterq-dump` writes to its unpaired file) fills `sequence1` only. Technical reads (barcodes, indexes) are always skipped. A run described as paired, by its archive or by ENA, can hold some or only such spots, so filtering on `sequence2 IS NOT NULL` keeps the pairs and drops the rest.
+    - `'spot'` (`--split-spot`): one row per read, with its position in the spot in `read_number`
 - `include_technical` (BOOLEAN, optional, default false): With `split => 'spot'`, also return technical reads (`--include-technical`). Combined with `'split_3'` it is an error: `fasterq-dump` switches to another layout in that case, with only a notice on stderr.
 - `include_filepath` (BOOLEAN, optional, default false): Add a `filepath` column
 
 **Output schema (`read_fastx`'s, with `read_ena_sequences`' `run_accession`):**
+
 - `sequence_index` (BIGINT): 1-based row number within its run, with no gaps, as in `read_fastx` and `read_ena_sequences`. It is not the spot number: a spot that yields no row leaves no gap, and under `'spot'` each read of a spot gets its own number. The spot number is in `read_id`.
 - `read_id` (VARCHAR): `<run>.<spot>` (`fasterq-dump`'s `$ac.$si`), the run taken from the file name with `.sra`/`.sralite` removed
 - `comment` (VARCHAR): The rest of `fasterq-dump`'s defline: the spot name, then `length=` and read 1's length (e.g. `M00763:72:000000000-KK57D:1:1101:15586:1335 length=251`). Just `length=<n>` for runs that store no names.
@@ -751,6 +791,7 @@ SELECT * FROM read_sra('SRR4424282.sra');
 - `filepath` (VARCHAR, optional): The file each row came from, when `include_filepath => true`
 
 **Behavior:**
+
 - Runs are returned in the order given (globs sorted), spots in ascending order, decoded in parallel across threads. The unit of parallel work is a range of spots, 131072 by default; `SET miint_sra_spots_per_unit = n` changes it (0 restores the default)
 - Every stored checksum is verified, and the archive's structure is checked as it is read: a blob that fails its checksum, or damage that breaks the structure, raises an `IOException` naming the run. Not every column stores checksums and the spot-name index has none, so some damage changes reads without an error, as it does for `fasterq-dump`. To check a downloaded file whole, compare its md5 with the one NCBI's SRA Data Locator gives (`https://locate.ncbi.nlm.nih.gov/sdl/2/retrieve?acc=<run>`)
 - Opening a run reads its indexes into memory, its spot-name index included, before any of its spots are returned; DuckDB's `memory_limit` does not count them
@@ -759,6 +800,7 @@ SELECT * FROM read_sra('SRR4424282.sra');
 **What is read and what is refused:**
 
 Supported are runs submitted as reads, without alignments: Illumina runs, runs loaded from FASTQ on any platform (PacBio and Nanopore included), and runs loaded from unaligned BAM. Runs stored with their alignments (cSRA) are not: they are common among SARS-CoV-2 and influenza surveillance runs, and occur among other kinds of run too. Each other kind fails with an `InvalidInputException` saying what the run is, whether or not other files are being read:
+
 - cSRA: reads stored against alignments (a `PRIMARY_ALIGNMENT` table, or reads compressed against a reference)
 - SRA Lite (`.sralite`, or a run converted to it): original qualities removed
 - PacBio or Nanopore databases with a `CONSENSUS`, `ZMW_METRICS` or `PASSES` table
@@ -792,6 +834,7 @@ TO 'SRR24770212.fastq' (FORMAT FASTQ);
 COPY's deflines carry `read_id` only, not the spot name and `length=` of `fasterq-dump`'s.
 
 **Notes:**
+
 - Cite the SRA as: Leinonen R, Sugawara H, Shumway M. The Sequence Read Archive. *Nucleic Acids Res.* 2011;39:D19–D21. doi:10.1093/nar/gkq1019
 
 ### mzML and mzXML
@@ -800,10 +843,12 @@ Read mzML and mzXML mass spectrometry files and chromatograms. Returns one row p
 
 **Basic example:**
 
-```
-SELECT * FROM read_mzml('some_file.mzml');
-SELECT * FROM read_mzxml('some_file.mzxml');
-SELECT * FROM read_mzml_chromatograms('some_file.mzml');
+```sql
+SELECT * FROM 'spectra.mzML';
+SELECT * FROM 'spectra.mzXML';
+
+-- To read chromatograms, call the reader explicitly.
+SELECT * FROM read_mzml_chromatograms('spectra.mzML');
 ```
 
 **Parameters:**
@@ -883,12 +928,14 @@ SELECT * FROM read_mzml('data/mzml/*.mzML', include_filepath=true);
 ```
 
 **mzML Notes:**
+
 - Stdin is not supported (mzML requires file seeking)
 - Supports zlib-compressed and uncompressed binary arrays, 32-bit and 64-bit precision
 - Also reads chromatograms via `read_mzml_chromatograms`
 - See [Mass Spectrometry & MassQL](massql.md) for higher-level analysis macros
 
 **mzXML Notes:**
+
 - Handles big-endian interleaved binary data (mzXML spec)
 - Supports nested `<scan>` elements (child scans emitted before parents)
 - `scan_number` always populated from the `<scan num>` attribute
@@ -896,27 +943,32 @@ SELECT * FROM read_mzml('data/mzml/*.mzML', include_filepath=true);
 
 ### BIOM
 
-Read BIOM (Biological Observation Matrix) format files.
+Read BIOM (Biological Observation Matrix) files with a build that includes [HDF5 support](installation.md#optional-feature-flags).
 
-**Basic exmaple:**
+**Basic example:**
 
 ```sql
-SELECT * FROM read_biom('some_file.biom');
+SELECT * FROM 'observations.biom';
 ```
 
 **Parameters:**
+
 - `filename` (VARCHAR or VARCHAR[]): Path to BIOM file(s) or glob pattern (e.g., `'data/*.biom'`)
-  - **Glob patterns**: When a single VARCHAR contains glob characters (`*`, `?`, `[`), files are expanded and sorted alphabetically
-  - **Arrays**: VARCHAR[] elements are treated as literal paths (no glob expansion)
+    - **Glob patterns**: When a single VARCHAR contains glob characters (`*`, `?`, `[`), files are expanded and sorted alphabetically
+    - **Arrays**: VARCHAR[] elements are treated as literal paths (no glob expansion)
 - `include_filepath` (BOOLEAN, optional, default false): Add filepath column to output
 
 **Output schema:**
-- `sample_id` (VARCHAR): Sample identifier
-- `feature_id` (VARCHAR): Feature/OGU/OTU/ASV identifier
-- `value` (DOUBLE): Abundance/count value
-- `filepath` (VARCHAR, optional): File path when include_filepath=true
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `sample_id` | VARCHAR | Sample identifier |
+| `feature_id` | VARCHAR | Feature/OGU/OTU/ASV identifier |
+| `value` | DOUBLE | Abundance/count value |
+| `filepath` | VARCHAR, optional | File path when include_filepath=true |
 
 **Behavior:**
+
 - Reads BIOM format v2.1 files (HDF5-based)
 - Returns data in sparse COO (coordinate) format: one row per non-zero (sample, feature, value) entry
 - Reads up to 4 files at a time, one thread per file
@@ -1000,15 +1052,17 @@ ORDER BY filepath, sample_id;
 ```
 
 **Compatibility:**
+
 - Reads BIOM files created by:
-  - QIIME2 (FeatureTable exports)
-  - biom-format Python package
-  - Woltka
-  - This extension's `COPY ... FORMAT BIOM`
+    - QIIME2 (FeatureTable exports)
+    - biom-format Python package
+    - Woltka
+    - This extension's `COPY ... FORMAT BIOM`
 - Follows BIOM format specification v2.1
 - Only supports HDF5-based BIOM files (not JSON format)
 
 **Performance:**
+
 - Efficiently handles large sparse matrices
 - Parallel processing enabled by default
 - Only non-zero values are read/returned, optimizing memory usage
@@ -1021,11 +1075,14 @@ These methods are differentiated as the output schemas are not the same.
 **Basic example:**
 
 ```sql
-SELECT * FROM read_jplace('some_data.jplace');
-SELECT * FROM read_jplace_newick('some_data.jplace');
+SELECT * FROM 'placements.jplace';
+
+-- To read the reference tree, call the reader explicitly.
+SELECT * FROM read_jplace_newick('placements.jplace');
 ```
 
 **Parameters:**
+
 - `path` (VARCHAR): Path to jplace file(s), supports glob patterns (e.g., `'data/*.jplace'`). gzip (`.gz`) and zstd (`.zst`) files are read as `read_json` reads them; zstd is read through DuckDB's parquet extension, so parquet must be loaded or loadable.
 
 **Output schema:**
@@ -1134,17 +1191,19 @@ GROUP BY filepath;
 ```
 
 **jplace Format Notes:**
+
 - Standard format for phylogenetic placement tools (pplacer, EPA-ng, etc.)
 - The `fields` array in the file defines column order: typically `[edge_num, likelihood, like_weight_ratio, distal_length, pendant_length]`
 - Multiple placements per fragment are supported in the format, but this function returns only the best (first) placement
 - The `nm` field contains `[[name, multiplicity], ...]` pairs; `n` field contains simple name arrays
 
 **Compatibility:**
+
 - Reads jplace files created by:
-  - pplacer
-  - EPA-ng
-  - SEPP
-  - Other tools following the jplace specification
+    - pplacer
+    - EPA-ng
+    - SEPP
+    - Other tools following the jplace specification
 
 **Implementation note:** `read_jplace` is implemented as a DuckDB macro using `read_json` with JSON path extraction.
 
@@ -1155,35 +1214,41 @@ Read Newick phylogenetic tree files and return a table with one row per node.
 **Basic example:**
 
 ```sql
-SELECT * FROM read_newick('some_file.newick');
+SELECT * FROM 'tree.nwk';
 ```
 
 **Parameters:**
+
 - `filename` (VARCHAR or VARCHAR[]): Path to Newick file(s), glob pattern (e.g., `'data/*.nwk'`), or `-` / `/dev/stdin` for standard input
-  - **Glob patterns**: When a single VARCHAR contains glob characters (`*`, `?`, `[`), files are expanded and sorted alphabetically
-  - **Arrays**: VARCHAR[] elements are treated as literal paths (no glob expansion)
+    - **Glob patterns**: When a single VARCHAR contains glob characters (`*`, `?`, `[`), files are expanded and sorted alphabetically
+    - **Arrays**: VARCHAR[] elements are treated as literal paths (no glob expansion)
 - `include_filepath` (BOOLEAN, optional, default false): Add filepath column to output
 
 **Output schema:**
-- `node_index` (BIGINT): 0-based index of node in tree, in postorder (see "Node numbering" below)
-- `name` (VARCHAR): Node label (empty string for unlabeled internal nodes)
-- `branch_length` (DOUBLE, nullable): Branch length (NULL if not specified in file)
-- `edge_id` (BIGINT, nullable): Edge identifier from jplace format `{n}` syntax (NULL if not specified)
-- `parent_index` (BIGINT, nullable): Parent node's node_index (NULL for root)
-- `is_tip` (BOOLEAN): Whether node is a tip/leaf (has no children)
-- `filepath` (VARCHAR, optional): File path when include_filepath=true
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `node_index` | BIGINT | 0-based index of node in tree, in postorder (see "Node numbering" below) |
+| `name` | VARCHAR | Node label (empty string for unlabeled internal nodes) |
+| `branch_length` | DOUBLE, nullable | Branch length (NULL if not specified in file) |
+| `edge_id` | BIGINT, nullable | Edge identifier from jplace format `{n}` syntax (NULL if not specified) |
+| `parent_index` | BIGINT, nullable | Parent node's node_index (NULL for root) |
+| `is_tip` | BOOLEAN | Whether node is a tip/leaf (has no children) |
+| `filepath` | VARCHAR, optional | File path when include_filepath=true |
 
 **Behavior:**
+
 - Parses standard Newick format including:
-  - Node names (quoted or unquoted)
-  - Branch lengths (`:0.123`)
-  - Edge identifiers for jplace compatibility (`{0}`, `{1}`, etc.)
+    - Node names (quoted or unquoted)
+    - Branch lengths (`:0.123`)
+    - Edge identifiers for jplace compatibility (`{0}`, `{1}`, etc.)
 - Supports gzip-compressed files (auto-detected from `.gz` extension)
 - Supports stdin input using `-` or `/dev/stdin` (single file only)
 - Returns exactly one row per node in the tree
 - Root node has `parent_index = NULL`
 
 **Node numbering:** `node_index` is a postorder numbering, and code may rely on it:
+
 - every node's children come before it, and every subtree occupies a contiguous range of indices ending at its
   root, so a node with `d` descendants has exactly the indices `node_index - d` to `node_index - 1` below it;
 - siblings are numbered in their Newick (left-to-right) order;
@@ -1244,10 +1309,12 @@ WHERE is_tip ORDER BY depth DESC;
 ```
 
 **Stdin limitations:**
+
 - Cannot be used in multi-file arrays (e.g., `['/dev/stdin', 'file.nwk']` will error)
 - User must know the format of their stdin data
 
 **Newick Format Notes:**
+
 - Standard format for representing phylogenetic trees as text
 - Parentheses denote tree structure: `(A,B)` means A and B share a parent
 - Colons precede branch lengths: `A:0.1` means tip A with branch length 0.1
@@ -1258,21 +1325,30 @@ WHERE is_tip ORDER BY depth DESC;
 
 Read GFF3 (General Feature Format) annotation files. GFF is a standard format for genomic feature annotations including genes, transcripts, exons, and other biological features.
 
+```sql
+SELECT * FROM 'annotations.gff3';
+```
+
 **Parameters:**
+
 - `path` (VARCHAR): Path to GFF/GFF3 file. gzip (`.gz`) and zstd (`.zst`) files are read as `read_csv` reads them; zstd is read through DuckDB's parquet extension, so parquet must be loaded or loadable.
 
 **Output schema:**
-- `seqid` (VARCHAR): Sequence/chromosome identifier
-- `source` (VARCHAR): Annotation source (e.g., 'NCBI', 'Ensembl')
-- `type` (VARCHAR): Feature type (e.g., 'gene', 'mRNA', 'exon', 'CDS')
-- `position` (INTEGER): 1-based start position
-- `stop_position` (INTEGER): 1-based **half-open** end position — i.e. GFF3's `end` **+ 1**. See [Coordinate conventions](#coordinate-conventions) below.
-- `score` (DOUBLE, nullable): Feature score (NULL if '.')
-- `strand` (VARCHAR, nullable): Strand ('+', '-', or NULL if '.')
-- `phase` (INTEGER, nullable): CDS phase (0, 1, 2, or NULL if '.')
-- `attributes` (MAP(VARCHAR, VARCHAR)): Parsed key-value attributes
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `seqid` | VARCHAR | Sequence/chromosome identifier |
+| `source` | VARCHAR | Annotation source (e.g., 'NCBI', 'Ensembl') |
+| `type` | VARCHAR | Feature type (e.g., 'gene', 'mRNA', 'exon', 'CDS') |
+| `position` | INTEGER | 1-based start position |
+| `stop_position` | INTEGER | 1-based **half-open** end position — i.e. GFF3's `end` **+ 1**. See [Coordinate conventions](#coordinate-conventions) below. |
+| `score` | DOUBLE, nullable | Feature score (NULL if '.') |
+| `strand` | VARCHAR, nullable | Strand ('+', '-', or NULL if '.') |
+| `phase` | INTEGER, nullable | CDS phase (0, 1, 2, or NULL if '.') |
+| `attributes` | MAP(VARCHAR, VARCHAR) | Parsed key-value attributes |
 
 **Behavior:**
+
 - Reads tab-delimited GFF3 format files
 - Skips comment and directive lines (those starting with '#'); a '#' later in a line is kept as data
 - Every line, comment lines included, must be UTF-8 and have at most nine tab-separated fields; a line that breaks either fails the scan. GFF3 has no quoting, so '"' is an ordinary character
@@ -1352,6 +1428,7 @@ WHERE g.type = 'gene' AND t.type = 'mRNA';
 
 **Attribute Parsing:**
 The `attributes` column is automatically parsed from GFF format (semicolon-separated key=value pairs) into a DuckDB MAP:
+
 - Input: `ID=gene1;Name=TEST1;biotype=protein_coding`
 - Output: `{'ID': 'gene1', 'Name': 'TEST1', 'biotype': 'protein_coding'}`
 
@@ -1360,6 +1437,7 @@ The `attributes` column is automatically parsed from GFF format (semicolon-separ
 The parsing above is done by `parse_gff_attributes`, which `read_gff` applies to column 9. It is also callable directly on any GFF-style attribute string.
 
 **Parameters:**
+
 - `kvp_string` (VARCHAR): A semicolon-separated `key=value` string (a GFF3 column-9 value).
 
 **Returns:** `MAP(VARCHAR, VARCHAR)` — the parsed key/value pairs.
@@ -1368,9 +1446,11 @@ The parsing above is done by `parse_gff_attributes`, which `read_gff` applies to
 SELECT parse_gff_attributes('ID=gene1;Name=TEST1;biotype=protein_coding');
 -- {'ID': 'gene1', 'Name': 'TEST1', 'biotype': 'protein_coding'}
 ```
+
 - Access values using bracket notation: `attributes['ID']`
 
 **GFF3 Format Notes:**
+
 - Coordinates **in the file** are 1-based and inclusive (both start and end). miint normalizes them on read — see [Coordinate conventions](#coordinate-conventions).
 - Strand: '+' (forward), '-' (reverse), '.' (unknown/not applicable)
 - Phase: Indicates position within codon (0, 1, or 2) for CDS features
@@ -1379,6 +1459,7 @@ SELECT parse_gff_attributes('ID=gene1;Name=TEST1;biotype=protein_coding');
 - **The GFF3 sequence section is honoured**: content after a `##FASTA` directive is not returned as feature rows. prokka and bakta always append the genome, so this is the common case. A feature line carrying only *some* of the 8 mandatory fields is a malformed GFF line and raises an error rather than being silently dropped, as does a feature line with an empty seqid, a start or end that is not an integer, or a score or phase that is neither a number nor `.`, whichever columns the query selects or filters on. (A query that stops early, such as one with `LIMIT`, may finish before reaching it.)
 
 **Use Cases:**
+
 - **Gene annotation analysis**: Extract genes, transcripts, exons from genome annotations
 - **Feature filtering**: Select specific feature types or genomic regions
 - **Structural analysis**: Calculate feature lengths, count features, analyze distributions
@@ -1386,12 +1467,13 @@ SELECT parse_gff_attributes('ID=gene1;Name=TEST1;biotype=protein_coding');
 - **Integration**: Combine annotations with alignment data or other genomic datasets
 
 **Compatibility:**
+
 - Supports GFF3 format specification
 - Compatible with annotations from:
-  - NCBI RefSeq
-  - Ensembl
-  - GENCODE
-  - Other standard GFF3 producers
+    - NCBI RefSeq
+    - Ensembl
+    - GENCODE
+    - Other standard GFF3 producers
 
 **Implementation note:** Implemented as a DuckDB macro using `read_csv` with GFF-specific parsing.
 
