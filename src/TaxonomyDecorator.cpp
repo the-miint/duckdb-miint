@@ -535,4 +535,20 @@ std::vector<NodeLabel> PromoteCommonNames(std::vector<NodeLabel> labels, const T
 	return labels;
 }
 
+std::string FormatLabel(const NodeLabel &label, const TaxonomyStore &store) {
+	return {};
+}
+
+DecorateResult Decorate(const CladeCountIndex &index, const TaxonomyStore &store, uint32_t min_count) {
+	return {AssignNames(index, min_count), {}, {}};
+}
+
+std::vector<LabelPart> ParseNodeLabel(std::string_view label) {
+	return {};
+}
+
+EmittedLineages EmitLineages(const TreeIndex &tree, const std::vector<std::vector<LabelPart>> &labels) {
+	return {};
+}
+
 } // namespace miint

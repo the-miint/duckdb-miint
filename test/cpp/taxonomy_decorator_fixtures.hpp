@@ -38,6 +38,14 @@ inline std::ostream &operator<<(std::ostream &os, const RankName &s) {
 	return os << "{rank " << s.rank << ", name " << s.name << "}";
 }
 
+inline std::ostream &operator<<(std::ostream &os, const LabelPart &s) {
+	return os << "{rank " << s.rank << ", name \"" << s.name << "\"}";
+}
+
+inline std::ostream &operator<<(std::ostream &os, const RankRepeat &s) {
+	return os << "{node " << s.node << ", rank " << s.rank << ", ancestor " << s.ancestor << "}";
+}
+
 inline std::ostream &operator<<(std::ostream &os, const InvertedBackfill &s) {
 	return os << "{node " << s.node << ", rank " << s.rank << ", name " << s.name << ", ancestor " << s.ancestor
 	          << ", ancestor_rank " << s.ancestor_rank << "}";

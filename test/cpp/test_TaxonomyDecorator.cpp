@@ -1559,3 +1559,213 @@ TEST_CASE("PromoteCommonNames never gives a node a second name at one rank", "[t
 	    PromoteCommonNames(LabelsOf(store, 9, {{0, u}, {1, "f__F1; g__G"}, {3, "f__F2"}, {2, "f__F3"}}), store, tree);
 	CHECK(LabelTexts(labels, store) == TextsOf(9, {{0, u}, {1, "f__F1; g__G"}, {3, "f__F2"}, {2, "f__F3"}}));
 }
+
+namespace {
+std::vector<LabelPart> Parts(std::initializer_list<std::pair<size_t, std::string>> parts) {
+	std::vector<LabelPart> out;
+	for (const auto &[rank, name] : parts) {
+		out.push_back({rank, name});
+	}
+	return out;
+}
+
+// Each tip's lineage as "tip: name|name|...", eight fields, empty where no label gives the rank.
+std::vector<std::string> LineageTexts(const EmittedLineages &emitted,
+                                      const std::vector<std::vector<LabelPart>> &labels) {
+	std::vector<std::string> out;
+	for (size_t i = 0; i < emitted.tips.size() && i < emitted.holders.size(); i++) {
+		std::string line = std::to_string(emitted.tips[i]) + ": ";
+		for (size_t r = 0; r < kLineageRanks.size(); r++) {
+			if (r > 0) {
+				line += "|";
+			}
+			const uint32_t holder = emitted.holders[i][r];
+			if (holder == EmittedLineages::kNone) {
+				continue;
+			}
+			for (const auto &part : labels.at(holder)) {
+				if (part.rank == r) {
+					line += part.name;
+				}
+			}
+		}
+		out.push_back(line);
+	}
+	return out;
+}
+
+std::string ParseError(std::string_view label) {
+	try {
+		ParseNodeLabel(label);
+	} catch (const std::invalid_argument &e) {
+		return e.what();
+	}
+	return "";
+}
+} // namespace
+
+// Labels come from FormatLabel, from other tools, and from hand editing, so spacing after ';'
+// varies and ranks need not come in order: each component is placed by its letter. k is the
+// domain's letter in trees labeled with kingdoms.
+TEST_CASE("ParseNodeLabel reads components by their rank letter", "[taxonomy_decorator]") {
+	CHECK(ParseNodeLabel("f__A; g__B") == Parts({{kFamily, "A"}, {kGenus, "B"}}));
+	CHECK(ParseNodeLabel("f__A;g__B") == Parts({{kFamily, "A"}, {kGenus, "B"}}));
+	CHECK(ParseNodeLabel(" f__A ;\tg__B ") == Parts({{kFamily, "A"}, {kGenus, "B"}}));
+	CHECK(ParseNodeLabel("g__B; f__A") == Parts({{kFamily, "A"}, {kGenus, "B"}}));
+	CHECK(ParseNodeLabel("k__Bacteria") == Parts({{kDomain, "Bacteria"}}));
+	CHECK(ParseNodeLabel("d__Bacteria; s__Escherichia coli; t__K-12") ==
+	      Parts({{kDomain, "Bacteria"}, {6, "Escherichia coli"}, {7, "K-12"}}));
+	CHECK(ParseNodeLabel("g__[Eubacterium]") == Parts({{kGenus, "[Eubacterium]"}}));
+	CHECK(ParseNodeLabel("").empty());
+}
+
+// A label that cannot be read is an error naming it and the component, never a guess: tax2tree
+// indexes a rank table with the first character and fails with a KeyError, or reads "x__" as a
+// name. A name may not start or end with whitespace, as no taxonomy name does.
+TEST_CASE("ParseNodeLabel rejects a malformed label, naming it", "[taxonomy_decorator]") {
+	const std::pair<std::string_view, std::string_view> cases[] = {
+	    {"x__A", "x__A"},   {"D__A", "D__A"}, {"fA", "fA"},           {"f_A", "f_A"},         {"f__", "f__"},
+	    {"f__ A", "f__ A"}, {"f__A;", ""},    {"f__A; f__B", "f__B"}, {"d__A; k__B", "k__B"},
+	};
+	for (const auto &[label, component] : cases) {
+		INFO(label);
+		const std::string error = ParseError(label);
+		CHECK_THAT(error, ContainsSubstring(std::string(label)));
+		CHECK_THAT(error, ContainsSubstring("\"" + std::string(component) + "\""));
+	}
+}
+
+// The text form of a label is what tree_decorate writes and what tax2tree writes: names in rank
+// order, each after its letter, joined by "; ".
+TEST_CASE("FormatLabel writes names in rank order with their letters", "[taxonomy_decorator]") {
+	const auto store = StoreOf({{"Bacteria", "Pseudomonadota", "Gammaproteobacteria", "Enterobacterales",
+	                             "Enterobacteriaceae", "Escherichia", "Escherichia coli"}});
+	CHECK(FormatLabel(LabelFrom(store, "d__Bacteria; p__Pseudomonadota"), store) == "d__Bacteria; p__Pseudomonadota");
+	CHECK(FormatLabel(LabelFrom(store, "g__Escherichia; s__Escherichia coli"), store) ==
+	      "g__Escherichia; s__Escherichia coli");
+	CHECK(FormatLabel(LabelFrom(store, "d__Bacteria"), store) == "d__Bacteria");
+	CHECK(FormatLabel({}, store).empty());
+}
+
+// A tip's lineage has every rank, NULL where no label on its path gives one. The root's label
+// counts, a node with no label adds nothing, and a tip's own label is ignored: a tip's name is
+// its id.
+TEST_CASE("EmitLineages gives each tip eight ranks from the labels on its path", "[taxonomy_decorator]") {
+	// root(0) [d__D1; p__P1] +-- v(1) [c__C1] +-- t3, t4
+	//                        +-- w(2)         +-- t5
+	//                        +-- t6 [g__X]
+	const auto tree = TreeOf({kNoParent, 0, 0, 1, 1, 2, 0});
+	std::vector<std::vector<LabelPart>> labels(7);
+	labels[0] = Parts({{kDomain, "D1"}, {kPhylum, "P1"}});
+	labels[1] = Parts({{kClass, "C1"}});
+	labels[6] = Parts({{kGenus, "X"}});
+	const auto emitted = EmitLineages(tree, labels);
+	CHECK(emitted.tips == std::vector<uint32_t> {3, 4, 5, 6});
+	CHECK(LineageTexts(emitted, labels) ==
+	      std::vector<std::string> {"3: D1|P1|C1|||||", "4: D1|P1|C1|||||", "5: D1|P1||||||", "6: D1|P1||||||"});
+	CHECK(emitted.repeats.empty());
+}
+
+// A rank held twice on a path is recorded, even with the same name both times, and the shallower
+// name is the one emitted, as tax2tree does. The caller decides whether a repeat is an error.
+TEST_CASE("EmitLineages records a rank held twice on a path", "[taxonomy_decorator]") {
+	// root(0) [d__D1; p__P1] +-- v(1) [p__P2; c__C1] +-- x(2) [c__C1] +-- t3, t4
+	//                        |                       +-- t5
+	//                        +-- t6
+	const auto tree = TreeOf({kNoParent, 0, 1, 2, 2, 1, 0});
+	std::vector<std::vector<LabelPart>> labels(7);
+	labels[0] = Parts({{kDomain, "D1"}, {kPhylum, "P1"}});
+	labels[1] = Parts({{kPhylum, "P2"}, {kClass, "C1"}});
+	labels[2] = Parts({{kClass, "C1"}});
+	const auto emitted = EmitLineages(tree, labels);
+	CHECK(LineageTexts(emitted, labels) ==
+	      std::vector<std::string> {"3: D1|P1|C1|||||", "4: D1|P1|C1|||||", "5: D1|P1|C1|||||", "6: D1|P1||||||"});
+	CHECK(emitted.repeats == std::vector<RankRepeat> {{1, kPhylum, 0}, {2, kClass, 1}});
+}
+
+TEST_CASE("EmitLineages on a one-node tree, and with labels of the wrong size", "[taxonomy_decorator]") {
+	const auto tree = TreeOf({kNoParent});
+	const std::vector<std::vector<LabelPart>> labels(1);
+	const auto emitted = EmitLineages(tree, labels);
+	CHECK(LineageTexts(emitted, labels) == std::vector<std::string> {"0: |||||||"});
+	CHECK_THROWS_AS(EmitLineages(TreeOf({kNoParent, 0, 0}), labels), std::invalid_argument);
+}
+
+// The stages in order. F's tips are split between v's two clades and w, so F is eligible at w
+// alone, and a and b are named at the genus. Backfill gives a and b their family from the
+// hierarchy, and promotion then moves F up to v, which spans them both.
+TEST_CASE("Decorate places, backfills and promotes", "[taxonomy_decorator]") {
+	// root(0) +-- v(1) +-- a(4) +-- t6, t7  D1; P1; C1; O1; F; G1
+	//         |        +-- b(5) +-- t8, t9  D1; P1; C1; O1; F; G2
+	//         +-- w(2) +-- t10 .. t14       D1; P1; C1; O1; F
+	//         +-- c(3) +-- t15, t16         D1; P1; C1; O1; F9
+	Lineages lineages;
+	Add(lineages, {"D1", "P1", "C1", "O1", "F", "G1"}, {6, 7});
+	Add(lineages, {"D1", "P1", "C1", "O1", "F", "G2"}, {8, 9});
+	Add(lineages, {"D1", "P1", "C1", "O1", "F"}, {10, 11, 12, 13, 14});
+	Add(lineages, {"D1", "P1", "C1", "O1", "F9"}, {15, 16});
+	auto c = MakeCase({kNoParent, 0, 0, 0, 1, 1, 4, 4, 5, 5, 2, 2, 2, 2, 2, 3, 3}, lineages);
+	const auto result = Decorate(c.index, c.store, 2);
+	CHECK(result.assignment.Scores() == AssignNames(c.index, 2).Scores());
+	CHECK(LabelTexts(result.labels, c.store) ==
+	      TextsOf(
+	          17,
+	          {{0, "d__D1; p__P1; c__C1; o__O1"}, {1, "f__F"}, {2, "f__F"}, {3, "f__F9"}, {4, "g__G1"}, {5, "g__G2"}}));
+	CHECK(result.inverted.empty());
+}
+
+// tax2tree's validate_all_paths, on our own output: on random trees, every label survives
+// FormatLabel and ParseNodeLabel, and wherever no inverted-rank backfill was recorded, each tip's
+// path holds every rank at most once, in order from the root, so EmitLineages records no repeat.
+// An inversion is the one source of a repeat, and the trials must include both kinds, and some
+// promotion.
+TEST_CASE("Decorate's labels keep every path in rank order unless a backfill was inverted", "[taxonomy_decorator]") {
+	std::mt19937 rng(20261121);
+	size_t with_inversion = 0, without_inversion = 0, promoted = 0;
+	for (int k = 0; k < 300; k++) {
+		const uint32_t n = std::uniform_int_distribution<uint32_t>(1, 40)(rng);
+		const auto c = random_taxonomy_case(rng, n);
+		TaxonomyStore store(c.rows);
+		const auto index = build_index(c, store);
+		for (uint32_t min_count = 1; min_count <= 3; min_count++) {
+			INFO("trial " << k << ", " << n << " nodes, min_count " << min_count);
+			const auto result = Decorate(index, store, min_count);
+			REQUIRE(result.labels.size() == n);
+			const auto backfill = BackfillNames(result.assignment, store, index.Tree());
+			std::vector<std::vector<LabelPart>> parsed(n);
+			for (uint32_t v = 0; v < n; v++) {
+				INFO("node " << v);
+				promoted += result.labels[v].size() > backfill.labels[v].size();
+				parsed[v] = ParseNodeLabel(FormatLabel(result.labels[v], store));
+				REQUIRE(parsed[v].size() == result.labels[v].size());
+				for (size_t i = 0; i < parsed[v].size(); i++) {
+					REQUIRE(parsed[v][i].rank == result.labels[v][i].rank);
+					REQUIRE(parsed[v][i].name == store.NameText(result.labels[v][i].rank, result.labels[v][i].name));
+				}
+			}
+			const auto emitted = EmitLineages(index.Tree(), parsed);
+			REQUIRE(emitted.tips.size() == emitted.holders.size());
+			if (!result.inverted.empty()) {
+				with_inversion++;
+				continue;
+			}
+			without_inversion++;
+			CHECK(emitted.repeats.empty());
+			for (const uint32_t tip : emitted.tips) {
+				// The ranks of the labels on the tip's path, from the root down.
+				std::vector<size_t> ranks;
+				for (uint32_t v = c.tree.parent[tip]; v != kNoParent; v = c.tree.parent[v]) {
+					for (auto it = result.labels[v].rbegin(); it != result.labels[v].rend(); ++it) {
+						ranks.push_back(it->rank);
+					}
+				}
+				std::reverse(ranks.begin(), ranks.end());
+				INFO("tip " << tip);
+				CHECK(std::adjacent_find(ranks.begin(), ranks.end(), std::greater_equal<size_t>()) == ranks.end());
+			}
+		}
+	}
+	CHECK(with_inversion > 0);
+	CHECK(without_inversion > 0);
+	CHECK(promoted > 0);
+}

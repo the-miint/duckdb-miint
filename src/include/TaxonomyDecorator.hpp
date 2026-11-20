@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -274,5 +275,67 @@ std::string_view PolyphyleticBase(std::string_view name);
 // Labels stay by ascending rank. `labels` must come from BackfillNames over `tree` and `store`.
 std::vector<NodeLabel> PromoteCommonNames(std::vector<NodeLabel> labels, const TaxonomyStore &store,
                                           const TreeIndex &tree);
+
+// A label as text: its names in rank order, each after its rank's letter and two underscores
+// ("d__Bacteria", "s__Escherichia coli"), joined by "; ". An empty label gives "".
+std::string FormatLabel(const NodeLabel &label, const TaxonomyStore &store);
+
+// Decoration after placement: AssignNames, BackfillNames, then PromoteCommonNames.
+struct DecorateResult {
+	NameAssignment assignment;
+	// One label per node, after promotion.
+	std::vector<NodeLabel> labels;
+	// The inversions BackfillNames recorded.
+	std::vector<InvertedBackfill> inverted;
+};
+
+// Throws std::invalid_argument when min_count is 0.
+DecorateResult Decorate(const CladeCountIndex &index, const TaxonomyStore &store, uint32_t min_count);
+
+// A name of a label read from text, at a rank (a kLineageRanks index).
+struct LabelPart {
+	size_t rank;
+	std::string name;
+
+	bool operator==(const LabelPart &) const = default;
+};
+
+// A label read from text, as FormatLabel writes it or another tool did. Its components are
+// separated by ';' and trimmed of whitespace, and each is a rank letter (dpcofgst, or k for the
+// domain), two underscores and a name. They may come in any order; the parts come by ascending
+// rank. An empty label has no parts. Throws std::invalid_argument, naming the label and the
+// component, for an empty component, one not of that form, an unknown letter, an empty name or
+// one that starts or ends with whitespace, and a rank given twice.
+std::vector<LabelPart> ParseNodeLabel(std::string_view label);
+
+// A rank that a node's label holds and a label above it on its path already holds; the tips
+// below get the ancestor's name at that rank.
+struct RankRepeat {
+	uint32_t node;
+	size_t rank;
+	// The shallowest node above `node` whose label holds `rank`.
+	uint32_t ancestor;
+
+	bool operator==(const RankRepeat &) const = default;
+};
+
+// Each tip's lineage from the labels on its path (tax2tree's pull_consensus_strings), given as
+// the nodes whose labels supply each rank, so names are not copied once per tip.
+struct EmittedLineages {
+	static constexpr uint32_t kNone = UINT32_MAX;
+	// The tips, by ascending node.
+	std::vector<uint32_t> tips;
+	// Per tip, per rank: the shallowest node on the path from the root to the tip whose label
+	// holds the rank, since tax2tree, writing from the tip up, lets the shallower name win; kNone
+	// where no label on the path holds it.
+	std::vector<std::array<uint32_t, kLineageRanks.size()>> holders;
+	// By ascending node, then rank.
+	std::vector<RankRepeat> repeats;
+};
+
+// `labels` has one entry per node of `tree`, each with at most one part per rank, as
+// ParseNodeLabel gives them. A tip's label is ignored, its name being its id. Throws
+// std::invalid_argument when `labels` and `tree` differ in size.
+EmittedLineages EmitLineages(const TreeIndex &tree, const std::vector<std::vector<LabelPart>> &labels);
 
 } // namespace miint
