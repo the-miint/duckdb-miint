@@ -169,6 +169,10 @@ void ReadHmmTableFunction::Execute(ClientContext &context, TableFunctionInput &d
 	std::string chunk_path = local.file ? local.file->path : std::string();
 
 	auto read_model = [&]() {
+		// HMMER calibrates a HMMER2 model as it reads it, which takes milliseconds, and one chunk
+		// can hold thousands: a cancel or max_execution_time is noticed here, between models.
+		// The blocking check reads the clock each time; DuckDB's own reads it once in 256.
+		context.BlockingInterruptCheck();
 		local.models_read++;
 		hmmer::ProfileHeader header;
 		try {
