@@ -11,12 +11,14 @@ on:
     paths-ignore:
       - 'docs/**'
       - 'localdocs/**'
+      - 'src/reference/**'
       - 'README.md'
       - '*.md'
   pull_request:
     paths-ignore:
       - 'docs/**'
       - 'localdocs/**'
+      - 'src/reference/**'
       - 'README.md'
       - '*.md'
   workflow_dispatch:

@@ -21,7 +21,8 @@ SECTION = re.compile(
 SECTION_MARKER = re.compile(r"^<!-- (?:BEGIN|END) REFERENCE:", re.MULTILINE)
 DESCRIPTION = re.compile(r"^<!-- manual:description -->\n([^\n]+)$", re.MULTILINE)
 EXAMPLE = re.compile(
-    r"^<!-- manual:example -->\n```sql\n(.+?)\n```$", re.MULTILINE | re.DOTALL
+    r"^<!-- manual:example -->\n```sql[ \t]*\n((?:(?!^```)[^\n]*\n)+)^```+[ \t]*$",
+    re.MULTILINE,
 )
 URL = re.compile(r"^<!-- manual:url (https://[^\s#]+#[^\s#]+) -->$", re.MULTILINE)
 MANUAL_MARKER = re.compile(r"^<!-- manual:.* -->\n", re.MULTILINE)
@@ -29,7 +30,7 @@ MANUAL_MARKER = re.compile(r"^<!-- manual:.* -->\n", re.MULTILINE)
 
 def render_manual(name, fragment):
     descriptions = DESCRIPTION.findall(fragment)
-    examples = EXAMPLE.findall(fragment)
+    examples = [example.removesuffix("\n") for example in EXAMPLE.findall(fragment)]
     urls = URL.findall(fragment)
     if not MANUAL_MARKER.search(fragment):
         return ""

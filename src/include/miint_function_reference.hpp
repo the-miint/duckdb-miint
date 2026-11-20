@@ -26,7 +26,7 @@ inline duckdb::FunctionDescription prodigal_proteins() {
 
 inline duckdb::FunctionDescription read_fastx() {
 	duckdb::FunctionDescription doc;
-	doc.description = "Read FASTA and FASTQ files, including paired-end reads. Full documentation: https://the-miint.github.io/duckdb-miint/reading/#fasta-and-fastq";
+	doc.description = "Read FASTA and FASTQ files, including paired-end reads. Pass a path, a glob, or a list of literal paths. Full documentation: https://the-miint.github.io/duckdb-miint/reading/#fasta-and-fastq";
 	doc.examples = {
 	    "SELECT * FROM 'sequences.fasta';\nSELECT * FROM 'reads.fastq.gz';",
 	    "SELECT * FROM read_fastx('R1.fastq', sequence2 = 'R2.fastq');"

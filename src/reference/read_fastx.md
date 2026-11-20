@@ -2,7 +2,7 @@
 
 <!-- manual:url https://the-miint.github.io/duckdb-miint/reading/#fasta-and-fastq -->
 <!-- manual:description -->
-Read FASTA and FASTQ files, including paired-end reads.
+Read FASTA and FASTQ files, including paired-end reads. Pass a path, a glob, or a list of literal paths.
 
 After [loading miint](#reading-a-file-by-its-name), read a file directly by name. DuckDB calls `read_fastx` for these suffixes.
 
@@ -28,7 +28,7 @@ SELECT * FROM read_fastx('samples/*.fastq', include_filepath = true)
 ORDER BY filepath, sequence_index;
 ```
 
-Reads are paired by position. Ensure the read IDs appear in the same order in both mates. `read_fastx` does not validate the IDs.
+Reads are paired by position. Each pair must have matching read IDs after removing mate suffixes such as `/1` and `/2`.
 
 #### Parameters
 
