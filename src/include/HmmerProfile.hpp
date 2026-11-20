@@ -33,29 +33,29 @@ std::string TakeExceptionMessage();
 // The header of one model, which is one row of read_hmm. A field the model does
 // not have is nullopt: HMMER's own flags decide, never its placeholder values.
 struct ProfileHeader {
-	std::string name;                              // NAME
-	std::optional<std::string> accession;          // ACC
-	std::optional<std::string> description;        // DESC
-	int64_t length = 0;                            // LENG: the number of match states
-	std::string alphabet;                          // ALPH, under Easel's names: amino, DNA, RNA, ...
-	std::string format;                            // HMMER3/a ... HMMER3/f, or HMMER2.0
-	std::optional<int64_t> max_length;             // MAXL
-	std::optional<int64_t> sequence_count;         // NSEQ
-	std::optional<float> effective_sequence_count; // EFFN
-	std::optional<uint32_t> checksum;              // CKSUM
-	std::optional<float> gathering_sequence;       // GA, per-sequence
-	std::optional<float> gathering_domain;         // GA, per-domain
-	std::optional<float> trusted_sequence;         // TC, per-sequence
-	std::optional<float> trusted_domain;           // TC, per-domain
-	std::optional<float> noise_sequence;           // NC, per-sequence
-	std::optional<float> noise_domain;             // NC, per-domain
-	std::string consensus;                         // the CONS column, or computed by HMMER when the model has none
-	std::optional<float> msv_mu;                   // STATS LOCAL MSV
-	std::optional<float> msv_lambda;               // STATS LOCAL MSV
-	std::optional<float> viterbi_mu;               // STATS LOCAL VITERBI
-	std::optional<float> viterbi_lambda;           // STATS LOCAL VITERBI
-	std::optional<float> forward_tau;              // STATS LOCAL FORWARD
-	std::optional<float> forward_lambda;           // STATS LOCAL FORWARD
+	std::string name;                                  // NAME
+	std::optional<std::string> accession;              // ACC
+	std::optional<std::string> description;            // DESC
+	int64_t length = 0;                                // LENG: the number of match states
+	std::string alphabet;                              // ALPH, under Easel's names: amino, DNA, RNA, ...
+	std::string format;                                // HMMER3/a ... HMMER3/f, or HMMER2.0
+	std::optional<int64_t> max_instance_length;        // MAXL
+	std::optional<int64_t> sequence_count;             // NSEQ
+	std::optional<float> effective_sequence_count;     // EFFN
+	std::optional<uint32_t> checksum;                  // CKSUM
+	std::optional<float> gathering_threshold_sequence; // GA, per-sequence
+	std::optional<float> gathering_threshold_domain;   // GA, per-domain
+	std::optional<float> trusted_cutoff_sequence;      // TC, per-sequence
+	std::optional<float> trusted_cutoff_domain;        // TC, per-domain
+	std::optional<float> noise_cutoff_sequence;        // NC, per-sequence
+	std::optional<float> noise_cutoff_domain;          // NC, per-domain
+	std::string consensus;                             // the CONS column, or computed by HMMER when the model has none
+	std::optional<float> msv_mu;                       // STATS LOCAL MSV
+	std::optional<float> msv_lambda;                   // STATS LOCAL MSV
+	std::optional<float> viterbi_mu;                   // STATS LOCAL VITERBI
+	std::optional<float> viterbi_lambda;               // STATS LOCAL VITERBI
+	std::optional<float> forward_tau;                  // STATS LOCAL FORWARD
+	std::optional<float> forward_lambda;               // STATS LOCAL FORWARD
 };
 
 // A model HMMER could not read. what() is HMMER's message, or this layer's

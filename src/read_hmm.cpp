@@ -21,16 +21,16 @@ enum Column : idx_t {
 	LENGTH,
 	ALPHABET,
 	FORMAT,
-	MAX_LENGTH,
+	MAX_INSTANCE_LENGTH,
 	SEQUENCE_COUNT,
 	EFFECTIVE_SEQUENCE_COUNT,
 	CHECKSUM,
-	GATHERING_SEQUENCE,
-	GATHERING_DOMAIN,
-	TRUSTED_SEQUENCE,
-	TRUSTED_DOMAIN,
-	NOISE_SEQUENCE,
-	NOISE_DOMAIN,
+	GATHERING_THRESHOLD_SEQUENCE,
+	GATHERING_THRESHOLD_DOMAIN,
+	TRUSTED_CUTOFF_SEQUENCE,
+	TRUSTED_CUTOFF_DOMAIN,
+	NOISE_CUTOFF_SEQUENCE,
+	NOISE_CUTOFF_DOMAIN,
 	CONSENSUS,
 	MSV_MU,
 	MSV_LAMBDA,
@@ -54,16 +54,16 @@ constexpr ColumnSpec COLUMNS[] = {
     {"hmm_length", LogicalTypeId::BIGINT},
     {"alphabet", LogicalTypeId::VARCHAR},
     {"format", LogicalTypeId::VARCHAR},
-    {"max_length", LogicalTypeId::BIGINT},
+    {"max_instance_length", LogicalTypeId::BIGINT},
     {"sequence_count", LogicalTypeId::BIGINT},
     {"effective_sequence_count", LogicalTypeId::FLOAT},
     {"checksum", LogicalTypeId::UINTEGER},
-    {"gathering_sequence", LogicalTypeId::FLOAT},
-    {"gathering_domain", LogicalTypeId::FLOAT},
-    {"trusted_sequence", LogicalTypeId::FLOAT},
-    {"trusted_domain", LogicalTypeId::FLOAT},
-    {"noise_sequence", LogicalTypeId::FLOAT},
-    {"noise_domain", LogicalTypeId::FLOAT},
+    {"gathering_threshold_sequence", LogicalTypeId::FLOAT},
+    {"gathering_threshold_domain", LogicalTypeId::FLOAT},
+    {"trusted_cutoff_sequence", LogicalTypeId::FLOAT},
+    {"trusted_cutoff_domain", LogicalTypeId::FLOAT},
+    {"noise_cutoff_sequence", LogicalTypeId::FLOAT},
+    {"noise_cutoff_domain", LogicalTypeId::FLOAT},
     {"consensus", LogicalTypeId::VARCHAR},
     {"msv_mu", LogicalTypeId::FLOAT},
     {"msv_lambda", LogicalTypeId::FLOAT},
@@ -103,16 +103,16 @@ void WriteRow(DataChunk &output, idx_t row, const hmmer::ProfileHeader &h) {
 	FlatVector::GetDataMutable<int64_t>(out[LENGTH])[row] = h.length;
 	SetString(out[ALPHABET], row, h.alphabet);
 	SetString(out[FORMAT], row, h.format);
-	SetNumber(out[MAX_LENGTH], row, h.max_length);
+	SetNumber(out[MAX_INSTANCE_LENGTH], row, h.max_instance_length);
 	SetNumber(out[SEQUENCE_COUNT], row, h.sequence_count);
 	SetNumber(out[EFFECTIVE_SEQUENCE_COUNT], row, h.effective_sequence_count);
 	SetNumber(out[CHECKSUM], row, h.checksum);
-	SetNumber(out[GATHERING_SEQUENCE], row, h.gathering_sequence);
-	SetNumber(out[GATHERING_DOMAIN], row, h.gathering_domain);
-	SetNumber(out[TRUSTED_SEQUENCE], row, h.trusted_sequence);
-	SetNumber(out[TRUSTED_DOMAIN], row, h.trusted_domain);
-	SetNumber(out[NOISE_SEQUENCE], row, h.noise_sequence);
-	SetNumber(out[NOISE_DOMAIN], row, h.noise_domain);
+	SetNumber(out[GATHERING_THRESHOLD_SEQUENCE], row, h.gathering_threshold_sequence);
+	SetNumber(out[GATHERING_THRESHOLD_DOMAIN], row, h.gathering_threshold_domain);
+	SetNumber(out[TRUSTED_CUTOFF_SEQUENCE], row, h.trusted_cutoff_sequence);
+	SetNumber(out[TRUSTED_CUTOFF_DOMAIN], row, h.trusted_cutoff_domain);
+	SetNumber(out[NOISE_CUTOFF_SEQUENCE], row, h.noise_cutoff_sequence);
+	SetNumber(out[NOISE_CUTOFF_DOMAIN], row, h.noise_cutoff_domain);
 	SetString(out[CONSENSUS], row, h.consensus);
 	SetNumber(out[MSV_MU], row, h.msv_mu);
 	SetNumber(out[MSV_LAMBDA], row, h.msv_lambda);

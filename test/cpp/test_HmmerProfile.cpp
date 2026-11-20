@@ -370,12 +370,12 @@ void ExpectRecordError(const std::string &record, const std::string &message, in
 }
 
 void CheckNoCutoffs(const ProfileHeader &h) {
-	CHECK_FALSE(h.gathering_sequence.has_value());
-	CHECK_FALSE(h.gathering_domain.has_value());
-	CHECK_FALSE(h.trusted_sequence.has_value());
-	CHECK_FALSE(h.trusted_domain.has_value());
-	CHECK_FALSE(h.noise_sequence.has_value());
-	CHECK_FALSE(h.noise_domain.has_value());
+	CHECK_FALSE(h.gathering_threshold_sequence.has_value());
+	CHECK_FALSE(h.gathering_threshold_domain.has_value());
+	CHECK_FALSE(h.trusted_cutoff_sequence.has_value());
+	CHECK_FALSE(h.trusted_cutoff_domain.has_value());
+	CHECK_FALSE(h.noise_cutoff_sequence.has_value());
+	CHECK_FALSE(h.noise_cutoff_domain.has_value());
 }
 
 } // namespace
@@ -438,7 +438,7 @@ TEST_CASE("HMMER profile - M1: the header, and the fields it does not have", "[h
 
 	CHECK_FALSE(h.accession.has_value());
 	CHECK_FALSE(h.description.has_value());
-	CHECK_FALSE(h.max_length.has_value());
+	CHECK_FALSE(h.max_instance_length.has_value());
 	CheckNoCutoffs(h);
 }
 
@@ -451,16 +451,16 @@ TEST_CASE("HMMER profile - XYPPX: accession, description and cutoffs", "[hmmer]"
 	CHECK(h.length == 5);
 	CHECK(h.alphabet == "amino");
 	CHECK(h.format == "HMMER3/e");
-	CHECK_FALSE(h.max_length.has_value());
+	CHECK_FALSE(h.max_instance_length.has_value());
 	CHECK(h.sequence_count == 7);
 	CHECK(h.effective_sequence_count == F(7.000000));
 	CHECK(h.checksum == 149732247u);
-	CHECK(h.gathering_sequence == F(14.30));
-	CHECK(h.gathering_domain == F(0.70));
-	CHECK(h.trusted_sequence == F(14.40));
-	CHECK(h.trusted_domain == F(0.70));
-	CHECK(h.noise_sequence == F(14.20));
-	CHECK(h.noise_domain == F(4.00));
+	CHECK(h.gathering_threshold_sequence == F(14.30));
+	CHECK(h.gathering_threshold_domain == F(0.70));
+	CHECK(h.trusted_cutoff_sequence == F(14.40));
+	CHECK(h.trusted_cutoff_domain == F(0.70));
+	CHECK(h.noise_cutoff_sequence == F(14.20));
+	CHECK(h.noise_cutoff_domain == F(4.00));
 	CHECK(h.consensus == "GYPPq");
 	CHECK(h.msv_mu == F(-5.1112));
 	CHECK(h.msv_lambda == F(0.78852));
@@ -479,7 +479,7 @@ TEST_CASE("HMMER profile - 3box: a HMMER3/f DNA model with MAXL", "[hmmer]") {
 	CHECK(h.length == 20);
 	CHECK(h.alphabet == "DNA");
 	CHECK(h.format == "HMMER3/f");
-	CHECK(h.max_length == 75);
+	CHECK(h.max_instance_length == 75);
 	CHECK(h.sequence_count == 22);
 	CHECK(h.effective_sequence_count == F(22.000000));
 	CHECK(h.checksum == 1874497603u);
@@ -515,7 +515,7 @@ TEST_CASE("HMMER profile - HMMER2 models: format, header, and calibrated statist
 		// HMMER2 has no EFFN or MAXL, and HMMER ignores a HMMER2 CKSUM,
 		// which is a different checksum.
 		CHECK_FALSE(h.effective_sequence_count.has_value());
-		CHECK_FALSE(h.max_length.has_value());
+		CHECK_FALSE(h.max_instance_length.has_value());
 		CHECK_FALSE(h.checksum.has_value());
 		CHECK_FALSE(h.accession.has_value());
 		CHECK_FALSE(h.description.has_value());

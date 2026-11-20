@@ -1508,13 +1508,13 @@ SELECT hmm_name, hmm_accession, hmm_length FROM read_hmm('models/*.hmm');
 | `hmm_length` | BIGINT | `LENG`, the number of match states |
 | `alphabet` | VARCHAR | `ALPH`, under Easel's names: `amino`, `DNA` or `RNA` |
 | `format` | VARCHAR | The format tag on the model's first line: `HMMER3/a` to `HMMER3/f`, or `HMMER2.0` |
-| `max_length` | BIGINT | `MAXL` |
+| `max_instance_length` | BIGINT | `MAXL`, the longest an instance of the model is expected to be, in residues (nhmmer uses it) |
 | `sequence_count` | BIGINT | `NSEQ` |
 | `effective_sequence_count` | FLOAT | `EFFN` |
 | `checksum` | UINTEGER | `CKSUM` |
-| `gathering_sequence`, `gathering_domain` | FLOAT | `GA`, the per-sequence and per-domain gathering thresholds, in bits |
-| `trusted_sequence`, `trusted_domain` | FLOAT | `TC`, the trusted cutoffs |
-| `noise_sequence`, `noise_domain` | FLOAT | `NC`, the noise cutoffs |
+| `gathering_threshold_sequence`, `gathering_threshold_domain` | FLOAT | `GA`, the per-sequence and per-domain gathering thresholds, in bits |
+| `trusted_cutoff_sequence`, `trusted_cutoff_domain` | FLOAT | `TC`, the trusted cutoffs |
+| `noise_cutoff_sequence`, `noise_cutoff_domain` | FLOAT | `NC`, the noise cutoffs |
 | `consensus` | VARCHAR | The consensus residue of each match state, from the `CONS` column (see below) |
 | `msv_mu`, `msv_lambda` | FLOAT | `STATS LOCAL MSV`: the location and slope of the MSV score distribution |
 | `viterbi_mu`, `viterbi_lambda` | FLOAT | `STATS LOCAL VITERBI` |
@@ -1570,17 +1570,17 @@ Among the defects HMMER rejects:
 **Examples:**
 ```sql
 -- Pfam families with a gathering threshold of at least 25 bits
-SELECT hmm_accession, hmm_name, gathering_sequence
+SELECT hmm_accession, hmm_name, gathering_threshold_sequence
 FROM read_hmm('Pfam-A.hmm.gz')
-WHERE gathering_sequence >= 25;
+WHERE gathering_threshold_sequence >= 25;
 
 -- Models by alphabet and format across a directory
 SELECT alphabet, format, count(*) AS models
 FROM read_hmm('models/*.hmm')
 GROUP BY ALL;
 
--- Dfam models with their length and maximum hit length
-SELECT hmm_name, hmm_length, max_length FROM 'Dfam.hmm.gz' WHERE alphabet = 'DNA';
+-- Dfam models with their length and maximum instance length
+SELECT hmm_name, hmm_length, max_instance_length FROM 'Dfam.hmm.gz' WHERE alphabet = 'DNA';
 ```
 
 ### Coordinate conventions

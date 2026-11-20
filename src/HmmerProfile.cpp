@@ -201,7 +201,7 @@ ProfileHeader ParseProfile(std::string_view record) {
 	// No flag marks these three: they are present when HMMER would write them
 	// back out (p7_hmmfile_WriteASCII).
 	if (hmm->max_length > 0) {
-		h.max_length = hmm->max_length;
+		h.max_instance_length = hmm->max_length;
 	}
 	if (hmm->nseq > 0) {
 		h.sequence_count = hmm->nseq;
@@ -213,16 +213,16 @@ ProfileHeader ParseProfile(std::string_view record) {
 		h.checksum = hmm->checksum;
 	}
 	if (hmm->flags & p7H_GA) {
-		h.gathering_sequence = hmm->cutoff[p7_GA1];
-		h.gathering_domain = hmm->cutoff[p7_GA2];
+		h.gathering_threshold_sequence = hmm->cutoff[p7_GA1];
+		h.gathering_threshold_domain = hmm->cutoff[p7_GA2];
 	}
 	if (hmm->flags & p7H_TC) {
-		h.trusted_sequence = hmm->cutoff[p7_TC1];
-		h.trusted_domain = hmm->cutoff[p7_TC2];
+		h.trusted_cutoff_sequence = hmm->cutoff[p7_TC1];
+		h.trusted_cutoff_domain = hmm->cutoff[p7_TC2];
 	}
 	if (hmm->flags & p7H_NC) {
-		h.noise_sequence = hmm->cutoff[p7_NC1];
-		h.noise_domain = hmm->cutoff[p7_NC2];
+		h.noise_cutoff_sequence = hmm->cutoff[p7_NC1];
+		h.noise_cutoff_domain = hmm->cutoff[p7_NC2];
 	}
 	h.consensus = hmm->consensus + 1; // [0] is a blank; [1..M] are the nodes
 	if (hmm->flags & p7H_STATS) {
