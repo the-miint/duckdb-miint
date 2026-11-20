@@ -3,7 +3,6 @@
 #include "HmmerProfile.hpp"
 #include "table_function_common.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
-#include "duckdb/common/vector/string_vector.hpp"
 
 #include <optional>
 #include <string_view>
@@ -74,11 +73,7 @@ constexpr ColumnSpec COLUMNS[] = {
 };
 static_assert(sizeof(COLUMNS) / sizeof(COLUMNS[0]) == COLUMN_COUNT, "one ColumnSpec per Column");
 
-void SetString(Vector &vec, idx_t row, const std::string &value) {
-	FlatVector::GetDataMutable<string_t>(vec)[row] = StringVector::AddString(vec, value);
-}
-
-void SetString(Vector &vec, idx_t row, const std::optional<std::string> &value) {
+void SetOptionalString(Vector &vec, idx_t row, const std::optional<std::string> &value) {
 	if (!value) {
 		FlatVector::ValidityMutable(vec).SetInvalid(row);
 		return;
@@ -98,8 +93,8 @@ void SetNumber(Vector &vec, idx_t row, const std::optional<T> &value) {
 void WriteRow(DataChunk &output, idx_t row, const hmmer::ProfileHeader &h) {
 	auto &out = output.data;
 	SetString(out[NAME], row, h.name);
-	SetString(out[ACCESSION], row, h.accession);
-	SetString(out[DESCRIPTION], row, h.description);
+	SetOptionalString(out[ACCESSION], row, h.accession);
+	SetOptionalString(out[DESCRIPTION], row, h.description);
 	FlatVector::GetDataMutable<int64_t>(out[LENGTH])[row] = h.length;
 	SetString(out[ALPHABET], row, h.alphabet);
 	SetString(out[FORMAT], row, h.format);

@@ -83,6 +83,10 @@ bool ClaimNextFile(ClientContext &context, const LineScanData &data, LineScanGlo
 	return true;
 }
 
+void SetString(Vector &vec, idx_t row, const std::string &value) {
+	FlatVector::GetDataMutable<string_t>(vec)[row] = StringVector::AddString(vec, value);
+}
+
 void SetTagMap(Vector &map_vec, idx_t row, const std::vector<miint::SamStyleTag> &tags) {
 	auto offset = ListVector::GetListSize(map_vec);
 	ListVector::Reserve(map_vec, offset + tags.size());

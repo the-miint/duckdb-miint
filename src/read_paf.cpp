@@ -3,7 +3,6 @@
 #include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
-#include "duckdb/common/vector/string_vector.hpp"
 
 #include <stdexcept>
 
@@ -129,10 +128,6 @@ void TakeTypedTags(std::vector<miint::SamStyleTag> &tags, std::vector<ReadPafTab
 		out.present = true;
 	}
 	tags.resize(kept);
-}
-
-void SetString(Vector &vec, idx_t row, const std::string &value) {
-	FlatVector::GetDataMutable<string_t>(vec)[row] = StringVector::AddString(vec, value);
 }
 
 void SetInt64(Vector &vec, idx_t row, int64_t value) {

@@ -78,6 +78,9 @@ struct LineScanLocalState : public LocalTableFunctionState {
 bool ClaimNextFile(ClientContext &context, const LineScanData &data, LineScanGlobalState &global,
                    LineScanLocalState &local);
 
+// Write `value` as row `row` of a VARCHAR vector.
+void SetString(Vector &vec, idx_t row, const std::string &value);
+
 // Write `tags` as row `row` of a MAP(VARCHAR, VARCHAR) vector.
 void SetTagMap(Vector &map_vec, idx_t row, const std::vector<miint::SamStyleTag> &tags);
 
