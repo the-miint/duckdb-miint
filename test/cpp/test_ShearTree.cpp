@@ -376,3 +376,17 @@ TEST_CASE("shear reports each output node's source", "[NewickTree][shear]") {
 		CHECK(distinct.size() == source.size());
 	}
 }
+
+// A kept node below a collapsed chain reports itself, not a node merged into its edge, so it keeps its
+// own label. Keeping A and C collapses (A,B), whose edge merges into A's, and the root, which leaves
+// ((A,B),C) as the new root. parse numbers nodes in postorder: A 0, B 1, (A,B) 2, C 3, ((A,B),C) 4.
+TEST_CASE("shear reports the kept node as the source below a collapsed chain", "[NewickTree][shear]") {
+	auto tree = miint::NewickTree::parse("(((A:1,B:2):3,C:4):5,(D:6,E:7):8);");
+	std::vector<uint32_t> source;
+	auto sheared = tree.shear(names_of({"A", "C"}), true, false, &source);
+	REQUIRE(source.size() == sheared.num_nodes());
+	CHECK(source == std::vector<uint32_t> {0, 3, 4});
+	for (uint32_t j = 0; j < sheared.num_nodes(); ++j) {
+		CHECK(tree.name(source[j]) == sheared.name(j));
+	}
+}
