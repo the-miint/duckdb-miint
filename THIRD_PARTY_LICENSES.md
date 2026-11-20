@@ -552,8 +552,8 @@ it is recorded here.
 ## HMMER and Easel
 
 Profile hidden Markov models. Used by `read_hmm`. Embedded as a statically
-linked C library built from 39 source files of HMMER and its Easel library
-(`cmake/deps/hmmer.cmake`), taken from the-miint's forks: HMMER 3.4 on branch
+linked C library built from the HMMER and Easel sources listed in
+`cmake/deps/hmmer.cmake`, taken from the-miint's forks: HMMER 3.4 on branch
 `v3.4-miint`, pinned as the `ext/hmmer` submodule, and Easel 0.49 on branch
 `v0.49-miint`, a submodule inside it (`ext/hmmer/easel`). The forks' changes
 are listed in `ext/hmmer/miint/README.md` and `ext/hmmer/easel/miint/README.md`.
@@ -564,9 +564,11 @@ are listed in `ext/hmmer/miint/README.md` and `ext/hmmer/easel/miint/README.md`.
 - License: HMMER, BSD-3-Clause, with a sublicence for Michael Farrar's SIMD
   technology limited to HMMER's use, modification and redistribution (in the
   text below); Easel, BSD-2-Clause
-- Test fixtures: the model files in `data/hmmer/` come from HMMER's and
-  Easel's source distributions, under the same licences; `data/hmmer/README.md`
-  gives each one's source.
+- Test fixtures: the model files in `data/hmmer/`, and the models written out
+  in `test/cpp/test_HmmerProfile.cpp` and `scripts/wasm_browser/steps.json`
+  (HMMER's `testsuite/M1.hmm`, and a HMMER2 model `testsuite/i15-hmmconvert.pl` writes), come from HMMER's
+  and Easel's source distributions, under the same licences;
+  `data/hmmer/README.md` and the test file's header give each one's source.
 
 ### HMMER license (`ext/hmmer/LICENSE`)
 
@@ -749,7 +751,7 @@ links (none of HMMER's linked files carries one):
 | File | Code | Notice |
 |---|---|---|
 | `esl_sse.c` (x86-64 and wasm builds), `esl_neon.c` (arm64 builds) | `esl_sse_logf()` / `esl_sse_expf()`, and their NEON versions | Derived from Julien Pommier's zlib-licensed SIMD routines, which derive from Stephen Moshier's Cephes library ("may be used freely"). Copyright (C) 2007 Julien Pommier; Copyright (C) 1992 Stephen Moshier. The file's notice is below |
-| `esl_rand64.c` | The 64-bit Mersenne Twister; `esl_rand64_Deal()` | "derived from MT19937-64 (2004/9/29) by Takuji Nishimura and Makoto Matsumoto … Copyright (C) 2004, Makoto Matsumoto and Takuji Nishimura. All rights reserved." `esl_rand64_Deal()`: "derived from code by Kevin Lawler (Brave Software; brave.com). Copyright (2016) Kevin Lawler. Released under ISC License." |
+| `esl_rand64.c` | The 64-bit Mersenne Twister; `esl_rand64_Deal()` | "derived from MT19937-64 (2004/9/29) by Takuji Nishimura and Makoto Matsumoto … Copyright (C) 2004, Makoto Matsumoto and Takuji Nishimura. All rights reserved." `esl_rand64_Deal()`: "derived from code by Kevin Lawler (Brave Software; brave.com). Copyright (2016) Kevin Lawler. Released under ISC License." Both licenses are below |
 | `esl_random.c` | The Mersenne Twister MT19937; `esl_rnd_Gaussian()`; `esl_mix3()` | MT19937 after Matsumoto and Nishimura; `esl_rnd_Gaussian()` "derived from the public domain RANLIB.c `gennor()` function, written by Barry W. Brown and James Lovato"; `esl_mix3()` after Bob Jenkins. The file carries no license text for these; Easel's license names their authors |
 | `esl_stats.c` | `esl_erfc()` | "Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved. Developed at SunPro, a Sun Microsystems, Inc. business. Permission to use, copy, modify, and distribute this software is freely granted, provided that this notice is preserved." |
 | `easel.c` | `esl_tmpfile()` | "Substantially copied from David Wheeler, 'Secure Programming for Linux and Unix HOWTO' … Copyright (C) 1999-2001 David A. Wheeler. Licensed under the MIT license" |
@@ -830,6 +832,64 @@ Moshier for their clear code.
     LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
     OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
     SUCH DAMAGE.
+```
+
+`esl_rand64.c`, the 64-bit Mersenne Twister. The file names its source,
+MT19937-64 (2004/9/29) by Takuji Nishimura and Makoto Matsumoto, and its
+copyright, but not its license. The license, from that source
+(https://www.math.sci.hiroshima-u.ac.jp/m-mat/MT/VERSIONS/C-LANG/mt19937-64.c,
+read 2026-11-20):
+
+```
+   Copyright (C) 2004, Makoto Matsumoto and Takuji Nishimura,
+   All rights reserved.
+
+   Redistribution and use in source and binary forms, with or without
+   modification, are permitted provided that the following conditions
+   are met:
+
+     1. Redistributions of source code must retain the above copyright
+        notice, this list of conditions and the following disclaimer.
+
+     2. Redistributions in binary form must reproduce the above copyright
+        notice, this list of conditions and the following disclaimer in the
+        documentation and/or other materials provided with the distribution.
+
+     3. The names of its contributors may not be used to endorse or promote
+        products derived from this software without specific prior written
+        permission.
+
+   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+   "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+   LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR
+   A PARTICULAR PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT OWNER OR
+   CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+   EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+   PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+   PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+   LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+   NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+`esl_rand64.c`, `esl_rand64_Deal()`. The file says "Copyright (2016) Kevin
+Lawler. Released under ISC License."; the ISC License's text, as SPDX gives it
+(https://spdx.org/licenses/ISC.html, read 2026-11-20), with that copyright line:
+
+```
+Copyright (2016) Kevin Lawler
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY
+SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER
+RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT,
+NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE
+USE OR PERFORMANCE OF THIS SOFTWARE.
 ```
 
 ---

@@ -10,10 +10,10 @@ value is what the fork's `hmmconvert` prints for the same file.
 
 The files are distributed as HMMER and Easel distribute them:
 
-- from HMMER's `tutorial/` and `testsuite/`: HMMER's 3-clause BSD licence, `ext/hmmer/LICENSE`
-  (Copyright (C) 1992-2023 Sean R. Eddy, President and Fellows of Harvard College, Howard Hughes Medical
-  Institute, Washington University School of Medicine, and MRC Laboratory of Molecular Biology);
-- from Easel's `demotic/examples/`: Easel's BSD licence, `ext/hmmer/easel/LICENSE`, with the same holders.
+- from HMMER's `tutorial/` and `testsuite/`: HMMER's 3-clause BSD licence, `ext/hmmer/LICENSE`;
+- from Easel's `demotic/examples/`: Easel's BSD licence, `ext/hmmer/easel/LICENSE`.
+
+Both licences, with their copyright holders and years, are in `THIRD_PARTY_LICENSES.md` (HMMER and Easel).
 
 Several models are built from public family databases, as their accessions show: `PF…` models from Pfam,
 `MADE1` (`DF0000629.2`) from Dfam.
