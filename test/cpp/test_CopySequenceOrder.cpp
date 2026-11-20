@@ -1,6 +1,6 @@
 // The COPY formats that plan through SequenceCopyPlan keep record order only when the query asks for it: with an ORDER
-// BY, or with PRESERVE_ORDER true. Otherwise the records are a set, and the writer runs on all threads, as with
-// PRESERVE_ORDER false. DuckDB's own default for a COPY is to keep insertion order.
+// BY that sorts the rows the COPY writes, or with PRESERVE_ORDER true. Otherwise the records are a set, and the writer
+// runs on all threads, as with PRESERVE_ORDER false. DuckDB's own default for a COPY is to keep insertion order.
 //
 // The SQL tests see the records a COPY writes, not the mode it ran in: a COPY that kept order when it need not is only
 // slower, and one that ran on all threads can still write its records in order. These tests plan each COPY as DuckDB
@@ -121,6 +121,33 @@ TEST_CASE("A sequence COPY whose query has an ORDER BY keeps its order", "[copy_
 		// The optimizer makes ORDER BY with LIMIT a top-N.
 		CHECK_FALSE(
 		    fixture.RunsOnAllThreads(OrderFixture::Copy(output, "(FROM " + table + " ORDER BY read_id LIMIT 10)")));
+	}
+}
+
+TEST_CASE("A sequence COPY keeps only an ORDER BY that sorts the rows it writes", "[copy_order]") {
+	OrderFixture fixture;
+	for (auto &output : OUTPUTS) {
+		INFO(output.name);
+		const auto &table = output.table;
+		const auto sorted = "(FROM " + table + " ORDER BY read_id LIMIT 10)";
+		// A filter passes its input's order on, in a query or in a CTE the query reads.
+		CHECK_FALSE(fixture.RunsOnAllThreads(OrderFixture::Copy(
+		    output, "(SELECT * FROM (FROM " + table + " ORDER BY read_id) s WHERE read_id <> 'x')")));
+		CHECK_FALSE(fixture.RunsOnAllThreads(OrderFixture::Copy(
+		    output, "(WITH s AS (FROM " + table + " ORDER BY read_id) FROM s WHERE read_id <> 'x')")));
+		// A sort whose rows feed an IN or EXISTS subquery, a scalar subquery or a join orders nothing the COPY writes.
+		CHECK(fixture.RunsOnAllThreads(
+		    OrderFixture::Copy(output, "(FROM " + table + " WHERE read_id IN (SELECT read_id FROM " + sorted + "))")));
+		CHECK(fixture.RunsOnAllThreads(OrderFixture::Copy(output, "(FROM " + table + " a WHERE EXISTS (SELECT 1 FROM " +
+		                                                              sorted + " b WHERE b.read_id = a.read_id))")));
+		CHECK(fixture.RunsOnAllThreads(
+		    OrderFixture::Copy(output, "(SELECT * REPLACE (read_id || (SELECT min(read_id) FROM " + sorted +
+		                                   ") AS read_id) FROM " + table + ")")));
+		CHECK(fixture.RunsOnAllThreads(
+		    OrderFixture::Copy(output, "(SELECT a.* FROM (FROM " + table +
+		                                   " ORDER BY read_id) a JOIN (SELECT DISTINCT read_id "
+		                                   "FROM " +
+		                                   table + ") b USING (read_id))")));
 	}
 }
 

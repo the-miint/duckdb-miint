@@ -109,6 +109,23 @@ JOIN (SELECT read_id, row_number() OVER (ORDER BY reference, position, read_id) 
 ----
 200000	0
 
+# No two rows tie on this ORDER BY (read_id is unique), so the file is the same at any thread count. Rows that tie can
+# come out of DuckDB's sort in either order.
+statement ok
+SET threads=1;
+
+statement ok
+COPY (FROM read_parquet('{TEST_DIR}/many_aln.parquet') ORDER BY reference, position, read_id)
+TO '{TEST_DIR}/sorted_t1.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'many_seq');
+
+statement ok
+SET threads=8;
+
+query I
+SELECT count(DISTINCT md5(content)) FROM read_blob(['{TEST_DIR}/sorted.bam', '{TEST_DIR}/sorted_t1.bam']);
+----
+1
+
 # Each check below counts what is in one output and not in the other, duplicates included, both ways: 0 when the two
 # hold the same records the same number of times. A SAM file is compared line by line, header lines included; a BAM
 # file record by record, SEQ and QUAL included.

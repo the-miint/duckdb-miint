@@ -103,6 +103,73 @@ COPY tree1 TO '{TEST_DIR}/unknown.nwk' (FORMAT NEWICK, BOGUS 1);
 ----
 Unrecognized option "bogus"
 
+# DuckDB's own options that FASTQ, FASTA, SAM and BAM do not support are refused with DuckDB's messages, naming the
+# format as the statement does, not the writer it binds (FORMAT FASTA binds _miint_fasta). File rotation among them:
+# DuckDB writes a rotating COPY on all threads, which would drop an ORDER BY.
+statement error
+COPY (SELECT read_id, sequence1, qual1 FROM fq) TO '{TEST_DIR}/rotate_fq' (FORMAT FASTQ, ROW_GROUPS_PER_FILE 2);
+----
+Can't use file rotation (e.g., ROW_GROUPS_PER_FILE) with FORMAT "fastq"
+
+statement error
+COPY (SELECT read_id, sequence1 FROM fq ORDER BY read_id) TO '{TEST_DIR}/rotate_fa' (FORMAT FASTA, ROW_GROUPS_PER_FILE 2);
+----
+Can't use file rotation (e.g., ROW_GROUPS_PER_FILE) with FORMAT "fasta"
+
+statement error
+COPY sam_test TO '{TEST_DIR}/rotate_sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_table', ROW_GROUPS_PER_FILE 2);
+----
+Can't use file rotation (e.g., ROW_GROUPS_PER_FILE) with FORMAT "sam"
+
+statement error
+COPY sam_test TO '{TEST_DIR}/rotate_bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table', ROW_GROUPS_PER_FILE 2);
+----
+Can't use file rotation (e.g., ROW_GROUPS_PER_FILE) with FORMAT "bam"
+
+statement error
+COPY (SELECT read_id, sequence1, qual1 FROM fq) TO '{TEST_DIR}/size.fq' (FORMAT FASTQ, FILE_SIZE_BYTES '1MB');
+----
+FILE_SIZE_BYTES not implemented for "fastq"
+
+statement error
+COPY (SELECT read_id, sequence1 FROM fq) TO '{TEST_DIR}/size.fa' (FORMAT FASTA, FILE_SIZE_BYTES '1MB');
+----
+FILE_SIZE_BYTES not implemented for "fasta"
+
+statement error
+COPY sam_test TO '{TEST_DIR}/size.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_table', FILE_SIZE_BYTES '1MB');
+----
+FILE_SIZE_BYTES not implemented for "sam"
+
+statement error
+COPY sam_test TO '{TEST_DIR}/size.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table', FILE_SIZE_BYTES '1MB');
+----
+FILE_SIZE_BYTES not implemented for "bam"
+
+statement error
+COPY (SELECT read_id, sequence1, qual1 FROM fq) TO '{TEST_DIR}/stats.fq' (FORMAT FASTQ, RETURN_STATS true);
+----
+RETURN_STATS is not supported for the "FASTQ" copy format
+
+statement error
+COPY (SELECT read_id, sequence1 FROM fq) TO '{TEST_DIR}/stats.fa' (FORMAT FASTA, RETURN_STATS);
+----
+RETURN_STATS is not supported for the "FASTA" copy format
+
+statement error
+COPY sam_test TO '{TEST_DIR}/stats.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_table', RETURN_STATS true);
+----
+RETURN_STATS is not supported for the "SAM" copy format
+
+statement error
+COPY sam_test TO '{TEST_DIR}/stats.bam' (FORMAT bam, REFERENCE_LENGTHS 'ref_table', RETURN_STATS true);
+----
+RETURN_STATS is not supported for the "bam" copy format
+
+# RETURN_STATS false asks for nothing the formats lack.
+statement ok
+COPY (SELECT read_id, sequence1 FROM fq) TO '{TEST_DIR}/no_stats.fa' (FORMAT FASTA, RETURN_STATS false);
+
 # COMPRESSION_LEVEL follows one rule in every format that takes it: a bare or NULL level is
 # refused, a level outside 0-9 is refused with the same message, and a quoted or fractional level is
 # cast as DuckDB casts its own options (Parquet's COMPRESSION_LEVEL included).

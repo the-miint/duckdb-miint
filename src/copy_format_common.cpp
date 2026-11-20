@@ -9,6 +9,8 @@
 #include "duckdb/parser/statement/copy_statement.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/operator/logical_copy_to_file.hpp"
+#include "duckdb/planner/operator/logical_cte.hpp"
+#include "duckdb/planner/operator/logical_cteref.hpp"
 
 #include <htslib-1.22.1/htslib/bgzf.h>
 #include <cerrno>
@@ -420,23 +422,55 @@ CopyFunctionExecutionMode SequenceCopyExecutionMode(bool preserve_insertion_orde
 	                                : CopyFunctionExecutionMode::PARALLEL_COPY_TO_FILE;
 }
 
-// Whether an ORDER BY sorts any part of a query's plan, as bound: before the optimizer, which makes an ORDER BY with a
-// LIMIT a top-N.
-static bool HasOrderBy(const LogicalOperator &op) {
-	if (op.type == LogicalOperatorType::LOGICAL_ORDER_BY) {
+// Whether an ORDER BY sorts the rows a query's plan returns, as bound: before the optimizer, which makes an ORDER BY
+// with a LIMIT a top-N. Order passes up through projections, filters and limits, and from a CTE to the query that
+// reads it. A join, an aggregate or a subquery in an expression (which binds as a join) orders none of the rows.
+static bool SortsResult(const LogicalOperator &op, vector<reference<const LogicalCTE>> &ctes) {
+	switch (op.type) {
+	case LogicalOperatorType::LOGICAL_ORDER_BY:
 		return true;
+	case LogicalOperatorType::LOGICAL_PROJECTION:
+	case LogicalOperatorType::LOGICAL_FILTER:
+	case LogicalOperatorType::LOGICAL_LIMIT:
+		return SortsResult(*op.children[0], ctes);
+	case LogicalOperatorType::LOGICAL_MATERIALIZED_CTE: {
+		// The CTE's definition, then the query that reads it.
+		ctes.push_back(op.Cast<LogicalCTE>());
+		return SortsResult(*op.children[1], ctes);
 	}
-	for (auto &child : op.children) {
-		if (HasOrderBy(*child)) {
-			return true;
+	case LogicalOperatorType::LOGICAL_CTE_REF: {
+		const auto cte_index = op.Cast<LogicalCTERef>().cte_index;
+		for (auto &cte : ctes) {
+			if (cte.get().table_index == cte_index) {
+				return SortsResult(*cte.get().children[0], ctes);
+			}
 		}
+		return false;
 	}
-	return false;
+	default:
+		return false;
+	}
 }
 
 BoundStatement SequenceCopyPlan(Binder &binder, CopyStatement &stmt, const string &writer_format) {
 	auto &info = *stmt.info;
-	// Option names are identifiers, which compare case-insensitively.
+	// DuckDB checks its own options against the writer it binds, so its errors for the ones these formats cannot take
+	// would name the writer (_miint_fasta). They are refused here, with DuckDB's messages, under the format the
+	// statement names. File rotation is among them: DuckDB writes a rotating COPY on all threads, which drops an
+	// ORDER BY. Option names are identifiers, which compare case-insensitively.
+	const auto &format = info.format;
+	if (info.options.find("file_size_bytes") != info.options.end()) {
+		throw BinderException("FILE_SIZE_BYTES not implemented for \"%s\"", StringUtil::Lower(format));
+	}
+	if (info.options.find("row_groups_per_file") != info.options.end()) {
+		throw NotImplementedException("Can't use file rotation (e.g., ROW_GROUPS_PER_FILE) with FORMAT \"%s\"",
+		                              StringUtil::Lower(format));
+	}
+	auto stats = info.options.find("return_stats");
+	if (stats != info.options.end() &&
+	    (stats->second.empty() || stats->second[0].CastAs(binder.context, LogicalType::BOOLEAN).GetValue<bool>())) {
+		throw NotImplementedException("RETURN_STATS is not supported for the \"%s\" copy format", format);
+	}
 	if (info.options.find("row_group_size") == info.options.end()) {
 		info.options["row_group_size"] = {Value::UBIGINT(SEQUENCE_DEFAULT_BATCH_ROWS)};
 	}
@@ -445,12 +479,12 @@ BoundStatement SequenceCopyPlan(Binder &binder, CopyStatement &stmt, const strin
 	}
 	info.format = writer_format;
 	auto result = binder.Bind(stmt);
-	// A sequence file's records are a set unless the query sorts them, so order is kept only for an ORDER BY or
-	// PRESERVE_ORDER true, not by default as DuckDB does. With an ORDER BY, DuckDB decides: one that reaches the COPY
-	// keeps its order. An ORDER BY anywhere counts, so a query whose sort DuckDB would not keep (one under an
-	// aggregate, say) keeps the insertion order: slower, never wrong.
+	// A sequence file's records are a set unless the query sorts them, so order is kept only for an ORDER BY that sorts
+	// the rows the COPY writes, or PRESERVE_ORDER true, not by default as DuckDB does. Such an ORDER BY reaches the
+	// COPY, and DuckDB keeps its order.
 	auto &copy = result.plan->Cast<LogicalCopyToFile>();
-	if (copy.preserve_order == PreserveOrderType::AUTOMATIC && !HasOrderBy(*copy.children[0])) {
+	vector<reference<const LogicalCTE>> ctes;
+	if (copy.preserve_order == PreserveOrderType::AUTOMATIC && !SortsResult(*copy.children[0], ctes)) {
 		copy.preserve_order = PreserveOrderType::DONT_PRESERVE_ORDER;
 	}
 	return result;
