@@ -1,0 +1,41 @@
+# name: test/sql/file_suffix_scan_hmm.test
+# description: A .hmm file named in FROM is read by read_hmm, in a build that reads HMMER models
+# group: [sql]
+
+require miint
+
+require-env HMMER_AVAILABLE
+
+# Writes the .zst file below with parquet's zstd file system.
+require parquet
+
+# FROM 'x.hmm' is shorthand for FROM read_hmm('x.hmm') and nothing else, plain or gzipped.
+query II
+SELECT 'hmm', count(*) FROM 'data/hmmer/XYPPX.hmm'
+UNION ALL SELECT 'hmm.gz', count(*) FROM 'data/hmmer/example.hmm.gz'
+ORDER BY ALL
+----
+hmm	1
+hmm.gz	2
+
+query I
+SELECT count(*) FROM ((FROM 'data/hmmer/XYPPX.hmm' EXCEPT ALL FROM read_hmm('data/hmmer/XYPPX.hmm'))
+            UNION ALL (FROM read_hmm('data/hmmer/XYPPX.hmm') EXCEPT ALL FROM 'data/hmmer/XYPPX.hmm'))
+----
+0
+
+query I
+SELECT count(*) FROM ((FROM 'data/hmmer/example.hmm.gz' EXCEPT ALL FROM read_hmm('data/hmmer/example.hmm.gz'))
+            UNION ALL (FROM read_hmm('data/hmmer/example.hmm.gz') EXCEPT ALL FROM 'data/hmmer/example.hmm.gz'))
+----
+0
+
+# read_hmm reads plain and gzipped files, so a zstd-compressed one is not claimed: DuckDB says
+# no reader handles it instead of read_hmm failing on it. What the file holds is never read.
+statement ok
+COPY (SELECT 1 AS x) TO '{TEST_DIR}/fss_unclaimed.hmm.zst' (FORMAT csv, COMPRESSION zstd);
+
+statement error
+FROM '{TEST_DIR}/fss_unclaimed.hmm.zst'
+----
+No extension found that is capable of reading the file

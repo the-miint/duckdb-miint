@@ -454,6 +454,9 @@ fi
 if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'place_krepp';" | ./build/release/duckdb -csv -noheader 2>/dev/null | grep -q 1; then
     export KREPP_AVAILABLE=1
 fi
+if echo "SELECT 1 FROM duckdb_functions() WHERE function_name = 'read_hmm';" | ./build/release/duckdb -csv -noheader 2>/dev/null | grep -q 1; then
+    export HMMER_AVAILABLE=1
+fi
 
 # Toy krepp index for the place_krepp end-to-end test.
 #
@@ -768,7 +771,7 @@ fi
 # Which skips are allowed: docs/testing.md, "Guards and skipped tests". A skip does not
 # change unittest's exit status, so a disallowed one, such as a skip for the mock server's
 # URL that this script exports, is caught here.
-HTTPFS_ALLOWED_SKIPS='ENA_AVAILABLE|NCBI_AVAILABLE|BLAST_LIVE_AVAILABLE|GTDB_AVAILABLE|MIINT_TAXDUMP_REMOTE|ENA_WEBIN_TEST_(USER|PASSWORD|AVAILABLE)|ASPERA_AVAILABLE|HDF5_AVAILABLE'
+HTTPFS_ALLOWED_SKIPS='ENA_AVAILABLE|NCBI_AVAILABLE|BLAST_LIVE_AVAILABLE|GTDB_AVAILABLE|MIINT_TAXDUMP_REMOTE|ENA_WEBIN_TEST_(USER|PASSWORD|AVAILABLE)|ASPERA_AVAILABLE|HDF5_AVAILABLE|HMMER_AVAILABLE'
 
 # run_httpfs_files <comma-separated files> <log>: run them as the httpfs pass does, and
 # exit the script when one fails or skips for a reason this run should have provided.

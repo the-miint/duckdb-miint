@@ -49,13 +49,14 @@ SELECT (SELECT COUNT(*) FROM miint_versions() WHERE library = 'st3')
 ----
 true
 
-# HMMER and the Easel library inside it: built everywhere except Windows, which
-# no lane that runs these tests builds (the read_hmm tests are unguarded too).
-# Each version is the pinned commit of the-miint fork.
+# Likewise HMMER and the Easel library inside it, present only when read_hmm is
+# (MIINT_ENABLE_HMMER: not on Windows). Each version is the pinned commit of its
+# fork in the-miint.
 query I
-SELECT COUNT(*) FROM miint_versions() WHERE library IN ('hmmer', 'easel');
+SELECT (SELECT COUNT(*) FROM miint_versions() WHERE library IN ('hmmer', 'easel'))
+     = (SELECT 2 * (COUNT(*) > 0)::INTEGER FROM duckdb_functions() WHERE function_name = 'read_hmm');
 ----
-2
+true
 
 # Every row matches either a core or optional library name
 query I

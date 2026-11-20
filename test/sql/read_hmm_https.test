@@ -11,6 +11,8 @@ require httpfs
 
 require-env MIINT_HTTPS_TEST_URL
 
+require-env HMMER_AVAILABLE
+
 query TTI
 SELECT hmm_name, hmm_accession, hmm_length FROM read_hmm('{MIINT_HTTPS_TEST_URL}/hmmer/XYPPX.hmm');
 ----

@@ -97,8 +97,6 @@ UNION ALL SELECT 'paf', t::VARCHAR FROM 'data/paf/k12_minimap2.paf' t
 UNION ALL SELECT 'paf.gz', t::VARCHAR FROM 'data/paf/k12_minimap2.paf.gz' t
 UNION ALL SELECT 'gfa', t::VARCHAR FROM 'data/gfa/spec_example.gfa' t
 UNION ALL SELECT 'gfa.gz', t::VARCHAR FROM 'data/myloasm/ecoli_sim/final_contig_graph.gfa.gz' t
-UNION ALL SELECT 'hmm', t::VARCHAR FROM 'data/hmmer/XYPPX.hmm' t
-UNION ALL SELECT 'hmm.gz', t::VARCHAR FROM 'data/hmmer/example.hmm.gz' t
 UNION ALL SELECT 'jplace', t::VARCHAR FROM 'data/jplace/test.jplace' t
 UNION ALL SELECT 'jplace.gz', t::VARCHAR FROM 'data/jplace/test.jplace.gz' t
 UNION ALL SELECT 'jplace.zst', t::VARCHAR FROM 'data/jplace/test.jplace.zst' t
@@ -136,8 +134,6 @@ UNION ALL SELECT 'paf', t::VARCHAR FROM read_paf('data/paf/k12_minimap2.paf') t
 UNION ALL SELECT 'paf.gz', t::VARCHAR FROM read_paf('data/paf/k12_minimap2.paf.gz') t
 UNION ALL SELECT 'gfa', t::VARCHAR FROM read_gfa('data/gfa/spec_example.gfa') t
 UNION ALL SELECT 'gfa.gz', t::VARCHAR FROM read_gfa('data/myloasm/ecoli_sim/final_contig_graph.gfa.gz') t
-UNION ALL SELECT 'hmm', t::VARCHAR FROM read_hmm('data/hmmer/XYPPX.hmm') t
-UNION ALL SELECT 'hmm.gz', t::VARCHAR FROM read_hmm('data/hmmer/example.hmm.gz') t
 UNION ALL SELECT 'jplace', t::VARCHAR FROM read_jplace('data/jplace/test.jplace') t
 UNION ALL SELECT 'jplace.gz', t::VARCHAR FROM read_jplace('data/jplace/test.jplace.gz') t
 UNION ALL SELECT 'jplace.zst', t::VARCHAR FROM read_jplace('data/jplace/test.jplace.zst') t
@@ -172,8 +168,6 @@ gff	7
 gff.gz	7
 gff.zst	7
 gff3	7
-hmm	1
-hmm.gz	2
 jplace	3
 jplace.gz	3
 jplace.zst	3
@@ -249,9 +243,6 @@ statement ok
 COPY (SELECT 1 AS x) TO '{TEST_DIR}/fss_unclaimed.gfa.zst' (FORMAT csv, COMPRESSION zstd);
 
 statement ok
-COPY (SELECT 1 AS x) TO '{TEST_DIR}/fss_unclaimed.hmm.zst' (FORMAT csv, COMPRESSION zstd);
-
-statement ok
 COPY (SELECT 1 AS x) TO '{TEST_DIR}/fss_unclaimed.bam.gz' (FORMAT csv, COMPRESSION gzip);
 
 statement ok
@@ -301,11 +292,6 @@ No extension found that is capable of reading the file
 
 statement error
 FROM '{TEST_DIR}/fss_unclaimed.gfa.zst'
-----
-No extension found that is capable of reading the file
-
-statement error
-FROM '{TEST_DIR}/fss_unclaimed.hmm.zst'
 ----
 No extension found that is capable of reading the file
 

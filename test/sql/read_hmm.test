@@ -4,6 +4,8 @@
 
 require miint
 
+require-env HMMER_AVAILABLE
+
 # The fixtures are HMMER's and Easel's own model files (data/hmmer/README.md). Each expected
 # header value is as written in the file, and is checked field by field: a query turns a
 # model's row into (field, value) pairs, every value as VARCHAR, so a FLOAT prints as the
