@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <new>
 #include <string>
 #include <thread>
@@ -683,6 +684,27 @@ TEST_CASE("HMMER profile - how a read's outcome becomes an error", "[hmmer]") {
 	SECTION("out of memory") {
 		CHECK_THROWS_AS(ThrowIfReadFailed(eslEMEM, false, "", 1), std::bad_alloc);
 	}
+	// HMMER's parser ignores what some calls it makes return (p7_hmm_SetName, SetAccession,
+	// SetDescription), so a read can succeed without the field such a call failed to set. An
+	// exception raised during the read says so.
+	SECTION("success, with an exception raised during the read") {
+		REQUIRE(RaiseModelLengthException(0) == eslEINVAL);
+		ExpectParseError([] { ThrowIfReadFailed(eslOK, true, "", 24); }, "model length M=0 out of range 1..100000", 24);
+		CHECK(TakeExceptionMessage().empty());
+	}
+	SECTION("success, with an allocation failure raised during the read") {
+		esl_exception(eslEMEM, FALSE, const_cast<char *>(__FILE__), __LINE__,
+		              const_cast<char *>("malloc of size %d failed"), 8);
+		CHECK_THROWS_AS(ThrowIfReadFailed(eslOK, true, "", 1), std::bad_alloc);
+		CHECK(TakeExceptionMessage().empty());
+	}
+}
+
+// Easel's buffer reader sizes its line buffer as twice a line's length, as an int
+// (esl_fileparser.c, nextline()), so a line of INT_MAX / 2 bytes or more would overflow it.
+// A record no longer than that holds no such line.
+TEST_CASE("HMMER profile - the largest record holds no line Easel cannot buffer", "[hmmer]") {
+	CHECK(miint::hmmer::MAX_RECORD_BYTES <= static_cast<size_t>(std::numeric_limits<int>::max() / 2));
 }
 
 // What a caller splitting a file into records relies on, as HMMER reads lines (p7_hmmfile.c's
@@ -698,6 +720,12 @@ TEST_CASE("HMMER profile - lines as HMMER reads them", "[hmmer]") {
 	CHECK(FirstWord("//") == "//");
 	CHECK(FirstWord("").empty());
 	CHECK(FirstWord(" \t ").empty());
+	CHECK(FirstWord("NAME\rfn3") == "NAME");
+	// Easel splits on space, tab, CR and LF only, so a vertical tab or form feed is part of a
+	// word, and a line holding one is not blank.
+	CHECK(FirstWord("\vNAME  fn3") == "\vNAME");
+	CHECK(FirstWord("NAME\f fn3") == "NAME\f");
+	CHECK_FALSE(IsBlankOrComment(FirstWord("\v")));
 
 	CHECK(IsBlankOrComment(""));
 	CHECK(IsBlankOrComment("#"));

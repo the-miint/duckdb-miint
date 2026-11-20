@@ -20,8 +20,10 @@ namespace hmmer {
 //   the default handler aborts the process. This one records the message for
 //   the thread that raised it (TakeExceptionMessage) and returns, so the HMMER
 //   call that raised returns its error code instead.
-// - Fills HMMER's logsum lookup table. HMMER otherwise fills it on first use,
-//   and two threads getting there at once race on it.
+// - Fills HMMER's logsum lookup table, which HMMER's Forward filter (run by
+//   HMMER2 calibration) reads, and which only the caller fills: p7_FLogsumInit
+//   must run before any p7_FLogsum (logsum.c). Its "first time" flag is
+//   unsynchronized, so it runs here, once.
 void Initialize();
 
 // The message of the latest Easel exception raised on this thread, or "" if
@@ -72,17 +74,22 @@ private:
 };
 
 // How HMMER reads the lines of a model file, for a caller splitting a file into
-// records. HMMER takes each line's first word, its first whitespace-delimited
-// token: it skips a line with none (blank) or whose first word starts with '#'
-// (a comment); a model's first line it doesn't skip starts with the model's
-// format tag; and a model ends at a line whose first word is "//".
+// records. HMMER takes each line's first word, its first token split on space,
+// tab, CR and LF (Easel's fileparser): it skips a line with none (blank) or
+// whose first word starts with '#' (a comment); a model's first line it doesn't
+// skip starts with the model's format tag; and a model ends at a line whose
+// first word is "//".
 std::string_view FirstWord(std::string_view line);
 bool IsBlankOrComment(std::string_view first_word);
 bool IsFormatTag(std::string_view first_word); // HMMER3/a ... HMMER3/f, or HMMER2.0
 bool IsModelEnd(std::string_view first_word);
 
-// The largest record ParseProfile reads: HMMER takes a buffer's length as an int.
-constexpr size_t MAX_RECORD_BYTES = 2147483647;
+// The largest record ParseProfile reads, 1 GiB: a limit of read_hmm's, not of
+// HMMER's. Easel's buffer reader sizes its line buffer as twice a line's length,
+// as an int (esl_fileparser.c, nextline()), so a line of INT_MAX / 2 bytes or
+// more would overflow it; a record no longer than this holds no such line.
+constexpr size_t MAX_RECORD_BYTES = 1073741823;
+static_assert(MAX_RECORD_BYTES <= 2147483647 / 2, "Easel doubles a line's length in an int");
 
 // Reads one model: the text of one record, from its format line ("HMMER3/f
 // ...", "HMMER2.0 ...") through its closing "//". Text after the "//" is not

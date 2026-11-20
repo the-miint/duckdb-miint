@@ -1,9 +1,7 @@
 #include "HmmerProfile.hpp"
 
-#include <cctype>
 #include <cstdarg>
 #include <cstdio>
-#include <limits>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -17,16 +15,19 @@ namespace hmmer {
 
 namespace {
 
-// The latest Easel exception's message on this thread. A fixed buffer, so the
-// handler, which runs inside C frames, neither allocates nor can throw.
+// The latest Easel exception on this thread: its message, and its code (eslOK
+// when there is none). A fixed buffer, so the handler, which runs inside C
+// frames, neither allocates nor can throw.
 thread_local char exception_message[512] = "";
+thread_local int exception_code = eslOK;
 
-// Easel's exception handler. Records the message and returns, so the call that
-// raised returns its error code. The source file and line, which Easel's
+// Easel's exception handler. Records the exception and returns, so the call
+// that raised returns its error code. The source file and line, which Easel's
 // default handler prints, are left out: they locate HMMER's code, not the
 // user's input. So is errno, which Easel passes for failed system calls: the
 // read path here makes none, as it reads from memory.
-void RecordException(int, int, char *, int, char *format, va_list argp) {
+void RecordException(int code, int, char *, int, char *format, va_list argp) {
+	exception_code = code;
 	if (std::vsnprintf(exception_message, sizeof(exception_message), format, argp) < 0) {
 		std::snprintf(exception_message, sizeof(exception_message), "%s",
 		              "Easel exception with an unprintable message");
@@ -103,15 +104,15 @@ const char *FormatName(int format) {
 } // namespace
 
 std::string_view FirstWord(std::string_view line) {
-	size_t begin = 0;
-	while (begin < line.size() && std::isspace(static_cast<unsigned char>(line[begin]))) {
-		begin++;
+	// Easel's token separators (esl_fileparser.c): not std::isspace, which adds
+	// \v and \f and depends on the locale.
+	constexpr std::string_view separators = " \t\r\n";
+	const size_t begin = line.find_first_not_of(separators);
+	if (begin == std::string_view::npos) {
+		return {};
 	}
-	size_t end = begin;
-	while (end < line.size() && !std::isspace(static_cast<unsigned char>(line[end]))) {
-		end++;
-	}
-	return line.substr(begin, end - begin);
+	const size_t end = line.find_first_of(separators, begin);
+	return line.substr(begin, end == std::string_view::npos ? std::string_view::npos : end - begin);
 }
 
 bool IsBlankOrComment(std::string_view first_word) {
@@ -142,6 +143,7 @@ void Initialize() {
 std::string TakeExceptionMessage() {
 	std::string message(exception_message);
 	exception_message[0] = '\0';
+	exception_code = eslOK;
 	return message;
 }
 
@@ -150,11 +152,9 @@ ProfileHeader ParseProfile(std::string_view record) {
 	// read's.
 	TakeExceptionMessage();
 
-	static_assert(MAX_RECORD_BYTES == static_cast<size_t>(std::numeric_limits<int>::max()),
-	              "HMMER's buffer length is an int");
 	if (record.size() > MAX_RECORD_BYTES) {
 		throw ProfileParseError(
-		    "Model record of " + std::to_string(record.size()) + " bytes is larger than HMMER can read (2 GiB)", 1);
+		    "Model record of " + std::to_string(record.size()) + " bytes is larger than read_hmm reads (1 GiB)", 1);
 	}
 	// HMMER parses the buffer in place: it is not copied, and must outlive the
 	// handle.
@@ -189,10 +189,10 @@ ProfileHeader ParseProfile(std::string_view record) {
 
 	ProfileHeader h;
 	h.name = hmm->name; // HMMER rejects a model without one
-	if ((hmm->flags & p7H_ACC) && hmm->acc) {
+	if (hmm->flags & p7H_ACC) {
 		h.accession = hmm->acc;
 	}
-	if ((hmm->flags & p7H_DESC) && hmm->desc) {
+	if (hmm->flags & p7H_DESC) {
 		h.description = hmm->desc;
 	}
 	h.length = hmm->M;
@@ -239,15 +239,23 @@ ProfileHeader ParseProfile(std::string_view record) {
 namespace detail {
 void ThrowIfReadFailed(int status, bool have_model, const char *errbuf, int64_t line) {
 	// Taken whatever the outcome, so it cannot be blamed on a later read.
+	const int code = exception_code;
 	std::string exception = TakeExceptionMessage();
+	if (status == eslEMEM || code == eslEMEM) {
+		throw std::bad_alloc();
+	}
 	if (status == eslOK) {
+		// HMMER's parser ignores what some calls it makes return (p7_hmm_SetName,
+		// SetAccession, SetDescription), so a read can succeed without the field
+		// such a call failed to set. The exception it raised says so. No read of a
+		// valid model raises one: Easel's default handler would abort.
+		if (!exception.empty()) {
+			throw ProfileParseError(exception, line);
+		}
 		if (have_model) {
 			return;
 		}
 		throw ProfileParseError("HMMER reported success but returned no model", line);
-	}
-	if (status == eslEMEM) {
-		throw std::bad_alloc();
 	}
 	// The parser's own message says where in the model it stopped; an
 	// exception's comes from a function the parser called.
