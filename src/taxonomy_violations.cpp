@@ -7,7 +7,6 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/sql_identifier.hpp"
-#include "duckdb/common/string_util.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 
 #include <algorithm>
@@ -53,22 +52,12 @@ struct GlobalState : public GlobalTableFunctionState {
 	size_t next = 0;
 };
 
-// The type of feature_id, after checking that `columns` are exactly feature_id, of an id type, and
-// the shared lineage schema's eight rank columns, VARCHAR. Matched by name, in any order and case,
-// so a misspelled or extra column is an error rather than ignored.
+// The type of feature_id, after checking that `columns` include feature_id, of an id type, and the
+// shared lineage schema's eight rank columns, VARCHAR. Matched by name, in any order and case.
+// Other columns are not read, so a table that carries more than a taxonomy can be checked as it
+// is; a misspelled rank column is reported as that rank's column missing.
 LogicalType ValidateLineageSchema(const std::string &taxonomy, const TableOrViewColumns &columns,
                                   std::array<LogicalType, kRanks> &rank_types) {
-	for (const auto &name : columns.names) {
-		bool known = StringUtil::CIEquals(name, "feature_id");
-		for (const auto &rank : miint::kLineageRanks) {
-			known = known || StringUtil::CIEquals(name, rank.column);
-		}
-		if (!known) {
-			throw BinderException("%s: taxonomy '%s' has a column '%s' outside the shared lineage schema; select "
-			                      "feature_id and the eight rank columns, domain through strain",
-			                      kFn, taxonomy, name);
-		}
-	}
 	LogicalType id_type;
 	if (!FindColumnType(columns, "feature_id", id_type)) {
 		throw BinderException("%s: taxonomy '%s' has no 'feature_id' column", kFn, taxonomy);

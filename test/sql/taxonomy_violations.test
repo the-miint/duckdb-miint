@@ -7,8 +7,8 @@ require miint
 # A caller that builds taxonomies keeps the violations: it stores them, reports their totals
 # with examples, and can write its files anyway to measure them. So the check returns every
 # violation as a row, each with the feature_id of the row at fault, and never raises for one.
-# No violation is an error; only a call that cannot be checked is (no relation, or the wrong
-# columns or types). The checks are TaxonomyStore's own, run over the names as given rather than
+# No violation is an error; only a call that cannot be checked is (no relation, a missing
+# column, or the wrong types). The checks are TaxonomyStore's own, run over the names as given rather than
 # over its cleaned lineages. Cleaning cuts a lineage from a rank down, or empties it, so it never
 # gives a name a new parent: a taxonomy with no violations is one TaxonomyStore accepts.
 
@@ -56,6 +56,25 @@ query I
 SELECT count(*) FROM taxonomy_violations('shuffled');
 ----
 0
+
+# Other columns are ignored, whatever their type, so a table that carries more than a taxonomy
+# (here taxonomy_lineage's name, rank and lineage, with its taxid as feature_id) is checked as
+# it is. Its rank columns are still read: Bacillota under two domains is reported.
+statement ok
+CREATE TABLE lineage_shaped (feature_id BIGINT, name VARCHAR, rank VARCHAR, domain VARCHAR, phylum VARCHAR,
+                             class VARCHAR, "order" VARCHAR, family VARCHAR, genus VARCHAR, species VARCHAR,
+                             strain VARCHAR, lineage VARCHAR, extra INTEGER[]);
+
+statement ok
+INSERT INTO lineage_shaped VALUES
+    (1239, 'Bacillota', 'phylum', 'Bacteria', 'Bacillota', NULL, NULL, NULL, NULL, NULL, NULL, 'd__Bacteria;p__Bacillota', [1]),
+    (9999, 'Bacillota', 'phylum', 'Archaea', 'Bacillota', NULL, NULL, NULL, NULL, NULL, NULL, 'd__Archaea;p__Bacillota', [2]);
+
+query TITT
+SELECT kind, feature_id, name, parent FROM taxonomy_violations('lineage_shaped') ORDER BY feature_id;
+----
+multiple_parents	1239	Bacillota	Bacteria
+multiple_parents	9999	Bacillota	Archaea
 
 # =============================================================================
 # A taxonomy split over two files, a primary and a secondary, kept as lines. One parent per
@@ -475,8 +494,8 @@ FROM taxonomy_violations('uu_sign_tx');
 gap	true	80000000-0000-0000-0000-000000000000
 
 # =============================================================================
-# A relation that is not a taxonomy is an error, not a violation: a taxonomy is exactly
-# feature_id and the shared lineage schema's eight rank columns, which are VARCHAR
+# A relation that is not a taxonomy is an error, not a violation: a taxonomy has feature_id
+# and the shared lineage schema's eight rank columns, which are VARCHAR
 # =============================================================================
 
 statement ok
@@ -487,13 +506,16 @@ SELECT * FROM taxonomy_violations('no_strain');
 ----
 taxonomy_violations: taxonomy 'no_strain' has no 'strain' column
 
+# Since other columns are ignored, a misspelled rank column is not checked under its own name:
+# the rank it was meant to be is missing.
 statement ok
-CREATE TABLE extra_column AS SELECT *, 'x' AS subspecies FROM clean;
+CREATE TABLE misspelled AS
+SELECT feature_id, domain, phylum, class, "order", family, genus, species AS speceis, strain FROM clean;
 
 statement error
-SELECT * FROM taxonomy_violations('extra_column');
+SELECT * FROM taxonomy_violations('misspelled');
 ----
-taxonomy_violations: taxonomy 'extra_column' has a column 'subspecies' outside the shared lineage schema
+taxonomy_violations: taxonomy 'misspelled' has no 'species' column
 
 statement ok
 CREATE TABLE int_genus AS

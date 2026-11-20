@@ -713,7 +713,7 @@ SELECT kind, count(*) FROM taxonomy_violations('tx') GROUP BY kind;
 
 **Parameters:**
 
-- `taxonomy` (VARCHAR): the name of a table or view with exactly `feature_id` and the shared lineage schema's eight rank columns (`domain`, `phylum`, `class`, `"order"`, `family`, `genus`, `species`, `strain`), in any order and any case. `feature_id` is VARCHAR, BIGINT or UUID; the rank columns are VARCHAR, NULL at a rank the lineage does not name. [`parse_lineage`](#parse-lineage-strings-parse_lineage) turns lineage strings into these columns, as the examples do. A CTE cannot be named: use a view or a TEMP table (see [passing relations by name](table_of_contents.md#passing-relations-by-name)).
+- `taxonomy` (VARCHAR): the name of a table or view with `feature_id` and the shared lineage schema's eight rank columns (`domain`, `phylum`, `class`, `"order"`, `family`, `genus`, `species`, `strain`), in any order and any case. `feature_id` is VARCHAR, BIGINT or UUID; the rank columns are VARCHAR, NULL at a rank the lineage does not name. Other columns are ignored, so [`taxonomy_lineage`](#collapse-the-tree-to-lineages-taxonomy_lineage) output can be checked as it is once its `taxid` is renamed `feature_id`. [`parse_lineage`](#parse-lineage-strings-parse_lineage) turns lineage strings into these columns, as the examples do. A CTE cannot be named: use a view or a TEMP table (see [passing relations by name](table_of_contents.md#passing-relations-by-name)).
 
 **Returns:** one row per problem, in no particular order:
 
@@ -747,7 +747,7 @@ A column a kind does not use is NULL.
 **Errors**, raised when the statement is bound, before any row is read (so `EXPLAIN` and `PREPARE` raise them too):
 
 - a NULL relation name, a relation that does not exist, or a CTE ([passing relations by name](table_of_contents.md#passing-relations-by-name))
-- a missing column, or any column other than `feature_id` and the eight rank columns (a misspelled or extra column is not ignored)
+- a missing `feature_id` or rank column; a misspelled rank column is reported as missing, since other columns are ignored
 - a `feature_id` that is not VARCHAR, BIGINT or UUID, or a rank column that is not VARCHAR
 
 Raised at execution instead, so `EXPLAIN` and `PREPARE` do not catch it: a column read with a type other than the one the statement was bound with, such as a view over a file that was rewritten after `PREPARE`. Run or prepare the statement again.
