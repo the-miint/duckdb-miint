@@ -4,6 +4,7 @@
 #include <cmath>
 #include <string>
 #include <unordered_set>
+#include <vector>
 #include "NewickTree.hpp"
 
 using Catch::Matchers::ContainsSubstring;
@@ -333,4 +334,59 @@ TEST_CASE("shear does not match internal-node labels", "[NewickTree][shear]") {
 
 	// "G" is an internal label, not a tip -> treated as missing.
 	REQUIRE_THROWS_WITH(tree.shear(names_of({"G"}), true, /*ignore_missing=*/false), ContainsSubstring("G"));
+}
+
+// ============================================================================
+// source: each output node's node in the input tree
+// ============================================================================
+
+// shear reports where each output node came from, so a caller can carry per-node data the tree
+// does not hold (a SQL tree table's `label` column) onto the sheared tree. Internal nodes here are
+// unnamed, so only the reported sources can tell them apart.
+TEST_CASE("shear reports each output node's source", "[NewickTree][shear]") {
+	auto tree = miint::NewickTree::parse("(((A:1,B:2):3,C:4):5,(D:6,E:7):8);");
+
+	for (bool collapse : {false, true}) {
+		INFO("collapse " << collapse);
+		std::vector<uint32_t> source;
+		auto sheared = tree.shear(names_of({"A", "B", "C"}), collapse, false, &source);
+		REQUIRE(source.size() == sheared.num_nodes());
+		for (uint32_t j = 0; j < sheared.num_nodes(); ++j) {
+			REQUIRE(source[j] < tree.num_nodes());
+			CHECK(tree.name(source[j]) == sheared.name(j));
+			CHECK(tree.is_tip(source[j]) == sheared.is_tip(j));
+			const uint32_t parent = sheared.parent(j);
+			if (parent == miint::NewickTree::NO_PARENT) {
+				continue;
+			}
+			// Without collapse the input's parent is kept; with it, the output parent is the
+			// nearest kept ancestor.
+			if (collapse) {
+				uint32_t up = tree.parent(source[j]);
+				while (up != miint::NewickTree::NO_PARENT && up != source[parent]) {
+					up = tree.parent(up);
+				}
+				CHECK(up == source[parent]);
+			} else {
+				CHECK(tree.parent(source[j]) == source[parent]);
+			}
+		}
+		// Sources are distinct: no input node is emitted twice.
+		std::unordered_set<uint32_t> distinct(source.begin(), source.end());
+		CHECK(distinct.size() == source.size());
+	}
+}
+
+// A kept node below a collapsed chain reports itself, not a node merged into its edge, so it keeps its
+// own label. Keeping A and C collapses (A,B), whose edge merges into A's, and the root, which leaves
+// ((A,B),C) as the new root. parse numbers nodes in postorder: A 0, B 1, (A,B) 2, C 3, ((A,B),C) 4.
+TEST_CASE("shear reports the kept node as the source below a collapsed chain", "[NewickTree][shear]") {
+	auto tree = miint::NewickTree::parse("(((A:1,B:2):3,C:4):5,(D:6,E:7):8);");
+	std::vector<uint32_t> source;
+	auto sheared = tree.shear(names_of({"A", "C"}), true, false, &source);
+	REQUIRE(source.size() == sheared.num_nodes());
+	REQUIRE(source == std::vector<uint32_t> {0, 3, 4});
+	for (uint32_t j = 0; j < sheared.num_nodes(); ++j) {
+		CHECK(tree.name(source[j]) == sheared.name(j));
+	}
 }

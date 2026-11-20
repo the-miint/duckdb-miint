@@ -7,9 +7,14 @@
 
 namespace duckdb {
 
-TreeResolvePlacementTableFunction::Data::Data(std::string tree_table, std::string placements_table)
-    : tree_table_name(std::move(tree_table)), placements_table_name(std::move(placements_table)) {
-	ReadNewickTableFunction::GetSchema(names, types, false);
+namespace {
+constexpr const char *kFn = "tree_resolve_placement";
+} // namespace
+
+TreeResolvePlacementTableFunction::Data::Data(std::string tree_table, TreeNameColumns tree_columns,
+                                              std::string placements_table)
+    : TreeOutputData(std::move(tree_table), std::move(tree_columns)),
+      placements_table_name(std::move(placements_table)) {
 }
 
 unique_ptr<FunctionData> TreeResolvePlacementTableFunction::Bind(ClientContext &context, TableFunctionBindInput &input,
@@ -21,37 +26,34 @@ unique_ptr<FunctionData> TreeResolvePlacementTableFunction::Bind(ClientContext &
 	RejectCTERelationName(input, placements_table_name);
 
 	// Validate schemas at bind time for early error detection
-	ValidateTreeTableSchema(context, tree_table_name);
-	ValidatePlacementTableSchema(context, placements_table_name);
+	auto tree_columns = BindTreeOutput(context, kFn, tree_table_name, return_types, names);
+	auto fragment_type = ValidatePlacementTableSchema(context, placements_table_name);
 
-	auto data = duckdb::make_uniq<Data>(std::move(tree_table_name), std::move(placements_table_name));
-
-	for (const auto &name : data->names) {
-		names.emplace_back(name);
+	// A fragment's id names the tip it becomes. A VARCHAR tree takes any id type and names the tip
+	// with its text; a BIGINT or UUID tree takes its own type, so the tip's name is one.
+	const bool typed_tree = tree_columns.name_type.id() != LogicalTypeId::VARCHAR;
+	if (typed_tree && fragment_type.id() != tree_columns.name_type.id()) {
+		throw BinderException("%s: the tree's names are %s, but 'fragment_id' is %s; a BIGINT or UUID tree takes "
+		                      "fragment ids of its own type, which name its new tips",
+		                      kFn, tree_columns.name_type.ToString(), fragment_type.ToString());
 	}
-	for (const auto &type : data->types) {
-		return_types.emplace_back(type);
-	}
 
+	auto data =
+	    duckdb::make_uniq<Data>(std::move(tree_table_name), std::move(tree_columns), std::move(placements_table_name));
+	if (typed_tree) {
+		data->bound_fragment_type = fragment_type;
+	}
 	return data;
 }
 
 unique_ptr<GlobalTableFunctionState> TreeResolvePlacementTableFunction::InitGlobal(ClientContext &context,
                                                                                    TableFunctionInitInput &input) {
 	auto &bind_data = input.bind_data->Cast<Data>();
-	auto gstate = duckdb::make_uniq<GlobalState>();
+	auto gstate = duckdb::make_uniq<TreeOutputState>();
 
-	// Read tree data and placements
-	auto node_inputs = ReadTreeTable(context, bind_data.tree_table_name);
-	auto placements = ReadPlacementTable(context, bind_data.placements_table_name);
-
-	// Build tree from node data
-	miint::NewickTree tree;
-	try {
-		tree = miint::NewickTree::build(node_inputs);
-	} catch (const std::exception &e) {
-		throw InvalidInputException("Failed to build tree from '%s': %s", bind_data.tree_table_name, e.what());
-	}
+	auto tree = BuildTree(context, kFn, bind_data.tree_table_name, bind_data.tree_columns, gstate->labels);
+	auto placements = ReadPlacementTable(context, bind_data.placements_table_name, kFn,
+	                                     bind_data.bound_fragment_type ? &*bind_data.bound_fragment_type : nullptr);
 
 	// Resolve placements
 	try {
@@ -60,33 +62,13 @@ unique_ptr<GlobalTableFunctionState> TreeResolvePlacementTableFunction::InitGlob
 		throw InvalidInputException("Failed to resolve placements: %s", e.what());
 	}
 
-	// Convert to rows
-	gstate->rows = ReadNewickTableFunction::TreeToRows(tree);
-
+	// insert_fully_resolved keeps input node i at index i and appends the nodes it creates
+	gstate->SetRows(tree);
 	return gstate;
 }
 
-void TreeResolvePlacementTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
-	auto &global_state = data_p.global_state->Cast<GlobalState>();
-
-	if (global_state.current_row_idx >= global_state.rows.size()) {
-		output.SetChildCardinality(0);
-		return;
-	}
-
-	size_t rows_to_output =
-	    std::min<size_t>(STANDARD_VECTOR_SIZE, global_state.rows.size() - global_state.current_row_idx);
-
-	ReadNewickTableFunction::EmitNodeRows(global_state.rows, global_state.current_row_idx, rows_to_output, output, 0,
-	                                      false, "");
-
-	global_state.current_row_idx += rows_to_output;
-	output.SetChildCardinality(rows_to_output);
-}
-
 TableFunction TreeResolvePlacementTableFunction::GetFunction() {
-	return TableFunction("tree_resolve_placement", {LogicalType::VARCHAR, LogicalType::VARCHAR}, Execute, Bind,
-	                     InitGlobal);
+	return TableFunction(kFn, {LogicalType::VARCHAR, LogicalType::VARCHAR}, TreeOutputExecute, Bind, InitGlobal);
 }
 
 void TreeResolvePlacementTableFunction::Register(ExtensionLoader &loader) {

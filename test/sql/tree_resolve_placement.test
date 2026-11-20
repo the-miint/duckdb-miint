@@ -283,3 +283,171 @@ DROP TABLE jplace_tree;
 
 statement ok
 DROP TABLE jplace_placements;
+
+# =============================================================================
+# Typed names and labels. `name` keeps its id type (VARCHAR, BIGINT or UUID), and an optional
+# `label` VARCHAR column of text labels is carried through; the nodes a placement creates (an
+# internal node on the edge, and the fragment's tip) have no label. A VARCHAR tree takes a
+# fragment_id of any id type and names the tip with its text; a BIGINT or UUID tree takes
+# fragment ids of its own type.
+# Tree: ((A:0.1{0},B:0.2{1}):0.3{2},C:0.4{3}):0.0{4}; A, B, C are 1, 2, 3 in the typed trees.
+# =============================================================================
+
+statement ok
+CREATE TABLE rp_text AS SELECT node_index, name, branch_length, edge_id, parent_index,
+    CASE WHEN NOT is_tip THEN 'n' || node_index END AS label
+FROM read_newick('data/newick/with_edge_ids.nwk');
+
+statement ok
+CREATE TABLE rp_big AS SELECT node_index,
+    CASE name WHEN 'A' THEN 1 WHEN 'B' THEN 2 WHEN 'C' THEN 3 END::BIGINT AS name,
+    branch_length, edge_id, parent_index, label
+FROM rp_text;
+
+statement ok
+CREATE TABLE rp_uuid AS SELECT node_index,
+    CASE WHEN name IS NOT NULL THEN ('00000000-0000-0000-0000-00000000000' || name)::UUID END AS name,
+    branch_length, edge_id, parent_index, label
+FROM rp_big;
+
+statement ok
+CREATE TABLE place_big AS SELECT * FROM (VALUES
+    (100::BIGINT, 0::BIGINT, 0.95::DOUBLE, 0.05::DOUBLE, 0.001::DOUBLE)
+) AS t(fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length);
+
+statement ok
+CREATE TABLE place_uuid AS SELECT ('00000000-0000-0000-0000-000000000' || fragment_id)::UUID AS fragment_id,
+    edge_id, like_weight_ratio, distal_length, pendant_length
+FROM place_big;
+
+statement ok
+CREATE TABLE place_text AS SELECT fragment_id::VARCHAR AS fragment_id, edge_id, like_weight_ratio,
+    distal_length, pendant_length
+FROM place_big;
+
+query T
+SELECT DISTINCT typeof(name) FROM tree_resolve_placement('rp_big', 'place_big');
+----
+BIGINT
+
+# The tree's nodes keep their names and labels; the placement appends an internal node and the
+# fragment's tip, both unlabeled.
+query IIT
+SELECT node_index, name, label FROM tree_resolve_placement('rp_big', 'place_big') ORDER BY node_index;
+----
+0	1	NULL
+1	2	NULL
+2	NULL	n2
+3	3	NULL
+4	NULL	n4
+5	NULL	NULL
+6	100	NULL
+
+query TTT
+SELECT node_index, name, label FROM tree_resolve_placement('rp_uuid', 'place_uuid') ORDER BY node_index;
+----
+0	00000000-0000-0000-0000-000000000001	NULL
+1	00000000-0000-0000-0000-000000000002	NULL
+2	NULL	n2
+3	00000000-0000-0000-0000-000000000003	NULL
+4	NULL	n4
+5	NULL	NULL
+6	00000000-0000-0000-0000-000000000100	NULL
+
+query T
+SELECT DISTINCT typeof(name) FROM tree_resolve_placement('rp_uuid', 'place_uuid');
+----
+UUID
+
+# A VARCHAR tree takes BIGINT and UUID fragment ids and names the tips with their text; its
+# unnamed nodes stay ''.
+query TTT
+SELECT node_index, name, label FROM tree_resolve_placement('rp_text', 'place_big') ORDER BY node_index;
+----
+0	A	NULL
+1	B	NULL
+2	(empty)	n2
+3	C	NULL
+4	(empty)	n4
+5	(empty)	NULL
+6	100	NULL
+
+query T
+SELECT name FROM tree_resolve_placement('rp_text', 'place_uuid') WHERE node_index = 6;
+----
+00000000-0000-0000-0000-000000000100
+
+# A typed tree takes fragment ids of its own type only: they become its tips' names.
+statement error
+SELECT * FROM tree_resolve_placement('rp_big', 'place_text');
+----
+'fragment_id' is VARCHAR
+
+statement error
+SELECT * FROM tree_resolve_placement('rp_uuid', 'place_big');
+----
+'fragment_id' is BIGINT
+
+# Without a `label` column the output is the read_newick schema.
+statement ok
+CREATE TABLE rp_text_nolabel AS SELECT node_index, name, branch_length, edge_id, parent_index FROM rp_text;
+
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM tree_resolve_placement('rp_text_nolabel', 'place_big'));
+----
+node_index	BIGINT
+name	VARCHAR
+branch_length	DOUBLE
+edge_id	BIGINT
+parent_index	BIGINT
+is_tip	BOOLEAN
+
+statement ok
+CREATE TABLE rp_label_int AS SELECT node_index, name, branch_length, edge_id, parent_index, 7 AS label FROM rp_text;
+
+statement error
+SELECT * FROM tree_resolve_placement('rp_label_int', 'place_big');
+----
+'label' must be VARCHAR, got INTEGER
+
+statement ok
+CREATE TABLE rp_int AS SELECT node_index, name::INTEGER AS name, branch_length, edge_id, parent_index FROM rp_big;
+
+statement error
+SELECT * FROM tree_resolve_placement('rp_int', 'place_big');
+----
+tip names must be VARCHAR, BIGINT, or UUID, but they are INTEGER
+
+# A typed tree's fragment ids name its new tips, so their type is checked when the placements are
+# read as well as at bind: a view can change type under a prepared statement.
+statement ok
+COPY (SELECT * FROM place_big) TO '{TEST_DIR}/prep_rp_place.csv';
+
+statement ok
+CREATE VIEW prep_rp_place AS SELECT * FROM read_csv('{TEST_DIR}/prep_rp_place.csv');
+
+statement ok
+PREPARE prep_rp AS SELECT name FROM tree_resolve_placement('rp_big', 'prep_rp_place') WHERE node_index = 6;
+
+query I
+EXECUTE prep_rp;
+----
+100
+
+statement ok
+COPY (SELECT 42::BIGINT AS fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length FROM place_big)
+TO '{TEST_DIR}/prep_rp_place.csv';
+
+query I
+EXECUTE prep_rp;
+----
+42
+
+statement ok
+COPY (SELECT '*' AS fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length FROM place_big)
+TO '{TEST_DIR}/prep_rp_place.csv';
+
+statement error
+EXECUTE prep_rp;
+----
+<REGEX>:.*tree_resolve_placement: column 'fragment_id' of 'prep_rp_place' is VARCHAR now but was BIGINT when the statement was bound.*
