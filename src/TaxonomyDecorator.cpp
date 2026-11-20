@@ -1,9 +1,11 @@
 #include "TaxonomyDecorator.hpp"
 
 #include <algorithm>
+#include <array>
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 
 namespace miint {
@@ -536,19 +538,143 @@ std::vector<NodeLabel> PromoteCommonNames(std::vector<NodeLabel> labels, const T
 }
 
 std::string FormatLabel(const NodeLabel &label, const TaxonomyStore &store) {
-	return {};
+	std::string out;
+	for (const auto &[rank, name] : label) {
+		if (!out.empty()) {
+			out += "; ";
+		}
+		out += kLineageRanks[rank].letter;
+		out += "__";
+		out += store.NameText(rank, name);
+	}
+	return out;
 }
 
 DecorateResult Decorate(const CladeCountIndex &index, const TaxonomyStore &store, uint32_t min_count) {
-	return {AssignNames(index, min_count), {}, {}};
+	auto assignment = AssignNames(index, min_count);
+	auto backfill = BackfillNames(assignment, store, index.Tree());
+	auto labels = PromoteCommonNames(std::move(backfill.labels), store, index.Tree());
+	return {std::move(assignment), std::move(labels), std::move(backfill.inverted)};
 }
 
+namespace {
+bool IsSpace(char c) {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+std::string_view TrimSpace(std::string_view text) {
+	while (!text.empty() && IsSpace(text.front())) {
+		text.remove_prefix(1);
+	}
+	while (!text.empty() && IsSpace(text.back())) {
+		text.remove_suffix(1);
+	}
+	return text;
+}
+} // namespace
+
 std::vector<LabelPart> ParseNodeLabel(std::string_view label) {
-	return {};
+	std::vector<LabelPart> parts;
+	if (label.empty()) {
+		return parts;
+	}
+	auto fail = [&](std::string_view component, const char *why) {
+		throw std::invalid_argument("ParseNodeLabel: label \"" + std::string(label) + "\": component \"" +
+		                            std::string(component) + "\" " + why);
+	};
+	std::array<bool, kRanks> seen {};
+	for (size_t start = 0;;) {
+		const size_t end = std::min(label.find(';', start), label.size());
+		const std::string_view component = TrimSpace(label.substr(start, end - start));
+		if (component.empty()) {
+			fail(component, "is empty");
+		}
+		if (component.size() < 3 || component.substr(1, 2) != "__") {
+			fail(component, "is not a rank letter, two underscores and a name");
+		}
+		const char letter = component[0] == 'k' ? 'd' : component[0];
+		const auto rank = static_cast<size_t>(std::find_if(kLineageRanks.begin(), kLineageRanks.end(),
+		                                                   [&](const LineageRank &r) { return r.letter == letter; }) -
+		                                      kLineageRanks.begin());
+		if (rank == kRanks) {
+			fail(component, "has an unknown rank letter; the letters are dpcofgst, and k for the domain");
+		}
+		const std::string_view name = component.substr(3);
+		if (name.empty()) {
+			fail(component, "has an empty name");
+		}
+		if (IsSpace(name.front())) {
+			fail(component, "has a name that starts with whitespace");
+		}
+		if (seen[rank]) {
+			fail(component, "gives a rank the label already has");
+		}
+		seen[rank] = true;
+		parts.push_back({rank, std::string(name)});
+		if (end == label.size()) {
+			break;
+		}
+		start = end + 1;
+	}
+	std::sort(parts.begin(), parts.end(), [](const LabelPart &a, const LabelPart &b) { return a.rank < b.rank; });
+	return parts;
 }
 
 EmittedLineages EmitLineages(const TreeIndex &tree, const std::vector<std::vector<LabelPart>> &labels) {
-	return {};
+	const uint32_t n = static_cast<uint32_t>(tree.size());
+	if (labels.size() != n) {
+		throw std::invalid_argument("EmitLineages: " + std::to_string(labels.size()) + " labels for a tree of " +
+		                            std::to_string(n) + " nodes");
+	}
+	constexpr uint32_t kNone = EmittedLineages::kNone;
+	EmittedLineages out;
+	// Each tip's position in `tips`, which lists them by ascending node.
+	std::vector<uint32_t> tip_position(n, kNone);
+	for (uint32_t v = 0; v < n; v++) {
+		if (tree.is_tip(v)) {
+			tip_position[v] = static_cast<uint32_t>(out.tips.size());
+			out.tips.push_back(v);
+		}
+	}
+	out.holders.resize(out.tips.size());
+	std::vector<uint32_t> preorder(n);
+	for (uint32_t v = 0; v < n; v++) {
+		preorder[tree.pre(v)] = v;
+	}
+
+	// The holder of each rank on the path from the root to the node being visited. Each internal
+	// node on that path is on `path`, with the length `set` had when it was entered; the ranks it
+	// set are set's entries after that, cleared again when the walk leaves its subtree.
+	std::array<uint32_t, kRanks> holder;
+	holder.fill(kNone);
+	std::vector<std::pair<uint32_t, size_t>> path;
+	std::vector<size_t> set;
+	for (const uint32_t v : preorder) {
+		while (!path.empty() && !tree.is_ancestor_or_self(path.back().first, v)) {
+			for (size_t i = path.back().second; i < set.size(); i++) {
+				holder[set[i]] = kNone;
+			}
+			set.resize(path.back().second);
+			path.pop_back();
+		}
+		if (tree.is_tip(v)) {
+			out.holders[tip_position[v]] = holder;
+			continue;
+		}
+		path.push_back({v, set.size()});
+		for (const auto &part : labels[v]) {
+			if (holder[part.rank] == kNone) {
+				holder[part.rank] = v;
+				set.push_back(part.rank);
+			} else {
+				out.repeats.push_back({v, part.rank, holder[part.rank]});
+			}
+		}
+	}
+	std::sort(out.repeats.begin(), out.repeats.end(), [](const RankRepeat &a, const RankRepeat &b) {
+		return std::tie(a.node, a.rank) < std::tie(b.node, b.rank);
+	});
+	return out;
 }
 
 } // namespace miint

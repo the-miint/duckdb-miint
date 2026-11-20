@@ -305,7 +305,7 @@ struct LabelPart {
 // domain), two underscores and a name. They may come in any order; the parts come by ascending
 // rank. An empty label has no parts. Throws std::invalid_argument, naming the label and the
 // component, for an empty component, one not of that form, an unknown letter, an empty name or
-// one that starts or ends with whitespace, and a rank given twice.
+// one that starts with whitespace ("f__ A"), and a rank given twice.
 std::vector<LabelPart> ParseNodeLabel(std::string_view label);
 
 // A rank that a node's label holds and a label above it on its path already holds; the tips
