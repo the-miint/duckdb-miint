@@ -387,4 +387,8 @@ NameAssignment AssignNames(const CladeCountIndex &index, uint32_t min_count) {
 	return NameAssignment(std::move(scores), std::move(not_placed), static_cast<uint32_t>(tree.size()));
 }
 
+Backfill BackfillNames(const NameAssignment &assignment, const TaxonomyStore &store, const TreeIndex &tree) {
+	return {};
+}
+
 } // namespace miint

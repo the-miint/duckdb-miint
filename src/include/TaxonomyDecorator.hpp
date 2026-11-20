@@ -203,4 +203,52 @@ private:
 // std::invalid_argument when min_count is 0.
 NameAssignment AssignNames(const CladeCountIndex &index, uint32_t min_count);
 
+// A name on a node at a rank (a kLineageRanks index).
+struct RankName {
+	size_t rank;
+	NameId name;
+
+	bool operator==(const RankName &) const = default;
+};
+
+// A node's label: its names by ascending rank, at most one per rank.
+using NodeLabel = std::vector<RankName>;
+
+// A node whose preliminary name is at a shallower rank than its nearest named ancestor's
+// (tax2tree's levels < 0). tax2tree empties such a node's label, losing a name the fold
+// placed, unless the name is a domain, which it never compares; here the node keeps its
+// preliminary name, and this records that the ranks were inverted, at the domain too.
+struct InvertedBackfill {
+	uint32_t node;
+	size_t rank;
+	NameId name;
+	uint32_t ancestor;
+	size_t ancestor_rank;
+
+	bool operator==(const InvertedBackfill &) const = default;
+};
+
+struct Backfill {
+	// One label per node of the tree.
+	std::vector<NodeLabel> labels;
+	// By ascending node.
+	std::vector<InvertedBackfill> inverted;
+};
+
+// Each node's label after tax2tree's set_preliminary_name_and_rank and backfill_names_gap. An
+// internal node keeps its preliminary name (NameAssignment::Preliminary), preceded by the
+// names the hierarchy (TaxonomyStore::Parent) gives it at the ranks between that name's rank
+// and the preliminary rank of its nearest named ancestor, the nearest ancestor with a
+// preliminary name. The node's other assigned names are dropped; where the fill reaches their
+// ranks, the hierarchy's names stand in their place.
+//   - Tips, and internal nodes with no preliminary name, get an empty label.
+//   - With no named ancestor, the root included, the fill reaches rank 0. tax2tree skips such
+//     a node and keeps its name alone, so the shallower names the fold placed on it are lost:
+//     a root named down to the phylum leaves every lineage without a domain.
+//   - With the ancestor's rank equal to the node's or one above it, there is no gap to fill.
+//   - With the ancestor's rank deeper than the node's, the node keeps its preliminary name
+//     alone and `inverted` records it. tax2tree empties the label.
+// `assignment` must come from AssignNames over an index built on `tree` and `store`.
+Backfill BackfillNames(const NameAssignment &assignment, const TaxonomyStore &store, const TreeIndex &tree);
+
 } // namespace miint

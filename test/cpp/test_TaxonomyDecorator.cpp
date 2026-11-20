@@ -1090,3 +1090,216 @@ TEST_CASE("AssignNames matches the brute-force assignment", "[taxonomy_decorator
 		}
 	}
 }
+
+namespace {
+constexpr size_t kFamily = 4, kGenus = 5;
+
+// A label as text, "p__P1; c__C1", in the order it lists its names.
+std::string LabelText(const NodeLabel &label, const TaxonomyStore &store) {
+	std::string out;
+	for (const auto &[rank, name] : label) {
+		if (!out.empty()) {
+			out += "; ";
+		}
+		out += kLineageRanks[rank].letter;
+		out += "__" + store.NameText(rank, name);
+	}
+	return out;
+}
+
+std::vector<std::string> LabelTexts(const Backfill &backfill, const TaxonomyStore &store) {
+	std::vector<std::string> out;
+	for (const auto &label : backfill.labels) {
+		out.push_back(LabelText(label, store));
+	}
+	return out;
+}
+
+// Per-node label text; unlisted nodes have an empty label.
+std::vector<std::string> TextsOf(size_t n, std::initializer_list<std::pair<uint32_t, std::string>> texts) {
+	return PerNode(n, texts);
+}
+
+// The names the fold gave a node, as label text.
+std::string FoldText(const NameAssignment &assignment, uint32_t node, const TaxonomyStore &store) {
+	NodeLabel label;
+	for (const auto &score : assignment.NamesAt(node)) {
+		label.push_back({score.rank, score.name});
+	}
+	return LabelText(label, store);
+}
+} // namespace
+
+// q's fold left it only O1: its phylum and class are unsafe there, since P1 and C1 have most of
+// their tips under r. Its nearest named ancestor, the root, is named at the domain, so the
+// phylum and class between them come from the hierarchy, O1's parent C1 and C1's parent P1. s
+// is named one rank below the root, so there is no gap and it keeps P2 alone. Tips, and
+// internal nodes without a name, get empty labels.
+TEST_CASE("BackfillNames fills the ranks between a node and its named ancestor from the hierarchy",
+          "[taxonomy_decorator]") {
+	// root(0) +-- q(1) +-- t4, t5      D1; P1; C1; O1
+	//         +-- r(2) +-- t6, t7, t8  D1; P1; C1; O2
+	//         +-- s(3) +-- t9, t10     D1; P2
+	Lineages lineages;
+	Add(lineages, {"D1", "P1", "C1", "O1"}, {4, 5});
+	Add(lineages, {"D1", "P1", "C1", "O2"}, {6, 7, 8});
+	Add(lineages, {"D1", "P2"}, {9, 10});
+	auto c = MakeCase({kNoParent, 0, 0, 0, 1, 1, 2, 2, 2, 3, 3}, lineages);
+	const auto assignment = AssignNames(c.index, 2);
+	REQUIRE(FoldText(assignment, 0, c.store) == "d__D1");
+	REQUIRE(FoldText(assignment, 1, c.store) == "o__O1");
+	REQUIRE(FoldText(assignment, 2, c.store) == "p__P1; c__C1; o__O2");
+	REQUIRE(FoldText(assignment, 3, c.store) == "p__P2");
+	const auto backfill = BackfillNames(assignment, c.store, c.index.Tree());
+	CHECK(LabelTexts(backfill, c.store) ==
+	      TextsOf(11, {{0, "d__D1"}, {1, "p__P1; c__C1; o__O1"}, {2, "p__P1; c__C1; o__O2"}, {3, "p__P2"}}));
+	CHECK(backfill.inverted.empty());
+}
+
+// tax2tree keeps only a node's deepest name and rebuilds the shallower ones from the hierarchy,
+// so a fold name that disagrees with the hierarchy is replaced. n holds Py, the one phylum
+// eligible there, and Cx, whose parent is Pz: Pz is not eligible at n, having most of its tips
+// under m. n's label is Cx's lineage, Pz then Cx.
+TEST_CASE("BackfillNames replaces the fold's shallower names with the hierarchy's", "[taxonomy_decorator]") {
+	// root(0) +-- n(1) +-- t3, t4            D1; Pz; Cx
+	//         |        +-- t5, t6, t7        D1; Py
+	//         +-- m(2) +-- t8, t9, t10, t11  D1; Pz; C2
+	Lineages lineages;
+	Add(lineages, {"D1", "Pz", "Cx"}, {3, 4});
+	Add(lineages, {"D1", "Py"}, {5, 6, 7});
+	Add(lineages, {"D1", "Pz", "C2"}, {8, 9, 10, 11});
+	auto c = MakeCase({kNoParent, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2}, lineages);
+	const auto assignment = AssignNames(c.index, 2);
+	REQUIRE(FoldText(assignment, 0, c.store) == "d__D1");
+	REQUIRE(FoldText(assignment, 1, c.store) == "p__Py; c__Cx");
+	REQUIRE(FoldText(assignment, 2, c.store) == "p__Pz; c__C2");
+	const auto backfill = BackfillNames(assignment, c.store, c.index.Tree());
+	CHECK(LabelTexts(backfill, c.store) == TextsOf(12, {{0, "d__D1"}, {1, "p__Pz; c__Cx"}, {2, "p__Pz; c__C2"}}));
+	CHECK(backfill.inverted.empty());
+}
+
+// The root has no named ancestor, so its fill reaches the domain. tax2tree's backfill skips the
+// root, so the root keeps its deepest name alone: D1, which the fold also gave it, is dropped
+// and not rebuilt, and no lineage on this tree would carry the domain. q is named one rank below
+// the root's P1, so it has no gap to fill.
+TEST_CASE("BackfillNames fills the root up to the domain", "[taxonomy_decorator]") {
+	// root(0) +-- q(1) +-- t3, t4  (D1; P1; C1)
+	//         +-- t2   (D1; P1; C2)
+	auto c =
+	    MakeCase({kNoParent, 0, 0, 1, 1}, {{2, {"D1", "P1", "C2"}}, {3, {"D1", "P1", "C1"}}, {4, {"D1", "P1", "C1"}}});
+	const auto assignment = AssignNames(c.index, 2);
+	REQUIRE(FoldText(assignment, 0, c.store) == "d__D1; p__P1");
+	REQUIRE(FoldText(assignment, 1, c.store) == "c__C1");
+	const auto backfill = BackfillNames(assignment, c.store, c.index.Tree());
+	CHECK(LabelTexts(backfill, c.store) == TextsOf(5, {{0, "d__D1; p__P1"}, {1, "c__C1"}}));
+	CHECK(backfill.inverted.empty());
+}
+
+// On a two-domain tree the root is unnamed, every rank having two eligible names there, so y,
+// which the fold named at every rank from A to S3, has no named ancestor. tax2tree skips such a
+// node and keeps only S3, losing the six names above it. Here the fill reaches the domain. x,
+// named at the domain alone, has nothing to fill; ab and cd fill up to x's domain.
+TEST_CASE("BackfillNames fills a node with no named ancestor up to the domain", "[taxonomy_decorator]") {
+	// root(0) +-- x(1) +-- ab(3) +-- t5, t6  B; P1; C1; O1; F1; G1; S1
+	//         |        +-- cd(4) +-- t7, t8  B; P2; C2; O2; F2; G2; S2
+	//         +-- y(2) +-- t9, t10           A; P3; C3; O3; F3; G3; S3
+	auto lineage = [](std::string domain, std::string k) {
+		return std::vector<std::string> {domain, "P" + k, "C" + k, "O" + k, "F" + k, "G" + k, "S" + k};
+	};
+	Lineages lineages;
+	Add(lineages, lineage("B", "1"), {5, 6});
+	Add(lineages, lineage("B", "2"), {7, 8});
+	Add(lineages, lineage("A", "3"), {9, 10});
+	auto c = MakeCase({kNoParent, 0, 0, 1, 1, 3, 3, 4, 4, 2, 2}, lineages);
+	const auto assignment = AssignNames(c.index, 2);
+	REQUIRE(FoldText(assignment, 0, c.store).empty());
+	REQUIRE(FoldText(assignment, 1, c.store) == "d__B");
+	REQUIRE(FoldText(assignment, 2, c.store) == "d__A; p__P3; c__C3; o__O3; f__F3; g__G3; s__S3");
+	const auto backfill = BackfillNames(assignment, c.store, c.index.Tree());
+	CHECK(LabelTexts(backfill, c.store) == TextsOf(11, {{1, "d__B"},
+	                                                    {2, "d__A; p__P3; c__C3; o__O3; f__F3; g__G3; s__S3"},
+	                                                    {3, "p__P1; c__C1; o__O1; f__F1; g__G1; s__S1"},
+	                                                    {4, "p__P2; c__C2; o__O2; f__F2; g__G2; s__S2"}}));
+	CHECK(backfill.inverted.empty());
+}
+
+// n is named at the family, below a, named at the genus: n won F2 from a, which holds G's tips
+// too, while a kept G, eligible nowhere else. With its ancestor's rank deeper than its own,
+// tax2tree empties n's label, losing F2; here n keeps F2 and the inversion is recorded. a fills
+// the family between it and the root's O1 from the hierarchy: G's parent F1, not the F2 below it.
+TEST_CASE("BackfillNames keeps an inverted-rank node's name and records it", "[taxonomy_decorator]") {
+	// root(0) +-- a(1) +-- n(2) +-- t4, t5  D1; P1; C1; O1; F2
+	//         |        +-- t6, t7           D1; P1; C1; O1; F1; G
+	//         +-- m(3) +-- t8 .. t12        D1; P1; C1; O1; F1
+	Lineages lineages;
+	Add(lineages, {"D1", "P1", "C1", "O1", "F2"}, {4, 5});
+	Add(lineages, {"D1", "P1", "C1", "O1", "F1", "G"}, {6, 7});
+	Add(lineages, {"D1", "P1", "C1", "O1", "F1"}, {8, 9, 10, 11, 12});
+	auto c = MakeCase({kNoParent, 0, 1, 0, 2, 2, 1, 1, 3, 3, 3, 3, 3}, lineages);
+	const auto assignment = AssignNames(c.index, 2);
+	REQUIRE(FoldText(assignment, 0, c.store) == "d__D1; p__P1; c__C1; o__O1");
+	REQUIRE(FoldText(assignment, 1, c.store) == "g__G");
+	REQUIRE(FoldText(assignment, 2, c.store) == "f__F2");
+	REQUIRE(FoldText(assignment, 3, c.store) == "f__F1");
+	const auto backfill = BackfillNames(assignment, c.store, c.index.Tree());
+	CHECK(LabelTexts(backfill, c.store) ==
+	      TextsOf(13, {{0, "d__D1; p__P1; c__C1; o__O1"}, {1, "f__F1; g__G"}, {2, "f__F2"}, {3, "f__F1"}}));
+	CHECK(backfill.inverted == std::vector<InvertedBackfill> {{2, kFamily, c.Name(kFamily, "F2"), 1, kGenus}});
+}
+
+// An inversion at the domain is recorded too. tax2tree never compares a domain's rank with its
+// ancestor's, so it keeps the name without a word; the label is the same here, but a domain below
+// a phylum is as inverted as a family below a genus. Two domains are eligible at the root, so it
+// is named at the phylum, P; n holds D's two tips and wins D, and its phylum is unsafe, Pa and Pb
+// being on one tip each.
+TEST_CASE("BackfillNames records an inverted node named at the domain", "[taxonomy_decorator]") {
+	// root(0) +-- n(1) +-- t2  D; Pa
+	//         |        +-- t3  D; Pb
+	//         +-- t4, t5       D2; P
+	Lineages lineages {{2, {"D", "Pa"}}, {3, {"D", "Pb"}}};
+	Add(lineages, {"D2", "P"}, {4, 5});
+	auto c = MakeCase({kNoParent, 0, 1, 1, 0, 0}, lineages);
+	const auto assignment = AssignNames(c.index, 2);
+	REQUIRE(FoldText(assignment, 0, c.store) == "p__P");
+	REQUIRE(FoldText(assignment, 1, c.store) == "d__D");
+	const auto backfill = BackfillNames(assignment, c.store, c.index.Tree());
+	CHECK(LabelTexts(backfill, c.store) == TextsOf(6, {{0, "d__D2; p__P"}, {1, "d__D"}}));
+	CHECK(backfill.inverted == std::vector<InvertedBackfill> {{1, kDomain, c.Name(kDomain, "D"), 0, kPhylum}});
+}
+
+// Against brute force (naive_backfill): nearest named ancestors found by walking parents, fills
+// by walking Parent(), on random trees through AssignNames at min_count 1 to 3. The brute force
+// runs first over every case, so the coverage it requires is checked even while BackfillNames
+// fails.
+TEST_CASE("BackfillNames matches the brute-force backfill", "[taxonomy_decorator]") {
+	std::mt19937 rng(20261120);
+	struct Trial {
+		TaxonomyCase c;
+		uint32_t min_count;
+		NaiveBackfill expected;
+	};
+	std::vector<Trial> trials;
+	BackfillCoverage coverage;
+	for (int k = 0; k < 300; k++) {
+		const uint32_t n = std::uniform_int_distribution<uint32_t>(1, 40)(rng);
+		auto c = random_taxonomy_case(rng, n);
+		TaxonomyStore store(c.rows);
+		const auto index = build_index(c, store);
+		for (uint32_t min_count = 1; min_count <= 3; min_count++) {
+			auto expected = naive_backfill(c, store, AssignNames(index, min_count));
+			coverage.Add(expected);
+			trials.push_back({c, min_count, std::move(expected)});
+		}
+	}
+	CHECK(coverage.Missing().empty());
+
+	for (size_t k = 0; k < trials.size(); k++) {
+		const auto &[c, min_count, expected] = trials[k];
+		TaxonomyStore store(c.rows);
+		const auto index = build_index(c, store);
+		INFO("trial " << k / 3 << ", " << c.tree.parent.size() << " nodes, min_count " << min_count);
+		const auto backfill = BackfillNames(AssignNames(index, min_count), store, index.Tree());
+		REQUIRE(backfill.labels == expected.labels);
+		REQUIRE(backfill.inverted == expected.inverted);
+	}
+}
