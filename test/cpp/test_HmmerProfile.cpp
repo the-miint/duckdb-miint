@@ -748,11 +748,11 @@ TEST_CASE("HMMER profile - lines as HMMER reads them", "[hmmer]") {
 	CHECK(FirstWord("").empty());
 	CHECK(FirstWord(" \t ").empty());
 	CHECK(FirstWord("NAME\rfn3") == "NAME");
-	// Easel splits on space, tab, CR and LF only, so a vertical tab or form feed is part of a
-	// word, and a line holding one is not blank.
-	CHECK(FirstWord("\vNAME  fn3") == "\vNAME");
+	// Easel skips any leading whitespace, a vertical tab or form feed too, but ends a word only at
+	// a space, tab, CR or LF: a form feed after the first letter is part of the word.
+	CHECK(FirstWord("\vNAME  fn3") == "NAME");
 	CHECK(FirstWord("NAME\f fn3") == "NAME\f");
-	CHECK_FALSE(IsBlankOrComment(FirstWord("\v")));
+	CHECK(IsBlankOrComment(FirstWord("\v")));
 
 	CHECK(IsBlankOrComment(""));
 	CHECK(IsBlankOrComment("#"));

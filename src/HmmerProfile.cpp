@@ -111,10 +111,12 @@ std::string WithoutTrailingWhitespace(std::string_view message) {
 } // namespace
 
 std::string_view FirstWord(std::string_view line) {
-	// Easel's token separators (esl_fileparser.c): not std::isspace, which adds
-	// \v and \f and depends on the locale.
+	// As esl_fileparser_NextLine() and GetTokenOnLine() take it: NextLine skips
+	// what isspace() skips in the C locale, and a token ends at a space, tab, CR
+	// or LF. Spelled out, as isspace() depends on the locale.
+	constexpr std::string_view leading = " \t\n\v\f\r";
 	constexpr std::string_view separators = " \t\r\n";
-	const size_t begin = line.find_first_not_of(separators);
+	const size_t begin = line.find_first_not_of(leading);
 	if (begin == std::string_view::npos) {
 		return {};
 	}

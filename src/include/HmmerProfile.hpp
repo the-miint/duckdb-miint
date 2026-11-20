@@ -75,11 +75,15 @@ private:
 };
 
 // How HMMER reads the lines of a model file, for a caller splitting a file into
-// records. HMMER takes each line's first word, its first token split on space,
-// tab, CR and LF (Easel's fileparser): it skips a line with none (blank) or
-// whose first word starts with '#' (a comment); a model's first line it doesn't
-// skip starts with the model's format tag; and a model ends at a line whose
-// first word is "//".
+// records. HMMER takes each line's first word as Easel's fileparser does: it
+// skips leading whitespace, vertical tab and form feed included, and the word
+// ends at a space, tab, CR or LF. It skips a line with no word (blank) or whose
+// first word starts with '#' (a comment); a model's first line it doesn't skip
+// starts with the model's format tag; and a model ends at a line whose first
+// word is "//".
+//
+// ParseProfile reads the format tag as the record's first token, with no
+// whitespace before it: a caller passes the first line from its first word on.
 std::string_view FirstWord(std::string_view line);
 bool IsBlankOrComment(std::string_view first_word);
 bool IsFormatTag(std::string_view first_word); // HMMER3/a ... HMMER3/f, or HMMER2.0

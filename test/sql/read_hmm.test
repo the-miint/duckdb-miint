@@ -646,6 +646,37 @@ SELECT gathering_threshold_sequence, gathering_threshold_domain, trusted_cutoff_
 ----
 0.0	0.0	14.4
 
+# HMMER reads a model's lines, its closing // included, through Easel's NextLine, which skips
+# leading whitespace (a vertical tab or form feed too) before it takes the first word. hmmstat, on
+# the same files: a model closed by "\v//" and the model after it are two models; a line holding
+# only "\v" between two models is blank; and "\v" before a model's format tag is skipped.
+statement ok
+COPY (SELECT rtrim(replace(content, chr(10) || '//', chr(10) || chr(11) || '//') || content, chr(10)) FROM read_text('data/hmmer/XYPPX.hmm'))
+TO '{TEST_DIR}/vt_end.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+query II
+SELECT count(*), count(*) FILTER (WHERE hmm_name = 'XYPPX') FROM read_hmm('{TEST_DIR}/vt_end.hmm');
+----
+2	2
+
+statement ok
+COPY (SELECT rtrim(content || chr(11) || chr(10) || content, chr(10)) FROM read_text('data/hmmer/XYPPX.hmm'))
+TO '{TEST_DIR}/vt_blank.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+query II
+SELECT count(*), count(*) FILTER (WHERE hmm_name = 'XYPPX') FROM read_hmm('{TEST_DIR}/vt_blank.hmm');
+----
+2	2
+
+statement ok
+COPY (SELECT rtrim(chr(11) || content, chr(10)) FROM read_text('data/hmmer/XYPPX.hmm'))
+TO '{TEST_DIR}/vt_tag.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+query II
+SELECT count(*), count(*) FILTER (WHERE hmm_name = 'XYPPX') FROM read_hmm('{TEST_DIR}/vt_tag.hmm');
+----
+1	1
+
 # Blank and comment lines before and between models count toward the line: a comment and a blank
 # line, XYPPX (lines 3 to 43), a blank line and a comment, then the bad model from line 46, whose
 # ALPH line is its sixth.
