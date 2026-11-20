@@ -493,6 +493,24 @@ TEST_CASE("HMMER profile - 3box: a HMMER3/f DNA model with MAXL", "[hmmer]") {
 	CHECK(h.forward_lambda == F(0.74408));
 }
 
+// HMMER3 writes one cutoff of each kind for a nucleotide model, and HMMER uses it for both the
+// per-sequence and the per-domain cutoff.
+TEST_CASE("HMMER profile - a DNA model's one cutoff fills both columns", "[hmmer]") {
+	Initialize();
+	std::string text(BOX3_HMM);
+	const std::string after = "CKSUM 1874497603\n";
+	const size_t at = text.find(after);
+	REQUIRE(at != std::string::npos);
+	text.insert(at + after.size(), "GA    20.50;\nTC    21.25;\nNC    19.75;\n");
+	const auto h = ParseProfile(text);
+	CHECK(h.gathering_threshold_sequence == 20.5f);
+	CHECK(h.gathering_threshold_domain == 20.5f);
+	CHECK(h.trusted_cutoff_sequence == 21.25f);
+	CHECK(h.trusted_cutoff_domain == 21.25f);
+	CHECK(h.noise_cutoff_sequence == 19.75f);
+	CHECK(h.noise_cutoff_domain == 19.75f);
+}
+
 TEST_CASE("HMMER profile - with CONS no, HMMER computes the consensus", "[hmmer]") {
 	Initialize();
 	// HMMER writes "-" in the consensus column of a model without one.
@@ -619,6 +637,15 @@ TEST_CASE("HMMER profile - a model HMMER rejects is an error with HMMER's messag
 	SECTION("ends in the middle of the model") {
 		ExpectRecordError(FirstLines(m1, 20), "Premature end of data in main model section, at node 1 (expected 1)",
 		                  20);
+	}
+	// A message HMMER ends with a newline is reported without it.
+	SECTION("a match line with too few fields") {
+		std::string text(XYPPX_HMM);
+		const std::string node1 = "\n      1   0.91707";
+		const size_t at = text.find(node1);
+		REQUIRE(at != std::string::npos);
+		text.replace(at, text.find('\n', at + 1) - at, "\n      1   0.91707  5.48468  5.65823");
+		ExpectRecordError(text, "Too few probability fields on match line, node 1: expected 20, got 3", 26);
 	}
 	SECTION("no closing //") {
 		ExpectRecordError(FirstLines(m1, 23), "Premature end of data: missing //?", 23);

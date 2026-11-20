@@ -101,6 +101,13 @@ const char *FormatName(int format) {
 	throw ProfileParseError("Empty record: no HMMER format tag", 1);
 }
 
+// HMMER ends some of its messages with a newline, which the error's reader
+// does not need.
+std::string WithoutTrailingWhitespace(std::string_view message) {
+	const size_t end = message.find_last_not_of(" \t\r\n");
+	return std::string(message.substr(0, end == std::string_view::npos ? 0 : end + 1));
+}
+
 } // namespace
 
 std::string_view FirstWord(std::string_view line) {
@@ -250,7 +257,7 @@ void ThrowIfReadFailed(int status, bool have_model, const char *errbuf, int64_t 
 		// such a call failed to set. The exception it raised says so. No read of a
 		// valid model raises one: Easel's default handler would abort.
 		if (!exception.empty()) {
-			throw ProfileParseError(exception, line);
+			throw ProfileParseError(WithoutTrailingWhitespace(exception), line);
 		}
 		if (have_model) {
 			return;
@@ -260,7 +267,7 @@ void ThrowIfReadFailed(int status, bool have_model, const char *errbuf, int64_t 
 	// The parser's own message says where in the model it stopped; an
 	// exception's comes from a function the parser called.
 	if (errbuf && *errbuf) {
-		throw ProfileParseError(errbuf, line);
+		throw ProfileParseError(WithoutTrailingWhitespace(errbuf), line);
 	}
 	// The record ended before the header did. HMMER takes that as the end of
 	// the file, with no message.
@@ -268,7 +275,7 @@ void ThrowIfReadFailed(int status, bool have_model, const char *errbuf, int64_t 
 		throw ProfileParseError("Premature end of data in the header: no HMM line", line);
 	}
 	if (!exception.empty()) {
-		throw ProfileParseError(exception, line);
+		throw ProfileParseError(WithoutTrailingWhitespace(exception), line);
 	}
 	throw ProfileParseError("HMMER failed with status " + std::to_string(status) + " and no message", line);
 }
