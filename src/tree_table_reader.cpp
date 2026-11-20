@@ -15,9 +15,7 @@
 
 namespace duckdb {
 
-void ValidateTreeTableSchema(ClientContext &context, const std::string &table_name) {
-	auto info = GetTableOrViewColumns(context, table_name, "Tree table");
-
+static void CheckTreeColumns(const TableOrViewColumns &info, const std::string &table_name) {
 	// node_index and parent_index are required; name/branch_length/edge_id are
 	// optional (ReadTreeTable substitutes NULL when they are absent).
 	for (const char *required : {"node_index", "parent_index"}) {
@@ -27,10 +25,15 @@ void ValidateTreeTableSchema(ClientContext &context, const std::string &table_na
 	}
 }
 
-// The rows of a tree table, in node_index order. `name_proj` reads the names, which the read
-// must return as `name_type`; with `labels`, a VARCHAR `label` column is read too.
+void ValidateTreeTableSchema(ClientContext &context, const std::string &table_name) {
+	CheckTreeColumns(GetTableOrViewColumns(context, table_name, "Tree table"), table_name);
+}
+
+// The rows of a tree table, in node_index order. Without `columns`, names are cast to VARCHAR, as
+// ReadTreeTable reads them; with them, names are read in the bound type and, with `labels`, the
+// VARCHAR `label` column is read too.
 static std::vector<miint::NodeInput> ReadTreeRows(ClientContext &context, const std::string &table_name,
-                                                  const std::string &name_proj, const LogicalType &name_type,
+                                                  const TreeNameColumns *columns,
                                                   std::vector<std::optional<std::string>> *labels) {
 	std::vector<miint::NodeInput> result;
 
@@ -44,6 +47,12 @@ static std::vector<miint::NodeInput> ReadTreeRows(ClientContext &context, const 
 	// Cast to canonical types so GetData<> always matches the backing store.
 	// DuckDB handles INTEGER->BIGINT, FLOAT->DOUBLE etc. transparently.
 	auto info = GetTableOrViewColumns(context, table_name, "Tree table");
+	const bool has_name = columns ? columns->has_name : HasColumn(info, "name");
+	const LogicalType name_type = columns ? columns->name_type : LogicalType::VARCHAR;
+	std::string name_proj = "CAST(NULL AS VARCHAR)";
+	if (has_name) {
+		name_proj = columns ? "name" : "name::VARCHAR";
+	}
 	std::string bl_proj = HasColumn(info, "branch_length") ? "branch_length::DOUBLE" : "CAST(NULL AS DOUBLE)";
 	std::string edge_proj = HasColumn(info, "edge_id") ? "edge_id::BIGINT" : "CAST(NULL AS BIGINT)";
 
@@ -160,15 +169,13 @@ static std::vector<miint::NodeInput> ReadTreeRows(ClientContext &context, const 
 }
 
 std::vector<miint::NodeInput> ReadTreeTable(ClientContext &context, const std::string &table_name) {
-	auto info = GetTableOrViewColumns(context, table_name, "Tree table");
-	std::string name_proj = HasColumn(info, "name") ? "name::VARCHAR" : "CAST(NULL AS VARCHAR)";
-	return ReadTreeRows(context, table_name, name_proj, LogicalType::VARCHAR, nullptr);
+	return ReadTreeRows(context, table_name, nullptr, nullptr);
 }
 
 TreeNameColumns BindTreeOutput(ClientContext &context, const char *fn, const std::string &table_name,
                                vector<LogicalType> &return_types, vector<Identifier> &names) {
-	ValidateTreeTableSchema(context, table_name);
 	auto info = GetTableOrViewColumns(context, table_name, "Tree table");
+	CheckTreeColumns(info, table_name);
 	TreeNameColumns columns;
 	columns.has_name = HasColumn(info, "name");
 	if (columns.has_name) {
@@ -203,8 +210,7 @@ miint::NewickTree BuildTree(ClientContext &context, const std::string &table_nam
 	labels.clear();
 	// The rows are released on return, before the caller's operation, so they don't add to its peak
 	// memory: an operation that builds a new tree (shear, resolution) holds two trees at once.
-	auto node_inputs = ReadTreeRows(context, table_name, columns.has_name ? "name" : "CAST(NULL AS VARCHAR)",
-	                                columns.name_type, columns.has_label ? &labels : nullptr);
+	auto node_inputs = ReadTreeRows(context, table_name, &columns, columns.has_label ? &labels : nullptr);
 	// build() keeps the rows' order, so node i is row i, the row labels[i] came from
 	try {
 		return miint::NewickTree::build(node_inputs);

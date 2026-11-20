@@ -29,6 +29,7 @@ unique_ptr<FunctionData> TreeResolvePlacementTableFunction::Bind(ClientContext &
 	// A fragment's id names the tip it becomes. A VARCHAR tree takes any id type and names the tip
 	// with its text; a BIGINT or UUID tree takes its own type, so the tip's name is one.
 	if (tree_columns.name_type.id() != LogicalTypeId::VARCHAR) {
+		// ValidatePlacementTableSchema, above, has checked that fragment_id exists
 		LogicalType fragment_type;
 		FindColumnType(GetTableOrViewColumns(context, placements_table_name, "Placement table"), "fragment_id",
 		               fragment_type);

@@ -245,6 +245,9 @@ public:
 	// 3. Sorts each group by distal_length descending
 	// 4. For each edge, creates a chain of new internal nodes with fragments
 	//
+	// Existing nodes keep their index and the nodes it creates are appended after them, so data a
+	// caller holds per node index stays with its node (tree_resolve_placement carries labels so).
+	//
 	// Throws if edge_id not found or distal_length exceeds edge length
 	void insert_fully_resolved(const std::vector<Placement> &placements);
 
@@ -293,7 +296,9 @@ public:
 	// Nodes with two or fewer children are left untouched, including
 	// single-child unifurcations (this resolves polytomies only; use shear() to
 	// collapse unifurcations). The returned tree's node indices are reassigned
-	// 0-based (original nodes keep their index; new nodes follow).
+	// 0-based (original nodes keep their index; new nodes follow), so data a
+	// caller holds per node index stays with its node
+	// (tree_resolve_multifurcations carries labels so).
 	NewickTree resolve_multifurcations() const;
 
 	// ========================================================================

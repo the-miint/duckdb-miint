@@ -407,6 +407,23 @@ SELECT * FROM shear_tree('tint', 'tips_big_abc');
 ----
 tip names must be VARCHAR, BIGINT, or UUID, but they are INTEGER
 
+# A label is any VARCHAR, a collated one included, as it is at bind; the output's `label` is VARCHAR.
+statement ok
+CREATE TABLE tbig_nocase(node_index BIGINT, name BIGINT, branch_length DOUBLE, edge_id BIGINT, parent_index BIGINT,
+                         label VARCHAR COLLATE NOCASE);
+
+statement ok
+INSERT INTO tbig_nocase SELECT node_index, name, branch_length, edge_id, parent_index, label FROM tbig;
+
+query IT
+SELECT name, label FROM shear_tree('tbig_nocase', 'tips_big_abc') ORDER BY name, label;
+----
+1	NULL
+2	NULL
+3	NULL
+NULL	f__H
+NULL	g__G
+
 # The output types are fixed at bind. A view can change type without a catalog change (one over a
 # file that is rewritten, under a prepared statement), and a name or label read in another type
 # would be misread, so the read checks its own types against the bound ones.
