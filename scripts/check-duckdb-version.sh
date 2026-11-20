@@ -57,7 +57,7 @@ if [[ ! -f "$WORKFLOW" ]]; then
     exit 1
 fi
 
-# A read loop, not mapfile: test_wasm_browser.sh runs this on macOS, whose bash is 3.2.
+# A read loop, not mapfile, which bash 3.2 (macOS's /bin/bash) does not have.
 wf_versions=()
 while IFS= read -r v; do
     wf_versions+=("$v")
@@ -69,8 +69,9 @@ n_pin=$(grep -cE '^[[:space:]]*duckdb_version:[[:space:]]*\$\{\{[[:space:]]*need
 # Pre-release: before the target DuckDB is tagged, both jobs take duckdb_version from
 # extension-ci-tools' _submodule_version.yml (the duckdb submodule pin) instead of a
 # literal, and there is no release version to hold the other spellings to. Only the
-# all-or-nothing form counts: a workflow mixing a literal with the pin is not pre-release,
-# and fails the normal checks below.
+# all-or-nothing form counts. A workflow mixing a literal with the pin is not pre-release:
+# the normal checks below hold the literal to the other spellings and the submodule to it,
+# and the count of inputs only notes the one that is missing.
 PRE_RELEASE=false
 if (( ${#wf_versions[@]} == 0 && n_pin == 2 )); then
     PRE_RELEASE=true
