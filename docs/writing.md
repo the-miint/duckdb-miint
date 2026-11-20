@@ -135,6 +135,7 @@ COPY (SELECT * FROM read_fastx('run_*.fastq.gz'))
 TO 'all_runs.fastq.gz' (FORMAT FASTQ, PRESERVE_ORDER true);
 ```
 
+<!-- BEGIN REFERENCE: copy_fasta -->
 ### FASTA
 
 Write query results to FASTA format files. Requires `read_id` and `sequence1` columns from `read_fastx` output.
@@ -213,6 +214,7 @@ TO 'genomes_sorted.fasta.gz' (FORMAT FASTA);
 ```
 
 Prodigal's `-a` (proteins) and `-d` (gene nucleotides) FASTA, from `predict_genes`, are written with this format and the [`prodigal_proteins` and `prodigal_genes`](gene_prediction.md#writing-prodigals-fasta) macros.
+<!-- END REFERENCE: copy_fasta -->
 
 ###  SAM and BAM
 

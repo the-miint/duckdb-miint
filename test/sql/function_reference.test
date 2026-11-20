@@ -1,0 +1,40 @@
+# name: test/sql/function_reference.test
+# description: Public reference descriptions and examples are available to DuckDB's .manual
+# group: [sql]
+
+require miint
+
+query TTTI
+SELECT function_name, function_type, parameters[1], coalesce(length(description), 0) > 0
+FROM duckdb_functions()
+WHERE extension_name = 'miint'
+  AND function_name IN ('read_fastx', 'parse_gff_attributes', 'prodigal_proteins')
+ORDER BY function_name;
+----
+parse_gff_attributes	macro	kvp_string	true
+prodigal_proteins	table_macro	relation	true
+read_fastx	table	filename	true
+
+query IIII
+SELECT starts_with(reader.examples[1], 'SELECT * FROM ''sequences.fasta'';'),
+       list_contains(reader.examples, 'SELECT * FROM read_fastx(''R1.fastq'', sequence2 = ''R2.fastq'');'),
+       starts_with(scalar_macro.examples[1], 'SELECT parse_gff_attributes('),
+       list_contains(table_macro.examples, 'SELECT * FROM prodigal_proteins(''genes'');')
+FROM duckdb_functions() AS reader, duckdb_functions() AS scalar_macro, duckdb_functions() AS table_macro
+WHERE reader.extension_name = 'miint' AND reader.function_name = 'read_fastx'
+  AND scalar_macro.extension_name = 'miint' AND scalar_macro.function_name = 'parse_gff_attributes'
+  AND table_macro.extension_name = 'miint' AND table_macro.function_name = 'prodigal_proteins';
+----
+true	true	true	true
+
+query TTI
+SELECT function_name, split_part(description, 'Full documentation: ', 2),
+       NOT contains(array_to_string(examples, chr(10)), 'Full documentation: ')
+FROM duckdb_functions()
+WHERE extension_name = 'miint'
+  AND function_name IN ('read_fastx', 'parse_gff_attributes', 'prodigal_proteins')
+ORDER BY function_name;
+----
+parse_gff_attributes	https://the-miint.github.io/duckdb-miint/reading/#parse_gff_attributeskvp_string	true
+prodigal_proteins	https://the-miint.github.io/duckdb-miint/gene_prediction/#writing-prodigals-fasta	true
+read_fastx	https://the-miint.github.io/duckdb-miint/reading/#fasta-and-fastq	true
