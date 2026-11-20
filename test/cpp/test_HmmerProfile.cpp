@@ -13,7 +13,6 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
-#include <limits>
 #include <new>
 #include <string>
 #include <thread>
@@ -684,7 +683,7 @@ TEST_CASE("HMMER profile - how a read's outcome becomes an error", "[hmmer]") {
 	SECTION("a model") {
 		CHECK_NOTHROW(ThrowIfReadFailed(eslOK, true, "", 24));
 	}
-	// HMMER returns this when allocating a HMMER2 model's background fails.
+	// No input gets here: see ThrowIfReadFailed.
 	SECTION("success, but no model") {
 		ExpectParseError([] { ThrowIfReadFailed(eslOK, false, "", 24); },
 		                 "HMMER reported success but returned no model", 24);
@@ -725,13 +724,6 @@ TEST_CASE("HMMER profile - how a read's outcome becomes an error", "[hmmer]") {
 		CHECK_THROWS_AS(ThrowIfReadFailed(eslOK, true, "", 1), std::bad_alloc);
 		CHECK(TakeExceptionMessage().empty());
 	}
-}
-
-// Easel's buffer reader sizes its line buffer as twice a line's length, as an int
-// (esl_fileparser.c, nextline()), so a line of INT_MAX / 2 bytes or more would overflow it.
-// A record no longer than that holds no such line.
-TEST_CASE("HMMER profile - the largest record holds no line Easel cannot buffer", "[hmmer]") {
-	CHECK(miint::hmmer::MAX_RECORD_BYTES <= static_cast<size_t>(std::numeric_limits<int>::max() / 2));
 }
 
 // What a caller splitting a file into records relies on, as HMMER reads lines (p7_hmmfile.c's

@@ -1508,7 +1508,7 @@ SELECT hmm_name, hmm_accession, hmm_length FROM read_hmm('models/*.hmm');
 | `hmm_length` | BIGINT | `LENG`, the number of match states |
 | `alphabet` | VARCHAR | `ALPH`: `amino`, `DNA` or `RNA`, or HMMER's toy alphabets `coins` and `dice` (Easel 0.49 reports a `dice` model as `coins`) |
 | `format` | VARCHAR | The format tag on the model's first line: `HMMER3/a` to `HMMER3/f`, or `HMMER2.0` |
-| `max_instance_length` | BIGINT | `MAXL`, the longest an instance of the model is expected to be, in residues (nhmmer uses it) |
+| `max_instance_length` | BIGINT | `MAXL`, the longest an instance of the model is expected to be, in residues (nhmmer uses it). From `HMMER3/c` on; HMMER skips the line in an older model |
 | `sequence_count` | BIGINT | `NSEQ` |
 | `effective_sequence_count` | FLOAT | `EFFN` |
 | `checksum` | UINTEGER | `CKSUM` |
@@ -1535,7 +1535,7 @@ HMMER holds the cutoffs, `EFFN` and the statistics as 32-bit floats; as `FLOAT` 
 - For a HMMER3 model, `checksum` is NULL only when the model has no `CKSUM` line; `CKSUM 0` gives 0.
 - Header lines with no column are not output: `DATE`, `COM`, `RF`, `MM`, `CS`, `MAP`, and HMMER2's null-model and statistics lines.
 - Blank lines and lines whose first word starts with `#` are skipped, as HMMER skips them. A file of nothing else returns no rows.
-- HMMER checks few of a model's numbers. It rejects a `LENG` outside 1 to 100000, a `MAXL` or `NSEQ` that reads as 0, and an `EFFN` that is not positive, reading each by its leading number (`LENG 5x` is 5). It reads the cutoffs, the statistics and the model's probabilities without checking them: a value there that is not a number reads as 0 (`GA xx yy;` gives 0.0 and 0.0), in read_hmm as in HMMER's own programs.
+- HMMER checks few of a model's numbers. It rejects a `LENG` outside 1 to 100000 and an `EFFN` that is not positive, and in a HMMER3 model an `NSEQ` or `MAXL` that reads as 0. It reads each by its leading number (`LENG 5x` is 5). It reads the cutoffs, the statistics and the model's probabilities without checking them: a value there that is not a number reads as 0 (`GA xx yy;` gives 0.0 and 0.0), in read_hmm as in HMMER's own programs.
 - gzip-compressed files (`.gz`) are decompressed transparently, including multi-member (bgzip) files. Remote paths (`s3://`, `https://`) are read through DuckDB's file system.
 - One thread reads each file; several files are read in parallel.
 - An empty file returns no rows.
@@ -1557,7 +1557,7 @@ Among the defects HMMER rejects:
 - a model longer than 100000 match states;
 - a node line with too few fields.
 
-read_hmm also rejects a single model of more than 1 GiB of text, which Easel's line reader cannot hold safely.
+read_hmm also rejects a single model of 1 GiB of text or more.
 
 **Differences from HMMER's programs:**
 

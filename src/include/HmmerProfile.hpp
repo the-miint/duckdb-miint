@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -21,10 +22,12 @@ namespace hmmer {
 //   default handler aborts the process. This one records the message for the
 //   thread that raised it (TakeExceptionMessage) and returns, so the HMMER call
 //   that raised returns its error code instead.
-// - Fills HMMER's logsum lookup table, which HMMER's Forward filter (run by
-//   HMMER2 calibration) reads, and which only the caller fills: p7_FLogsumInit
-//   must run before any p7_FLogsum (logsum.c). Its "first time" flag is
-//   unsynchronized, so it runs here, once.
+// - Fills HMMER's logsum lookup table (p7_FLogsumInit). Nothing ParseProfile
+//   runs reads it: HMMER2 calibration runs HMMER's SIMD filters. HMMER's generic
+//   Forward and Backward fill it themselves, behind an unsynchronized "first
+//   time" flag that is cleared before the table is filled, so a second thread
+//   could read it part-filled. Filled here, before any query, it is complete for
+//   every later caller.
 void Initialize();
 
 // The message of the latest Easel exception raised on this thread, or "" if
@@ -89,12 +92,12 @@ bool IsBlankOrComment(std::string_view first_word);
 bool IsFormatTag(std::string_view first_word); // HMMER3/a ... HMMER3/f, or HMMER2.0
 bool IsModelEnd(std::string_view first_word);
 
-// The largest record ParseProfile reads, 1 GiB: a limit of read_hmm's, not of
-// HMMER's. Easel's buffer reader sizes its line buffer as twice a line's length,
-// as an int (esl_fileparser.c, nextline()), so a line of INT_MAX / 2 bytes or
-// more would overflow it; a record no longer than this holds no such line.
-constexpr size_t MAX_RECORD_BYTES = 1073741823;
-static_assert(MAX_RECORD_BYTES <= 2147483647 / 2, "Easel doubles a line's length in an int");
+// The largest record ParseProfile reads, one byte under 1 GiB: a limit of
+// read_hmm's, not of HMMER's. Easel's buffer reader sizes a line's buffer as
+// twice the line's length, its newline included, in an int (esl_fileparser.c,
+// nextline()), which overflows for a line of 2^30 bytes or more. A record no
+// longer than this holds no such line.
+constexpr size_t MAX_RECORD_BYTES = static_cast<size_t>(std::numeric_limits<int>::max() / 2);
 
 // Reads one model: the text of one record, from its format line ("HMMER3/f
 // ...", "HMMER2.0 ...") through its closing "//". Text after the "//" is not
@@ -114,9 +117,10 @@ namespace detail {
 // HMMER return code, <errbuf> HMMER's error buffer, and <line> the line the
 // reader stopped at. Takes this thread's exception message.
 //
-// Exposed for the tests: one outcome, a success code with no model (HMMER
-// returns it when allocating a HMMER2 model's background fails), can't be
-// produced from any input.
+// Exposed for the tests: one outcome, a success code with no model and no
+// exception, can't be produced from any input. HMMER returns success with no
+// model when allocating a HMMER2 model's background fails, but that allocation
+// raises eslEMEM too, which ends as std::bad_alloc.
 void ThrowIfReadFailed(int status, bool have_model, const char *errbuf, int64_t line);
 } // namespace detail
 

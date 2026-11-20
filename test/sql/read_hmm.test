@@ -607,6 +607,8 @@ SELECT * FROM read_hmm('{TEST_DIR}/no_alph.hmm');
 ----
 read_hmm: {TEST_DIR}/no_alph.hmm: model 1 (line 17): No alphabet defined (no ALPH line?)
 
+# HMMER stops at the end of the text with no message here (end of data, an empty error buffer),
+# so the message is read_hmm's own.
 statement ok
 COPY (SELECT rtrim(regexp_replace(content, '\nHMM [^\n]*', ''), chr(10)) FROM read_text('data/hmmer/XYPPX.hmm'))
 TO '{TEST_DIR}/no_hmm_line.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
