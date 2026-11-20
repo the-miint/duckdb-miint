@@ -84,9 +84,6 @@ private:
 // first word starts with '#' (a comment); a model's first line it doesn't skip
 // starts with the model's format tag; and a model ends at a line whose first
 // word is "//".
-//
-// ParseProfile reads the format tag as the record's first token, with no
-// whitespace before it: a caller passes the first line from its first word on.
 std::string_view FirstWord(std::string_view line);
 bool IsBlankOrComment(std::string_view first_word);
 bool IsFormatTag(std::string_view first_word); // HMMER3/a ... HMMER3/f, or HMMER2.0
@@ -100,8 +97,9 @@ bool IsModelEnd(std::string_view first_word);
 constexpr size_t MAX_RECORD_BYTES = static_cast<size_t>(std::numeric_limits<int>::max() / 2);
 
 // Reads one model: the text of one record, from its format line ("HMMER3/f
-// ...", "HMMER2.0 ...") through its closing "//". Text after the "//" is not
-// read; splitting a file into records is the caller's job.
+// ...", "HMMER2.0 ...") through its closing "//". Blank and comment lines
+// before the format line are skipped, as is whitespace before the tag; text
+// after the "//" is not read. Splitting a file into records is the caller's job.
 //
 // For a HMMER2 model, HMMER calibrates the E-value statistics as it reads, as
 // the HMMER programs do. Its random seed is fixed, so a model always gets the

@@ -76,12 +76,11 @@ const char *FormatName(int format) {
 	}
 }
 
-// p7_hmmfile_OpenBuffer failed with a format error, which it reports with no
-// message and no line: its first token is not a HMMER format tag, or there is
-// none. Names the token, found as Easel's parser finds it: the first word of
-// the first line that is neither blank nor a comment.
-[[noreturn]] void ThrowNotAModel(std::string_view record) {
-	int64_t line = 0;
+// Where a record's format tag is, as HMMER's programs find it: the first word
+// of the first line that is neither blank nor a comment. Returns its offset in
+// <record>, and sets <line> to its line, counting from 1; npos if there is none.
+size_t FindFormatTag(std::string_view record, int64_t &line) {
+	line = 0;
 	size_t start = 0;
 	while (start < record.size()) {
 		size_t end = record.find('\n', start);
@@ -91,14 +90,11 @@ const char *FormatName(int format) {
 		line++;
 		const auto word = FirstWord(record.substr(start, end - start));
 		if (!IsBlankOrComment(word)) {
-			throw ProfileParseError("Format tag is '" + std::string(word) +
-			                            "': unrecognized (expected HMMER3/a to HMMER3/f, or HMMER2.0)",
-			                        line);
+			return static_cast<size_t>(word.data() - record.data());
 		}
 		start = end + 1;
 	}
-	// No line to point at: the record's first is reported.
-	throw ProfileParseError("Empty record: no HMMER format tag", 1);
+	return std::string_view::npos;
 }
 
 // HMMER ends some of its messages with a newline, which the error's reader
@@ -162,18 +158,35 @@ ProfileHeader ParseProfile(std::string_view record) {
 	TakeExceptionMessage();
 
 	if (record.size() > MAX_RECORD_BYTES) {
-		throw ProfileParseError(
-		    "Model record of " + std::to_string(record.size()) + " bytes is larger than read_hmm reads (1 GiB)", 1);
+		throw ProfileParseError("Model record of " + std::to_string(record.size()) +
+		                            " bytes is 1 GiB or more, more than read_hmm reads",
+		                        1);
 	}
+	int64_t tag_line = 1;
+	const size_t tag = FindFormatTag(record, tag_line);
+	if (tag == std::string_view::npos) {
+		// No line to point at: the record's first is reported.
+		throw ProfileParseError("Empty record: no HMMER format tag", 1);
+	}
+	// HMMER reads from the tag on. p7_hmmfile_OpenBuffer reads the tag with
+	// Easel's GetToken, which skips blank and comment lines but not a vertical
+	// tab or form feed before the tag, as HMMER's programs do. Its line numbers
+	// then miss the lines before the tag's.
+	const std::string_view text = record.substr(tag);
+	const int64_t lines_before = tag_line - 1;
+
 	// HMMER parses the buffer in place: it is not copied, and must outlive the
 	// handle.
 	P7_HMMFILE *opened = nullptr;
-	int status = p7_hmmfile_OpenBuffer(record.empty() ? "" : record.data(), static_cast<int>(record.size()), &opened);
+	int status = p7_hmmfile_OpenBuffer(text.data(), static_cast<int>(text.size()), &opened);
 	if (status == eslEMEM) {
 		throw std::bad_alloc();
 	}
 	if (status != eslOK) {
-		ThrowNotAModel(record);
+		// A format error, which HMMER reports with no message: the tag is not one.
+		throw ProfileParseError("Format tag is '" + std::string(FirstWord(text)) +
+		                            "': unrecognized (expected HMMER3/a to HMMER3/f, or HMMER2.0)",
+		                        tag_line);
 	}
 	std::unique_ptr<P7_HMMFILE, HmmFileCloser> hfp(opened);
 
@@ -188,7 +201,7 @@ ProfileHeader ParseProfile(std::string_view record) {
 	status = p7_hmmfile_Read(hfp.get(), &abc_read, &hmm_read);
 	std::unique_ptr<ESL_ALPHABET, AlphabetDestroyer> abc(abc_read);
 	std::unique_ptr<P7_HMM, ModelDestroyer> hmm(hmm_read);
-	detail::ThrowIfReadFailed(status, hmm != nullptr, hfp->errbuf, hfp->efp->linenumber);
+	detail::ThrowIfReadFailed(status, hmm != nullptr, hfp->errbuf, hfp->efp->linenumber + lines_before);
 
 	// HMMER sets the consensus itself only for formats older than HMMER3/e; a
 	// later file can say CONS no.

@@ -214,9 +214,6 @@ void ReadHmmTableFunction::Execute(ClientContext &context, TableFunctionInput &d
 				continue;
 			}
 			local.record_start = local.file->lines.LineNumber();
-			// ParseProfile reads the format tag as the record's first token, with no whitespace
-			// before it, where a line of the file may have some.
-			line.remove_prefix(static_cast<size_t>(word.data() - line.data()));
 		}
 		local.record.append(line);
 		local.record.push_back('\n');

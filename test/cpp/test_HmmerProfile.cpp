@@ -676,6 +676,23 @@ TEST_CASE("HMMER profile - a record that is not a model is an error", "[hmmer]")
 	}
 }
 
+// HMMER's programs find the format tag as Easel's NextLine finds a line's first
+// word, past blank and comment lines and any leading whitespace, a vertical tab
+// or form feed included. p7_hmmfile_OpenBuffer reads it with GetToken, which
+// skips the lines but not a vertical tab or form feed.
+TEST_CASE("HMMER profile - the format tag is found as HMMER's programs find it", "[hmmer]") {
+	Initialize();
+
+	SECTION("a vertical tab or form feed before the tag") {
+		CHECK(ParseProfile(std::string("\v") + M1_HMM).name == "M1");
+		CHECK(ParseProfile(std::string(" \f") + M1_HMM).name == "M1");
+	}
+	SECTION("HMMER's lines count those before the tag") {
+		ExpectRecordError("\n# a comment\n\v" + Replace(M1_HMM, "ALPH  amino\n", "ALPH  custom\n"),
+		                  "Unrecognized alphabet type custom", 6);
+	}
+}
+
 TEST_CASE("HMMER profile - how a read's outcome becomes an error", "[hmmer]") {
 	Initialize();
 	TakeExceptionMessage();
