@@ -57,16 +57,30 @@ if [[ ! -f "$WORKFLOW" ]]; then
     exit 1
 fi
 
-mapfile -t wf_versions < <(grep -oE '^[[:space:]]*duckdb_version:[[:space:]]*v?[0-9]+\.[0-9]+\.[0-9]+' "$WORKFLOW" \
-                           | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+')
-# Inputs that take the duckdb submodule pin instead of a literal (the pre-release mode below).
+# A read loop, not mapfile: test_wasm_browser.sh runs this on macOS, whose bash is 3.2.
+wf_versions=()
+while IFS= read -r v; do
+    wf_versions+=("$v")
+done < <(grep -oE '^[[:space:]]*duckdb_version:[[:space:]]*v?[0-9]+\.[0-9]+\.[0-9]+' "$WORKFLOW" \
+         | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+')
+# Inputs that take the duckdb submodule pin instead of a literal.
 n_pin=$(grep -cE '^[[:space:]]*duckdb_version:[[:space:]]*\$\{\{[[:space:]]*needs\.duckdb-submodule-version\.outputs\.version[[:space:]]*\}\}' "$WORKFLOW" || true)
+
+# Pre-release: before the target DuckDB is tagged, both jobs take duckdb_version from
+# extension-ci-tools' _submodule_version.yml (the duckdb submodule pin) instead of a
+# literal, and there is no release version to hold the other spellings to. Only the
+# all-or-nothing form counts: a workflow mixing a literal with the pin is not pre-release,
+# and fails the normal checks below.
+PRE_RELEASE=false
+if (( ${#wf_versions[@]} == 0 && n_pin == 2 )); then
+    PRE_RELEASE=true
+fi
 
 # --print: the canonical version alone, for the scripts that build or test against it
 # (build_wasm.sh, test_wasm_browser.sh). None of the checks below run. In the pre-release
 # mode there is no release version: it prints nothing, says so on stderr, and succeeds.
 if $PRINT; then
-    if (( ${#wf_versions[@]} == 0 && n_pin == 2 )); then
+    if $PRE_RELEASE; then
         printf 'PRE-RELEASE: %s builds the duckdb submodule pin, not a release tag\n' "$WORKFLOW" >&2
         exit 0
     fi
@@ -106,13 +120,8 @@ elif [[ "$(resolve_tag "$test_job_version")" != "$pinned_sha" ]]; then
     fail "$WORKFLOW: test-with-bowtie2 builds DuckDB as $test_job_version, but the duckdb submodule is pinned at ${pinned_sha:0:10}, not that tag"
 fi
 
-# Pre-release: before the target DuckDB is tagged, both jobs take duckdb_version from
-# extension-ci-tools' _submodule_version.yml (the duckdb submodule pin) instead of a
-# literal. There is then no release version to hold the other spellings to, so report
-# that loudly and stop. Only the all-or-nothing form is accepted: a workflow mixing a
-# literal with the pin falls through to the normal checks and fails there.
-if (( ${#wf_versions[@]} == 0 && n_pin == 2 )); then
-    pinned_sha=$(git ls-tree HEAD duckdb 2>/dev/null | awk '{print $3}')
+# Pre-release (above): report that loudly and stop.
+if $PRE_RELEASE; then
     msg="PRE-RELEASE: $WORKFLOW builds the duckdb submodule pin (${pinned_sha:0:10}), not a release tag. The Dockerfile, publish cron, Python CLI pin and wasm artifact name are NOT checked until literal duckdb_version inputs are restored on release day."
     printf '%s\n' "$msg"
     [[ "${GITHUB_ACTIONS:-}" == true ]] && printf '::warning::%s\n' "$msg"
