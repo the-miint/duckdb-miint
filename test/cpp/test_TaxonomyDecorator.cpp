@@ -1107,12 +1107,16 @@ std::string LabelText(const NodeLabel &label, const TaxonomyStore &store) {
 	return out;
 }
 
-std::vector<std::string> LabelTexts(const Backfill &backfill, const TaxonomyStore &store) {
+std::vector<std::string> LabelTexts(const std::vector<NodeLabel> &labels, const TaxonomyStore &store) {
 	std::vector<std::string> out;
-	for (const auto &label : backfill.labels) {
+	for (const auto &label : labels) {
 		out.push_back(LabelText(label, store));
 	}
 	return out;
+}
+
+std::vector<std::string> LabelTexts(const Backfill &backfill, const TaxonomyStore &store) {
+	return LabelTexts(backfill.labels, store);
 }
 
 // Per-node label text; unlisted nodes have an empty label.
@@ -1302,4 +1306,256 @@ TEST_CASE("BackfillNames matches the brute-force backfill", "[taxonomy_decorator
 		REQUIRE(backfill.labels == expected.labels);
 		REQUIRE(backfill.inverted == expected.inverted);
 	}
+}
+
+namespace {
+// A store holding each lineage (domain first) as a row, so labels can name its names.
+TaxonomyStore StoreOf(const std::vector<std::vector<std::string>> &lineages) {
+	std::vector<TaxonomyRow> rows;
+	for (const auto &lineage : lineages) {
+		TaxonomyRow row {"R" + std::to_string(rows.size()), {}};
+		std::copy(lineage.begin(), lineage.end(), row.ranks.begin());
+		rows.push_back(std::move(row));
+	}
+	return TaxonomyStore(rows);
+}
+
+TreeIndex TreeOf(const std::vector<uint32_t> &parent) {
+	return TreeIndex::Build(parent, std::vector<double>(parent.size(), 1.0));
+}
+
+// A label from text, "g__G1; s__S1", each name found at its rank in `store`.
+NodeLabel LabelFrom(const TaxonomyStore &store, std::string_view text) {
+	NodeLabel label;
+	while (!text.empty()) {
+		const size_t end = std::min(text.find("; "), text.size());
+		const std::string_view part = text.substr(0, end);
+		text.remove_prefix(std::min(end + 2, text.size()));
+		const auto rank = std::find_if(kLineageRanks.begin(), kLineageRanks.end(),
+		                               [&](const LineageRank &r) { return r.letter == part[0]; }) -
+		                  kLineageRanks.begin();
+		NameId name = 0;
+		while (name < store.NameCount(rank) && store.NameText(rank, name) != part.substr(3)) {
+			name++;
+		}
+		if (name == store.NameCount(rank) || part.substr(1, 2) != "__") {
+			throw std::logic_error("LabelFrom: no name " + std::string(part));
+		}
+		label.push_back({static_cast<size_t>(rank), name});
+	}
+	return label;
+}
+
+// The labels of n nodes, from text; unlisted nodes have empty labels.
+std::vector<NodeLabel> LabelsOf(const TaxonomyStore &store, size_t n,
+                                std::initializer_list<std::pair<uint32_t, std::string>> labels) {
+	std::vector<NodeLabel> out(n);
+	for (const auto &[node, text] : labels) {
+		out[node] = LabelFrom(store, text);
+	}
+	return out;
+}
+
+// u(0) +-- v(1) +-- a(3) +-- t5, t6
+//      |        +-- b(4) +-- t7, t8
+//      +-- c(2) +-- t9, t10
+// v is unnamed, so its labeled descendants are a and b. c's label, unlike a's and b's, keeps u's
+// own promotion from taking their names.
+const std::vector<uint32_t> kUvTree {kNoParent, 0, 0, 1, 1, 3, 3, 4, 4, 2, 2};
+constexpr uint32_t kU = 0, kV = 1, kC = 2, kA = 3, kB = 4;
+} // namespace
+
+// A name moves up to the topmost node whose only labeled descendant holds it, not only to the
+// labeled node's parent: tax2tree's behavior, kept. At R, H1 and Z disagree; at Q, H1 is the only
+// labeled descendant, P being unnamed and W's subtree holding no names, so S lands on Q, two
+// levels above H1, and spans W's tips, which S does not cover.
+TEST_CASE("PromoteCommonNames hoists a lone descendant's name to the topmost node", "[taxonomy_decorator]") {
+	// R(0) +-- Q(1) +-- P(3) +-- H1(5) --- t7
+	//      |        |        +-- H2(6) --- t8
+	//      |        +-- W(4) +-- t9, t10
+	//      +-- Z(2) +-- t11, t12
+	const auto store = StoreOf({{"D1", "P1", "C1", "O1", "F1", "G1", "S"}, {"D1", "P1", "C1", "O1", "F1", "Other"}});
+	const auto tree = TreeOf({kNoParent, 0, 0, 1, 1, 3, 3, 5, 6, 4, 4, 2, 2});
+	const auto labels = PromoteCommonNames(LabelsOf(store, 13, {{5, "s__S"}, {2, "g__Other"}}), store, tree);
+	CHECK(LabelTexts(labels, store) == TextsOf(13, {{1, "s__S"}, {2, "g__Other"}}));
+}
+
+// Not a bug: a descendant's last name can be taken. a holds only F, which b also starts with, so F
+// goes up to v, which spans them both, and a is left unnamed. Refusing to take a last name would
+// leave F on a and on v, two nodes for one family.
+TEST_CASE("PromoteCommonNames takes a descendant's last name", "[taxonomy_decorator]") {
+	const auto store = StoreOf({{"D1", "P1", "C1", "O1", "F", "G"}, {"D1", "P1", "C1", "O1", "F9"}});
+	const auto tree = TreeOf(kUvTree);
+	const auto labels = PromoteCommonNames(
+	    LabelsOf(store, 11, {{kU, "d__D1; p__P1; c__C1; o__O1"}, {kA, "f__F"}, {kB, "f__F; g__G"}, {kC, "f__F9"}}),
+	    store, tree);
+	CHECK(LabelTexts(labels, store) ==
+	      TextsOf(11, {{kU, "d__D1; p__P1; c__C1; o__O1"}, {kV, "f__F"}, {kB, "g__G"}, {kC, "f__F9"}}));
+}
+
+// Promotion goes round by round while the first names agree, and stops after a round leaves a
+// descendant with one name: here after C1, though a and b would agree on O1 next.
+TEST_CASE("PromoteCommonNames stops after a round leaves a descendant with one name", "[taxonomy_decorator]") {
+	const auto store = StoreOf({{"D1", "P1", "C1", "O1", "F2"}, {"D1", "P1", "C9"}});
+	const auto tree = TreeOf(kUvTree);
+	const auto labels = PromoteCommonNames(
+	    LabelsOf(store, 11, {{kU, "d__D1; p__P1"}, {kA, "c__C1; o__O1"}, {kB, "c__C1; o__O1; f__F2"}, {kC, "c__C9"}}),
+	    store, tree);
+	CHECK(LabelTexts(labels, store) ==
+	      TextsOf(11, {{kU, "d__D1; p__P1"}, {kV, "c__C1"}, {kA, "o__O1"}, {kB, "o__O1; f__F2"}, {kC, "c__C9"}}));
+}
+
+// Nodes are visited in preorder, so u, seeing a, b and c agree on D1 to O1, takes all four before
+// v is visited. Visited bottom-up, v would take them first, and u would then take only D1 to C1
+// from v and c, stopping when v is down to O1.
+TEST_CASE("PromoteCommonNames visits ancestors before descendants", "[taxonomy_decorator]") {
+	const auto store =
+	    StoreOf({{"D1", "P1", "C1", "O1", "F1"}, {"D1", "P1", "C1", "O1", "F2"}, {"D1", "P1", "C1", "O1", "F3"}});
+	const auto tree = TreeOf(kUvTree);
+	const auto labels = PromoteCommonNames(LabelsOf(store, 11,
+	                                                {{kA, "d__D1; p__P1; c__C1; o__O1; f__F1"},
+	                                                 {kB, "d__D1; p__P1; c__C1; o__O1; f__F2"},
+	                                                 {kC, "d__D1; p__P1; c__C1; o__O1; f__F3"}}),
+	                                       store, tree);
+	CHECK(LabelTexts(labels, store) ==
+	      TextsOf(11, {{kU, "d__D1; p__P1; c__C1; o__O1"}, {kA, "f__F1"}, {kB, "f__F2"}, {kC, "f__F3"}}));
+}
+
+// Two names agree when one is the other's polyphyletic base, and the suffixed one goes up: GTDB's
+// Bacillus_A is a part of Bacillus. Nothing else agrees. tax2tree matches by substring, so there
+// Baci and Bacillus_A agree, and so do Candidatus and Candidatus_Foo.
+TEST_CASE("PromoteCommonNames merges a name with its polyphyletic variant, and nothing else", "[taxonomy_decorator]") {
+	struct Pair {
+		std::string a, b, promoted;
+	};
+	const Pair pairs[] = {{"Bacillus", "Bacillus_A", "Bacillus_A"},
+	                      {"Bacillus_A", "Bacillus", "Bacillus_A"},
+	                      {"Baci", "Bacillus_A", ""},
+	                      {"Foo", "Foo_1", ""},
+	                      {"Bacillus_A", "Bacillus_B", ""},
+	                      {"Candidatus", "Candidatus_Foo", ""}};
+	for (const auto &[a, b, promoted] : pairs) {
+		INFO(a << " and " << b);
+		const std::vector<std::string> shared {"D1", "P1", "C1", "O1", "F1"};
+		auto with = [&](std::vector<std::string> deeper) {
+			auto out = shared;
+			out.insert(out.end(), deeper.begin(), deeper.end());
+			return out;
+		};
+		const auto store = StoreOf({with({a, "S1"}), with({b, "S2"}), with({"Other"})});
+		const auto tree = TreeOf(kUvTree);
+		const std::string u = "d__D1; p__P1; c__C1; o__O1; f__F1";
+		const auto labels = PromoteCommonNames(
+		    LabelsOf(store, 11, {{kU, u}, {kA, "g__" + a + "; s__S1"}, {kB, "g__" + b + "; s__S2"}, {kC, "g__Other"}}),
+		    store, tree);
+		if (promoted.empty()) {
+			CHECK(LabelTexts(labels, store) ==
+			      TextsOf(11, {{kU, u}, {kA, "g__" + a + "; s__S1"}, {kB, "g__" + b + "; s__S2"}, {kC, "g__Other"}}));
+		} else {
+			CHECK(LabelTexts(labels, store) ==
+			      TextsOf(11, {{kU, u}, {kV, "g__" + promoted}, {kA, "s__S1"}, {kB, "s__S2"}, {kC, "g__Other"}}));
+		}
+	}
+}
+
+// Agreement counts distinct names: three never agree, while a name held twice is one name.
+TEST_CASE("PromoteCommonNames never merges three distinct names", "[taxonomy_decorator]") {
+	// u(0) +-- v(1) +-- a(3) +-- t6, t7
+	//      |        +-- b(4) +-- t8, t9
+	//      |        +-- e(5) +-- t10, t11
+	//      +-- c(2) +-- t12, t13
+	const std::vector<std::string> shared {"D1", "P1", "C1", "O1", "F1"};
+	auto with = [&](std::vector<std::string> deeper) {
+		auto out = shared;
+		out.insert(out.end(), deeper.begin(), deeper.end());
+		return out;
+	};
+	const auto store = StoreOf({with({"Bacillus", "S1"}), with({"Bacillus_A", "S2"}), with({"Bacillus_B", "S3"}),
+	                            with({"Bacillus", "S4"}), with({"Other"})});
+	const auto tree = TreeOf({kNoParent, 0, 0, 1, 1, 1, 3, 3, 4, 4, 5, 5, 2, 2});
+	const std::string u = "d__D1; p__P1; c__C1; o__O1; f__F1";
+
+	const auto three = PromoteCommonNames(LabelsOf(store, 14,
+	                                               {{0, u},
+	                                                {3, "g__Bacillus; s__S1"},
+	                                                {4, "g__Bacillus_A; s__S2"},
+	                                                {5, "g__Bacillus_B; s__S3"},
+	                                                {2, "g__Other"}}),
+	                                      store, tree);
+	CHECK(LabelTexts(three, store) == TextsOf(14, {{0, u},
+	                                               {3, "g__Bacillus; s__S1"},
+	                                               {4, "g__Bacillus_A; s__S2"},
+	                                               {5, "g__Bacillus_B; s__S3"},
+	                                               {2, "g__Other"}}));
+
+	const auto two = PromoteCommonNames(LabelsOf(store, 14,
+	                                             {{0, u},
+	                                              {3, "g__Bacillus; s__S1"},
+	                                              {4, "g__Bacillus_A; s__S2"},
+	                                              {5, "g__Bacillus; s__S4"},
+	                                              {2, "g__Other"}}),
+	                                    store, tree);
+	CHECK(LabelTexts(two, store) ==
+	      TextsOf(14, {{0, u}, {1, "g__Bacillus_A"}, {3, "s__S1"}, {4, "s__S2"}, {5, "s__S4"}, {2, "g__Other"}}));
+}
+
+// The suffix is GTDB's: an underscore and capital letters, at the end, after a non-empty base.
+// tax2tree's pattern is anchored only at the start, so it finds a suffix in Candidatus_Foo.
+TEST_CASE("PolyphyleticBase strips a trailing capital-letter suffix", "[taxonomy_decorator]") {
+	const std::pair<std::string_view, std::string_view> cases[] = {
+	    {"Bacillus_A", "Bacillus"},
+	    {"Bacillus_AB", "Bacillus"},
+	    {"g__Bacillus_A", "g__Bacillus"},
+	    {"A_B_C", "A_B"},
+	    {"Bacillus_A subtilis_B", "Bacillus_A subtilis"},
+	    {"Bacillus", "Bacillus"},
+	    {"Foo_1", "Foo_1"},
+	    {"Foo_A1", "Foo_A1"},
+	    {"Foo_a", "Foo_a"},
+	    {"Foo_", "Foo_"},
+	    {"_A", "_A"},
+	    {"Candidatus_Foo", "Candidatus_Foo"},
+	    {"[Eubacterium]", "[Eubacterium]"},
+	};
+	for (const auto &[name, base] : cases) {
+		INFO(name);
+		CHECK(PolyphyleticBase(name) == base);
+	}
+}
+
+// A promoted name says the node is that taxon, so it must fit below what the node already says.
+// v is named at the species Z, and n, its one labeled descendant, at the genus Y, inverted below
+// it: Y stays on n, the clade it was placed on. tax2tree moves it to v, writing "s__Z; g__Y", a
+// genus over a species of another genus.
+TEST_CASE("PromoteCommonNames never moves a name onto a node named deeper", "[taxonomy_decorator]") {
+	// u(0) +-- v(1) +-- n(3) +-- t4, t5
+	//      |        +-- t6
+	//      +-- c(2) +-- t7, t8
+	const std::vector<std::string> shared {"D1", "P1", "C1", "O1", "F1"};
+	auto with = [&](std::vector<std::string> deeper) {
+		auto out = shared;
+		out.insert(out.end(), deeper.begin(), deeper.end());
+		return out;
+	};
+	const auto store = StoreOf({with({"G1", "Z"}), with({"G1", "Other"}), with({"Y"})});
+	const auto tree = TreeOf({kNoParent, 0, 0, 1, 3, 3, 1, 2, 2});
+	const std::string u = "d__D1; p__P1; c__C1; o__O1; f__F1; g__G1";
+	const auto labels =
+	    PromoteCommonNames(LabelsOf(store, 9, {{0, u}, {1, "s__Z"}, {3, "g__Y"}, {2, "s__Other"}}), store, tree);
+	CHECK(LabelTexts(labels, store) == TextsOf(9, {{0, u}, {1, "s__Z"}, {3, "g__Y"}, {2, "s__Other"}}));
+}
+
+// A label holds one name per rank. v holds F1 and G, and n, inverted below it, holds F2 alone:
+// tax2tree moves F2 to v, writing "f__F1; g__G; f__F2", two families on one node. Here F2 stays on n.
+TEST_CASE("PromoteCommonNames never gives a node a second name at one rank", "[taxonomy_decorator]") {
+	// u(0) +-- v(1) +-- n(3) +-- t4, t5
+	//      |        +-- t6
+	//      +-- c(2) +-- t7, t8
+	const auto store =
+	    StoreOf({{"D1", "P1", "C1", "O1", "F1", "G"}, {"D1", "P1", "C1", "O1", "F2"}, {"D1", "P1", "C1", "O1", "F3"}});
+	const auto tree = TreeOf({kNoParent, 0, 0, 1, 3, 3, 1, 2, 2});
+	const std::string u = "d__D1; p__P1; c__C1; o__O1";
+	const auto labels =
+	    PromoteCommonNames(LabelsOf(store, 9, {{0, u}, {1, "f__F1; g__G"}, {3, "f__F2"}, {2, "f__F3"}}), store, tree);
+	CHECK(LabelTexts(labels, store) == TextsOf(9, {{0, u}, {1, "f__F1; g__G"}, {3, "f__F2"}, {2, "f__F3"}}));
 }

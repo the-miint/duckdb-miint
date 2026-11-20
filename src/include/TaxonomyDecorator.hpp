@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <vector>
 
 namespace miint {
@@ -250,5 +251,28 @@ struct Backfill {
 //     alone and `inverted` records it. tax2tree empties the label.
 // `assignment` must come from AssignNames over an index built on `tree` and `store`.
 Backfill BackfillNames(const NameAssignment &assignment, const TaxonomyStore &store, const TreeIndex &tree);
+
+// A name without its polyphyletic suffix, a trailing underscore and one or more capital letters:
+// "Bacillus_A" and "Bacillus_AB" give "Bacillus". A name without one is returned whole, as is a
+// name that is nothing but one ("_A"). Digits and lower-case letters are no suffix, so "Foo_1",
+// a decoration's own ordinal, and "Candidatus_Foo" are returned whole.
+std::string_view PolyphyleticBase(std::string_view name);
+
+// tax2tree's commonname_promotion over the labels BackfillNames gave a tree's nodes. In preorder,
+// each internal node finds its nearest descendants with a non-empty label, searching below the
+// empty ones, and takes their first names. While those agree, it appends the name to its own
+// label and removes it from each of theirs, stopping after the round that leaves one of them with
+// one name or none, so a descendant's last name can be taken. With one such descendant, agreement
+// is trivial, so a name moves up to the topmost node whose only labeled descendant holds it.
+//   - Two names agree when they are equal, or when one is the other's PolyphyleticBase, and the
+//     suffixed one is promoted. tax2tree matches by substring, so Baci and Bacillus_A agree there.
+//   - A name no deeper than every name the node already holds stops the node's promotion before
+//     it is appended: a promoted name says the node is that taxon, which must fit below what the
+//     node already says it is. Such a name can only come from an inverted-rank descendant, whose
+//     name then stays where it was placed. tax2tree appends it, which gives the label two names
+//     at one rank or a shallower name after deeper ones.
+// Labels stay by ascending rank. `labels` must come from BackfillNames over `tree` and `store`.
+std::vector<NodeLabel> PromoteCommonNames(std::vector<NodeLabel> labels, const TaxonomyStore &store,
+                                          const TreeIndex &tree);
 
 } // namespace miint

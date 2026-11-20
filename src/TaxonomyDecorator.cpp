@@ -438,4 +438,13 @@ Backfill BackfillNames(const NameAssignment &assignment, const TaxonomyStore &st
 	return out;
 }
 
+std::string_view PolyphyleticBase(std::string_view name) {
+	return {};
+}
+
+std::vector<NodeLabel> PromoteCommonNames(std::vector<NodeLabel> labels, const TaxonomyStore &store,
+                                          const TreeIndex &tree) {
+	return {};
+}
+
 } // namespace miint
