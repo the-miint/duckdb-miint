@@ -65,9 +65,12 @@ SELECT * FROM tree.nwk;            -- a name made of plain words needs no quotes
 - A single file's result is named after the file up to its first `.`, so `SELECT reads.read_id FROM 'reads.fq.gz'` works.
 - DuckDB autoloads only its own extensions by file name, so a session must `LOAD miint` first.
 
+<!-- BEGIN REFERENCE: read_fastx -->
 ### FASTA and FASTQ
 
-After [loading miint](#reading-a-file-by-its-name), read a FASTA or FASTQ file directly by name. DuckDB calls `read_fastx` for these suffixes.
+Read FASTA and FASTQ files, including paired-end reads. Pass a path, a glob, or a list of literal paths.
+
+After [loading miint](#reading-a-file-by-its-name), read a file directly by name. DuckDB calls `read_fastx` for these suffixes.
 
 ```sql
 SELECT * FROM 'sequences.fasta';
@@ -80,14 +83,16 @@ Use the [file suffix table](#reading-a-file-by-its-name) to see which names Duck
 
 ```sql
 SELECT * FROM read_fastx('R1.fastq', sequence2 = 'R2.fastq');
+```
 
+```sql
 SELECT * FROM 'samples/*.fastq';
 
 SELECT * FROM read_fastx('samples/*.fastq', include_filepath = true)
 ORDER BY filepath, sequence_index;
 ```
 
-Reads are paired by position. Ensure the read IDs appear in the same order in both mates. `read_fastx` does not validate the IDs.
+Reads are paired by position. Each pair must have matching read IDs after removing mate suffixes such as `/1` and `/2`.
 
 #### Parameters
 
@@ -208,6 +213,7 @@ FROM (
 GROUP BY read_id
 HAVING AVG(q) >= 30;
 ```
+<!-- END REFERENCE: read_fastx -->
 
 ### SAM and BAM
 
@@ -1451,9 +1457,12 @@ The `attributes` column is automatically parsed from GFF format (semicolon-separ
 - Input: `ID=gene1;Name=TEST1;biotype=protein_coding`
 - Output: `{'ID': 'gene1', 'Name': 'TEST1', 'biotype': 'protein_coding'}`
 
+<!-- BEGIN REFERENCE: parse_gff_attributes -->
 #### `parse_gff_attributes(kvp_string)`
 
-The parsing above is done by `parse_gff_attributes`, which `read_gff` applies to column 9. It is also callable directly on any GFF-style attribute string.
+Parse a GFF3 attribute string into a map of keys to values.
+
+`read_gff` applies this macro to column 9. You can also call it directly.
 
 **Parameters:**
 
@@ -1467,6 +1476,7 @@ SELECT parse_gff_attributes('ID=gene1;Name=TEST1;biotype=protein_coding');
 ```
 
 - Access values using bracket notation: `attributes['ID']`
+<!-- END REFERENCE: parse_gff_attributes -->
 
 **GFF3 Format Notes:**
 
