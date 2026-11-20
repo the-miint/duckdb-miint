@@ -165,11 +165,6 @@ void ReadHmmTableFunction::Execute(ClientContext &context, TableFunctionInput &d
 	std::string chunk_path = local.file ? local.file->path : std::string();
 
 	auto read_model = [&]() {
-		// HMMER calibrates a HMMER2 model as it reads it, which takes milliseconds, and one chunk
-		// can hold thousands: a cancel or max_execution_time is noticed here, between models.
-		// InterruptCheck() looks at the deadline once in 256 calls, too seldom for a model;
-		// BlockingInterruptCheck() looks on every call.
-		context.BlockingInterruptCheck();
 		local.models_read++;
 		hmmer::ProfileHeader header;
 		try {
@@ -187,8 +182,11 @@ void ReadHmmTableFunction::Execute(ClientContext &context, TableFunctionInput &d
 	};
 
 	while (row < STANDARD_VECTOR_SIZE && chunk_bytes < LINE_SCAN_MAX_CHUNK_BYTES) {
-		// For the reads the check per model misses: blank and comment lines, which can run on
-		// across files, and the lines of one long record.
+		// One chunk can take seconds without returning to DuckDB, which checks between chunks:
+		// HMMER calibrates a HMMER2 model as it reads it, a millisecond or more a model, and a
+		// chunk can hold thousands; blank and comment lines can run on across files. So a cancel
+		// is noticed on every line, and max_execution_time every 256 lines (InterruptCheck()
+		// reads the clock once in 256 calls), a few models at most.
 		context.InterruptCheck();
 		if (!local.file) {
 			if (row > 0 || !ClaimNextFile(context, data, global, local)) {

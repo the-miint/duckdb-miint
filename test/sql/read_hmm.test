@@ -766,7 +766,7 @@ read_hmm: {TEST_DIR}/many_damaged.hmm: model 2050 (line 84015): Unrecognized alp
 
 # A query stops at max_execution_time even partway through one output chunk: HMMER calibrates a
 # HMMER2 model as it reads it, a millisecond or more a model, so these 2000 models, which fit one
-# chunk, take seconds on one thread. read_hmm checks the deadline between models.
+# chunk, take seconds on one thread. read_hmm checks the deadline as it reads lines.
 statement ok
 COPY (SELECT rtrim(string_agg(content, '' ORDER BY i), chr(10)) FROM read_text('data/hmmer/ecori.hmm2'), range(2000) t(i))
 TO '{TEST_DIR}/many_hmmer2.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
