@@ -109,7 +109,8 @@ std::string WithoutTrailingWhitespace(std::string_view message) {
 std::string_view FirstWord(std::string_view line) {
 	// As esl_fileparser_NextLine() and GetTokenOnLine() take it: NextLine skips
 	// what isspace() skips in the C locale, and a token ends at a space, tab, CR
-	// or LF. Spelled out, as isspace() depends on the locale.
+	// or LF. Spelled out, as isspace() depends on the locale and this file uses
+	// nothing of DuckDB's.
 	constexpr std::string_view leading = " \t\n\v\f\r";
 	constexpr std::string_view separators = " \t\r\n";
 	const size_t begin = line.find_first_not_of(leading);

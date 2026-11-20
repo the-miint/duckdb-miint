@@ -638,6 +638,45 @@ SELECT sequence_count IS NULL, effective_sequence_count FROM read_hmm('{TEST_DIR
 ----
 true	7.0
 
+# HMMER2 rejects an NSEQ that reads as 0, unless it is 0 itself, which reads as NULL.
+statement ok
+COPY (SELECT rtrim(replace(content, 'NSEQ  2' || chr(10), 'NSEQ  x' || chr(10)), chr(10)) FROM read_text('data/hmmer/ecori.hmm2'))
+TO '{TEST_DIR}/nseq_x.hmm2' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT * FROM read_hmm('{TEST_DIR}/nseq_x.hmm2');
+----
+read_hmm: {TEST_DIR}/nseq_x.hmm2: model 1 (line 9): Invalid nseq on NSEQ line: should be integer, not x
+
+statement ok
+COPY (SELECT rtrim(replace(content, 'NSEQ  2' || chr(10), 'NSEQ  0' || chr(10)), chr(10)) FROM read_text('data/hmmer/ecori.hmm2'))
+TO '{TEST_DIR}/nseq_0.hmm2' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+query I
+SELECT sequence_count IS NULL FROM read_hmm('{TEST_DIR}/nseq_0.hmm2');
+----
+true
+
+# HMMER reads MAXL from HMMER3/c on: it skips the line in an older model, and rejects one that
+# reads as 0 in a later one. XYPPX is HMMER3/e, with no MAXL.
+statement ok
+COPY (SELECT rtrim(replace(replace(content, 'HMMER3/e', 'HMMER3/b'), 'LENG  5' || chr(10), 'LENG  5' || chr(10) || 'MAXL  426' || chr(10)), chr(10)) FROM read_text('data/hmmer/XYPPX.hmm'))
+TO '{TEST_DIR}/maxl_3b.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+query II
+SELECT format, max_instance_length IS NULL FROM read_hmm('{TEST_DIR}/maxl_3b.hmm');
+----
+HMMER3/b	true
+
+statement ok
+COPY (SELECT rtrim(replace(replace(content, 'HMMER3/e', 'HMMER3/c'), 'LENG  5' || chr(10), 'LENG  5' || chr(10) || 'MAXL  0' || chr(10)), chr(10)) FROM read_text('data/hmmer/XYPPX.hmm'))
+TO '{TEST_DIR}/maxl0_3c.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+statement error
+SELECT * FROM read_hmm('{TEST_DIR}/maxl0_3c.hmm');
+----
+read_hmm: {TEST_DIR}/maxl0_3c.hmm: model 1 (line 6): Invalid max length 0 on MAXL line
+
 # HMMER reads a cutoff that is not a number as 0, unchecked (atof), and read_hmm with it.
 statement ok
 COPY (SELECT rtrim(replace(content, 'GA    14.30 0.70' || chr(10), 'GA    xx yy;' || chr(10)), chr(10)) FROM read_text('data/hmmer/XYPPX.hmm'))
@@ -649,9 +688,9 @@ SELECT gathering_threshold_sequence, gathering_threshold_domain, trusted_cutoff_
 0.0	0.0	14.4
 
 # HMMER reads a model's lines, its closing // included, through Easel's NextLine, which skips
-# leading whitespace (a vertical tab or form feed too) before it takes the first word. hmmstat, on
-# the same files: a model closed by "\v//" and the model after it are two models; a line holding
-# only "\v" between two models is blank; and "\v" before a model's format tag is skipped.
+# leading whitespace (a vertical tab or form feed too) before it takes the first word. The fork's
+# hmmstat, on the same files: a model closed by "\v//" and the model after it are two models; a line
+# holding only "\v" between two models is blank; and "\v" before a model's format tag is skipped.
 statement ok
 COPY (SELECT rtrim(replace(content, chr(10) || '//', chr(10) || chr(11) || '//') || content, chr(10)) FROM read_text('data/hmmer/XYPPX.hmm'))
 TO '{TEST_DIR}/vt_end.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
@@ -678,6 +717,16 @@ query II
 SELECT count(*), count(*) FILTER (WHERE hmm_name = 'XYPPX') FROM read_hmm('{TEST_DIR}/vt_tag.hmm');
 ----
 1	1
+
+# The same three with a form feed, in one file; the fork's hmmstat reads two models from it.
+statement ok
+COPY (SELECT rtrim(chr(12) || replace(content, chr(10) || '//', chr(10) || chr(12) || '//') || chr(12) || chr(10) || content, chr(10)) FROM read_text('data/hmmer/XYPPX.hmm'))
+TO '{TEST_DIR}/ff.hmm' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', DELIMITER E'\x01');
+
+query II
+SELECT count(*), count(*) FILTER (WHERE hmm_name = 'XYPPX') FROM read_hmm('{TEST_DIR}/ff.hmm');
+----
+2	2
 
 # Blank and comment lines before and between models count toward the line: a comment and a blank
 # line, XYPPX (lines 3 to 43), a blank line and a comment, then the bad model from line 46, whose

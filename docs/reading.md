@@ -1535,7 +1535,7 @@ HMMER holds the cutoffs, `EFFN` and the statistics as 32-bit floats; as `FLOAT` 
 - For a HMMER3 model, `checksum` is NULL only when the model has no `CKSUM` line; `CKSUM 0` gives 0.
 - Header lines with no column are not output: `DATE`, `COM`, `RF`, `MM`, `CS`, `MAP`, and HMMER2's null-model and statistics lines.
 - Blank lines and lines whose first word starts with `#` are skipped, as HMMER skips them. A file of nothing else returns no rows.
-- HMMER checks few of a model's numbers. It rejects a `LENG` outside 1 to 100000 and an `EFFN` that is not positive, and in a HMMER3 model an `NSEQ` or `MAXL` that reads as 0. It reads each by its leading number (`LENG 5x` is 5). It reads the cutoffs, the statistics and the model's probabilities without checking them: a value there that is not a number reads as 0 (`GA xx yy;` gives 0.0 and 0.0), in read_hmm as in HMMER's own programs.
+- HMMER checks few of a model's numbers. It rejects a `LENG` outside 1 to 100000, an `EFFN` that is not positive, an `NSEQ` that reads as 0 (a `HMMER2.0` model's `NSEQ 0` itself is NULL), and from `HMMER3/c` on a `MAXL` that reads as 0. It reads each by its leading number (`LENG 5x` is 5). It reads the cutoffs, the statistics and the model's probabilities without checking them: a value there that is not a number reads as 0 (`GA xx yy;` gives 0.0 and 0.0), in read_hmm as in HMMER's own programs.
 - gzip-compressed files (`.gz`) are decompressed transparently, including multi-member (bgzip) files. Remote paths (`s3://`, `https://`) are read through DuckDB's file system.
 - One thread reads each file; several files are read in parallel.
 - An empty file returns no rows.
