@@ -1498,7 +1498,7 @@ SELECT hmm_name, hmm_accession, hmm_length FROM read_hmm('models/*.hmm');
     - **Arrays**: VARCHAR[] elements are treated as literal paths (no glob expansion)
 - `include_filepath` (BOOLEAN, optional, default false): Add a `filepath` column to the output
 
-**Output schema.** Each column is a line of the model's header, which HMMER's documentation describes under the same tag. A field the model does not have is NULL.
+**Output schema.** Each column is a line of the model's header, which HMMER's documentation describes under the same tag. A field the model does not have is NULL. So is a `MAXL` or `NSEQ` of 0 or less, which HMMER holds as unset and does not write back out (`hmmconvert` drops the line).
 
 | Column | Type | HMMER header line |
 |---|---|---|
