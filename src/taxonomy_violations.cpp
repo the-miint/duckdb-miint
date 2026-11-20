@@ -121,10 +121,10 @@ const char *KindText(miint::TaxonomyViolationKind kind) {
 	throw InternalException("%s: unknown violation kind", kFn);
 }
 
-unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFunctionInitInput &input) {
-	auto &bind = input.bind_data->Cast<BindData>();
-	auto state = make_uniq<GlobalState>();
-
+// The taxonomy's rows, in the relation's order, ids as text. A NULL id is "" with id_null set,
+// since its text cannot tell it from an empty VARCHAR id.
+void ReadTaxonomy(ClientContext &context, const BindData &bind, std::vector<miint::TaxonomyRow> &rows,
+                  std::vector<bool> &id_null) {
 	std::vector<std::pair<std::string, LogicalType>> columns {{SQLIdentifier::ToString("feature_id"), bind.id_type}};
 	for (size_t r = 0; r < kRanks; r++) {
 		columns.emplace_back(SQLIdentifier::ToString(miint::kLineageRanks[r].column), bind.rank_types[r]);
@@ -145,10 +145,16 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 					row.ranks[r] = UnifiedVectorFormat::GetData<string_t>(ranks[r])[idx].GetString();
 				}
 			}
-			state->rows.push_back(std::move(row));
-			state->id_null.push_back(nulls[i]);
+			rows.push_back(std::move(row));
+			id_null.push_back(nulls[i]);
 		}
 	});
+}
+
+unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFunctionInitInput &input) {
+	auto &bind = input.bind_data->Cast<BindData>();
+	auto state = make_uniq<GlobalState>();
+	ReadTaxonomy(context, bind, state->rows, state->id_null);
 
 	const auto &rows = state->rows;
 	auto &violations = state->violations;
