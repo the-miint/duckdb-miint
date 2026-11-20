@@ -12,7 +12,9 @@
 
 #include <algorithm>
 #include <array>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -32,15 +34,15 @@ struct BindData : public TableFunctionData {
 	std::array<LogicalType, kRanks> rank_types;
 };
 
-// One output row. The pointers point into GlobalState::rows, or at static text; nullptr is NULL.
+// One output row. The text views GlobalState::rows or static strings; nullopt is NULL.
 struct Violation {
 	const char *kind;
 	// The input row it names by feature_id.
 	size_t row;
-	const char *rank;
-	const std::string *name;
-	const std::string *parent;
-	const char *detail;
+	std::optional<std::string_view> rank;
+	std::optional<std::string_view> name;
+	std::optional<std::string_view> parent;
+	std::optional<std::string_view> detail;
 };
 
 struct GlobalState : public GlobalTableFunctionState {
@@ -51,9 +53,9 @@ struct GlobalState : public GlobalTableFunctionState {
 	size_t next = 0;
 };
 
-// The type of feature_id, after checking that `columns` are exactly the shared lineage schema's:
-// feature_id, of an id type, and the eight rank columns, VARCHAR. Matched by name, in any order and
-// case, so a misspelled or extra column is an error rather than ignored.
+// The type of feature_id, after checking that `columns` are exactly feature_id, of an id type, and
+// the shared lineage schema's eight rank columns, VARCHAR. Matched by name, in any order and case,
+// so a misspelled or extra column is an error rather than ignored.
 LogicalType ValidateLineageSchema(const std::string &taxonomy, const TableOrViewColumns &columns,
                                   std::array<LogicalType, kRanks> &rank_types) {
 	for (const auto &name : columns.names) {
@@ -112,20 +114,6 @@ unique_ptr<FunctionData> Bind(ClientContext &context, TableFunctionBindInput &in
 	return std::move(data);
 }
 
-const char *KindText(miint::TaxonomyViolationKind kind) {
-	switch (kind) {
-	case miint::TaxonomyViolationKind::InvalidId:
-		return "invalid_id";
-	case miint::TaxonomyViolationKind::InvalidValue:
-		return "invalid_value";
-	case miint::TaxonomyViolationKind::DuplicateId:
-		return "duplicate_id";
-	case miint::TaxonomyViolationKind::Gap:
-		return "gap";
-	}
-	throw InternalException("%s: unknown violation kind", kFn);
-}
-
 // The taxonomy's rows, in the relation's order, ids as text. A NULL id is "" with id_null set,
 // since its text cannot tell it from an empty VARCHAR id.
 void ReadTaxonomy(ClientContext &context, const BindData &bind, std::vector<miint::TaxonomyRow> &rows,
@@ -164,14 +152,15 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 	const auto &rows = state->rows;
 	auto &violations = state->violations;
 	for (const auto &v : miint::FindRowViolations(rows)) {
-		Violation out {KindText(v.kind), v.row, nullptr, nullptr, nullptr, nullptr};
+		Violation out {
+		    miint::TaxonomyViolationKindName(v.kind), v.row, std::nullopt, std::nullopt, std::nullopt, std::nullopt};
 		switch (v.kind) {
 		case miint::TaxonomyViolationKind::InvalidId:
 			out.detail = state->id_null[v.row] ? "is NULL" : "is empty";
 			break;
 		case miint::TaxonomyViolationKind::InvalidValue:
 			out.rank = miint::kLineageRanks[v.rank].column;
-			out.name = &*rows[v.row].ranks[v.rank];
+			out.name = *rows[v.row].ranks[v.rank];
 			out.detail = v.reason;
 			break;
 		case miint::TaxonomyViolationKind::DuplicateId:
@@ -182,38 +171,29 @@ unique_ptr<GlobalTableFunctionState> InitGlobal(ClientContext &context, TableFun
 		}
 		violations.push_back(out);
 	}
-	// One row per input row under each parent of a label, so the rows at fault can be found;
-	// an empty parent rank is a NULL parent.
+	// One row per input row under each parent of a name, so the rows at fault can be found; a NULL
+	// parent rank is a NULL parent.
 	for (const auto &label : miint::FindMultipleParents(rows)) {
 		for (const auto &under : label.rows_by_parent) {
 			for (const size_t row : under) {
 				const auto &ranks = rows[row].ranks;
 				const auto &parent = ranks[label.rank - 1];
-				violations.push_back({"multiple_parents", row, miint::kLineageRanks[label.rank].column,
-				                      &*ranks[label.rank], parent ? &*parent : nullptr, nullptr});
+				violations.push_back({miint::kMultipleParentsKindName, row, miint::kLineageRanks[label.rank].column,
+				                      *ranks[label.rank],
+				                      parent ? std::optional<std::string_view>(*parent) : std::nullopt, std::nullopt});
 			}
 		}
 	}
 	return std::move(state);
 }
 
-void SetText(Vector &out, idx_t row, const char *text) {
+void SetText(Vector &out, idx_t row, std::optional<std::string_view> text) {
 	auto &validity = FlatVector::ValidityMutable(out);
 	if (!text) {
 		validity.SetInvalid(row);
 		return;
 	}
-	FlatVector::GetDataMutable<string_t>(out)[row] = StringVector::AddString(out, text);
-	validity.SetValid(row);
-}
-
-void SetText(Vector &out, idx_t row, const std::string *text) {
-	auto &validity = FlatVector::ValidityMutable(out);
-	if (!text) {
-		validity.SetInvalid(row);
-		return;
-	}
-	FlatVector::GetDataMutable<string_t>(out)[row] = StringVector::AddString(out, *text);
+	FlatVector::GetDataMutable<string_t>(out)[row] = StringVector::AddString(out, text->data(), text->size());
 	validity.SetValid(row);
 }
 

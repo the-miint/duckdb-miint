@@ -129,6 +129,13 @@ TEST_CASE("TaxonomyStore rejects gaps", "[taxonomy_store]") {
 	CHECK_THAT(ErrorOf({Row("G2", {std::nullopt, "B"})}), ContainsSubstring("'domain' is NULL"));
 }
 
+// The message names the first set rank below the gap, not the one directly below it, so that
+// the reader can find the value that makes it a gap.
+TEST_CASE("TaxonomyStore's gap message names the deeper rank that is set", "[taxonomy_store]") {
+	CHECK_THAT(ErrorOf({Row("G1", {"A", std::nullopt, std::nullopt, "D"})}),
+	           ContainsSubstring("'phylum' is NULL but deeper rank 'order' is not"));
+}
+
 // FindRow looks rows up by feature_id: a repeated id has no one row, and an empty one names
 // nothing.
 TEST_CASE("TaxonomyStore rejects empty and duplicate feature_ids", "[taxonomy_store]") {
@@ -334,30 +341,15 @@ TEST_CASE("TaxonomyStore reports the problem count and the first 10", "[taxonomy
 // --- FindRowViolations and FindMultipleParents --------------------------------------------
 //
 // The checks behind both TaxonomyStore's errors and taxonomy_violations' rows. A caller that
-// keeps the violations (miintax stores them, reports totals and can write its files anyway)
-// needs every one of them, each pointing at its input row, rather than the first 10 in a
-// message.
+// keeps the violations, to store them or count them, needs every one of them, each pointing at
+// its input row, rather than the first 10 in a message.
 
 namespace {
-const char *KindText(TaxonomyViolationKind kind) {
-	switch (kind) {
-	case TaxonomyViolationKind::InvalidId:
-		return "invalid_id";
-	case TaxonomyViolationKind::InvalidValue:
-		return "invalid_value";
-	case TaxonomyViolationKind::DuplicateId:
-		return "duplicate_id";
-	case TaxonomyViolationKind::Gap:
-		return "gap";
-	}
-	return "?";
-}
-
 // Each violation as one line, "row 2 gap phylum", so that a failure shows the whole list.
 std::vector<std::string> Describe(const std::vector<RowViolation> &violations) {
 	std::vector<std::string> out;
 	for (const auto &v : violations) {
-		std::string line = "row " + std::to_string(v.row) + " " + KindText(v.kind);
+		std::string line = "row " + std::to_string(v.row) + " " + TaxonomyViolationKindName(v.kind);
 		switch (v.kind) {
 		case TaxonomyViolationKind::InvalidValue:
 			line += std::string(" ") + kLineageRanks[v.rank].column + ": " + (v.reason ? v.reason : "<no reason>");
@@ -418,13 +410,21 @@ TEST_CASE("FindRowViolations reports every row problem in input order", "[taxono
 	                                                  "row 2 gap phylum", "row 3 invalid_value order: is empty",
 	                                                  "row 3 invalid_value family: starts with a rank prefix such "
 	                                                  "as 'p__'"});
-	// A clean taxonomy has none, so no rows can be told apart from rows not checked.
+	// A clean taxonomy, and an empty one, have no violations.
 	CHECK(FindRowViolations({Row("G1", {"A", "B"}), Row("G2", {"A", "C"})}).empty());
 	CHECK(FindRowViolations({}).empty());
 }
 
-// The reasons are the text taxonomy_violations returns in `detail`; each is a value no other
-// row spells the same way, or, for ';', one that reads as two ranks once lineages are joined.
+// Within a row, the value problems come before the gap, whatever their ranks: TaxonomyStore lists
+// the first 10 problems in this order, so it decides which ones its error shows.
+TEST_CASE("FindRowViolations reports a row's values before its gap", "[taxonomy_store]") {
+	CHECK(Describe(FindRowViolations({Row("G1", {"A", std::nullopt, " C"})})) ==
+	      Lines {"row 0 invalid_value class: starts or ends with whitespace", "row 0 gap phylum"});
+}
+
+// The reasons are the text taxonomy_violations returns in `detail`. A value with a stray space or
+// prefix would not match the same name written cleanly in another row, and a ';' reads as two
+// ranks once a lineage is joined into one string.
 TEST_CASE("FindRowViolations gives the reason a value is not a name", "[taxonomy_store]") {
 	struct Case {
 		std::string value;
@@ -441,9 +441,9 @@ TEST_CASE("FindRowViolations gives the reason a value is not a name", "[taxonomy
 	}
 }
 
-// miintax counts how many rows carry a repeated id (its I2), and a caller looking for the rows
-// at fault needs each of them, so every occurrence is reported with the total. An empty id is
-// reported as such, and is not a repeat: it names no feature.
+// A repeated id gives a feature two lineages. A caller counting how many rows carry it, or looking
+// for the rows at fault, needs each of them, so every occurrence is reported with the total. An
+// empty id is reported as such, and is not a repeat: it names no feature.
 TEST_CASE("FindRowViolations reports every occurrence of a repeated id", "[taxonomy_store]") {
 	std::vector<TaxonomyRow> rows {Row("G1", {"A", "B"}), Row("G2", {"A", "B"}), Row("G1", {"A", "C"}),
 	                               Row("G1", {"A", "D"}), Row("", {"A"}),        Row("", {"A"})};
@@ -451,9 +451,8 @@ TEST_CASE("FindRowViolations reports every occurrence of a repeated id", "[taxon
 	                                                  "row 3 duplicate_id x3", "row 4 invalid_id", "row 5 invalid_id"});
 }
 
-// A gap is a NULL rank above a set one; the first NULL rank is the one reported, once per row
-// (miintax's I4 names it). NULLs at the end of a lineage are not gaps: a lineage may stop at
-// any rank, or be empty.
+// A gap is a NULL rank above a set one; the first NULL rank is the one reported, once per row.
+// NULLs at the end of a lineage are not gaps: a lineage may stop at any rank, or be empty.
 TEST_CASE("FindRowViolations reports a gap at its first NULL rank", "[taxonomy_store]") {
 	CHECK(Describe(FindRowViolations({Row("G1", {"A", std::nullopt, "C"})})) == Lines {"row 0 gap phylum"});
 	// d__dA; p__; c__cZ; o__; f__fZ: two NULLs above set ranks, one gap, at the phylum.
@@ -467,8 +466,8 @@ TEST_CASE("FindRowViolations reports a gap at its first NULL rank", "[taxonomy_s
 	          .empty());
 }
 
-// The parent rules miintax's I1 checks: a label is a rank and a whole name, and its parent is
-// the value directly above it, NULL included, so an empty family is a parent like any other.
+// A label is a rank and a whole name, and its parent is the value directly above it, NULL
+// included, so a NULL family is a parent like any other.
 TEST_CASE("FindMultipleParents counts a NULL rank as a parent", "[taxonomy_store]") {
 	std::vector<TaxonomyRow> rows {Row("G1", {"dA", "pA", "cA", "oA", "fA", "gA", "gA sA"}),
 	                               Row("L1", {"dA", "pA", "cA", "oA", "fA", "gA"}),
@@ -495,9 +494,9 @@ TEST_CASE("FindMultipleParents compares labels whole and per rank", "[taxonomy_s
 	CHECK(Describe(rows, FindMultipleParents(rows)) == Lines {"phylum 'pA': 'dA' [0 1 2 3]; 'dB' [5]"});
 }
 
-// The parent check runs over every row, a repeated id's included: miintax checks one parent per
-// label over its primary and secondary files together, and an id may be in both. Every row under
-// each parent is listed, so the rows at fault can be found.
+// The parent check runs over every row, a repeated id's included, so that it can check two files
+// together that share ids. Every row under each parent is listed, so the rows at fault can be
+// found.
 TEST_CASE("FindMultipleParents lists every row under each parent", "[taxonomy_store]") {
 	std::vector<TaxonomyRow> rows {Row("G1", {"dA", "pA", "cA", "oA", "fA"}), Row("G1", {"dA", "pA", "cA", "oA", "fA"}),
 	                               Row("G2", {"dA", "pA", "cA", "oB", "fA"}),

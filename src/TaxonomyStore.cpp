@@ -93,6 +93,20 @@ const std::vector<std::string> &DefaultBadNameTokens() {
 	return tokens;
 }
 
+const char *TaxonomyViolationKindName(TaxonomyViolationKind kind) {
+	switch (kind) {
+	case TaxonomyViolationKind::InvalidId:
+		return "invalid_id";
+	case TaxonomyViolationKind::InvalidValue:
+		return "invalid_value";
+	case TaxonomyViolationKind::DuplicateId:
+		return "duplicate_id";
+	case TaxonomyViolationKind::Gap:
+		return "gap";
+	}
+	throw std::invalid_argument("TaxonomyViolationKindName: unknown kind");
+}
+
 std::vector<RowViolation> FindRowViolations(const std::vector<TaxonomyRow> &rows) {
 	// How many rows carry each id. An empty id names no feature, so it is never a repeat.
 	std::unordered_map<std::string_view, size_t> id_count;
@@ -106,16 +120,16 @@ std::vector<RowViolation> FindRowViolations(const std::vector<TaxonomyRow> &rows
 	for (size_t i = 0; i < rows.size(); i++) {
 		const auto &row = rows[i];
 		if (row.feature_id.empty()) {
-			violations.push_back({TaxonomyViolationKind::InvalidId, i, 0, nullptr, 0});
+			violations.push_back({TaxonomyViolationKind::InvalidId, i, 0, nullptr, 0, 0});
 		} else if (const size_t count = id_count.at(row.feature_id); count > 1) {
-			violations.push_back({TaxonomyViolationKind::DuplicateId, i, 0, nullptr, count});
+			violations.push_back({TaxonomyViolationKind::DuplicateId, i, 0, nullptr, count, 0});
 		}
 		for (size_t r = 0; r < kRanks; r++) {
 			if (!row.ranks[r]) {
 				continue;
 			}
 			if (const char *why = ValueProblem(*row.ranks[r])) {
-				violations.push_back({TaxonomyViolationKind::InvalidValue, i, r, why, 0});
+				violations.push_back({TaxonomyViolationKind::InvalidValue, i, r, why, 0, 0});
 			}
 		}
 		// The first NULL rank is a gap when any deeper rank is set.
@@ -125,7 +139,7 @@ std::vector<RowViolation> FindRowViolations(const std::vector<TaxonomyRow> &rows
 		}
 		for (size_t deeper = first_null + 1; deeper < kRanks; deeper++) {
 			if (row.ranks[deeper]) {
-				violations.push_back({TaxonomyViolationKind::Gap, i, first_null, nullptr, 0});
+				violations.push_back({TaxonomyViolationKind::Gap, i, first_null, nullptr, 0, deeper});
 				break;
 			}
 		}
@@ -251,16 +265,10 @@ TaxonomyStore::TaxonomyStore(const std::vector<TaxonomyRow> &rows, const std::ve
 			problems.Add(RowText(id, v.row) + ", column '" + kLineageRanks[v.rank].column + "': value '" +
 			             *ranks[v.rank] + "' " + v.reason);
 			break;
-		case TaxonomyViolationKind::Gap: {
-			// A gap has a set rank below its first NULL one; name the first.
-			size_t deeper = v.rank + 1;
-			while (deeper + 1 < kRanks && !ranks[deeper]) {
-				deeper++;
-			}
+		case TaxonomyViolationKind::Gap:
 			problems.Add(RowText(id, v.row) + ": '" + kLineageRanks[v.rank].column + "' is NULL but deeper rank '" +
-			             kLineageRanks[deeper].column + "' is not");
+			             kLineageRanks[v.deeper].column + "' is not");
 			break;
-		}
 		}
 	}
 	problems.ThrowIfAny();

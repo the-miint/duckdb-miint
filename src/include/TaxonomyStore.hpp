@@ -36,14 +36,18 @@ const std::vector<std::string> &DefaultBadNameTokens();
 enum class TaxonomyViolationKind {
 	// The feature_id is empty.
 	InvalidId,
-	// A rank value is not a bare name: empty, with whitespace at either end, with a rank
-	// prefix ("p__Bacillota"), or containing ';'.
+	// A rank value is not a bare name; RowViolation::reason says why.
 	InvalidValue,
 	// The feature_id is on more than one row; every one of those rows is reported.
 	DuplicateId,
 	// A rank is NULL while a deeper rank is not.
 	Gap,
 };
+
+// Each kind's name in taxonomy_violations' `kind` column, the SQL output's contract.
+const char *TaxonomyViolationKindName(TaxonomyViolationKind kind);
+// The `kind` of a name under more than one parent (MultipleParents).
+inline constexpr const char *kMultipleParentsKindName = "multiple_parents";
 
 // One problem with one input row.
 struct RowViolation {
@@ -56,6 +60,8 @@ struct RowViolation {
 	const char *reason;
 	// DuplicateId: how many rows carry the id. 0 otherwise.
 	size_t count;
+	// Gap: the first rank below `rank` that is set. 0 otherwise.
+	size_t deeper;
 };
 
 // Every row problem, each row read as given, in input order; within a row, its id first, then

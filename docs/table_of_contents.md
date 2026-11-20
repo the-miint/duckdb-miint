@@ -10,7 +10,7 @@ Start with [installation](installation.md), or choose a task below. For function
 ## Public data repositories
 
 - [EBI/ENA](insdc_ena.md) - Interaction with EBI/ENA including submission and fetching of data.
-- [NCBI](insdc_ncbi.md) - Interaction with NCBI including fetching of data and the NCBI taxonomy (tree, name classes, lineages, retired/deleted-taxid handling), parsing `d__…; p__…` lineage strings into the shared lineage schema, checking a taxonomy in that schema for gaps, repeated ids and names under more than one parent, mapping NCBI ranks to its columns, and splitting GTDB labels into base names and suffixes; GTDB's genome metadata and the genomes that failed its quality checks.
+- [NCBI](insdc_ncbi.md) - Interaction with NCBI including fetching of data and the NCBI taxonomy (tree, name classes, lineages, retired/deleted-taxid handling), parsing `d__…; p__…` lineage strings into the shared lineage schema, checking a taxonomy (`feature_id` and that schema's rank columns) for gaps, repeated ids and names under more than one parent, mapping NCBI ranks to its columns, and splitting GTDB labels into base names and suffixes; GTDB's genome metadata and the genomes that failed its quality checks.
 
 ## Alignment
 
