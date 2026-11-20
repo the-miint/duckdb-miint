@@ -1,0 +1,468 @@
+# name: test/sql/taxonomy_violations.test
+# description: taxonomy_violations returns every problem in a shared-schema taxonomy as rows: bad ids and values, repeated ids, gaps, and labels under more than one parent
+# group: [sql]
+
+require miint
+
+# A caller that builds taxonomies (miintax writes tax2tree's input) keeps the violations: it
+# stores them, reports their totals with examples, and can write its files anyway to measure
+# them. So the check returns every violation as a row, each naming the input row at fault by
+# its feature_id, and never raises for one. Only a relation that is not a taxonomy (wrong
+# columns or types) is an error. The checks are TaxonomyStore's own (tax2tree's input
+# validation), run over the names as given, so a taxonomy with no violations is one tax2tree
+# accepts.
+
+# =============================================================================
+# A clean taxonomy gives no rows: GTDB's suffixed and placeholder names, accession ids, a
+# lineage that stops above species, one with every rank empty, and no strains
+# =============================================================================
+
+statement ok
+CREATE TABLE clean AS
+SELECT id AS feature_id, unnest(parse_lineage(lineage))
+FROM (VALUES
+    ('G000005825', 'd__Bacteria; p__Bacillota_A; c__Clostridia; o__Lachnospirales; f__Lachnospiraceae; g__Blautia; s__Blautia sp905234525'),
+    ('G000006765', 'd__Bacteria; p__Pseudomonadota; c__Gammaproteobacteria; o__Pseudomonadales; f__Pseudomonadaceae; g__Pseudomonas_E; s__Pseudomonas_E fluorescens_B'),
+    ('G900000001', 'd__Bacteria; p__Bacillota_A; c__Clostridia; o__Lachnospirales; f__UBA1234; g__UBA1234; s__'),
+    ('AB004721', 'd__Bacteria; p__Pseudomonadota; c__Gammaproteobacteria; o__Pseudomonadales; f__Pseudomonadaceae; g__Pseudomonas_E; s__Pseudomonas_E fluorescens_B'),
+    ('G000000001', 'd__; p__; c__; o__; f__; g__; s__'),
+    ('G000009045', 'd__Bacteria; p__Bacillota; c__Bacilli; o__Bacillales; f__Bacillaceae; g__Bacillus; s__Bacillus subtilis'),
+    ('G000011645', 'd__Bacteria; p__Bacillota; c__Bacilli; o__Bacillales; f__Bacillaceae_G; g__Bacillus_A; s__Bacillus_A anthracis')
+) AS v(id, lineage);
+
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM taxonomy_violations('clean'));
+----
+kind	VARCHAR
+feature_id	VARCHAR
+rank	VARCHAR
+name	VARCHAR
+parent	VARCHAR
+detail	VARCHAR
+
+# Bacillus (Bacillaceae) and Bacillus_A (Bacillaceae_G) are two labels: names compare whole.
+query I
+SELECT count(*) FROM taxonomy_violations('clean');
+----
+0
+
+# The columns are matched by name, in any order and any case.
+statement ok
+CREATE TABLE shuffled AS
+SELECT strain AS STRAIN, species, genus AS Genus, family, "order", class, phylum, domain, feature_id AS Feature_ID
+FROM clean;
+
+query I
+SELECT count(*) FROM taxonomy_violations('shuffled');
+----
+0
+
+# =============================================================================
+# miintax's invariants, over the lines of its two files (its tests/test_invariants.py at
+# 3ac2b4b). I1, one parent per label, spans both files, so it is checked over their union,
+# where an id in both files is a repeat; I2 (one line per id) and I4 (no gaps) are per file,
+# so they are checked over each file.
+# =============================================================================
+
+statement ok
+CREATE TABLE clean_lines AS SELECT * FROM (VALUES
+    ('primary', 'G1', 'd__dA; p__pA; c__cA; o__oA; f__fA; g__gA; s__gA sA'),
+    ('primary', 'L1', 'd__dA; p__pA; c__cA; o__oA; f__fA; g__gA; s__'),
+    ('primary', 'L2', 'd__; p__; c__; o__; f__; g__; s__'),
+    ('secondary', 'L1', 'd__dA; p__pA; c__cA; o__oA; f__fA; g__gA; s__gA sB')
+) AS v(file, id, lineage);
+
+statement ok
+CREATE TABLE lines AS SELECT * FROM clean_lines;
+
+statement ok
+CREATE VIEW primary_tx AS SELECT id AS feature_id, unnest(parse_lineage(lineage)) FROM lines WHERE file = 'primary';
+
+statement ok
+CREATE VIEW secondary_tx AS SELECT id AS feature_id, unnest(parse_lineage(lineage)) FROM lines WHERE file = 'secondary';
+
+statement ok
+CREATE VIEW both_tx AS SELECT id AS feature_id, unnest(parse_lineage(lineage)) FROM lines;
+
+# Clean: each file holds every invariant. In the union, L1 (in both files) is a repeat and
+# nothing else, so a caller checking I1 over the union filters on kind.
+query I
+SELECT count(*) FROM taxonomy_violations('primary_tx');
+----
+0
+
+query I
+SELECT count(*) FROM taxonomy_violations('secondary_tx');
+----
+0
+
+query TTTTT
+SELECT kind, feature_id, rank, name, parent FROM taxonomy_violations('both_tx') ORDER BY ALL;
+----
+duplicate_id	L1	NULL	NULL	NULL
+duplicate_id	L1	NULL	NULL	NULL
+
+# I1: f__fA under o__oA and o__oB. Each row under each parent is listed, the repeated L1
+# included, so the lines at fault can be found.
+statement ok
+INSERT INTO lines VALUES ('primary', 'G2', 'd__dA; p__pA; c__cA; o__oB; f__fA; g__gB; s__gB sC');
+
+query TTTTT
+SELECT kind, feature_id, rank, name, parent FROM taxonomy_violations('both_tx')
+WHERE kind = 'multiple_parents' ORDER BY ALL;
+----
+multiple_parents	G1	family	fA	oA
+multiple_parents	G2	family	fA	oB
+multiple_parents	L1	family	fA	oA
+multiple_parents	L1	family	fA	oA
+
+# I1 spans both files: f__fA under o__oA in the primary file and o__oB in the secondary, though
+# each file alone is consistent.
+statement ok
+DELETE FROM lines;
+
+statement ok
+INSERT INTO lines SELECT * FROM clean_lines WHERE NOT (file = 'secondary' AND id = 'L1')
+UNION ALL VALUES ('secondary', 'L1', 'd__dA; p__pA; c__cA; o__oB; f__fA; g__gA; s__gA sB');
+
+query TTTTT
+SELECT kind, feature_id, rank, name, parent FROM taxonomy_violations('both_tx')
+WHERE kind <> 'duplicate_id' ORDER BY ALL;
+----
+multiple_parents	G1	family	fA	oA
+multiple_parents	L1	family	fA	oA
+multiple_parents	L1	family	fA	oB
+
+query I
+SELECT count(*) FROM taxonomy_violations('primary_tx');
+----
+0
+
+query I
+SELECT count(*) FROM taxonomy_violations('secondary_tx');
+----
+0
+
+# I1 counts an empty rank as a parent: g__gA under f__ in one line and f__fA in others. The
+# empty family is also a gap (I4). An empty parent is NULL.
+statement ok
+DELETE FROM lines;
+
+statement ok
+INSERT INTO lines SELECT * FROM clean_lines WHERE NOT (file = 'secondary' AND id = 'L1')
+UNION ALL VALUES ('secondary', 'L1', 'd__dA; p__pA; c__cA; o__oA; f__; g__gA; s__gA sB');
+
+query TTTTT
+SELECT kind, feature_id, rank, name, parent FROM taxonomy_violations('both_tx')
+WHERE kind <> 'duplicate_id' ORDER BY ALL;
+----
+gap	L1	family	NULL	NULL
+multiple_parents	G1	genus	gA	fA
+multiple_parents	L1	genus	gA	fA
+multiple_parents	L1	genus	gA	NULL
+
+# I1 covers species: a species' parent is its genus, so s__gA sA under g__gA and g__gB.
+statement ok
+DELETE FROM lines;
+
+statement ok
+INSERT INTO lines SELECT * FROM clean_lines WHERE NOT (file = 'secondary' AND id = 'L1')
+UNION ALL VALUES ('secondary', 'L1', 'd__dA; p__pA; c__cA; o__oA; f__fA; g__gB; s__gA sA');
+
+query TTTTT
+SELECT kind, feature_id, rank, name, parent FROM taxonomy_violations('both_tx')
+WHERE kind <> 'duplicate_id' ORDER BY ALL;
+----
+multiple_parents	G1	species	gA sA	gA
+multiple_parents	L1	species	gA sA	gB
+
+# I2: G1 twice in the primary file, even with equal lineages, is two lineages for one tip.
+statement ok
+DELETE FROM lines;
+
+statement ok
+INSERT INTO lines SELECT * FROM clean_lines
+UNION ALL VALUES ('primary', 'G1', 'd__dA; p__pA; c__cA; o__oA; f__fA; g__gA; s__gA sA');
+
+query TTTTT
+SELECT kind, feature_id, rank, name, parent FROM taxonomy_violations('primary_tx') ORDER BY ALL;
+----
+duplicate_id	G1	NULL	NULL	NULL
+duplicate_id	G1	NULL	NULL	NULL
+
+query I
+SELECT count(*) FROM taxonomy_violations('secondary_tx');
+----
+0
+
+# I4: an empty rank above a set one is a gap, named by the first empty rank. d__dA; p__; c__cZ;
+# o__; f__fZ has two empty ranks above set ones, and one gap, at the phylum.
+statement ok
+DELETE FROM lines;
+
+statement ok
+INSERT INTO lines SELECT * FROM clean_lines
+UNION ALL VALUES ('secondary', 'L2', 'd__dA; p__pA; c__; o__oZ; f__fZ; g__gZ; s__gZ sZ');
+
+query TTTTT
+SELECT kind, feature_id, rank, name, parent FROM taxonomy_violations('secondary_tx') ORDER BY ALL;
+----
+gap	L2	class	NULL	NULL
+
+statement ok
+DELETE FROM lines;
+
+statement ok
+INSERT INTO lines SELECT * FROM clean_lines
+UNION ALL VALUES ('secondary', 'L2', 'd__dA; p__; c__cZ; o__; f__fZ');
+
+query TTTTT
+SELECT kind, feature_id, rank, name, parent FROM taxonomy_violations('secondary_tx') ORDER BY ALL;
+----
+gap	L2	phylum	NULL	NULL
+
+# Every row is checked: an id on two lines with a gap in each gives a gap per line, besides
+# the repeat. (miintax counts I4 once per id; it groups the rows.)
+statement ok
+DELETE FROM lines;
+
+statement ok
+INSERT INTO lines SELECT * FROM clean_lines
+UNION ALL VALUES ('secondary', 'L2', 'd__dA; p__pA; c__; o__oZ; f__fZ; g__gZ; s__gZ sZ'),
+                 ('secondary', 'L2', 'd__dA; p__; c__cY; o__; f__fY');
+
+query TTTTT
+SELECT kind, feature_id, rank, name, parent FROM taxonomy_violations('secondary_tx') ORDER BY ALL;
+----
+duplicate_id	L2	NULL	NULL	NULL
+duplicate_id	L2	NULL	NULL	NULL
+gap	L2	class	NULL	NULL
+gap	L2	phylum	NULL	NULL
+
+# =============================================================================
+# Values that are not bare names, and bad ids, are violations too, so that a taxonomy with no
+# rows here is one tax2tree accepts. Brackets show the values' whitespace.
+# =============================================================================
+
+statement ok
+CREATE TABLE values_tx (feature_id VARCHAR, domain VARCHAR, phylum VARCHAR, class VARCHAR, "order" VARCHAR,
+                        family VARCHAR, genus VARCHAR, species VARCHAR, strain VARCHAR);
+
+statement ok
+INSERT INTO values_tx VALUES
+    ('V1', 'dA', 'pA', 'cA', 'oA', 'fA', '', NULL, NULL),
+    ('V2', 'dA', 'pA', 'cA', 'oA', 'fA', ' gA', NULL, NULL),
+    ('V3', 'dA', 'pA', 'cA', 'oA', 'fA', 'gA ', NULL, NULL),
+    ('V4', 'dA', 'pA', 'cA', 'oA', 'fA', 'g__gA', NULL, NULL),
+    ('V5', 'dA', 'pA', 'cA', 'oA', 'fA', 'gA;gB', NULL, NULL);
+
+query TTTTT
+SELECT kind, feature_id, rank, '[' || name || ']', detail FROM taxonomy_violations('values_tx') ORDER BY feature_id;
+----
+invalid_value	V1	genus	[]	is empty
+invalid_value	V2	genus	[ gA]	starts or ends with whitespace
+invalid_value	V3	genus	[gA ]	starts or ends with whitespace
+invalid_value	V4	genus	[g__gA]	starts with a rank prefix such as 'p__'
+invalid_value	V5	genus	[gA;gB]	contains ';'
+
+# Names are read as given, so an invalid value is also a name of its own in the parent check:
+# ' fA' is not fA, and gX is under both. Fixing the value removes both rows.
+statement ok
+CREATE TABLE as_given_tx AS SELECT * FROM values_tx WHERE false;
+
+statement ok
+INSERT INTO as_given_tx VALUES
+    ('S1', 'dA', 'pA', 'cA', 'oA', 'fA', 'gX', NULL, NULL),
+    ('S2', 'dA', 'pA', 'cA', 'oA', ' fA', 'gX', NULL, NULL);
+
+query TTTTT
+SELECT kind, feature_id, rank, '[' || name || ']', '[' || parent || ']' FROM taxonomy_violations('as_given_tx')
+ORDER BY ALL;
+----
+invalid_value	S2	family	[ fA]	NULL
+multiple_parents	S1	genus	[gX]	[fA]
+multiple_parents	S2	genus	[gX]	[ fA]
+
+# A NULL or empty id names no feature. An empty id is not a repeat of another.
+statement ok
+CREATE TABLE ids_tx AS SELECT * FROM values_tx WHERE false;
+
+statement ok
+INSERT INTO ids_tx VALUES
+    (NULL, 'dA', 'pA', NULL, NULL, NULL, NULL, NULL, NULL),
+    ('', 'dA', 'pA', NULL, NULL, NULL, NULL, NULL, NULL),
+    ('', 'dA', 'pA', NULL, NULL, NULL, NULL, NULL, NULL),
+    ('I1', 'dA', 'pA', NULL, NULL, NULL, NULL, NULL, NULL);
+
+query TTT
+SELECT kind, '[' || feature_id || ']', detail FROM taxonomy_violations('ids_tx') ORDER BY ALL;
+----
+invalid_id	[]	is empty
+invalid_id	[]	is empty
+invalid_id	NULL	is NULL
+
+# A repeated id gives one row per occurrence, so count(*) is how many rows carry it.
+statement ok
+CREATE TABLE dup_tx AS SELECT * FROM values_tx WHERE false;
+
+statement ok
+INSERT INTO dup_tx VALUES
+    ('D1', 'dA', 'pA', NULL, NULL, NULL, NULL, NULL, NULL),
+    ('D2', 'dA', 'pA', NULL, NULL, NULL, NULL, NULL, NULL),
+    ('D1', 'dA', 'pA', NULL, NULL, NULL, NULL, NULL, NULL),
+    ('D1', 'dA', 'pA', NULL, NULL, NULL, NULL, NULL, NULL);
+
+query TTI
+SELECT kind, feature_id, count(*) FROM taxonomy_violations('dup_tx') GROUP BY ALL ORDER BY ALL;
+----
+duplicate_id	D1	3
+
+# =============================================================================
+# Every violation comes back, not the first 10 that TaxonomyStore's error lists
+# =============================================================================
+
+statement ok
+CREATE TABLE many_tx AS
+SELECT 'B' || lpad(i::VARCHAR, 2, '0') AS feature_id, 'dA' AS domain, NULL::VARCHAR AS phylum, 'cA' AS class,
+       NULL::VARCHAR AS "order", NULL::VARCHAR AS family, NULL::VARCHAR AS genus, NULL::VARCHAR AS species,
+       NULL::VARCHAR AS strain
+FROM range(1, 13) AS t(i);
+
+query TTI
+SELECT kind, rank, count(*) FROM taxonomy_violations('many_tx') GROUP BY ALL;
+----
+gap	phylum	12
+
+# =============================================================================
+# Names as given: tax2tree cleans a lineage before its own parent check, cutting it at a
+# placeholder name ('uncultured', 'Incertae Sedis') and emptying one with no phylum. This
+# check does neither: it reports what the taxonomy says.
+# =============================================================================
+
+statement ok
+CREATE TABLE given_tx AS SELECT * FROM values_tx WHERE false;
+
+statement ok
+INSERT INTO given_tx VALUES
+    ('U1', 'dA', 'pA', 'cA', 'oA', 'uncultured Bacillaceae', 'gU', NULL, NULL),
+    ('U2', 'dA', 'pA', 'cA', 'oB', 'uncultured Bacillaceae', 'gV', NULL, NULL),
+    ('I1', 'dA', 'pA', 'cA', 'oA', 'Incertae Sedis', 'gI', NULL, NULL),
+    ('I2', 'dA', 'pA', 'cA', 'oB', 'Incertae Sedis', 'gJ', NULL, NULL),
+    ('W1', 'dA', NULL, 'cW', NULL, NULL, NULL, NULL, NULL),
+    ('W2', 'dA', 'pA', 'cW', NULL, NULL, NULL, NULL, NULL);
+
+query TTTTT
+SELECT kind, feature_id, rank, name, parent FROM taxonomy_violations('given_tx') ORDER BY ALL;
+----
+gap	W1	phylum	NULL	NULL
+multiple_parents	I1	family	Incertae Sedis	oA
+multiple_parents	I2	family	Incertae Sedis	oB
+multiple_parents	U1	family	uncultured Bacillaceae	oA
+multiple_parents	U2	family	uncultured Bacillaceae	oB
+multiple_parents	W1	class	cW	NULL
+multiple_parents	W2	class	cW	pA
+
+# =============================================================================
+# Ids may be BIGINT or UUID; the output keeps the type
+# =============================================================================
+
+statement ok
+CREATE TABLE big_tx AS
+SELECT id::BIGINT AS feature_id, d AS domain, p AS phylum, c AS class, o AS "order", f AS family,
+       NULL::VARCHAR AS genus, NULL::VARCHAR AS species, NULL::VARCHAR AS strain
+FROM (VALUES (1, 'dA', 'pA', 'cA', 'oA', 'fA'), (2, 'dA', 'pA', 'cA', 'oB', 'fA'), (NULL, 'dA', 'pA', 'cA', 'oA', 'fA'))
+    AS v(id, d, p, c, o, f);
+
+query TITTT
+SELECT kind, feature_id, typeof(feature_id), parent, detail FROM taxonomy_violations('big_tx') ORDER BY ALL;
+----
+invalid_id	NULL	BIGINT	NULL	is NULL
+multiple_parents	1	BIGINT	oA	NULL
+multiple_parents	2	BIGINT	oB	NULL
+multiple_parents	NULL	BIGINT	oA	NULL
+
+statement ok
+CREATE TABLE uu_tx AS
+SELECT id::UUID AS feature_id, 'dA' AS domain, 'pA' AS phylum, NULL::VARCHAR AS class, NULL::VARCHAR AS "order",
+       NULL::VARCHAR AS family, NULL::VARCHAR AS genus, NULL::VARCHAR AS species, NULL::VARCHAR AS strain
+FROM (VALUES ('00000000-0000-0000-0000-00000000000a'), ('80000000-0000-0000-0000-000000000000'),
+             ('00000000-0000-0000-0000-00000000000a')) AS v(id);
+
+query TTT
+SELECT kind, feature_id = '00000000-0000-0000-0000-00000000000a'::UUID, typeof(feature_id)
+FROM taxonomy_violations('uu_tx');
+----
+duplicate_id	true	UUID
+duplicate_id	true	UUID
+
+# =============================================================================
+# A relation that is not a taxonomy in the shared lineage schema is an error, not a violation:
+# exactly feature_id and the eight rank columns, which are VARCHAR
+# =============================================================================
+
+statement ok
+CREATE TABLE no_strain AS SELECT feature_id, domain, phylum, class, "order", family, genus, species FROM clean;
+
+statement error
+SELECT * FROM taxonomy_violations('no_strain');
+----
+taxonomy_violations: taxonomy 'no_strain' has no 'strain' column
+
+statement ok
+CREATE TABLE extra_column AS SELECT *, 'x' AS subspecies FROM clean;
+
+statement error
+SELECT * FROM taxonomy_violations('extra_column');
+----
+taxonomy_violations: taxonomy 'extra_column' has a column 'subspecies' outside the shared lineage schema
+
+statement ok
+CREATE TABLE int_genus AS
+SELECT feature_id, domain, phylum, class, "order", family, 1 AS genus, species, strain FROM clean;
+
+statement error
+SELECT * FROM taxonomy_violations('int_genus');
+----
+taxonomy_violations: column 'genus' of taxonomy 'int_genus' is INTEGER; the rank columns must be VARCHAR
+
+statement ok
+CREATE TABLE int_ids AS
+SELECT 1::INTEGER AS feature_id, domain, phylum, class, "order", family, genus, species, strain FROM clean;
+
+statement error
+SELECT * FROM taxonomy_violations('int_ids');
+----
+taxonomy_violations: feature_id must be VARCHAR, BIGINT, or UUID, but it is INTEGER
+
+statement error
+SELECT * FROM taxonomy_violations('nope');
+----
+taxonomy table or view 'nope' does not exist
+
+# =============================================================================
+# An id type that changes after the statement was prepared is refused, not emitted under the
+# old type (views over CSV files change type without a catalog change).
+# =============================================================================
+
+statement ok
+COPY (SELECT * FROM clean) TO '{TEST_DIR}/prep_tx.csv';
+
+statement ok
+CREATE VIEW prep_tx AS SELECT * FROM read_csv('{TEST_DIR}/prep_tx.csv');
+
+statement ok
+PREPARE check_prep AS SELECT count(*) FROM taxonomy_violations('prep_tx');
+
+query I
+EXECUTE check_prep;
+----
+0
+
+statement ok
+COPY (SELECT row_number() OVER () AS feature_id, domain, phylum, class, "order", family, genus, species, strain
+      FROM clean) TO '{TEST_DIR}/prep_tx.csv';
+
+statement error
+EXECUTE check_prep;
+----
+<REGEX>:.*taxonomy_violations: column 'feature_id' of 'prep_tx' is BIGINT now but was VARCHAR when the statement was bound.*
