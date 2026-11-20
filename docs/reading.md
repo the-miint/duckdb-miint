@@ -98,7 +98,7 @@ Reads are paired by position. Ensure the read IDs appear in the same order in bo
 | `include_filepath` | `BOOLEAN` | `false` | Include the source path. |
 | `qual_offset` | `INTEGER` | `33` | Decode quality scores using Phred+33 or Phred+64. |
 | `allow_empty` | `BOOLEAN` | `false` | Accept empty files as zero records. A pair with exactly one empty mate fails. |
-| `max_batch_bytes` | `VARCHAR` | `'512MiB'` | Set the soft limit on uncompressed sequence and quality bytes per chunk. |
+| `max_batch_bytes` | `VARCHAR` | `'64MiB'` | Set the soft limit on the bytes of the records produced at a time. See [Memory and parallel reads](#memory-and-parallel-reads). |
 
 #### Output columns
 
@@ -109,8 +109,8 @@ Reads are paired by position. Ensure the read IDs appear in the same order in bo
 | `comment` | `VARCHAR` | Comment after the ID, or `NULL` if absent. |
 | `sequence1` | `VARCHAR` | Sequence, or R1 for paired reads. |
 | `sequence2` | `VARCHAR` | R2 sequence, or `NULL` for single-end reads. |
-| `qual1` | `UINT8[]` | Integer quality scores for R1, or `NULL` for FASTA. |
-| `qual2` | `UINT8[]` | Integer quality scores for R2, or `NULL` for FASTA or single-end reads. |
+| `qual1` | `UINT8[]` | Integer quality scores for R1, or `NULL` for FASTA. A FASTQ record with no bases has an empty list. |
+| `qual2` | `UINT8[]` | Integer quality scores for R2, or `NULL` for FASTA or single-end reads. A FASTQ record with no bases has an empty list. |
 | `filepath` | `VARCHAR` | Source path, included only with `include_filepath = true`. |
 
 #### Paths and file pairing
@@ -130,7 +130,7 @@ SELECT * FROM read_fastx('samples/*_R1.fastq', sequence2 = 'samples/*_R2.fastq')
 
 #### Formats, compression, and invalid input
 
-Detects FASTA (`>` headers) or FASTQ (`@` headers) from the file's content, whatever its extension. Both files of a pair must use the same format. A FASTA file paired with a FASTQ file fails the query.
+Detects FASTA (`>` headers) or FASTQ (`@` headers) from the file's first header, whatever its extension. Every record of a FASTA file has a `NULL` `qual1`, and every record of a FASTQ file has a list, even a record with no bases. A file that mixes the two formats fails the query, naming its first record of the other format. Both files of a pair must use the same format. A FASTA file paired with a FASTQ file fails the query.
 
 Reads gzip-compressed files. The reader detects gzip from content for local files and from the `.gz` suffix for remote files (`s3://`, `https://`).
 
@@ -142,11 +142,15 @@ A malformed record, a file that ends inside a FASTQ record, a truncated or corru
 
 #### Memory and parallel reads
 
-The reader streams records. `max_batch_bytes` is a positive formatted byte size such as `'256MiB'` or `'2GB'`. The reader stops adding records to a chunk once the combined sequence and quality bytes reach that budget. This bounds buffering for large records such as assembled genomes. With short reads, the chunk normally reaches DuckDB's standard vector size first.
+The reader streams records from each file rather than loading it whole. Rows come out in groups of up to 2,048 records. `max_batch_bytes` is a positive formatted byte size such as `'256MiB'` or `'2GB'`. A group closes early once the uncompressed bytes of its read IDs, comments, sequences and qualities reach it. This bounds memory for large records such as assembled genomes. With short reads, a group reaches 2,048 records long before the cap.
 
 The reader uses one thread per file or file pair, up to DuckDB's `threads` setting. It reads stdin on one thread.
 
-Each local regular file can be decompressed and parsed on a thread of its own, ahead of the rows being produced. This is decided once for the whole scan: it happens only if every file in the scan, each taking one of DuckDB's threads plus one more thread (two for a pair), fits in `threads` at once. With `SET threads = 8` that is up to four single-end files or two pairs. The count covers every file even when DuckDB reads them one at a time, as it does for a sink that keeps insertion order (a `CREATE TABLE ... AS` under the default `preserve_insertion_order`). Each read-ahead stops once it holds 4 MiB of records, or `max_batch_bytes` if that is smaller, passing it by about a record (by up to sixteen where record lengths jump). Remote files and pipes (stdin from a pipe included) are read without it, as is everything in DuckDB-Wasm.
+Under the default `preserve_insertion_order`, rows come out file by file, in the order the files are given (a glob's sorted by name), and each file's records in order. `CREATE TABLE ... AS`, `INSERT`, and `COPY` to CSV or Parquet keep that order and still read the files in parallel. `COPY ... (FORMAT FASTQ)` and `(FORMAT FASTA)` do not keep it unless asked. By default they read and write on all threads, in no fixed order. With `PRESERVE_ORDER true` they keep it, writing on one thread and reading on it too. See [Writing](writing.md).
+
+Reading several files in parallel with insertion order kept costs memory. Each file is read whole by one thread, and the rows of later files wait in memory until the files before them are done. For a few large files, that is most of the input. A consumer that keeps the order, such as `CREATE TABLE ... AS`, holds whole groups until the ones before them arrive, so its memory also follows `max_batch_bytes`. DuckDB bounds the wait by holding back the later files once it passes a share of `memory_limit`, and the read then slows toward one thread's speed. The [engine notes](internals/duckdb-engine-notes.md#output-order-costs-threads-and-memory) have the measurements. Where record order does not matter, `SET preserve_insertion_order = false` (or `PRESERVE_ORDER false` on a `COPY`) avoids the wait, as a FASTQ or FASTA `COPY` with no `ORDER BY` does by default. A single file is read on one thread, so nothing waits.
+
+Each local regular file can be decompressed and parsed on a thread of its own, ahead of the rows being produced. This is decided once for the whole scan: it happens only if every file in the scan, each taking one of DuckDB's threads plus one more thread (two for a pair), fits in `threads` at once. With `SET threads = 8` that is up to four single-end files or two pairs. The count covers every file even when DuckDB reads them one at a time, as it does for `COPY ... (FORMAT FASTQ)` with insertion order kept. Each read-ahead stops once it holds 4 MiB of records, or `max_batch_bytes` if that is smaller, passing it by about a record (by up to sixteen where record lengths jump). Remote files and pipes (stdin from a pipe included) are read without it, as is everything in DuckDB-Wasm.
 
 #### Remote reads and retries
 
@@ -1258,6 +1262,21 @@ SELECT * FROM 'tree.nwk';
 For `((A,B)C,(D,E)F)G;` the indices are A 0, B 1, C 2, D 3, E 4, F 5, G 6. [`shear_tree`](phylogeny.md#shear-subset-to-tips)
 keeps this order; `tree_resolve_multifurcations` and `tree_resolve_placement` append the nodes they create, so their
 output is not postorder.
+
+**Tree tables:** the functions that take a tree read it from a table or view in this schema, so a tree can be built in
+SQL or persisted (in Parquet, say) as well as read from Newick.
+
+- `name` holds the nodes' names, which are ids, such as a tip's feature id: VARCHAR, BIGINT or UUID, the types a
+  `read_id` takes. The functions that take a tree and return one, such as
+  [`shear_tree`](phylogeny.md#shear-subset-to-tips), return `name` in the type it came in, so tip ids keep their
+  type, and refuse a `name` of another type (cast it).
+- Text labels, such as taxonomy names on internal nodes, go in an optional `label` column (VARCHAR), so that a tree
+  with BIGINT or UUID tip ids can still carry them. The functions that take a tree and return one return `label`
+  when the input has it: each node keeps its label, and the nodes a function creates have none (NULL).
+- An unnamed node's `name` is `''` in a VARCHAR tree, as `read_newick` writes it, and NULL in a BIGINT or UUID tree.
+- Newick holds one label per node, so `read_newick` puts every node's text in `name` and returns no `label`.
+  [`COPY ... (FORMAT NEWICK)`](writing.md#newick) writes a node's `label` where its `name` is NULL or `''`, so a
+  tree written out and read back has its labels in `name`.
 
 **Examples:**
 ```sql

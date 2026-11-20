@@ -1,0 +1,225 @@
+# name: test/sql/read_fastx_batch_index.test
+# description: With insertion order kept, what read_fastx feeds an order-keeping consumer comes out in file order, then record order, at 1 and at 8 threads: a CREATE TABLE AS keeps it, a COPY CSV writes it, and an order-kept COPY FASTA/FASTQ of a glob of files written by COPY equals those files concatenated. The source spans more files than threads, files of several chunks, and paired files.
+# group: [sql]
+
+require miint
+
+# 12 files of 2,100 to 2,900 records of 40 to 199 bases, so each spans two chunks of 2,048 rows; 30,000 records.
+statement ok
+CREATE TABLE src AS
+SELECT *,
+       list_transform(range(length(sequence1)), lambda j: ((i + j + k) % 41)::UTINYINT) AS qual1,
+       list_transform(range(length(sequence2)), lambda j: ((i * 3 + j + k) % 41)::UTINYINT) AS qual2
+FROM (SELECT k, i, 'f' || k || '_' || i AS read_id,
+             left(repeat(translate(md5(k || '/' || i), '0123456789abcdef', 'ACGTACGTACGTACGT'), 8), 40 + (i * 7 + k) % 160)
+                 AS sequence1,
+             left(repeat(translate(md5(k || '/' || i || '/2'), '0123456789abcdef', 'ACGTACGTACGTACGT'), 8),
+                  40 + (i * 3 + k) % 120) AS sequence2
+      FROM range(10, 22) a(k), range(0, 2900) b(i)
+      WHERE i < 2100 + 400 * (k % 3));
+
+# Each file in its own record order. Two-digit numbers sort as the files are claimed.
+loop k 10 22
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM src WHERE k = ${k} ORDER BY i) TO '{TEST_DIR}/bi_fq_${k}.fastq' (FORMAT FASTQ);
+
+statement ok
+COPY (SELECT read_id, sequence1 FROM src WHERE k = ${k} ORDER BY i) TO '{TEST_DIR}/bi_fa_${k}.fasta' (FORMAT FASTA);
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM src WHERE k = ${k} ORDER BY i)
+TO '{TEST_DIR}/bi_p_${k}_{ORIENTATION}.fastq' (FORMAT FASTQ);
+
+endloop
+
+foreach thr 1 8
+
+statement ok
+SET threads=${thr};
+
+# --- CREATE TABLE AS keeps file order, then record order ---
+# rowid follows insertion order, so it must equal each row's place in (filepath, sequence_index) order.
+
+statement ok
+CREATE OR REPLACE TABLE ctas AS
+SELECT filepath, sequence_index, read_id FROM read_fastx('{TEST_DIR}/bi_fq_*.fastq', include_filepath = true);
+
+query II
+SELECT count(*), count(*) FILTER (WHERE rowid <> expected)
+FROM (SELECT rowid, row_number() OVER (ORDER BY filepath, sequence_index) - 1 AS expected FROM ctas);
+----
+30000	0
+
+# The same with chunks of at most 16 KB, about 80 records, so each file spans dozens of chunks.
+statement ok
+CREATE OR REPLACE TABLE ctas_small AS
+SELECT filepath, sequence_index, read_id
+FROM read_fastx('{TEST_DIR}/bi_fq_*.fastq', include_filepath = true, max_batch_bytes = '16KB');
+
+query II
+SELECT count(*), count(*) FILTER (WHERE rowid <> expected)
+FROM (SELECT rowid, row_number() OVER (ORDER BY filepath, sequence_index) - 1 AS expected FROM ctas_small);
+----
+30000	0
+
+# Paired files: the R1 file's order.
+statement ok
+CREATE OR REPLACE TABLE ctas_paired AS
+SELECT filepath, sequence_index, read_id
+FROM read_fastx('{TEST_DIR}/bi_p_*_R1.fastq', sequence2 = '{TEST_DIR}/bi_p_*_R2.fastq', include_filepath = true);
+
+query II
+SELECT count(*), count(*) FILTER (WHERE rowid <> expected)
+FROM (SELECT rowid, row_number() OVER (ORDER BY filepath, sequence_index) - 1 AS expected FROM ctas_paired);
+----
+30000	0
+
+# --- COPY CSV writes the same order ---
+
+statement ok
+COPY (SELECT read_id FROM read_fastx('{TEST_DIR}/bi_fq_*.fastq')) TO '{TEST_DIR}/bi_ids_${thr}.csv' (FORMAT CSV, HEADER false);
+
+query I
+SELECT (SELECT content FROM read_text('{TEST_DIR}/bi_ids_${thr}.csv'))
+     = (SELECT string_agg(read_id, E'\n' ORDER BY filepath, sequence_index) || E'\n' FROM ctas);
+----
+true
+
+# --- Order-kept FASTA/FASTQ of the glob equals the input files concatenated ---
+# With PRESERVE_ORDER true these writers keep order on one thread, so they check the order files are claimed and read
+# in, not the batch index.
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM read_fastx('{TEST_DIR}/bi_fq_*.fastq')) TO '{TEST_DIR}/bi_all_${thr}.fastq' (FORMAT FASTQ, PRESERVE_ORDER true);
+
+query I
+SELECT (SELECT md5(content) FROM read_text('{TEST_DIR}/bi_all_${thr}.fastq'))
+     = (SELECT md5(string_agg(content, '' ORDER BY filename)) FROM read_text('{TEST_DIR}/bi_fq_*.fastq'));
+----
+true
+
+statement ok
+COPY (SELECT read_id, sequence1 FROM read_fastx('{TEST_DIR}/bi_fa_*.fasta')) TO '{TEST_DIR}/bi_all_${thr}.fasta' (FORMAT FASTA, PRESERVE_ORDER true);
+
+query I
+SELECT (SELECT md5(content) FROM read_text('{TEST_DIR}/bi_all_${thr}.fasta'))
+     = (SELECT md5(string_agg(content, '' ORDER BY filename)) FROM read_text('{TEST_DIR}/bi_fa_*.fasta'));
+----
+true
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1, sequence2, qual2
+      FROM read_fastx('{TEST_DIR}/bi_p_*_R1.fastq', sequence2 = '{TEST_DIR}/bi_p_*_R2.fastq'))
+TO '{TEST_DIR}/bi_pall_${thr}_{ORIENTATION}.fastq' (FORMAT FASTQ, PRESERVE_ORDER true);
+
+query II
+SELECT (SELECT md5(content) FROM read_text('{TEST_DIR}/bi_pall_${thr}_R1.fastq'))
+     = (SELECT md5(string_agg(content, '' ORDER BY filename)) FROM read_text('{TEST_DIR}/bi_p_*_R1.fastq')),
+       (SELECT md5(content) FROM read_text('{TEST_DIR}/bi_pall_${thr}_R2.fastq'))
+     = (SELECT md5(string_agg(content, '' ORDER BY filename)) FROM read_text('{TEST_DIR}/bi_p_*_R2.fastq'));
+----
+true	true
+
+# --- A relation read by name keeps the order ---
+# save_minimap2_index reads the relation it is given by name on a connection of its own, as a materialized result
+# (ReadSubjectTable in sequence_table_reader.cpp), and over a view of a multi-file read_fastx that result keeps order
+# across threads. A minimap2 index stores its sequences in the order read, so the indexes built at 1 and 8 threads
+# must be identical (compared after the loop).
+
+statement ok
+CREATE OR REPLACE VIEW bi_view AS FROM read_fastx('{TEST_DIR}/bi_fq_*.fastq');
+
+statement ok
+SELECT * FROM save_minimap2_index('bi_view', '{TEST_DIR}/bi_idx_${thr}.mmi');
+
+endloop
+
+query II
+SELECT count(*), count(DISTINCT md5(content)) FROM read_blob('{TEST_DIR}/bi_idx_*.mmi');
+----
+2	1
+
+# --- With order kept, read_fastx feeds DuckDB's batch sinks ---
+# DuckDB uses them only over a source with a batch index (docs/internals/duckdb-engine-notes.md, "Output order costs
+# threads and memory").
+
+statement ok
+SET threads=8;
+
+query II
+EXPLAIN CREATE TABLE ex AS FROM read_fastx('{TEST_DIR}/bi_fq_*.fastq');
+----
+physical_plan	<REGEX>:.*Batch Create Table As.*
+
+statement ok
+CREATE TABLE ins AS SELECT * FROM read_fastx('{TEST_DIR}/bi_fq_*.fastq') LIMIT 0;
+
+query II
+EXPLAIN INSERT INTO ins SELECT * FROM read_fastx('{TEST_DIR}/bi_fq_*.fastq');
+----
+physical_plan	<REGEX>:.*Batch Insert.*
+
+query II
+EXPLAIN COPY (FROM read_fastx('{TEST_DIR}/bi_fq_*.fastq')) TO '{TEST_DIR}/bi_ex.csv' (FORMAT CSV);
+----
+physical_plan	<REGEX>:.*Batch Copy To File.*
+
+# A one-file scan declares no batch index (ScanBatchIndex::KeepForSeveralFiles says why): a file, a list of one file,
+# a pair, and a glob that matches one file. The first query keeps the <!REGEX> ones below from passing on a plan that
+# is empty or has no CREATE TABLE AS.
+query II
+EXPLAIN CREATE TABLE ex1 AS FROM read_fastx('{TEST_DIR}/bi_fq_10.fastq');
+----
+physical_plan	<REGEX>:.*Create Table As.*
+
+query II
+EXPLAIN CREATE TABLE ex1 AS FROM read_fastx('{TEST_DIR}/bi_fq_10.fastq');
+----
+physical_plan	<!REGEX>:.*Batch.*
+
+query II
+EXPLAIN CREATE TABLE ex1 AS FROM read_fastx(['{TEST_DIR}/bi_fq_10.fastq']);
+----
+physical_plan	<!REGEX>:.*Batch.*
+
+query II
+EXPLAIN CREATE TABLE ex1 AS FROM read_fastx('{TEST_DIR}/bi_p_10_R1.fastq', sequence2 = '{TEST_DIR}/bi_p_10_R2.fastq');
+----
+physical_plan	<!REGEX>:.*Batch.*
+
+query II
+EXPLAIN COPY (FROM read_fastx('{TEST_DIR}/bi_fq_21*.fastq')) TO '{TEST_DIR}/bi_ex1.csv' (FORMAT CSV);
+----
+physical_plan	<!REGEX>:.*Batch.*
+
+# Two files keep it.
+query II
+EXPLAIN CREATE TABLE ex2 AS FROM read_fastx(['{TEST_DIR}/bi_fq_10.fastq', '{TEST_DIR}/bi_fq_11.fastq']);
+----
+physical_plan	<REGEX>:.*Batch Create Table As.*
+
+# --- A chunk holds at most about 64 MiB by default ---
+# Three records of 23 MB: under the 64 MiB default a chunk takes two, as a third would pass it; a cap above 69 MB would
+# put all three in one. With ROW_GROUP_SIZE 1 a COPY flushes each chunk on its own, and DuckDB logs each flush with its
+# row count.
+
+statement ok
+CALL enable_logging('PhysicalOperator', storage = 'memory');
+
+statement ok
+COPY (SELECT 'g' || i AS read_id,
+             left(repeat(translate(md5(i::VARCHAR), '0123456789abcdef', 'ACGTACGTACGTACGT'), 718750), 23000000) AS sequence1
+      FROM range(3) r(i))
+TO '{TEST_DIR}/bi_big.fasta' (FORMAT FASTA);
+
+statement ok
+COPY (SELECT read_id, length(sequence1) AS n FROM read_fastx('{TEST_DIR}/bi_big.fasta'))
+TO '{TEST_DIR}/bi_big.csv' (FORMAT CSV, ROW_GROUP_SIZE 1);
+
+query III
+SELECT count(*), sum(info.rows::BIGINT), max(info.rows::BIGINT)
+FROM duckdb_logs_parsed('PhysicalOperator')
+WHERE event = 'FlushBatch' AND parse_filename(info.file) = 'bi_big.csv';
+----
+2	3	2

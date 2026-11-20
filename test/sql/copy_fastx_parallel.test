@@ -1,0 +1,295 @@
+# name: test/sql/copy_fastx_parallel.test
+# description: COPY FORMAT FASTA/FASTQ on 8 threads from a source that can be scanned in parallel. With PRESERVE_ORDER true, records are written in input order, and with an ORDER BY (and no option) in its order. With neither, order is not kept (the default), but every record is written exactly once, interleaved mates stay adjacent, split R1/R2 files stay in step, and partitioned output is complete. An unknown option is reported against the public format name.
+# group: [sql]
+
+require miint
+
+require parquet
+
+statement ok
+SET threads=8;
+
+# 20,000 paired records with varied lengths, read from a Parquet file of 10 row groups so that the scan feeding the
+# COPY can run on several threads, as it does when order is off.
+statement ok
+CREATE TABLE src AS
+SELECT *,
+       list_transform(range(length(sequence1)), lambda j: ((i * 7 + j) % 41)::UTINYINT) AS qual1,
+       list_transform(range(length(sequence2)), lambda j: ((i * 3 + j) % 41)::UTINYINT) AS qual2
+FROM (SELECT i, i % 4 AS bucket, 'r' || i AS read_id,
+             left(repeat(translate(md5(i::VARCHAR), '0123456789abcdef', 'ACGTACGTACGTACGT'), 5), 60 + i % 91)
+                 AS sequence1,
+             left(repeat(translate(md5(i::VARCHAR || '/2'), '0123456789abcdef', 'ACGTACGTACGTACGT'), 5), 50 + i % 71)
+                 AS sequence2
+      FROM range(0, 20000) r(i));
+
+statement ok
+COPY src TO '{TEST_DIR}/src.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 2048);
+
+query I
+SELECT count(DISTINCT row_group_id) FROM parquet_metadata('{TEST_DIR}/src.parquet');
+----
+10
+
+statement ok
+CREATE VIEW p AS FROM read_parquet('{TEST_DIR}/src.parquet');
+
+# --- PRESERVE_ORDER true: rows are written in input order ---
+# read_fastx numbers records from 1 in file order, and record k must be source row k - 1. With order kept the COPY runs
+# REGULAR, on one thread; were it PARALLEL, the batches would be written in whatever order they were finished.
+
+statement ok
+COPY (SELECT read_id, sequence1 FROM p) TO '{TEST_DIR}/kept.fasta' (FORMAT FASTA, PRESERVE_ORDER true);
+
+query II
+SELECT count(*), count(*) FILTER (WHERE read_id <> 'r' || (sequence_index - 1)) FROM read_fastx('{TEST_DIR}/kept.fasta');
+----
+20000	0
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM p) TO '{TEST_DIR}/kept.fastq' (FORMAT FASTQ, PRESERVE_ORDER true);
+
+query II
+SELECT count(*), count(*) FILTER (WHERE read_id <> 'r' || (sequence_index - 1)) FROM read_fastx('{TEST_DIR}/kept.fastq');
+----
+20000	0
+
+# --- An ORDER BY keeps its order, with no option ---
+# Record k must be the k-th row in the ORDER BY's order, which is not the input's (the sequences are md5-derived).
+# Too few rows come out of DuckDB's sort in order even to a COPY that keeps none (docs/internals/architecture.md,
+# "Tests to copy"), so this sorts 200,000 short reads: enough that a COPY that dropped the ORDER BY (as
+# PRESERVE_ORDER false does) writes them out of order. FASTQ goes through the same writer code; copy_sam_parallel.test
+# sorts 200,000 alignments for SAM and BAM's writer.
+
+statement ok
+CREATE TABLE many AS
+SELECT 'r' || i AS read_id, left(translate(md5(i::VARCHAR), '0123456789abcdef', 'ACGTACGTACGTACGT'), 8 + i % 9) AS sequence1
+FROM range(0, 200000) r(i);
+
+statement ok
+COPY many TO '{TEST_DIR}/many.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 20480);
+
+statement ok
+COPY (FROM read_parquet('{TEST_DIR}/many.parquet') ORDER BY sequence1, read_id) TO '{TEST_DIR}/sorted.fasta' (FORMAT FASTA);
+
+query II
+SELECT count(*), count(*) FILTER (WHERE f.read_id <> s.read_id)
+FROM read_fastx('{TEST_DIR}/sorted.fasta') f
+JOIN (SELECT read_id, row_number() OVER (ORDER BY sequence1, read_id) AS k FROM many) s ON f.sequence_index = s.k;
+----
+200000	0
+
+# Each check below counts the rows in one relation and not in the other, duplicates included, both ways: 0 when the
+# two hold the same records the same number of times.
+
+# --- Single-end output: every record exactly once ---
+
+statement ok
+COPY (SELECT read_id, sequence1 FROM p) TO '{TEST_DIR}/single.fasta' (FORMAT FASTA, PRESERVE_ORDER false);
+
+query I
+SELECT count(*) FROM (
+    (SELECT read_id, sequence1 FROM read_fastx('{TEST_DIR}/single.fasta') EXCEPT ALL SELECT read_id, sequence1 FROM src)
+    UNION ALL
+    (SELECT read_id, sequence1 FROM src EXCEPT ALL SELECT read_id, sequence1 FROM read_fastx('{TEST_DIR}/single.fasta')));
+----
+0
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM p) TO '{TEST_DIR}/single.fastq' (FORMAT FASTQ, PRESERVE_ORDER false);
+
+query I
+SELECT count(*) FROM (
+    (SELECT read_id, sequence1, qual1 FROM read_fastx('{TEST_DIR}/single.fastq')
+     EXCEPT ALL SELECT read_id, sequence1, qual1 FROM src)
+    UNION ALL
+    (SELECT read_id, sequence1, qual1 FROM src
+     EXCEPT ALL SELECT read_id, sequence1, qual1 FROM read_fastx('{TEST_DIR}/single.fastq')));
+----
+0
+
+# --- Interleaved output: records 2k-1 and 2k are R1 and R2 of one source row ---
+# read_fastx reads an interleaved file as single-end records, numbered from 1 in file order. If mates were split
+# across batches, a pair below would join two different rows and fail both checks.
+
+statement ok
+COPY (SELECT read_id, sequence1, sequence2 FROM p) TO '{TEST_DIR}/interleaved.fasta' (FORMAT FASTA, INTERLEAVE true, PRESERVE_ORDER false);
+
+statement ok
+CREATE TABLE fasta_pairs AS
+WITH r AS (SELECT sequence_index AS k, read_id, sequence1 FROM read_fastx('{TEST_DIR}/interleaved.fasta'))
+SELECT a.read_id AS id1, b.read_id AS id2, a.sequence1 AS sequence1, b.sequence1 AS sequence2
+FROM r a JOIN r b ON b.k = a.k + 1
+WHERE a.k % 2 = 1;
+
+query III
+SELECT (SELECT count(*) FROM read_fastx('{TEST_DIR}/interleaved.fasta')), count(*), count(*) FILTER (WHERE id1 = id2)
+FROM fasta_pairs;
+----
+40000	20000	20000
+
+query I
+SELECT count(*) FROM (
+    (SELECT id1, sequence1, sequence2 FROM fasta_pairs EXCEPT ALL SELECT read_id, sequence1, sequence2 FROM src)
+    UNION ALL
+    (SELECT read_id, sequence1, sequence2 FROM src EXCEPT ALL SELECT id1, sequence1, sequence2 FROM fasta_pairs));
+----
+0
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM p)
+TO '{TEST_DIR}/interleaved.fastq' (FORMAT FASTQ, INTERLEAVE true, PRESERVE_ORDER false);
+
+statement ok
+CREATE TABLE fastq_pairs AS
+WITH r AS (SELECT sequence_index AS k, read_id, sequence1, qual1 FROM read_fastx('{TEST_DIR}/interleaved.fastq'))
+SELECT a.read_id AS id1, b.read_id AS id2, a.sequence1 AS sequence1, a.qual1 AS qual1, b.sequence1 AS sequence2,
+       b.qual1 AS qual2
+FROM r a JOIN r b ON b.k = a.k + 1
+WHERE a.k % 2 = 1;
+
+query III
+SELECT (SELECT count(*) FROM read_fastx('{TEST_DIR}/interleaved.fastq')), count(*), count(*) FILTER (WHERE id1 = id2)
+FROM fastq_pairs;
+----
+40000	20000	20000
+
+query I
+SELECT count(*) FROM (
+    (SELECT id1, sequence1, qual1, sequence2, qual2 FROM fastq_pairs
+     EXCEPT ALL SELECT read_id, sequence1, qual1, sequence2, qual2 FROM src)
+    UNION ALL
+    (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM src
+     EXCEPT ALL SELECT id1, sequence1, qual1, sequence2, qual2 FROM fastq_pairs));
+----
+0
+
+# --- Split output: the R1 and R2 files stay in step ---
+# read_fastx reads R1 and R2 together and raises "Mismatched read IDs" at the first record where they differ.
+
+statement ok
+COPY (SELECT read_id, sequence1, sequence2 FROM p) TO '{TEST_DIR}/split.{ORIENTATION}.fasta' (FORMAT FASTA, PRESERVE_ORDER false);
+
+query I
+SELECT count(*) FROM (
+    (SELECT read_id, sequence1, sequence2 FROM read_fastx('{TEST_DIR}/split.R1.fasta', sequence2 = '{TEST_DIR}/split.R2.fasta')
+     EXCEPT ALL SELECT read_id, sequence1, sequence2 FROM src)
+    UNION ALL
+    (SELECT read_id, sequence1, sequence2 FROM src
+     EXCEPT ALL SELECT read_id, sequence1, sequence2
+                FROM read_fastx('{TEST_DIR}/split.R1.fasta', sequence2 = '{TEST_DIR}/split.R2.fasta')));
+----
+0
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM p)
+TO '{TEST_DIR}/split.{ORIENTATION}.fastq' (FORMAT FASTQ, PRESERVE_ORDER false);
+
+query I
+SELECT count(*) FROM (
+    (SELECT read_id, sequence1, qual1, sequence2, qual2
+     FROM read_fastx('{TEST_DIR}/split.R1.fastq', sequence2 = '{TEST_DIR}/split.R2.fastq')
+     EXCEPT ALL SELECT read_id, sequence1, qual1, sequence2, qual2 FROM src)
+    UNION ALL
+    (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM src
+     EXCEPT ALL SELECT read_id, sequence1, qual1, sequence2, qual2
+                FROM read_fastx('{TEST_DIR}/split.R1.fastq', sequence2 = '{TEST_DIR}/split.R2.fastq')));
+----
+0
+
+# --- PARTITION_BY: one file per bucket, each complete ---
+# Batches for different files are prepared concurrently and are handed one file's global state, so a prepare that read
+# anything file-specific would put records in the wrong file. Order is off for every partitioned COPY.
+
+statement ok
+COPY (SELECT bucket, read_id, sequence1 FROM p) TO '{TEST_DIR}/part_single' (FORMAT FASTA, PARTITION_BY (bucket));
+
+query II
+SELECT count(DISTINCT filepath), count(*)
+FROM read_fastx('{TEST_DIR}/part_single/*/*', include_filepath = true);
+----
+4	20000
+
+query I
+SELECT count(*) FROM (
+    (SELECT regexp_extract(filepath, 'bucket=([0-9]+)', 1)::BIGINT, read_id, sequence1
+     FROM read_fastx('{TEST_DIR}/part_single/*/*', include_filepath = true)
+     EXCEPT ALL SELECT bucket, read_id, sequence1 FROM src)
+    UNION ALL
+    (SELECT bucket, read_id, sequence1 FROM src
+     EXCEPT ALL SELECT regexp_extract(filepath, 'bucket=([0-9]+)', 1)::BIGINT, read_id, sequence1
+                FROM read_fastx('{TEST_DIR}/part_single/*/*', include_filepath = true)));
+----
+0
+
+statement ok
+COPY (SELECT bucket, read_id, sequence1, qual1, sequence2, qual2 FROM p)
+TO '{TEST_DIR}/part_interleaved' (FORMAT FASTQ, PARTITION_BY (bucket), INTERLEAVE true);
+
+statement ok
+CREATE TABLE part_pairs AS
+WITH r AS (SELECT filepath, sequence_index AS k, read_id, sequence1, qual1
+           FROM read_fastx('{TEST_DIR}/part_interleaved/*/*', include_filepath = true))
+SELECT regexp_extract(a.filepath, 'bucket=([0-9]+)', 1)::BIGINT AS bucket, a.read_id AS id1, b.read_id AS id2,
+       a.sequence1 AS sequence1, a.qual1 AS qual1, b.sequence1 AS sequence2, b.qual1 AS qual2
+FROM r a JOIN r b ON b.filepath = a.filepath AND b.k = a.k + 1
+WHERE a.k % 2 = 1;
+
+query III
+SELECT (SELECT count(*) FROM read_fastx('{TEST_DIR}/part_interleaved/*/*')), count(*), count(*) FILTER (WHERE id1 = id2)
+FROM part_pairs;
+----
+40000	20000	20000
+
+query I
+SELECT count(*) FROM (
+    (SELECT bucket, id1, sequence1, qual1, sequence2, qual2 FROM part_pairs
+     EXCEPT ALL SELECT bucket, read_id, sequence1, qual1, sequence2, qual2 FROM src)
+    UNION ALL
+    (SELECT bucket, read_id, sequence1, qual1, sequence2, qual2 FROM src
+     EXCEPT ALL SELECT bucket, id1, sequence1, qual1, sequence2, qual2 FROM part_pairs));
+----
+0
+
+# PARTITION_PATH names the directories with an expression: the rebind to _miint_fasta passes it on.
+statement ok
+COPY (SELECT bucket, read_id, sequence1 FROM p)
+TO '{TEST_DIR}/part_path' (FORMAT FASTA, PARTITION_BY (bucket), PARTITION_PATH 'b' || bucket::VARCHAR);
+
+query I
+SELECT list_sort(list(DISTINCT regexp_extract(replace(filepath, '\', '/'), 'part_path/([^/]+)/', 1)))
+FROM read_fastx('{TEST_DIR}/part_path/*/*', include_filepath = true);
+----
+[b0, b1, b2, b3]
+
+query I
+SELECT count(*) FROM (
+    (SELECT regexp_extract(replace(filepath, '\', '/'), 'part_path/b([0-9]+)/', 1)::BIGINT, read_id, sequence1
+     FROM read_fastx('{TEST_DIR}/part_path/*/*', include_filepath = true)
+     EXCEPT ALL SELECT bucket, read_id, sequence1 FROM src)
+    UNION ALL
+    (SELECT bucket, read_id, sequence1 FROM src
+     EXCEPT ALL SELECT regexp_extract(replace(filepath, '\', '/'), 'part_path/b([0-9]+)/', 1)::BIGINT, read_id, sequence1
+                FROM read_fastx('{TEST_DIR}/part_path/*/*', include_filepath = true)));
+----
+0
+
+# Split R1/R2 output does not work with PARTITION_BY: with {ORIENTATION} in the target directory, the partition files
+# are opened under a directory that was never created.
+statement error
+COPY (SELECT bucket, read_id, sequence1, qual1, sequence2, qual2 FROM p) TO '{TEST_DIR}/part_split_{ORIENTATION}' (FORMAT FASTQ, PARTITION_BY (bucket));
+----
+Cannot open file
+
+# --- An unknown option names the format the user wrote ---
+# The options are checked against FASTA/FASTQ before the statement is rebound to _miint_fasta/_miint_fastq.
+
+statement error
+COPY (SELECT read_id, sequence1 FROM p) TO '{TEST_DIR}/bad_option.fasta' (FORMAT FASTA, PRESERVE_ORDER false, NO_SUCH_OPTION 1);
+----
+Unrecognized option "no_such_option" for FASTA
+
+statement error
+COPY (SELECT read_id, sequence1, qual1 FROM p) TO '{TEST_DIR}/bad_option.fastq' (FORMAT FASTQ, PRESERVE_ORDER false, NO_SUCH_OPTION 1);
+----
+Unrecognized option "no_such_option" for FASTQ

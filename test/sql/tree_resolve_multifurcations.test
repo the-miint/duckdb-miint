@@ -243,3 +243,123 @@ statement error
 SELECT * FROM tree_resolve_multifurcations('bad_tree');
 ----
 node_index
+
+# =============================================================================
+# Typed names and labels. `name` keeps its id type (VARCHAR, BIGINT or UUID), and an optional
+# `label` VARCHAR column of text labels is carried through. The connector node the resolution
+# creates has no name (NULL in a typed tree) and no label.
+# =============================================================================
+
+statement ok
+CREATE TABLE tri3_big AS SELECT * FROM (VALUES
+    (0, 10::BIGINT, 1.0, CAST(NULL AS BIGINT), 3, CAST(NULL AS VARCHAR)),
+    (1, 20,   2.0, NULL, 3, NULL),
+    (2, 30,   3.0, NULL, 3, NULL),
+    (3, NULL, NULL, NULL, NULL, 'd__R')
+) AS v(node_index, name, branch_length, edge_id, parent_index, label);
+
+query T
+SELECT DISTINCT typeof(name) FROM tree_resolve_multifurcations('tri3_big');
+----
+BIGINT
+
+query IIT
+SELECT node_index, name, label FROM tree_resolve_multifurcations('tri3_big') ORDER BY node_index;
+----
+0	10	NULL
+1	20	NULL
+2	30	NULL
+3	NULL	d__R
+4	NULL	NULL
+
+statement ok
+CREATE TABLE tri3_uuid AS SELECT node_index,
+    CASE WHEN name IS NOT NULL THEN ('00000000-0000-0000-0000-0000000000' || name)::UUID END AS name,
+    branch_length, edge_id, parent_index, label
+FROM tri3_big;
+
+query TTT
+SELECT node_index, name, label FROM tree_resolve_multifurcations('tri3_uuid') ORDER BY node_index;
+----
+0	00000000-0000-0000-0000-000000000010	NULL
+1	00000000-0000-0000-0000-000000000020	NULL
+2	00000000-0000-0000-0000-000000000030	NULL
+3	NULL	d__R
+4	NULL	NULL
+
+query T
+SELECT DISTINCT typeof(name) FROM tree_resolve_multifurcations('tri3_uuid');
+----
+UUID
+
+# A VARCHAR tree's connector is named '', with no label.
+statement ok
+CREATE TABLE tri3_labeled AS SELECT node_index, name, branch_length, edge_id, parent_index,
+    CASE WHEN parent_index IS NULL THEN 'd__R' END AS label
+FROM tri3;
+
+query TT
+SELECT name, label FROM tree_resolve_multifurcations('tri3_labeled') ORDER BY node_index;
+----
+A	NULL
+B	NULL
+C	NULL
+root	d__R
+(empty)	NULL
+
+# Without a `label` column the output is the read_newick schema.
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM tree_resolve_multifurcations('tri3'));
+----
+node_index	BIGINT
+name	VARCHAR
+branch_length	DOUBLE
+edge_id	BIGINT
+parent_index	BIGINT
+is_tip	BOOLEAN
+
+statement ok
+CREATE TABLE tri3_label_int AS SELECT node_index, name, branch_length, edge_id, parent_index, 7 AS label FROM tri3;
+
+statement error
+SELECT * FROM tree_resolve_multifurcations('tri3_label_int');
+----
+'label' must be VARCHAR, got INTEGER
+
+statement ok
+CREATE TABLE tri3_int AS SELECT node_index, name::INTEGER AS name, branch_length, edge_id, parent_index FROM tri3_big;
+
+statement error
+SELECT * FROM tree_resolve_multifurcations('tri3_int');
+----
+tip names must be VARCHAR, BIGINT, or UUID, but they are INTEGER
+
+# 1500 cherries under one root, more rows than one output batch (STANDARD_VECTOR_SIZE): tips 0..2999,
+# named 100000 + i; cherry k (row 3000 + k, labeled 'c' || k) holds tips 2k and 2k+1; the root (row
+# 4500) is labeled 'root'. node_index is ten times the row, so a label looked up by node_index
+# instead of by row would land on the wrong node.
+statement ok
+CREATE TABLE cherries AS
+SELECT i * 10 AS node_index,
+       CASE WHEN i < 3000 THEN 100000 + i END::BIGINT AS name,
+       1.0::DOUBLE AS branch_length,
+       CAST(NULL AS BIGINT) AS edge_id,
+       (CASE WHEN i < 3000 THEN 3000 + i // 2 WHEN i < 4500 THEN 4500 END * 10)::BIGINT AS parent_index,
+       CASE WHEN i >= 3000 AND i < 4500 THEN 'c' || (i - 3000) WHEN i = 4500 THEN 'root' END AS label
+FROM range(4501) AS r(i);
+
+# The root's 1500 children resolve into 1498 connectors, appended after the input's nodes. Every
+# input node keeps its name and label (output node i is input row i); the connectors have neither.
+query II
+SELECT count(*), count(*) FILTER (WHERE node_index > 4500) FROM tree_resolve_multifurcations('cherries');
+----
+5999	1498
+
+query I
+SELECT count(*) FROM tree_resolve_multifurcations('cherries') AS o
+LEFT JOIN cherries AS c ON c.node_index = o.node_index * 10
+WHERE CASE WHEN o.node_index <= 4500
+           THEN o.label IS DISTINCT FROM c.label OR o.name IS DISTINCT FROM c.name
+           ELSE o.label IS NOT NULL OR o.name IS NOT NULL END;
+----
+0

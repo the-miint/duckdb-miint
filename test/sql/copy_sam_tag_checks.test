@@ -1,0 +1,71 @@
+# name: test/sql/copy_sam_tag_checks.test
+# description: COPY FORMAT SAM/BAM check their tag columns. An integer tag column (tag_as, tag_xs, tag_ys, tag_xn, tag_xm, tag_xo, tag_xg, tag_nm) must be BIGINT and a string tag column (tag_yt, tag_md, tag_sa) VARCHAR, checked at bind, before a column of another type could reach the writer, whose read of it would raise an internal error, which invalidates the database. An integer tag holds a 32-bit signed value, so a value outside that range is an error naming the column, the value and the read, not a value cut to 32 bits.
+# group: [sql]
+
+require miint
+
+statement ok
+CREATE TABLE ref_lens AS SELECT 'chr1' AS name, 1000::BIGINT AS length;
+
+statement ok
+CREATE MACRO aln_row(id) AS TABLE
+SELECT id AS read_id, 0::USMALLINT AS flags, 'chr1' AS reference, 1::BIGINT AS position, 60::UTINYINT AS mapq, '4M' AS cigar,
+       '*' AS mate_reference, 0::BIGINT AS mate_position, 0::BIGINT AS template_length;
+
+# --- Column types, at bind ---
+# DuckDB checks a vector's type when the writer reads it, so without a check at bind each of these would be an
+# INTERNAL error ("Expected unified vector format of type INT64, but found type INT32").
+
+statement error
+COPY (SELECT *, 42::INTEGER AS tag_as FROM aln_row('r1')) TO '{TEST_DIR}/tag_integer.sam' (FORMAT SAM, INCLUDE_HEADER false);
+----
+Column 'tag_as' must be BIGINT
+
+statement error
+COPY (SELECT *, '3' AS tag_nm FROM aln_row('r1')) TO '{TEST_DIR}/tag_varchar.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens');
+----
+Column 'tag_nm' must be BIGINT
+
+statement error
+COPY (SELECT *, 3::BIGINT AS tag_md FROM aln_row('r1')) TO '{TEST_DIR}/tag_md_bigint.sam' (FORMAT SAM, INCLUDE_HEADER false);
+----
+Column 'tag_md' must be VARCHAR
+
+statement error
+COPY (SELECT *, 1.5::DOUBLE AS tag_xs FROM aln_row('r1')) TO '{TEST_DIR}/tag_double.sam' (FORMAT SAM, INCLUDE_HEADER false);
+----
+Column 'tag_xs' must be BIGINT
+
+# A column of no recognised name is not a tag, and is ignored whatever its type.
+statement ok
+COPY (SELECT *, 42::INTEGER AS score FROM aln_row('r1')) TO '{TEST_DIR}/not_a_tag.sam' (FORMAT SAM, INCLUDE_HEADER false);
+
+# --- The 32-bit range ---
+# Both ends of the range are written as given.
+
+statement ok
+COPY (SELECT * REPLACE ('r' || v AS read_id), v AS tag_as, -v - 1 AS tag_nm
+      FROM aln_row('x'), (VALUES (2147483647::BIGINT), (0::BIGINT)) t(v))
+TO '{TEST_DIR}/tag_range.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens');
+
+query TII
+SELECT read_id, tag_as, tag_nm FROM read_alignments('{TEST_DIR}/tag_range.bam') ORDER BY read_id;
+----
+r0	0	-1
+r2147483647	2147483647	-2147483648
+
+# One past either end is an error, naming the column, the value and the read, rather than a value cut to 32 bits
+# (2147483648 would be written as -2147483648).
+statement error
+COPY (SELECT a.* REPLACE (v.read_id AS read_id), v.tag_as
+      FROM aln_row('x') a, (VALUES ('ok', 2147483647::BIGINT), ('bad', 2147483648::BIGINT)) v(read_id, tag_as))
+TO '{TEST_DIR}/tag_over.sam' (FORMAT SAM, INCLUDE_HEADER false);
+----
+Column 'tag_as' is 2147483648 for read 'bad', outside the 32-bit signed range of a SAM integer tag
+
+statement error
+COPY (SELECT a.* REPLACE (v.read_id AS read_id), v.tag_nm
+      FROM aln_row('x') a, (VALUES ('ok', -2147483648::BIGINT), ('low', -2147483649::BIGINT)) v(read_id, tag_nm))
+TO '{TEST_DIR}/tag_under.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens');
+----
+Column 'tag_nm' is -2147483649 for read 'low', outside the 32-bit signed range of a SAM integer tag

@@ -25,6 +25,15 @@ TableOrViewColumns GetTableOrViewColumns(ClientContext &context, const std::stri
 // Case-insensitive check for whether `columns` contains a column named `col`.
 bool HasColumn(const TableOrViewColumns &columns, const std::string &col);
 
+// A column read at execution must have the type Bind saw: a view can change type without a catalog
+// change (one over a file that is rewritten, under a prepared statement), and
+// docs/internals/reading-tables-views.md says to check the read's own types. Throws
+// InvalidInputException "<fn>: column '<column>' of <relation> is <read> now but was <bound> when the
+// statement was bound; run or prepare it again". `relation` is how the message names the relation,
+// such as "'pairs'" or "tree table 'tree'".
+void CheckBoundType(const char *fn, const std::string &relation, const std::string &column,
+                    const LogicalType &read_type, const LogicalType &bound_type);
+
 // Guard for functions whose argument is a LITERAL identifier fetched from a remote
 // service (e.g. an NCBI accession), NOT the name of a relation. Throws if `literal`
 // resolves to a table or view in the catalog; returns silently otherwise.

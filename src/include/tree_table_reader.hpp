@@ -2,7 +2,10 @@
 
 #include "NewickTree.hpp"
 #include "TreeIndex.hpp"
+#include "read_newick.hpp"
+#include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_set>
@@ -13,12 +16,71 @@ namespace duckdb {
 
 // Validate that a table or view has the required columns for tree data
 // Required: node_index (integer), parent_index (integer, nullable)
-// Optional: name (VARCHAR), branch_length (DOUBLE/FLOAT), edge_id (integer)
+// Optional: name (read as text by ReadTreeTable; BindTreeOutput requires VARCHAR, BIGINT or UUID),
+// branch_length (DOUBLE/FLOAT), edge_id (integer)
 void ValidateTreeTableSchema(ClientContext &context, const std::string &table_name);
 
 // Read tree node data from a table or view and return as NodeInput structs.
 // Uses a separate Connection to avoid deadlocking the current context.
 std::vector<miint::NodeInput> ReadTreeTable(ClientContext &context, const std::string &table_name);
+
+// Shared by the table functions that take a tree table and return one. A tree's `name` keeps its id
+// type (VARCHAR, BIGINT or UUID) from input to output, and text labels live in an optional `label`
+// VARCHAR column, so a tree can hold typed tip ids and text labels on its internal nodes together.
+
+// A tree table's `name` and `label` columns, as bound.
+struct TreeNameColumns {
+	bool has_name = false;
+	// VARCHAR when there is no name column
+	LogicalType name_type = LogicalType::VARCHAR;
+	bool has_label = false;
+};
+
+// Bind a tree table for a function that returns a tree: check it (ValidateTreeTableSchema; `name`
+// an id type; `label` VARCHAR), throwing BinderException naming `fn` otherwise, and set the output
+// schema: read_newick's (without filepath), with `name` in the tree's type, and `label VARCHAR`
+// last when the tree has one.
+TreeNameColumns BindTreeOutput(ClientContext &context, const char *fn, const std::string &table_name,
+                               vector<LogicalType> &return_types, vector<Identifier> &names);
+
+// Read and build a tree bound by BindTreeOutput for the function `fn`. Names are read in the bound
+// type and held as text, as ReadTreeTable holds them. When the tree has a `label` column, `labels`
+// receives each node's label (nullopt for NULL), indexed by the built tree's node index. A column
+// whose type has changed since bind is refused (InvalidInputException, CheckBoundType).
+miint::NewickTree BuildTree(ClientContext &context, const char *fn, const std::string &table_name,
+                            const TreeNameColumns &columns, std::vector<std::optional<std::string>> &labels);
+
+// The bind data the functions that return a tree share; each function's Data derives from it.
+struct TreeOutputData : public TableFunctionData {
+	TreeOutputData(std::string tree_table_name_p, TreeNameColumns tree_columns_p)
+	    : tree_table_name(std::move(tree_table_name_p)), tree_columns(std::move(tree_columns_p)) {
+	}
+	std::string tree_table_name;
+	TreeNameColumns tree_columns;
+};
+
+// The rows a function that returns a tree emits, with their labels.
+struct TreeOutputState : public GlobalTableFunctionState {
+	std::vector<ReadNewickTableFunction::NodeRow> rows;
+	// Each row's label; empty exactly when the tree has no label column, since BuildTree refuses a
+	// tree with no rows. SetRows relies on that, and TreeOutputExecute on TreeNameColumns::has_label.
+	std::vector<std::optional<std::string>> labels;
+	size_t current_row_idx = 0;
+
+	idx_t MaxThreads() const override {
+		return 1;
+	}
+
+	// Take the output tree's rows, with `labels` (BuildTree's, for the input tree) carried onto them.
+	// With `source` (NewickTree::shear's), output node j takes the label of input node source[j];
+	// without it, output node i takes input node i's, which suits an operation that keeps every
+	// input node at its index and appends the nodes it creates, and those have no label.
+	void SetRows(const miint::NewickTree &tree, const std::vector<uint32_t> *source = nullptr);
+};
+
+// The table function's execute for the functions that return a tree: emits TreeOutputState's rows,
+// with names in TreeOutputData's type.
+void TreeOutputExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output);
 
 // A built tree plus the caller's original node_index for each dense tree index. Because
 // ReadTreeTable sorts by node_index and NewickTree::build preserves input order, dense

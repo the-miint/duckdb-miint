@@ -142,9 +142,9 @@ endloop
 endloop
 
 # ---------------------------------------------------------------------------
-# Through FASTQ files: miint's FASTQ writer takes its rows in order, so DuckDB
-# runs the whole query on one of its threads, and rype_filter maps on jobs of
-# its own instead. Single-end, paired into an R1 and an R2 file, and paired
+# Through FASTQ files: rype_filter's rows come in no fixed order, so miint's
+# FASTQ writer takes them on all of DuckDB's threads, while rype_filter maps on
+# jobs of its own. Single-end, paired into an R1 and an R2 file, and paired
 # interleaved into one, with async threads to map on, with only one, and
 # without
 # ---------------------------------------------------------------------------

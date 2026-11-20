@@ -31,6 +31,7 @@ struct NewickCopyBindData : public FunctionData {
 	idx_t name_idx = DConstants::INVALID_INDEX;
 	idx_t branch_length_idx = DConstants::INVALID_INDEX;
 	idx_t edge_id_idx = DConstants::INVALID_INDEX;
+	idx_t label_idx = DConstants::INVALID_INDEX;
 
 	// The name column's type, an id type (IsAllowedIdType)
 	LogicalType name_type = LogicalType::VARCHAR;
@@ -47,6 +48,7 @@ struct NewickCopyBindData : public FunctionData {
 		result->name_idx = name_idx;
 		result->branch_length_idx = branch_length_idx;
 		result->edge_id_idx = edge_id_idx;
+		result->label_idx = label_idx;
 		result->name_type = name_type;
 		return result;
 	}
@@ -58,7 +60,7 @@ struct NewickCopyBindData : public FunctionData {
 		       placements_table == other.placements_table && node_index_idx == other.node_index_idx &&
 		       parent_index_idx == other.parent_index_idx && name_idx == other.name_idx &&
 		       branch_length_idx == other.branch_length_idx && edge_id_idx == other.edge_id_idx &&
-		       name_type == other.name_type;
+		       label_idx == other.label_idx && name_type == other.name_type;
 	}
 };
 
@@ -115,8 +117,9 @@ static const NewickColumnType NEWICK_COLUMN_TYPES[] = {
     {"parent_index", &NewickCopyBindData::parent_index_idx, LogicalTypeId::BIGINT, nullptr, "BIGINT"},
     {"edge_id", &NewickCopyBindData::edge_id_idx, LogicalTypeId::BIGINT, nullptr, "BIGINT"},
     {"branch_length", &NewickCopyBindData::branch_length_idx, LogicalTypeId::DOUBLE, nullptr, "DOUBLE"},
-    // A node's label is an id, so it takes the id types
+    // A node's name is an id, so it takes the id types; text labels are in `label`
     {"name", &NewickCopyBindData::name_idx, LogicalTypeId::VARCHAR, IsAllowedIdType, AllowedIdTypeList()},
+    {"label", &NewickCopyBindData::label_idx, LogicalTypeId::VARCHAR, nullptr, "VARCHAR"},
 };
 
 static bool NewickColumnAccepts(const NewickColumnType &column, const LogicalType &type) {
@@ -245,7 +248,7 @@ static unique_ptr<GlobalFunctionData> NewickCopyInitializeGlobal(ClientContext &
 	auto &fdata = bind_data.Cast<NewickCopyBindData>();
 	std::vector<miint::Placement> placements;
 	if (fdata.placements_table) {
-		placements = ReadPlacementTable(context, *fdata.placements_table);
+		placements = ReadPlacementTable(context, *fdata.placements_table, "COPY FORMAT NEWICK");
 	}
 	return make_uniq<NewickCopyGlobalState>(file_path, fdata.compression, fdata.compression_level,
 	                                        fdata.include_edge_ids, std::move(placements));
@@ -277,6 +280,7 @@ static void NewickCopySink(ExecutionContext &context, FunctionData &bind_data, G
 	auto parent_indices = UnifiedVectorFormat::GetData<int64_t>(parent_index_data);
 
 	bool has_name = fdata.name_idx != DConstants::INVALID_INDEX;
+	bool has_label = fdata.label_idx != DConstants::INVALID_INDEX;
 	bool has_branch_length = fdata.branch_length_idx != DConstants::INVALID_INDEX;
 	bool has_edge_id = fdata.edge_id_idx != DConstants::INVALID_INDEX;
 
@@ -287,6 +291,12 @@ static void NewickCopySink(ExecutionContext &context, FunctionData &bind_data, G
 
 	if (has_name) {
 		ExtractIdColumnAsStrings(input, fdata.name_idx, fdata.name_type, names, name_nulls);
+	}
+	UnifiedVectorFormat label_data;
+	const string_t *labels_ptr = nullptr;
+	if (has_label) {
+		input.data[fdata.label_idx].ToUnifiedFormat(label_data);
+		labels_ptr = UnifiedVectorFormat::GetData<string_t>(label_data);
 	}
 	if (has_branch_length) {
 		input.data[fdata.branch_length_idx].ToUnifiedFormat(branch_length_data);
@@ -321,6 +331,21 @@ static void NewickCopySink(ExecutionContext &context, FunctionData &bind_data, G
 		// name (optional)
 		if (has_name && !name_nulls[row]) {
 			node.name = std::move(names[row]);
+		}
+
+		// label (optional): written where the node has no name. NULL and '' are no label, as they
+		// are no name; a Newick node has room for one of them, so a node with both is an error.
+		if (has_label) {
+			auto label_row = label_data.sel->get_index(row);
+			if (label_data.validity.RowIsValid(label_row) && labels_ptr[label_row].GetSize() > 0) {
+				auto label = labels_ptr[label_row].GetString();
+				if (!node.name.empty()) {
+					throw InvalidInputException("COPY FORMAT NEWICK: node %d has both a name ('%s') and a label "
+					                            "('%s'); a Newick node has room for one",
+					                            node.node_id, node.name, label);
+				}
+				node.name = std::move(label);
+			}
 		}
 
 		// branch_length (optional, default to NaN)
