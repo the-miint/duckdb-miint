@@ -14,6 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "src/reference"
 HEADER = ROOT / "src/include/miint_function_reference.hpp"
+DOCUMENTATION_ROOT = "https://the-miint.github.io/duckdb-miint"
 SECTION = re.compile(
     r"^(<!-- BEGIN REFERENCE: ([a-z_][a-z0-9_]*) -->\n).*?(^<!-- END REFERENCE: \2 -->$)",
     re.MULTILINE | re.DOTALL,
@@ -24,7 +25,7 @@ EXAMPLE = re.compile(
     r"^<!-- manual:example -->\n```sql[ \t]*\n((?:(?!^```)[^\n]*\n)+)^```+[ \t]*$",
     re.MULTILINE,
 )
-URL = re.compile(r"^<!-- manual:url (https://[^\s#]+#[^\s#]+) -->$", re.MULTILINE)
+URL = re.compile(r"^<!-- manual:url (/(?!/)[^\s?#]+/#[^\s?#]+) -->$", re.MULTILINE)
 MANUAL_MARKER = re.compile(r"^<!-- manual:.* -->\n", re.MULTILINE)
 
 
@@ -41,10 +42,10 @@ def render_manual(name, fragment):
         or len(MANUAL_MARKER.findall(fragment)) != 2 + len(examples)
     ):
         raise ValueError(
-            f"{name}: use one description line, at least one marked SQL fence, and one section URL"
+            f"{name}: use one description line, at least one marked SQL fence, and one site-relative section URL"
         )
 
-    description = f"{descriptions[0]} Full documentation: {urls[0]}"
+    description = f"{descriptions[0]} Full documentation: "
     quoted_examples = ",\n".join(
         f"\t    {json.dumps(example, ensure_ascii=False)}" for example in examples
     )
@@ -52,6 +53,8 @@ def render_manual(name, fragment):
         f"inline duckdb::FunctionDescription {name}() {{\n"
         f"\tduckdb::FunctionDescription doc;\n"
         f"\tdoc.description = {json.dumps(description, ensure_ascii=False)};\n"
+        f"\tdoc.description += documentation_root;\n"
+        f"\tdoc.description += {json.dumps(urls[0], ensure_ascii=False)};\n"
         f"\tdoc.examples = {{\n{quoted_examples}\n\t}};\n"
         f"\treturn doc;\n"
         f"}}\n\n"
@@ -97,6 +100,7 @@ def render_outputs():
         '#include "duckdb/parser/parsed_data/create_function_info.hpp"\n\n'
         "namespace miint::reference {\n\n"
         "// clang-format off\n"
+        f"inline constexpr char documentation_root[] = {json.dumps(DOCUMENTATION_ROOT)};\n\n"
         f"{entries}"
         "// clang-format on\n"
         "} // namespace miint::reference\n"

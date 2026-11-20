@@ -6,9 +6,13 @@
 namespace miint::reference {
 
 // clang-format off
+inline constexpr char documentation_root[] = "https://the-miint.github.io/duckdb-miint";
+
 inline duckdb::FunctionDescription parse_gff_attributes() {
 	duckdb::FunctionDescription doc;
-	doc.description = "Parse a GFF3 attribute string into a map of keys to values. Full documentation: https://the-miint.github.io/duckdb-miint/reading/#parse_gff_attributeskvp_string";
+	doc.description = "Parse a GFF3 attribute string into a map of keys to values. Full documentation: ";
+	doc.description += documentation_root;
+	doc.description += "/reading/#parse_gff_attributeskvp_string";
 	doc.examples = {
 	    "SELECT parse_gff_attributes('ID=gene1;Name=TEST1;biotype=protein_coding');\n-- {'ID': 'gene1', 'Name': 'TEST1', 'biotype': 'protein_coding'}"
 	};
@@ -17,7 +21,9 @@ inline duckdb::FunctionDescription parse_gff_attributes() {
 
 inline duckdb::FunctionDescription prodigal_proteins() {
 	duckdb::FunctionDescription doc;
-	doc.description = "Convert `predict_genes` rows into Prodigal protein FASTA records. `per_genome` defaults to false. Full documentation: https://the-miint.github.io/duckdb-miint/gene_prediction/#writing-prodigals-fasta";
+	doc.description = "Convert `predict_genes` rows into Prodigal protein FASTA records. `per_genome` defaults to false. Full documentation: ";
+	doc.description += documentation_root;
+	doc.description += "/gene_prediction/#writing-prodigals-fasta";
 	doc.examples = {
 	    "SELECT * FROM prodigal_proteins('genes');"
 	};
@@ -26,7 +32,9 @@ inline duckdb::FunctionDescription prodigal_proteins() {
 
 inline duckdb::FunctionDescription read_fastx() {
 	duckdb::FunctionDescription doc;
-	doc.description = "Read FASTA and FASTQ files, including paired-end reads. Pass a path, a glob, or a list of literal paths. Full documentation: https://the-miint.github.io/duckdb-miint/reading/#fasta-and-fastq";
+	doc.description = "Read FASTA and FASTQ files, including paired-end reads. Pass a path, a glob, or a list of literal paths. Full documentation: ";
+	doc.description += documentation_root;
+	doc.description += "/reading/#fasta-and-fastq";
 	doc.examples = {
 	    "SELECT * FROM 'sequences.fasta';\nSELECT * FROM 'reads.fastq.gz';",
 	    "SELECT * FROM read_fastx('R1.fastq', sequence2 = 'R2.fastq');"

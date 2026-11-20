@@ -1,6 +1,6 @@
 #### `parse_gff_attributes(kvp_string)`
 
-<!-- manual:url https://the-miint.github.io/duckdb-miint/reading/#parse_gff_attributeskvp_string -->
+<!-- manual:url /reading/#parse_gff_attributeskvp_string -->
 <!-- manual:description -->
 Parse a GFF3 attribute string into a map of keys to values.
 

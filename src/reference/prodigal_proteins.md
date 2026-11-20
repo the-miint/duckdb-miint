@@ -5,7 +5,7 @@ prodigal_proteins(relation, [per_genome := false])
 prodigal_genes(relation, contigs, [genome_id := 'col'], [per_genome := false])
 ```
 
-<!-- manual:url https://the-miint.github.io/duckdb-miint/gene_prediction/#writing-prodigals-fasta -->
+<!-- manual:url /gene_prediction/#writing-prodigals-fasta -->
 <!-- manual:description -->
 Convert `predict_genes` rows into Prodigal protein FASTA records. `per_genome` defaults to false.
 
