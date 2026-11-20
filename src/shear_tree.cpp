@@ -87,7 +87,7 @@ unique_ptr<GlobalTableFunctionState> ShearTreeTableFunction::InitGlobal(ClientCo
 	auto &bind_data = input.bind_data->Cast<Data>();
 	auto gstate = duckdb::make_uniq<TreeOutputState>();
 
-	auto tree = BuildTree(context, bind_data.tree_table_name, bind_data.tree_columns, gstate->labels);
+	auto tree = BuildTree(context, "shear_tree", bind_data.tree_table_name, bind_data.tree_columns, gstate->labels);
 	auto keep_names = ReadTipNames(context, bind_data.tips_table_name);
 
 	miint::NewickTree sheared;

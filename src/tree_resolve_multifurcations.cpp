@@ -23,7 +23,8 @@ TreeResolveMultifurcationsTableFunction::InitGlobal(ClientContext &context, Tabl
 	auto &bind_data = input.bind_data->Cast<Data>();
 	auto gstate = duckdb::make_uniq<TreeOutputState>();
 
-	auto tree = BuildTree(context, bind_data.tree_table_name, bind_data.tree_columns, gstate->labels);
+	auto tree = BuildTree(context, "tree_resolve_multifurcations", bind_data.tree_table_name, bind_data.tree_columns,
+	                      gstate->labels);
 
 	miint::NewickTree resolved;
 	try {

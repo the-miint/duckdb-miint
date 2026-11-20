@@ -147,6 +147,15 @@ void DropHelperTempRelation(Connection &conn, const std::string &quoted_name) {
 	}
 }
 
+void CheckBoundType(const char *fn, const std::string &relation, const std::string &column,
+                    const LogicalType &read_type, const LogicalType &bound_type) {
+	if (read_type != bound_type) {
+		throw InvalidInputException(
+		    "%s: column '%s' of %s is %s now but was %s when the statement was bound; run or prepare it again", fn,
+		    column, relation, read_type.ToString(), bound_type.ToString());
+	}
+}
+
 bool HasColumn(const TableOrViewColumns &columns, const std::string &col) {
 	auto target = StringUtil::Lower(col);
 	for (const auto &name : columns.names) {

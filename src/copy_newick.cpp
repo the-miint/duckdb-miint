@@ -334,14 +334,14 @@ static void NewickCopySink(ExecutionContext &context, FunctionData &bind_data, G
 		}
 
 		// label (optional): written where the node has no name. NULL and '' are no label, as they
-		// are no name; Newick holds one label per node, so a node with both is an error.
+		// are no name; a Newick node has room for one of them, so a node with both is an error.
 		if (has_label) {
 			auto label_row = label_data.sel->get_index(row);
 			if (label_data.validity.RowIsValid(label_row) && labels_ptr[label_row].GetSize() > 0) {
 				auto label = labels_ptr[label_row].GetString();
 				if (!node.name.empty()) {
 					throw InvalidInputException("COPY FORMAT NEWICK: node %d has both a name ('%s') and a label "
-					                            "('%s'); Newick holds one label per node",
+					                            "('%s'); a Newick node has room for one",
 					                            node.node_id, node.name, label);
 				}
 				node.name = std::move(label);

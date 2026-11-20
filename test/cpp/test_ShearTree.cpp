@@ -385,7 +385,7 @@ TEST_CASE("shear reports the kept node as the source below a collapsed chain", "
 	std::vector<uint32_t> source;
 	auto sheared = tree.shear(names_of({"A", "C"}), true, false, &source);
 	REQUIRE(source.size() == sheared.num_nodes());
-	CHECK(source == std::vector<uint32_t> {0, 3, 4});
+	REQUIRE(source == std::vector<uint32_t> {0, 3, 4});
 	for (uint32_t j = 0; j < sheared.num_nodes(); ++j) {
 		CHECK(tree.name(source[j]) == sheared.name(j));
 	}

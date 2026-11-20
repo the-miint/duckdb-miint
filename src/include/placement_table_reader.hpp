@@ -28,12 +28,16 @@ namespace duckdb {
 //   - UBIGINT edge_id exceeds INT64_MAX
 //   - A column's type is not one listed above (checked again here, as it can change after
 //     ValidatePlacementTableSchema ran)
-std::vector<miint::Placement> ReadPlacementTable(ClientContext &context, const std::string &table_name);
+//   - With `bound_fragment_type`, fragment_id no longer has that type: a caller whose fragment ids
+//     must keep the type Bind saw passes it, and `fn` names the caller (CheckBoundType)
+std::vector<miint::Placement> ReadPlacementTable(ClientContext &context, const std::string &table_name,
+                                                 const char *fn = nullptr,
+                                                 const LogicalType *bound_fragment_type = nullptr);
 
-// Validate that a placement table or view has the required columns with correct types.
-// Called at bind time to provide early error detection.
+// Validate that a placement table or view has the required columns with correct types, and
+// return fragment_id's type. Called at bind time to provide early error detection.
 // Supports both tables and views.
 // Throws BinderException if validation fails.
-void ValidatePlacementTableSchema(ClientContext &context, const std::string &table_name);
+LogicalType ValidatePlacementTableSchema(ClientContext &context, const std::string &table_name);
 
 } // namespace duckdb

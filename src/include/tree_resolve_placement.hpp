@@ -11,6 +11,9 @@ public:
 	// Executes with TreeOutputExecute, from a TreeOutputState
 	struct Data : public TreeOutputData {
 		std::string placements_table_name;
+		// fragment_id's type, which the read must still find, on a BIGINT or UUID tree: there the
+		// fragment ids become the tree's names
+		std::optional<LogicalType> bound_fragment_type;
 
 		Data(std::string tree_table, TreeNameColumns tree_columns, std::string placements_table);
 	};

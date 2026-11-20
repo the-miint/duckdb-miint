@@ -764,5 +764,11 @@ SELECT count(*) FROM read_newick('{TEST_DIR}/placements_labels.nwk') WHERE NOT i
 ----
 1
 
+# The labels sit on their own nodes: the root is n4.
+query T
+SELECT name FROM read_newick('{TEST_DIR}/placements_labels.nwk') WHERE parent_index IS NULL;
+----
+n4
+
 statement ok
 DROP TABLE label_placements;

@@ -86,13 +86,12 @@ public:
 	// Convert parsed tree to row format
 	static std::vector<NodeRow> TreeToRows(const miint::NewickTree &tree);
 
-	// Populate names/types with the standard newick table schema.
-	// Shared by read_newick, read_jplace_newick, tree_resolve_placement.
+	// Populate names/types with the standard newick table schema, the one tree tables follow.
 	static void GetSchema(std::vector<std::string> &names, std::vector<LogicalType> &types, bool include_filepath);
 
-	// Emit NodeRow data into a DataChunk (shared by read_newick, read_jplace_newick and the functions that
-	// return a tree). `name` is written in `name_type`, an id type, where '' (an unnamed node) is NULL in
-	// BIGINT and UUID. `labels`, indexed like `rows`, fills a `label` column after the others.
+	// Emit NodeRow data into a DataChunk in that schema. `name` is written in `name_type`, an id type,
+	// where '' (an unnamed node) is NULL in BIGINT and UUID. `labels`, indexed like `rows`, fills a
+	// `label` column after the others.
 	static void EmitNodeRows(const std::vector<NodeRow> &rows, size_t start_idx, size_t count, DataChunk &output,
 	                         idx_t output_offset, bool include_filepath, const std::string &filepath,
 	                         const LogicalType &name_type = LogicalType::VARCHAR,

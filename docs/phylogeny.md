@@ -39,7 +39,7 @@ SELECT * FROM shear_tree('ref_tree', 'keep');
 **Parameters:**
 
 - `tree_table` (VARCHAR): Name of a table or view containing tree data in [`read_newick`](reading.md#newick) schema (`node_index`, `parent_index`, `name`, `branch_length`, `edge_id`), with `name` VARCHAR, BIGINT or UUID and an optional `label` (VARCHAR) column (see "Tree tables" under [Newick](reading.md#newick)).
-- `tips_table` (VARCHAR): Name of a table or view with a `name` column listing the tip names to keep. Passing the tips as a table (rather than a list literal) keeps the call practical when the kept set is large. Duplicate and `NULL` names are ignored. Tips are matched to the tree's names by their text, so `name` may be VARCHAR, BIGINT or UUID whatever the tree's type: BIGINT tips `1, 2` match a VARCHAR tree's `'1', '2'`, with no cast.
+- `tips_table` (VARCHAR): Name of a table or view with a `name` column listing the tip names to keep. Passing the tips as a table (rather than a list literal) keeps the call practical when the kept set is large. Duplicate and `NULL` names are ignored. Tips are matched to the tree's names by their text, so `name` may have any type, whatever the tree's: BIGINT tips `1, 2` match a VARCHAR tree's `'1', '2'`, with no cast.
 - `collapse` (BOOLEAN, default `true`): How to treat internal nodes left with a single child after pruning.
     - `true` — standard phylogenetic shear: remove single-descendant ancestors and **sum their branch lengths onto the surviving descendant edge**, so tip-to-tip distances are preserved. The lowest common ancestor (LCA) of the kept tips becomes the new root; nodes above it are dropped.
     - `false` — preserve every internal node that lies on a path to a kept tip, with original parent links and branch lengths unchanged (unifurcations retained).
@@ -55,7 +55,7 @@ For a VARCHAR tree without `label`, the schema is `UNION ALL`-compatible with `r
 
 **Behavior / semantics:**
 
-- Only **tip** names are matched — an internal-node label in `tips_table` is treated as missing.
+- Only **tip** names are matched — an internal node's name in `tips_table` is treated as missing.
 - Every kept node keeps its `name` and `label`. A node that `collapse := true` removes takes its label with it, as it does its name; `collapse := false` keeps every label on the kept paths. An unnamed node's `name` is `''` in a VARCHAR tree and NULL in a BIGINT or UUID tree.
 - Branch-length summation (collapse mode) treats an unspecified length (NaN → `NULL`) as `0`, but a collapsed chain that is *entirely* unspecified stays `NULL`, so topology-only trees (cladograms) round-trip as cladograms.
 - A collapsed edge keeps the surviving (lower) node's `edge_id`; the `edge_id`s of merged intermediate nodes are dropped.
@@ -82,7 +82,7 @@ COPY (
 
 - `tree_table` or `tips_table` does not exist.
 - `tree_table` missing required `node_index` / `parent_index` columns; `tips_table` missing required `name` column.
-- The tree's `name` is not VARCHAR, BIGINT or UUID, or its `label` is not VARCHAR.
+- The tree's `name` is not VARCHAR, BIGINT or UUID, or its `label` is not VARCHAR; or either has changed type since the query was planned (a view under a prepared statement), when the tree is read.
 - A requested tip is not a tip in the tree and `ignore_missing := false`.
 - No requested tip matches any tip in the tree.
 
@@ -150,7 +150,7 @@ COPY (
 
 - `tree_table` does not exist.
 - `tree_table` missing required `node_index` / `parent_index` columns.
-- The tree's `name` is not VARCHAR, BIGINT or UUID, or its `label` is not VARCHAR.
+- The tree's `name` is not VARCHAR, BIGINT or UUID, or its `label` is not VARCHAR; or either has changed type since the query was planned (a view under a prepared statement), when the tree is read.
 
 ### Nearest target tip
 
@@ -764,8 +764,8 @@ WHERE is_tip = true;
 
 - Tree table or placements table does not exist
 - Tree table missing required `node_index` or `parent_index` columns
-- The tree's `name` is not VARCHAR, BIGINT or UUID, or its `label` is not VARCHAR
-- On a BIGINT or UUID tree, a `fragment_id` of another type
+- The tree's `name` is not VARCHAR, BIGINT or UUID, or its `label` is not VARCHAR; or either has changed type since the query was planned (a view under a prepared statement), when the tree is read
+- On a BIGINT or UUID tree, a `fragment_id` of another type, when the query is planned and again when the placements are read
 - Placements table missing required columns (`fragment_id`, `edge_id`, `like_weight_ratio`, `distal_length`, `pendant_length`), or a column of another type than listed above, when the query is planned and again when the placements are read
 - Placement references an `edge_id` not present in the tree
 - `distal_length` exceeds the edge's branch length

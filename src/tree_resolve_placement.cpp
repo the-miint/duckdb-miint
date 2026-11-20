@@ -1,7 +1,6 @@
 #include "tree_resolve_placement.hpp"
 #include "catalog_utils.hpp"
 #include "placement_table_reader.hpp"
-#include "tree_function_utils.hpp"
 #include "tree_table_reader.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -24,24 +23,23 @@ unique_ptr<FunctionData> TreeResolvePlacementTableFunction::Bind(ClientContext &
 
 	// Validate schemas at bind time for early error detection
 	auto tree_columns = BindTreeOutput(context, "tree_resolve_placement", tree_table_name, return_types, names);
-	ValidatePlacementTableSchema(context, placements_table_name);
+	auto fragment_type = ValidatePlacementTableSchema(context, placements_table_name);
 
 	// A fragment's id names the tip it becomes. A VARCHAR tree takes any id type and names the tip
 	// with its text; a BIGINT or UUID tree takes its own type, so the tip's name is one.
-	if (tree_columns.name_type.id() != LogicalTypeId::VARCHAR) {
-		// ValidatePlacementTableSchema, above, has checked that fragment_id exists
-		LogicalType fragment_type;
-		FindColumnType(GetTableOrViewColumns(context, placements_table_name, "Placement table"), "fragment_id",
-		               fragment_type);
-		if (fragment_type.id() != tree_columns.name_type.id()) {
-			throw BinderException("tree_resolve_placement: the tree's names are %s, but 'fragment_id' is %s; a "
-			                      "BIGINT or UUID tree takes fragment ids of its own type, which name its new tips",
-			                      tree_columns.name_type.ToString(), fragment_type.ToString());
-		}
+	const bool typed_tree = tree_columns.name_type.id() != LogicalTypeId::VARCHAR;
+	if (typed_tree && fragment_type.id() != tree_columns.name_type.id()) {
+		throw BinderException("tree_resolve_placement: the tree's names are %s, but 'fragment_id' is %s; a "
+		                      "BIGINT or UUID tree takes fragment ids of its own type, which name its new tips",
+		                      tree_columns.name_type.ToString(), fragment_type.ToString());
 	}
 
-	return duckdb::make_uniq<Data>(std::move(tree_table_name), std::move(tree_columns),
-	                               std::move(placements_table_name));
+	auto data =
+	    duckdb::make_uniq<Data>(std::move(tree_table_name), std::move(tree_columns), std::move(placements_table_name));
+	if (typed_tree) {
+		data->bound_fragment_type = fragment_type;
+	}
+	return data;
 }
 
 unique_ptr<GlobalTableFunctionState> TreeResolvePlacementTableFunction::InitGlobal(ClientContext &context,
@@ -49,8 +47,10 @@ unique_ptr<GlobalTableFunctionState> TreeResolvePlacementTableFunction::InitGlob
 	auto &bind_data = input.bind_data->Cast<Data>();
 	auto gstate = duckdb::make_uniq<TreeOutputState>();
 
-	auto tree = BuildTree(context, bind_data.tree_table_name, bind_data.tree_columns, gstate->labels);
-	auto placements = ReadPlacementTable(context, bind_data.placements_table_name);
+	auto tree =
+	    BuildTree(context, "tree_resolve_placement", bind_data.tree_table_name, bind_data.tree_columns, gstate->labels);
+	auto placements = ReadPlacementTable(context, bind_data.placements_table_name, "tree_resolve_placement",
+	                                     bind_data.bound_fragment_type ? &*bind_data.bound_fragment_type : nullptr);
 
 	// Resolve placements
 	try {

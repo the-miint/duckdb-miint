@@ -379,7 +379,7 @@ SELECT count(*) FROM shear_tree('tbig', 'tips_text_abc');
 ----
 5
 
-# Without a `label` column the output is the read_newick schema, as before.
+# Without a `label` column the output is the read_newick schema.
 query TT
 SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM shear_tree('t', 'tips_abc'));
 ----
@@ -423,6 +423,40 @@ SELECT name, label FROM shear_tree('tbig_nocase', 'tips_big_abc') ORDER BY name,
 3	NULL
 NULL	f__H
 NULL	g__G
+
+# 1500 cherries under one root, more rows than one output batch (STANDARD_VECTOR_SIZE): tips 0..2999,
+# named 100000 + i; cherry k (row 3000 + k, labeled 'c' || k) holds tips 2k and 2k+1; the root (row
+# 4500) is labeled 'root'. node_index is ten times the row, so a label looked up by node_index
+# instead of by row would land on the wrong node.
+statement ok
+CREATE TABLE cherries AS
+SELECT i * 10 AS node_index,
+       CASE WHEN i < 3000 THEN 100000 + i END::BIGINT AS name,
+       1.0::DOUBLE AS branch_length,
+       CAST(NULL AS BIGINT) AS edge_id,
+       (CASE WHEN i < 3000 THEN 3000 + i // 2 WHEN i < 4500 THEN 4500 END * 10)::BIGINT AS parent_index,
+       CASE WHEN i >= 3000 AND i < 4500 THEN 'c' || (i - 3000) WHEN i = 4500 THEN 'root' END AS label
+FROM range(4501) AS r(i);
+
+# Keep both tips of cherries 0..899 and one tip of each later cherry: those cherries collapse and
+# take their labels with them, so output node j is not input node j.
+statement ok
+CREATE TABLE cherry_tips AS SELECT 100000 + i AS name FROM range(3000) AS r(i) WHERE i < 1800 OR i % 2 = 0;
+
+query IIII
+WITH s AS (SELECT * FROM shear_tree('cherries', 'cherry_tips'))
+SELECT count(*), count(label), count(*) FILTER (WHERE is_tip), min(typeof(name)) = 'BIGINT' FROM s;
+----
+3301	901	2400	true
+
+# Each kept tip's parent carries the label of its own cherry, or the root's where its cherry collapsed.
+query I
+WITH s AS (SELECT * FROM shear_tree('cherries', 'cherry_tips'))
+SELECT count(*) FROM s AS t JOIN s AS p ON t.parent_index = p.node_index
+WHERE t.is_tip
+  AND p.label IS DISTINCT FROM CASE WHEN t.name < 101800 THEN 'c' || ((t.name - 100000) // 2) ELSE 'root' END;
+----
+0
 
 # The output types are fixed at bind. A view can change type without a catalog change (one over a
 # file that is rewritten, under a prepared statement), and a name or label read in another type

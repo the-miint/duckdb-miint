@@ -554,7 +554,7 @@ Write query results to Newick phylogenetic tree format. Reconstructs a tree from
 
 | Column | Type | Description |
 | --- | --- | --- |
-| `name` | VARCHAR, BIGINT or UUID | Node id, written as its text |
+| `name` | VARCHAR, BIGINT or UUID | Node name, an id such as a tip's feature id, written as its text |
 | `label` | VARCHAR | Text label, written where the node has no `name` |
 | `branch_length` | DOUBLE | Branch length |
 | `edge_id` | BIGINT | Edge identifier for jplace format |

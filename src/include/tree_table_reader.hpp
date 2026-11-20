@@ -16,17 +16,17 @@ namespace duckdb {
 
 // Validate that a table or view has the required columns for tree data
 // Required: node_index (integer), parent_index (integer, nullable)
-// Optional: name (VARCHAR), branch_length (DOUBLE/FLOAT), edge_id (integer)
+// Optional: name (read as text by ReadTreeTable; BindTreeOutput requires VARCHAR, BIGINT or UUID),
+// branch_length (DOUBLE/FLOAT), edge_id (integer)
 void ValidateTreeTableSchema(ClientContext &context, const std::string &table_name);
 
 // Read tree node data from a table or view and return as NodeInput structs.
 // Uses a separate Connection to avoid deadlocking the current context.
 std::vector<miint::NodeInput> ReadTreeTable(ClientContext &context, const std::string &table_name);
 
-// Shared by the functions that return a tree (shear_tree, tree_resolve_multifurcations,
-// tree_resolve_placement). A tree's `name` keeps its id type (VARCHAR, BIGINT or UUID) from input
-// to output, and text labels live in an optional `label` VARCHAR column, so a tree can hold typed
-// tip ids and text labels on its internal nodes together.
+// Shared by the table functions that take a tree table and return one. A tree's `name` keeps its id
+// type (VARCHAR, BIGINT or UUID) from input to output, and text labels live in an optional `label`
+// VARCHAR column, so a tree can hold typed tip ids and text labels on its internal nodes together.
 
 // A tree table's `name` and `label` columns, as bound.
 struct TreeNameColumns {
@@ -43,12 +43,12 @@ struct TreeNameColumns {
 TreeNameColumns BindTreeOutput(ClientContext &context, const char *fn, const std::string &table_name,
                                vector<LogicalType> &return_types, vector<Identifier> &names);
 
-// Read and build a tree bound by BindTreeOutput. Names are read in the bound type and held as text,
-// as ReadTreeTable holds them. When the tree has a `label` column, `labels` receives each node's
-// label (nullopt for NULL), indexed by the built tree's node index. A column whose type has changed
-// since bind is refused (InvalidInputException).
-miint::NewickTree BuildTree(ClientContext &context, const std::string &table_name, const TreeNameColumns &columns,
-                            std::vector<std::optional<std::string>> &labels);
+// Read and build a tree bound by BindTreeOutput for the function `fn`. Names are read in the bound
+// type and held as text, as ReadTreeTable holds them. When the tree has a `label` column, `labels`
+// receives each node's label (nullopt for NULL), indexed by the built tree's node index. A column
+// whose type has changed since bind is refused (InvalidInputException, CheckBoundType).
+miint::NewickTree BuildTree(ClientContext &context, const char *fn, const std::string &table_name,
+                            const TreeNameColumns &columns, std::vector<std::optional<std::string>> &labels);
 
 // The bind data the functions that return a tree share; each function's Data derives from it.
 struct TreeOutputData : public TableFunctionData {
@@ -62,7 +62,8 @@ struct TreeOutputData : public TableFunctionData {
 // The rows a function that returns a tree emits, with their labels.
 struct TreeOutputState : public GlobalTableFunctionState {
 	std::vector<ReadNewickTableFunction::NodeRow> rows;
-	// Each row's label; empty when the tree has no label column
+	// Each row's label; empty exactly when the tree has no label column, since BuildTree refuses a
+	// tree with no rows. SetRows relies on that, and TreeOutputExecute on TreeNameColumns::has_label.
 	std::vector<std::optional<std::string>> labels;
 	size_t current_row_idx = 0;
 

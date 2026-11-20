@@ -42,7 +42,7 @@ static const PlacementColumn PLACEMENT_COLUMNS[] = {
     {"distal_length", IsDoubleOrFloat, "DOUBLE or FLOAT"}, {"pendant_length", IsDoubleOrFloat, "DOUBLE or FLOAT"},
 };
 
-void ValidatePlacementTableSchema(ClientContext &context, const std::string &table_name) {
+LogicalType ValidatePlacementTableSchema(ClientContext &context, const std::string &table_name) {
 	auto info = GetTableOrViewColumns(context, table_name, "Placement table");
 	auto &col_names = info.names;
 	auto &col_types = info.types;
@@ -63,9 +63,11 @@ void ValidatePlacementTableSchema(ClientContext &context, const std::string &tab
 			throw BinderException("Column '%s' in table '%s' must be %s", column.name, table_name, column.description);
 		}
 	}
+	return col_types[name_to_idx.at("fragment_id")];
 }
 
-std::vector<miint::Placement> ReadPlacementTable(ClientContext &context, const std::string &table_name) {
+std::vector<miint::Placement> ReadPlacementTable(ClientContext &context, const std::string &table_name, const char *fn,
+                                                 const LogicalType *bound_fragment_type) {
 	std::vector<miint::Placement> result;
 
 	// A helper connection, as the caller's context is running its own query
@@ -104,6 +106,9 @@ std::vector<miint::Placement> ReadPlacementTable(ClientContext &context, const s
 			throw InvalidInputException("Column '%s' in table '%s' must be %s", column.name, table_name,
 			                            column.description);
 		}
+	}
+	if (bound_fragment_type) {
+		CheckBoundType(fn, "'" + table_name + "'", "fragment_id", result_types[0], *bound_fragment_type);
 	}
 
 	// Get column types for proper data extraction

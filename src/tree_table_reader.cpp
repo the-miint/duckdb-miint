@@ -30,22 +30,26 @@ void ValidateTreeTableSchema(ClientContext &context, const std::string &table_na
 }
 
 // The rows of a tree table, in node_index order. Without `columns`, names are cast to VARCHAR, as
-// ReadTreeTable reads them; with them, names are read in the bound type and, with `labels`, the
-// VARCHAR `label` column is read too.
-static std::vector<miint::NodeInput> ReadTreeRows(ClientContext &context, const std::string &table_name,
+// ReadTreeTable reads them; with them (BindTreeOutput's, for the function `fn`), names are read in
+// the bound type and, with `labels`, the VARCHAR `label` column is read too, each checked against
+// bind.
+static std::vector<miint::NodeInput> ReadTreeRows(ClientContext &context, const std::string &table_name, const char *fn,
                                                   const TreeNameColumns *columns,
                                                   std::vector<std::optional<std::string>> *labels) {
 	std::vector<miint::NodeInput> result;
 
 	auto conn = MakeReadOnlyHelperConnection(context);
 
-	// Optional columns (branch_length, edge_id) default to NULL when the
+	// Optional columns (name, branch_length, edge_id) default to NULL when the
 	// tree table lacks them, so a minimal node_index+parent_index table is
 	// accepted rather than failing mid-read. node_index/parent_index are
-	// guaranteed present by ValidateTreeTableSchema at bind time.
+	// guaranteed present by the bind-time check (ValidateTreeTableSchema or
+	// BindTreeOutput).
 	//
-	// Cast to canonical types so GetData<> always matches the backing store.
-	// DuckDB handles INTEGER->BIGINT, FLOAT->DOUBLE etc. transparently.
+	// The numeric columns are cast to canonical types so GetData<> always
+	// matches the backing store (DuckDB handles INTEGER->BIGINT, FLOAT->DOUBLE
+	// etc. transparently). Names are cast to VARCHAR, or read in their bound
+	// type, which is checked below.
 	auto info = GetTableOrViewColumns(context, table_name, "Tree table");
 	const bool has_name = columns ? columns->has_name : HasColumn(info, "name");
 	const LogicalType name_type = columns ? columns->name_type : LogicalType::VARCHAR;
@@ -76,18 +80,18 @@ static std::vector<miint::NodeInput> ReadTreeRows(ClientContext &context, const 
 
 	auto &materialized = *query_result;
 
-	// Bind fixed the output types, and a view can change type without a catalog change
-	// (docs/internals/reading-tables-views.md), so the read's own types are checked.
-	auto check_type = [&](idx_t col, const char *column, const LogicalType &bound) {
-		if (materialized.GetTypes()[col] != bound) {
-			throw InvalidInputException("column '%s' of tree table '%s' is %s now but was %s when the statement was "
-			                            "bound; run or prepare it again",
-			                            column, table_name, materialized.GetTypes()[col].ToString(), bound.ToString());
-		}
-	};
-	check_type(2, "name", name_type);
+	// Bind fixed the output types; a name read uncast, or a label, must still have them.
+	const std::string relation = "tree table '" + table_name + "'";
+	if (columns && columns->has_name) {
+		CheckBoundType(fn, relation, "name", materialized.GetTypes()[2], name_type);
+	}
 	if (labels) {
-		check_type(5, "label", LogicalType::VARCHAR);
+		CheckBoundType(fn, relation, "label", materialized.GetTypes()[5], LogicalType::VARCHAR);
+	}
+
+	result.reserve(materialized.RowCount());
+	if (labels) {
+		labels->reserve(materialized.RowCount());
 	}
 
 	std::vector<std::string> names;
@@ -169,7 +173,16 @@ static std::vector<miint::NodeInput> ReadTreeRows(ClientContext &context, const 
 }
 
 std::vector<miint::NodeInput> ReadTreeTable(ClientContext &context, const std::string &table_name) {
-	return ReadTreeRows(context, table_name, nullptr, nullptr);
+	return ReadTreeRows(context, table_name, nullptr, nullptr, nullptr);
+}
+
+// Build a tree from rows read from `table_name`, naming it in the error.
+static miint::NewickTree BuildNewickTree(const std::vector<miint::NodeInput> &rows, const std::string &table_name) {
+	try {
+		return miint::NewickTree::build(rows);
+	} catch (const std::exception &e) {
+		throw InvalidInputException("Failed to build tree from '%s': %s", table_name, e.what());
+	}
 }
 
 TreeNameColumns BindTreeOutput(ClientContext &context, const char *fn, const std::string &table_name,
@@ -205,18 +218,14 @@ TreeNameColumns BindTreeOutput(ClientContext &context, const char *fn, const std
 	return columns;
 }
 
-miint::NewickTree BuildTree(ClientContext &context, const std::string &table_name, const TreeNameColumns &columns,
-                            std::vector<std::optional<std::string>> &labels) {
+miint::NewickTree BuildTree(ClientContext &context, const char *fn, const std::string &table_name,
+                            const TreeNameColumns &columns, std::vector<std::optional<std::string>> &labels) {
 	labels.clear();
 	// The rows are released on return, before the caller's operation, so they don't add to its peak
 	// memory: an operation that builds a new tree (shear, resolution) holds two trees at once.
-	auto node_inputs = ReadTreeRows(context, table_name, &columns, columns.has_label ? &labels : nullptr);
+	auto node_inputs = ReadTreeRows(context, table_name, fn, &columns, columns.has_label ? &labels : nullptr);
 	// build() keeps the rows' order, so node i is row i, the row labels[i] came from
-	try {
-		return miint::NewickTree::build(node_inputs);
-	} catch (const std::exception &e) {
-		throw InvalidInputException("Failed to build tree from '%s': %s", table_name, e.what());
-	}
+	return BuildNewickTree(node_inputs, table_name);
 }
 
 void TreeOutputState::SetRows(const miint::NewickTree &tree, const std::vector<uint32_t> *source) {
@@ -268,11 +277,7 @@ TreeWithNodeIds BuildTreeAndNodeIds(ClientContext &context, const std::string &t
 		out.node_ids.push_back(ni.node_id);
 	}
 
-	try {
-		out.tree = miint::NewickTree::build(node_inputs);
-	} catch (const std::exception &e) {
-		throw InvalidInputException("Failed to build tree from '%s': %s", table_name, e.what());
-	}
+	out.tree = BuildNewickTree(node_inputs, table_name);
 	return out;
 }
 
