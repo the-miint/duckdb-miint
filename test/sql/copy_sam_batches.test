@@ -1,0 +1,519 @@
+# name: test/sql/copy_sam_batches.test
+# description: COPY FORMAT SAM/BAM hand their records to the writer in batches. The default cap (ROW_GROUP_SIZE 64 and ROW_GROUP_SIZE_BYTES '8MB', each added when the statement gives none) gathers small chunks and bounds a batch of large rows, and a user's own values win. Headerless SAM names every record's references, however many its batch meets. A batch whose records pass 64 MiB is built again as it is written, and gives the same bytes as small batches; its data errors are raised before anything is written. The hidden registrations _miint_sam and _miint_bam write what SAM and BAM write, without the cap. Files DuckDB names itself end in .sam, .sam.gz or .bam.
+# group: [sql]
+
+require miint
+
+statement ok
+SET threads=8;
+
+# DuckDB logs one FlushBatch entry per batch it hands a COPY writer, with the batch's row count, its size as DuckDB
+# measures it (the input rows, not the records written), and why it was flushed.
+statement ok
+CALL enable_logging('PhysicalOperator', storage = 'memory');
+
+statement ok
+CREATE MACRO batches(name) AS TABLE
+SELECT info.rows::BIGINT AS rows, info.size::BIGINT AS size, info.reason AS reason
+FROM duckdb_logs_parsed('PhysicalOperator')
+WHERE class = 'PhysicalCopyToFile' AND event = 'FlushBatch' AND parse_filename(info.file) = name;
+
+# A COPY whose batches are counted exactly, or whose bytes are compared with another's, says PRESERVE_ORDER true:
+# these formats keep no order by default, and on all threads a source scanned as several tasks would split the rows
+# into other batches, in another order.
+
+# A file's lines, without their order.
+statement ok
+CREATE MACRO sam_lines(path) AS TABLE
+SELECT line FROM read_csv(path, columns = {'line': 'VARCHAR'}, delim = E'\x1f', quote = '', escape = '', header = false,
+                          auto_detect = false);
+
+statement ok
+CREATE TABLE ref_lens AS SELECT 'ref' || k AS name, 100000000::BIGINT AS length FROM range(4) t(k);
+
+# Short alignments. Filtered on i % 128 = 0, a table scan yields chunks of 16 rows (320 rows in 20 chunks).
+statement ok
+CREATE TABLE aln AS
+SELECT i, 'r' || i AS read_id, 0::USMALLINT AS flags, 'ref' || (i % 4) AS reference, (1 + i % 1000)::BIGINT AS position,
+       60::UTINYINT AS mapq, '20M' AS cigar, '*' AS mate_reference, 0::BIGINT AS mate_position,
+       0::BIGINT AS template_length
+FROM range(0, 40960) r(i);
+
+# Rows of about 2 MB as DuckDB measures them: 50 alignments, each with a 2 MB MD tag; 100 MB in one chunk.
+statement ok
+CREATE TABLE big_tags AS
+SELECT 'b' || i AS read_id, 0::USMALLINT AS flags, 'ref' || (i % 4) AS reference, (1 + i * 100)::BIGINT AS position,
+       60::UTINYINT AS mapq, '100M' AS cigar, '*' AS mate_reference, 0::BIGINT AS mate_position,
+       0::BIGINT AS template_length,
+       repeat(translate(md5(i::VARCHAR), '0123456789abcdef', 'ACGTACGTACGTACGT'), 62500) AS tag_md
+FROM range(1, 51) r(i);
+
+# --- The default row cap gathers small chunks ---
+# Without it, every 16-row chunk is a batch; with it, a batch is flushed once it holds 64 rows.
+
+statement ok
+COPY (SELECT * EXCLUDE (i) FROM aln WHERE i % 128 = 0) TO '{TEST_DIR}/small_default.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', PRESERVE_ORDER true);
+
+query IIII
+SELECT count(*), sum(rows), min(rows), max(rows) FROM batches('small_default.sam');
+----
+5	320	64	64
+
+statement ok
+COPY (SELECT * EXCLUDE (i) FROM aln WHERE i % 128 = 0) TO '{TEST_DIR}/small_default.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens', PRESERVE_ORDER true);
+
+query IIII
+SELECT count(*), sum(rows), min(rows), max(rows) FROM batches('small_default.bam');
+----
+5	320	64	64
+
+# The format name in any case (the Python CLI writes it in lower case), and a .bam path with no FORMAT, which DuckDB
+# resolves to BAM before binding.
+statement ok
+COPY (SELECT * EXCLUDE (i) FROM aln WHERE i % 128 = 0) TO '{TEST_DIR}/small_lower.sam' (FORMAT sam, REFERENCE_LENGTHS 'ref_lens', PRESERVE_ORDER true);
+
+query IIII
+SELECT count(*), sum(rows), min(rows), max(rows) FROM batches('small_lower.sam');
+----
+5	320	64	64
+
+statement ok
+COPY (SELECT * EXCLUDE (i) FROM aln WHERE i % 128 = 0) TO '{TEST_DIR}/small_lower.bam' (FORMAT bam, REFERENCE_LENGTHS 'ref_lens', PRESERVE_ORDER true);
+
+query IIII
+SELECT count(*), sum(rows), min(rows), max(rows) FROM batches('small_lower.bam');
+----
+5	320	64	64
+
+statement ok
+COPY (SELECT * EXCLUDE (i) FROM aln WHERE i % 128 = 0) TO '{TEST_DIR}/small_no_format.bam' (REFERENCE_LENGTHS 'ref_lens', PRESERVE_ORDER true);
+
+query IIII
+SELECT count(*), sum(rows), min(rows), max(rows) FROM batches('small_no_format.bam');
+----
+5	320	64	64
+
+# --- The default byte cap bounds a batch of large rows ---
+# Without it, all 100 MB is one batch. With it, a batch ends with the row that reaches 8 MB: 4 rows of 2 MB, every batch
+# under 9 MB before its last row (as in copy_fastx_batches.test).
+
+statement ok
+COPY big_tags TO '{TEST_DIR}/big_default.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens');
+
+query IIII
+SELECT count(*) > 1, sum(rows), max(rows), bool_and(size - size // rows < 9000000) FROM batches('big_default.sam');
+----
+true	50	4	true
+
+statement ok
+COPY big_tags TO '{TEST_DIR}/big_default.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens');
+
+query IIII
+SELECT count(*) > 1, sum(rows), max(rows), bool_and(size - size // rows < 9000000) FROM batches('big_default.bam');
+----
+true	50	4	true
+
+# --- A user's own values win ---
+
+statement ok
+COPY (SELECT * EXCLUDE (i) FROM aln WHERE i % 128 = 0)
+TO '{TEST_DIR}/small_rows1000.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', ROW_GROUP_SIZE 1000, PRESERVE_ORDER true);
+
+query II
+SELECT count(*), sum(rows) FROM batches('small_rows1000.sam');
+----
+1	320
+
+statement ok
+COPY big_tags TO '{TEST_DIR}/big_bytes1gb.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens', ROW_GROUP_SIZE_BYTES '1GB');
+
+query II
+SELECT count(*), sum(rows) FROM batches('big_bytes1gb.bam');
+----
+1	50
+
+# --- Batches whose records pass 64 MiB give the same bytes ---
+# DuckDB measures the input rows, and SEQUENCE_DATA adds SEQ and QUAL to records it cannot see, so a batch of small
+# rows can write large records. 48 reads of 1 Mb, half on the reverse strand (written reverse-complemented): the rows
+# are one small chunk, so under the default cap each COPY is one batch, of about 96 MB of SAM text or 72 MB of BAM
+# records, over the 64 MiB above which a batch's records are not kept but built again as they are written. Under
+# ROW_GROUP_SIZE_BYTES '1B' every row is a batch of its own, whose records are kept, and is the oracle.
+
+statement ok
+CREATE TABLE huge_seq AS
+SELECT 'H' || i AS read_id,
+       repeat(translate(md5(i::VARCHAR), '0123456789abcdef', 'ACGTACGTACGTACGT'), 31250) AS sequence1,
+       list_transform(range(1000000), lambda j: ((i + j) % 41)::UTINYINT) AS qual1
+FROM range(1, 49) r(i);
+
+statement ok
+CREATE TABLE huge_aln AS
+SELECT 'H' || i AS read_id, (CASE WHEN i % 2 = 0 THEN 16 ELSE 0 END)::USMALLINT AS flags, 'ref' || (i % 4) AS reference,
+       (1 + i * 1000)::BIGINT AS position, 60::UTINYINT AS mapq, '1000000M' AS cigar, '*' AS mate_reference,
+       0::BIGINT AS mate_position, 0::BIGINT AS template_length, (i % 7)::BIGINT AS tag_nm
+FROM range(1, 49) r(i);
+
+statement ok
+COPY huge_aln TO '{TEST_DIR}/hs_deferred.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'huge_seq', PRESERVE_ORDER true);
+
+statement ok
+COPY huge_aln TO '{TEST_DIR}/hs_prepared.sam'
+(FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'huge_seq', ROW_GROUP_SIZE_BYTES '1B', PRESERVE_ORDER true);
+
+# Headerless, where each batch resolves its references for itself.
+statement ok
+COPY huge_aln TO '{TEST_DIR}/hs_deferred_nohdr.sam' (FORMAT SAM, INCLUDE_HEADER false, SEQUENCE_DATA 'huge_seq', PRESERVE_ORDER true);
+
+statement ok
+COPY huge_aln TO '{TEST_DIR}/hs_prepared_nohdr.sam'
+(FORMAT SAM, INCLUDE_HEADER false, SEQUENCE_DATA 'huge_seq', ROW_GROUP_SIZE_BYTES '1B', PRESERVE_ORDER true);
+
+statement ok
+COPY huge_aln TO '{TEST_DIR}/hs_deferred_gz.sam.gz' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'huge_seq', PRESERVE_ORDER true);
+
+statement ok
+COPY huge_aln TO '{TEST_DIR}/hs_prepared_gz.sam.gz'
+(FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'huge_seq', ROW_GROUP_SIZE_BYTES '1B', PRESERVE_ORDER true);
+
+statement ok
+COPY huge_aln TO '{TEST_DIR}/hs_deferred.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'huge_seq', PRESERVE_ORDER true);
+
+statement ok
+COPY huge_aln TO '{TEST_DIR}/hs_prepared.bam'
+(FORMAT BAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'huge_seq', ROW_GROUP_SIZE_BYTES '1B', PRESERVE_ORDER true);
+
+query II
+SELECT parse_filename(info.file) AS f, count(*)
+FROM duckdb_logs_parsed('PhysicalOperator')
+WHERE class = 'PhysicalCopyToFile' AND event = 'FlushBatch' AND parse_filename(info.file) LIKE 'hs\_%' ESCAPE '\'
+GROUP BY f ORDER BY f;
+----
+hs_deferred.bam	1
+hs_deferred.sam	1
+hs_deferred_gz.sam.gz	1
+hs_deferred_nohdr.sam	1
+hs_prepared.bam	48
+hs_prepared.sam	48
+hs_prepared_gz.sam.gz	48
+hs_prepared_nohdr.sam	48
+
+# Each file's md5 is taken as it is read, so the join holds digests, not file contents. Both gzip files are written by
+# the same deflate library, so their bytes compare too.
+query I
+WITH deferred AS (
+    SELECT replace(parse_filename(filename), 'hs_deferred', '') AS output, md5(content) AS digest
+    FROM read_blob('{TEST_DIR}/hs_deferred*')),
+prepared AS (
+    SELECT replace(parse_filename(filename), 'hs_prepared', '') AS output, md5(content) AS digest
+    FROM read_blob('{TEST_DIR}/hs_prepared*'))
+SELECT output FROM deferred JOIN prepared USING (output, digest)
+ORDER BY output;
+----
+.bam
+.sam
+_gz.sam.gz
+_nohdr.sam
+
+# And the records are the reads: SEQ and QUAL as SEQUENCE_DATA holds them, reverse-complemented on the reverse strand.
+query II
+SELECT count(*),
+       count(*) FILTER (WHERE a.sequence = CASE WHEN a.flags & 16 = 0 THEN s.sequence1
+                                                ELSE reverse(translate(s.sequence1, 'ACGT', 'TGCA')) END
+                          AND a.qual = CASE WHEN a.flags & 16 = 0 THEN s.qual1 ELSE list_reverse(s.qual1) END)
+FROM read_alignments('{TEST_DIR}/hs_deferred.bam', include_seq_qual := true) a JOIN huge_seq s USING (read_id);
+----
+48	48
+
+# --- A data error in a batch over 64 MiB is raised before anything is written ---
+# The last record's CIGAR consumes one base fewer than its read. The batch's records pass 64 MiB before it, so the
+# writer stops keeping them; the rows after are still checked while the batch is prepared. DuckDB logs a FlushBatch
+# before it hands the writer a batch to write, so none means the error came from preparing it.
+
+statement ok
+CREATE TABLE huge_bad AS
+SELECT * REPLACE (CASE WHEN read_id = 'H48' THEN '999999M' ELSE cigar END AS cigar) FROM huge_aln;
+
+statement error
+COPY huge_bad TO '{TEST_DIR}/err_deferred.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'huge_seq');
+----
+After hard clipping, sequence length (1000000) does not match CIGAR query length (999999) for read 'H48'
+
+query I
+SELECT count(*) FROM batches('err_deferred.sam');
+----
+0
+
+statement error
+COPY huge_bad TO '{TEST_DIR}/err_deferred.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'huge_seq');
+----
+After hard clipping, sequence length (1000000) does not match CIGAR query length (999999) for read 'H48'
+
+query I
+SELECT count(*) FROM batches('err_deferred.bam');
+----
+0
+
+# --- BAM's own limits are data errors, raised before anything is written ---
+# BAM stores POS, PNEXT and TLEN in 32 bits, and a CIGAR of more than 65,535 operations only if it spans fewer than 2^28
+# reference bases; SAM text writes them whole. A BAM record past one of these is refused while its batch is prepared,
+# with an error naming the column, its value and the read. The record is in the first batch, so no batch has been
+# written when it is refused. Each COPY holds one such record. r8's CIGAR is 131,072 operations spanning exactly 2^28.
+
+statement ok
+CREATE TABLE far AS
+SELECT * EXCLUDE (i) REPLACE (CASE WHEN i = 5 THEN 2147483649 ELSE position END AS position,
+                              CASE WHEN i = 6 THEN 2147483648 ELSE template_length END AS template_length,
+                              CASE WHEN i = 7 THEN 2147483649 ELSE mate_position END AS mate_position,
+                              CASE WHEN i = 8 THEN repeat('1M4095N', 65536) ELSE cigar END AS cigar)
+FROM aln WHERE i < 3000;
+
+statement error
+COPY (FROM far WHERE read_id NOT IN ('r6', 'r7', 'r8')) TO '{TEST_DIR}/err_far_pos.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens');
+----
+Column 'position' is 2147483649 for read 'r5', past 2147483648, the largest a BAM record holds
+
+query I
+SELECT count(*) FROM batches('err_far_pos.bam');
+----
+0
+
+statement error
+COPY (FROM far WHERE read_id NOT IN ('r5', 'r7', 'r8')) TO '{TEST_DIR}/err_far_tlen.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens');
+----
+Column 'template_length' is 2147483648 for read 'r6', outside the 32-bit signed range a BAM record holds
+
+statement error
+COPY (FROM far WHERE read_id NOT IN ('r5', 'r6', 'r8')) TO '{TEST_DIR}/err_far_mpos.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens');
+----
+Column 'mate_position' is 2147483649 for read 'r7', past 2147483648, the largest a BAM record holds
+
+statement error
+COPY (FROM far WHERE read_id NOT IN ('r5', 'r6', 'r7')) TO '{TEST_DIR}/err_far_cigar.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens');
+----
+Column 'cigar' of read 'r8' has 131072 operations spanning 268435456 reference bases: a BAM record holds more than 65535 only if they span fewer than 268435456
+
+statement ok
+COPY far TO '{TEST_DIR}/far.sam' (FORMAT SAM, INCLUDE_HEADER false);
+
+query II
+SELECT split_part(line, E'\t', 4), split_part(line, E'\t', 9)
+FROM read_csv('{TEST_DIR}/far.sam', columns = {'line': 'VARCHAR'}, delim = E'\x1f', quote = '', escape = '', header = false,
+              auto_detect = false)
+WHERE split_part(line, E'\t', 1) IN ('r5', 'r6') ORDER BY line;
+----
+2147483649	0
+7	2147483648
+
+# r7's PNEXT, and r8's CIGAR, whole.
+query II
+SELECT split_part(line, E'\t', 8), length(split_part(line, E'\t', 6))
+FROM read_csv('{TEST_DIR}/far.sam', columns = {'line': 'VARCHAR'}, delim = E'\x1f', quote = '', escape = '', header = false,
+              auto_detect = false)
+WHERE split_part(line, E'\t', 1) IN ('r7', 'r8') ORDER BY split_part(line, E'\t', 1);
+----
+2147483649	3
+0	458752
+
+# --- A failed COPY leaves no file it created, and a file it would have replaced as it was ---
+# How DuckDB does this: docs/internals/duckdb-engine-notes.md, "A failed COPY leaves no output". Each COPY below
+# fails after DuckDB has logged a batch written, so a partial write is what gets undone; r2999's tag is outside the
+# 32-bit range. Unpartitioned, the table scan's first chunk of 2,048 rows is a batch of its own, written before the
+# batch holding r2999 fails. Partitioned, DuckDB writes the bucket without r2999 (1,500 rows, one batch), then fails
+# on the other.
+
+statement ok
+CREATE TABLE bad_last AS
+SELECT * EXCLUDE (i), CASE WHEN i = 2999 THEN 3000000000 ELSE i END::BIGINT AS tag_as, i % 2 AS bucket
+FROM aln WHERE i < 3000;
+
+statement ok
+COPY (SELECT * EXCLUDE (bucket) FROM bad_last WHERE read_id <> 'r2999') TO '{TEST_DIR}/existing.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens');
+
+statement ok
+CREATE TABLE existing_before AS SELECT md5(content) AS digest FROM read_blob('{TEST_DIR}/existing.bam');
+
+statement error
+COPY (SELECT * EXCLUDE (bucket) FROM bad_last) TO '{TEST_DIR}/existing.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens', PRESERVE_ORDER true);
+----
+Column 'tag_as' is 3000000000 for read 'r2999'
+
+query III
+SELECT (SELECT count(*) FROM batches('tmp_existing.bam')),
+       (SELECT md5(content) FROM read_blob('{TEST_DIR}/existing.bam')) = (SELECT digest FROM existing_before),
+       (SELECT count(*) FROM glob('{TEST_DIR}/tmp_existing.bam'));
+----
+1	true	0
+
+statement error
+COPY bad_last TO '{TEST_DIR}/failed_parts' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens', PARTITION_BY (bucket));
+----
+Column 'tag_as' is 3000000000 for read 'r2999'
+
+query II
+SELECT (SELECT count(*) FROM duckdb_logs_parsed('PhysicalOperator')
+        WHERE class = 'PhysicalCopyToFile' AND event = 'FlushBatch' AND info.file LIKE '%failed\_parts%' ESCAPE '\') > 0,
+       (SELECT count(*) FROM glob('{TEST_DIR}/failed_parts/**'));
+----
+true	0
+
+# --- Headerless SAM names every record's references, whatever its batch meets ---
+# Headerless SAM names references only by name, so each batch keeps its own table of the references it meets, which
+# sam_format1 names them from. Every 2,048-row batch here meets more than 2,048 names of over 200 characters: more than
+# the table starts with room for, and more name bytes than one block of its storage holds. Each record must name its own
+# reference and mate reference; RNEXT is '=' when the mate's reference is the record's own, given as '=' or by name.
+# In a batch's first 200 rows, mates are '=', '*' or one of 150 names, met more than once. After them, each record has
+# a reference of its own and gives its mate's by name, so wherever the table grows past its first room, it grows
+# between a record's reference and its mate's, and the mate's must still be found as the same reference.
+statement ok
+CREATE MACRO ref_name(k) AS 'ref_' || k || '_' || repeat('x', 200 + k % 97);
+
+statement ok
+CREATE MACRO mate_name(k) AS 'mate_' || k || '_' || repeat('y', 200 + k % 89);
+
+statement ok
+CREATE TABLE many_refs AS
+SELECT 'q' || i AS read_id,
+       (CASE WHEN unmapped THEN 4 ELSE 0 END)::USMALLINT AS flags,
+       CASE WHEN unmapped THEN NULL ELSE ref_name(i) END AS reference,
+       CASE WHEN unmapped THEN NULL ELSE 1 + i END::BIGINT AS position,
+       CASE WHEN unmapped THEN NULL ELSE 30 END::UTINYINT AS mapq,
+       CASE WHEN unmapped THEN NULL ELSE '50M' END AS cigar,
+       CASE WHEN unmapped THEN '*' WHEN head AND i % 7 = 0 THEN '=' WHEN head THEN mate_name(i % 150)
+            ELSE ref_name(i) END AS mate_reference,
+       CASE WHEN unmapped THEN 0 ELSE 1 END::BIGINT AS mate_position,
+       0::BIGINT AS template_length
+FROM (SELECT i, i % 2048 < 200 AS head, i % 2048 < 200 AND i % 11 = 0 AS unmapped FROM range(6144) t(i));
+
+statement ok
+CREATE MACRO many_refs_mismatches(path) AS TABLE
+SELECT count(*) AS records, count(*) FILTER (WHERE s.rname <> e.rname OR s.rnext <> e.rnext) AS mismatches
+FROM (SELECT split_part(line, E'\t', 1) AS read_id, split_part(line, E'\t', 3) AS rname,
+             split_part(line, E'\t', 7) AS rnext
+      FROM sam_lines(path)) s
+JOIN (SELECT read_id, coalesce(reference, '*') AS rname,
+             CASE WHEN mate_reference = '*' THEN '*' WHEN mate_reference IN ('=', reference) THEN '='
+                  ELSE mate_reference END AS rnext
+      FROM many_refs) e USING (read_id);
+
+# Each 2,048 rows meet more than 2,048 distinct names.
+query I
+SELECT min(names) > 2048
+FROM (SELECT count(DISTINCT name) AS names
+      FROM (SELECT i // 2048 AS batch, unnest([reference, mate_reference]) AS name
+            FROM (SELECT row_number() OVER () - 1 AS i, * FROM many_refs))
+      WHERE name NOT IN ('*', '=')
+      GROUP BY batch);
+----
+true
+
+statement ok
+COPY many_refs TO '{TEST_DIR}/many_refs.sam' (FORMAT SAM, INCLUDE_HEADER false, PRESERVE_ORDER true);
+
+query II
+FROM many_refs_mismatches('{TEST_DIR}/many_refs.sam');
+----
+6144	0
+
+# Three batches, of 2,048 rows each.
+query II
+SELECT count(*), min(rows) FROM batches('many_refs.sam');
+----
+3	2048
+
+statement ok
+COPY many_refs TO '{TEST_DIR}/many_refs_off.sam' (FORMAT SAM, INCLUDE_HEADER false, PRESERVE_ORDER false);
+
+query II
+FROM many_refs_mismatches('{TEST_DIR}/many_refs_off.sam');
+----
+6144	0
+
+# --- The hidden registrations ---
+# FORMAT SAM/BAM bind as _miint_sam/_miint_bam with the default cap added. Naming the hidden ones directly writes the
+# same bytes, without the cap.
+
+statement ok
+COPY (SELECT * EXCLUDE (i) FROM aln WHERE i < 3000) TO '{TEST_DIR}/public.sam' (FORMAT SAM, INCLUDE_HEADER false, PRESERVE_ORDER true);
+
+statement ok
+COPY (SELECT * EXCLUDE (i) FROM aln WHERE i < 3000) TO '{TEST_DIR}/hidden.sam' (FORMAT _miint_sam, INCLUDE_HEADER false);
+
+statement ok
+COPY (SELECT * EXCLUDE (i) FROM aln WHERE i < 3000)
+TO '{TEST_DIR}/public.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens', COMPRESSION_LEVEL 1, PRESERVE_ORDER true);
+
+statement ok
+COPY (SELECT * EXCLUDE (i) FROM aln WHERE i < 3000)
+TO '{TEST_DIR}/hidden.bam' (FORMAT _miint_bam, REFERENCE_LENGTHS 'ref_lens', COMPRESSION_LEVEL 1);
+
+query II
+SELECT (SELECT md5(content) FROM read_blob('{TEST_DIR}/hidden.sam')) = (SELECT md5(content) FROM read_blob('{TEST_DIR}/public.sam')),
+       (SELECT md5(content) FROM read_blob('{TEST_DIR}/hidden.bam')) = (SELECT md5(content) FROM read_blob('{TEST_DIR}/public.bam'));
+----
+true	true
+
+statement ok
+COPY big_tags TO '{TEST_DIR}/big_hidden.sam' (FORMAT _miint_sam, REFERENCE_LENGTHS 'ref_lens');
+
+query II
+SELECT count(*), sum(rows) FROM batches('big_hidden.sam');
+----
+1	50
+
+# --- Files DuckDB names itself ---
+# They end in the format's extension, and gzip SAM's in .sam.gz, as DuckDB's CSV writer names its own; BAM is
+# compressed by nature and stays .bam. Every file gets the whole header.
+
+statement ok
+COPY (SELECT * EXCLUDE (i) FROM aln) TO '{TEST_DIR}/per_thread_sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', PER_THREAD_OUTPUT true);
+
+query III
+SELECT count(*) >= 1, bool_and(ends_with(file, '.sam')),
+       (SELECT count(*) FROM read_alignments('{TEST_DIR}/per_thread_sam/*'))
+FROM glob('{TEST_DIR}/per_thread_sam/*');
+----
+true	true	40960
+
+statement ok
+COPY (SELECT * EXCLUDE (i) FROM aln)
+TO '{TEST_DIR}/per_thread_sam_gz' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', PER_THREAD_OUTPUT true, COMPRESSION gzip);
+
+query III
+SELECT count(*) >= 1, bool_and(ends_with(file, '.sam.gz')),
+       (SELECT count(*) FROM read_alignments('{TEST_DIR}/per_thread_sam_gz/*'))
+FROM glob('{TEST_DIR}/per_thread_sam_gz/*');
+----
+true	true	40960
+
+statement ok
+COPY (SELECT i % 2 AS bucket, * EXCLUDE (i) FROM aln)
+TO '{TEST_DIR}/partitioned_sam_gz' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', PARTITION_BY (bucket), COMPRESSION gzip);
+
+query III
+SELECT count(*), bool_and(ends_with(file, '.sam.gz')),
+       (SELECT count(*) FROM read_alignments('{TEST_DIR}/partitioned_sam_gz/*/*'))
+FROM glob('{TEST_DIR}/partitioned_sam_gz/*/*');
+----
+2	true	40960
+
+statement ok
+COPY (SELECT i % 2 AS bucket, * EXCLUDE (i) FROM aln)
+TO '{TEST_DIR}/partitioned_bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens', PARTITION_BY (bucket));
+
+query III
+SELECT count(*), bool_and(ends_with(file, '.bam')),
+       (SELECT count(*) FROM read_alignments('{TEST_DIR}/partitioned_bam/*/*'))
+FROM glob('{TEST_DIR}/partitioned_bam/*/*');
+----
+2	true	40960
+
+# A FILE_EXTENSION that already ends in .gz is kept as given, not made .gz.gz.
+statement ok
+COPY (SELECT * EXCLUDE (i) FROM aln)
+TO '{TEST_DIR}/per_thread_sam_gz_ext' (FORMAT SAM, INCLUDE_HEADER false, PER_THREAD_OUTPUT true, COMPRESSION gzip, FILE_EXTENSION 'sam.gz');
+
+query II
+SELECT count(*) >= 1, bool_and(ends_with(file, '.sam.gz') AND NOT ends_with(file, '.gz.gz'))
+FROM glob('{TEST_DIR}/per_thread_sam_gz_ext/*');
+----
+true	true

@@ -117,11 +117,13 @@ unique_ptr<FunctionData> ReadFastxTableFunction::Bind(ClientContext &context, Ta
 		qual_offset = static_cast<uint8_t>(offset_value);
 	}
 
-	// Default byte budget: 512 MiB. Large enough that typical short-read workflows
+	// Default byte budget: 64 MiB. Large enough that typical short-read workflows
 	// always fill STANDARD_VECTOR_SIZE (~600 KB per chunk) without being capped, but
 	// small enough to prevent multi-GB chunks when reading large sequences
 	// (e.g. bacterial genomes at ~5 MB/record would otherwise blow past RAM at 2048x).
-	uint64_t max_batch_bytes = 512ULL * 1024 * 1024;
+	// A chunk is also a batch index's batch, which order-keeping sinks hold whole
+	// (docs/internals/duckdb-engine-notes.md, "Output order costs threads and memory").
+	uint64_t max_batch_bytes = 64ULL * 1024 * 1024;
 	auto mbb_param = input.named_parameters.find("max_batch_bytes");
 	if (mbb_param != input.named_parameters.end() && !mbb_param->second.IsNull()) {
 		std::string raw = mbb_param->second.ToString();
@@ -141,6 +143,8 @@ unique_ptr<FunctionData> ReadFastxTableFunction::Bind(ClientContext &context, Ta
 	if (empty_param != input.named_parameters.end() && !empty_param->second.IsNull()) {
 		allow_empty = empty_param->second.GetValue<bool>();
 	}
+
+	ScanBatchIndex::KeepForSeveralFiles(input.table_function, sequence1_paths.size());
 
 	auto data = duckdb::make_uniq<Data>(sequence1_paths, sequence2_paths, include_filepath, uses_stdin, qual_offset,
 	                                    max_batch_bytes, allow_empty);
@@ -196,6 +200,7 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 				local_state.current_file_idx = global_state.next_file_idx;
 				global_state.next_file_idx++;
 				local_state.has_file = true;
+				local_state.file_chunks = 0;
 			} // Lock released before I/O
 
 			// Open reader without holding the lock — safe because this thread
@@ -233,6 +238,11 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 		break;
 	}
 
+	// Files are claimed in increasing order, and a chunk never spans two, as ScanBatchIndex requires.
+	local_state.batch_index =
+	    ScanBatchIndex::Index(local_state.current_file_idx, local_state.file_chunks++, global_state.batch_stride);
+	const auto &reader = *global_state.readers[local_state.current_file_idx];
+
 	// Get sequence indices for this chunk from the current file's counter
 	// No atomic operation needed - this thread has exclusive access to this file
 	start_sequence_index = global_state.file_sequence_counters[local_state.current_file_idx];
@@ -258,15 +268,16 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 		SetResultVectorString(output.data[field_idx++], batch.sequences2);
 	}
 
-	// QUAL1 - null for FASTA (all records in a file are guaranteed same format)
-	if (batch.quals1[0].as_string().empty()) {
+	// QUAL1 - null for FASTA, which has no qualities. Decided by the file's format, not by a
+	// record: a FASTQ record with no bases has an empty quality, and gets an empty list.
+	if (!reader.IsFastq(0)) {
 		SetResultVectorNull(output.data[field_idx++]);
 	} else {
 		SetResultVectorListUInt8(output.data[field_idx++], batch.quals1, bind_data.qual_offset);
 	}
 
 	// QUAL2 - null for unpaired or FASTA
-	if (!batch.is_paired || batch.quals2.empty() || batch.quals2[0].as_string().empty()) {
+	if (!batch.is_paired || !reader.IsFastq(1)) {
 		SetResultVectorNull(output.data[field_idx++]);
 	} else {
 		SetResultVectorListUInt8(output.data[field_idx++], batch.quals2, bind_data.qual_offset);
@@ -277,6 +288,11 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 	}
 
 	output.SetChildCardinality(batch.size());
+}
+
+OperatorPartitionData ReadFastxTableFunction::GetPartitionData(ClientContext &context,
+                                                               TableFunctionGetPartitionInput &input) {
+	return ScanBatchIndex::PartitionData(input, input.local_state->Cast<LocalState>().batch_index);
 }
 
 // Cardinality estimate so joins stream read_fastx rather than hash it; see
@@ -301,6 +317,7 @@ TableFunction ReadFastxTableFunction::GetFunction() {
 	AddNamedParameter(tf, "max_batch_bytes", LogicalType::VARCHAR);
 	AddNamedParameter(tf, "allow_empty", LogicalType::BOOLEAN);
 	tf.cardinality = ReadFastxCardinality;
+	tf.get_partition_data = GetPartitionData;
 	return tf;
 }
 

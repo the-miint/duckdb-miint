@@ -12,11 +12,13 @@ CREATE TABLE seqs AS SELECT * FROM (VALUES
     ('r0', '')
 ) t(read_id, sequence1);
 
+# The files are compared whole, so the COPYs of several records say PRESERVE_ORDER true (these formats keep no order
+# by default).
 # 7 bases at 3: two full lines and a short one. 6 at 3: two full lines and no empty third (Prodigal writes no newline
 # after a full line at the end, gene.c write_translations). 2 at 3: one short line. An empty sequence is an empty
 # line, as without LINE_WIDTH.
 statement ok
-COPY seqs TO '{TEST_DIR}/w3.fa' (FORMAT FASTA, LINE_WIDTH 3);
+COPY seqs TO '{TEST_DIR}/w3.fa' (FORMAT FASTA, LINE_WIDTH 3, PRESERVE_ORDER true);
 
 query I
 SELECT content = E'>r7\nACG\nTAC\nG\n>r6\nACG\nTAC\n>r2\nAC\n>r0\n\n' FROM read_text('{TEST_DIR}/w3.fa');
@@ -25,7 +27,7 @@ true
 
 # Without LINE_WIDTH, unchanged: one line per sequence.
 statement ok
-COPY seqs TO '{TEST_DIR}/unwrapped.fa' (FORMAT FASTA);
+COPY seqs TO '{TEST_DIR}/unwrapped.fa' (FORMAT FASTA, PRESERVE_ORDER true);
 
 query I
 SELECT content = E'>r7\nACGTACG\n>r6\nACGTAC\n>r2\nAC\n>r0\n\n' FROM read_text('{TEST_DIR}/unwrapped.fa');

@@ -1,0 +1,245 @@
+# name: test/sql/copy_sam_bytes.test
+# description: COPY FORMAT SAM/BAM with insertion order kept writes the same bytes as at commit 352ec60a. Each output's md5 is pinned to that commit's output, at threads=1 and threads=8, for every option that shapes the bytes. Output at the default compression level differs between deflate libraries, so it is checked by content against the same query's uncompressed or level-0 output.
+# group: [sql]
+
+require miint
+
+# Inputs are derived from md5 and arithmetic only, so they are the same on every platform and DuckDB version (hash()
+# is not). 5,000 records span several chunks. They cover: unmapped records (NULL reference, position, mapq and
+# cigar); reverse-strand, paired (R1 and R2) and secondary flags; 19 of the 20 references; CIGARs with S, I, D and H,
+# all of query length 50; mate references written as '=', as the record's own reference by name (which SAM also
+# writes as '='), as another reference, and as '*'; and every tag column, with NULLs, which are written as no tag.
+statement ok
+CREATE TABLE alignments AS
+SELECT i,
+       'r' || i AS read_id,
+       flags::USMALLINT AS flags,
+       CASE WHEN unmapped THEN NULL ELSE 'ref' || lpad(((i * 7) % 20)::VARCHAR, 2, '0') END AS reference,
+       CASE WHEN unmapped THEN NULL ELSE 1 + (i * 37) % 100000 END::BIGINT AS position,
+       CASE WHEN unmapped THEN NULL ELSE i % 61 END::UTINYINT AS mapq,
+       CASE WHEN unmapped THEN NULL ELSE ['50M', '5S45M', '20M2I28M', '25M3D25M', '5H50M', '3H43M7S2H'][1 + i % 6] END
+           AS cigar,
+       CASE WHEN NOT paired THEN '*'
+            WHEN i % 3 = 0 THEN '='
+            WHEN i % 3 = 1 AND NOT unmapped THEN 'ref' || lpad(((i * 7) % 20)::VARCHAR, 2, '0')
+            ELSE 'ref' || lpad(((i * 3) % 20)::VARCHAR, 2, '0') END AS mate_reference,
+       CASE WHEN paired THEN 1 + (i * 53) % 100000 ELSE 0 END::BIGINT AS mate_position,
+       CASE WHEN paired THEN (i * 13) % 801 - 400 ELSE 0 END::BIGINT AS template_length,
+       CASE WHEN i % 7 = 0 THEN NULL ELSE i % 150 - 20 END::BIGINT AS tag_as,
+       CASE WHEN i % 5 = 0 THEN NULL ELSE i % 90 - 10 END::BIGINT AS tag_xs,
+       CASE WHEN NOT paired THEN NULL ELSE i % 70 END::BIGINT AS tag_ys,
+       (i % 3)::BIGINT AS tag_xn,
+       CASE WHEN i % 4 = 0 THEN NULL ELSE i % 6 END::BIGINT AS tag_xm,
+       (i % 2)::BIGINT AS tag_xo,
+       CASE WHEN i % 9 = 0 THEN NULL ELSE i % 4 END::BIGINT AS tag_xg,
+       CASE WHEN i % 5 = 0 THEN NULL ELSE i % 9 END::BIGINT AS tag_nm,
+       CASE WHEN paired THEN 'CP' ELSE 'UU' END AS tag_yt,
+       CASE WHEN i % 6 = 0 THEN NULL ELSE (20 + i % 25)::VARCHAR || 'A' || (29 - i % 25)::VARCHAR END AS tag_md,
+       CASE WHEN i % 17 = 0 THEN 'ref' || lpad(((i * 11) % 20)::VARCHAR, 2, '0') || ',' || (1 + i % 999) || ',+,50M,60,0;'
+            END AS tag_sa
+FROM (SELECT i,
+             i % 20 = 0 AS unmapped,
+             i % 4 < 2 AS paired,
+             (CASE WHEN i % 20 = 0 THEN 4 ELSE 0 END)
+               | (CASE WHEN i % 3 = 0 THEN 16 ELSE 0 END)
+               | (CASE WHEN i % 4 < 2 THEN 1 | (CASE WHEN i % 2 = 0 THEN 64 ELSE 128 END) ELSE 0 END)
+               | (CASE WHEN i % 11 = 0 AND i % 20 <> 0 THEN 256 ELSE 0 END) AS flags
+      FROM range(1, 5001) r(i));
+
+statement ok
+CREATE VIEW aln AS SELECT * EXCLUDE (i) FROM alignments;
+
+# The reads, as read_fastx gives them. A record whose CIGAR hard-clips 5 bases gets a read 5 bases longer, so that the
+# clipped SEQ matches the CIGAR. Every 13th read has no qualities, written as QUAL '*'.
+statement ok
+CREATE TABLE seq_data AS
+SELECT read_id, sequence1, sequence2,
+       CASE WHEN i % 13 = 0 THEN NULL
+            ELSE list_transform(range(length(sequence1)), lambda j: ((i * 7 + j * 13) % 41)::UTINYINT) END AS qual1,
+       CASE WHEN i % 13 = 0 THEN NULL
+            ELSE list_transform(range(length(sequence2)), lambda j: ((i * 11 + j * 5) % 41)::UTINYINT) END AS qual2
+FROM (SELECT i, read_id,
+             left(repeat(translate(md5(i::VARCHAR), '0123456789abcdef', 'ACGTACGTACGTACGT'), 2), n) AS sequence1,
+             left(repeat(translate(md5(i::VARCHAR || '/2'), '0123456789abcdef', 'ACGTACGTACGTACGT'), 2), n) AS sequence2
+      FROM (SELECT i, read_id, 50 + CASE WHEN cigar IN ('5H50M', '3H43M7S2H') THEN 5 ELSE 0 END AS n FROM alignments));
+
+statement ok
+CREATE TABLE ref_lens AS
+SELECT 'ref' || lpad(k::VARCHAR, 2, '0') AS name, (100000 + k * 1000)::BIGINT AS length FROM range(20) t(k);
+
+# A REFERENCE_LENGTHS that lacks some of the references, which headerless SAM accepts (sam_nohdr_partial, below).
+statement ok
+CREATE TABLE ref_lens_partial AS FROM ref_lens WHERE name < 'ref10';
+
+# Lines of every size against a BGZF block (65,280 bytes): short, near one block (a 30-31 kb read makes a line of 60-62
+# KB), and up to two blocks (70-76 kb). Gzip SAM ends a block before a line that does not fit (sam_write1), and a
+# writer that wrote a batch's text in one piece would cut lines across blocks instead.
+statement ok
+CREATE TABLE long_len AS
+SELECT i, CASE i % 4 WHEN 0 THEN 50 + i WHEN 1 THEN 30000 + i * 17 WHEN 2 THEN 70000 + i * 101 ELSE 120 + i END AS n
+FROM range(1, 61) r(i);
+
+statement ok
+CREATE TABLE long_aln AS
+SELECT 'L' || i AS read_id, 0::USMALLINT AS flags, 'ref' || lpad((i % 3)::VARCHAR, 2, '0') AS reference,
+       (1 + i * 10)::BIGINT AS position, 60::UTINYINT AS mapq, n || 'M' AS cigar, '*' AS mate_reference,
+       0::BIGINT AS mate_position, 0::BIGINT AS template_length
+FROM long_len;
+
+statement ok
+CREATE TABLE long_seq AS
+SELECT 'L' || i AS read_id,
+       left(repeat(translate(md5(i::VARCHAR), '0123456789abcdef', 'ACGTACGTACGTACGT'), n // 32 + 1), n) AS sequence1,
+       list_transform(range(n), lambda j: ((i + j * 7) % 41)::UTINYINT) AS qual1
+FROM long_len;
+
+# A gzipped file's text. read_text does not decompress, so it is rebuilt from the lines read_csv decompresses, which is
+# exact for these files: LF line endings, no empty line, a newline at the end. (The same macro as copy_fastx_bytes.test.)
+statement ok
+CREATE MACRO ref_text(path) AS (
+    SELECT string_agg(line, E'\n' ORDER BY i) || E'\n'
+    FROM (SELECT row_number() OVER () AS i, line
+          FROM read_csv(path, columns = {'line': 'VARCHAR'}, delim = E'\x1f', quote = '', escape = '',
+                        header = false, auto_detect = false)));
+
+foreach threads 1 8
+
+statement ok
+SET threads={threads};
+
+# Every COPY below whose records are compared in order says PRESERVE_ORDER true: these formats keep no order by
+# default, and without it the bytes would match at 1 and 8 threads only because each source here is scanned as one
+# task. The empty outputs need none.
+
+# Files named smb<threads>_* have md5s pinned below; files named smbx<threads>_* are at the default compression level
+# and are checked by content.
+
+# SAM
+
+statement ok
+COPY aln TO '{TEST_DIR}/smb{threads}_sam_hdr.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', PRESERVE_ORDER true);
+
+statement ok
+COPY aln TO '{TEST_DIR}/smb{threads}_sam_hdr_seq.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'seq_data', PRESERVE_ORDER true);
+
+statement ok
+COPY aln TO '{TEST_DIR}/smb{threads}_sam_lower.sam' (FORMAT sam, REFERENCE_LENGTHS 'ref_lens', PRESERVE_ORDER true);
+
+statement ok
+COPY aln TO '{TEST_DIR}/smb{threads}_sam_nohdr.sam' (FORMAT SAM, INCLUDE_HEADER false, PRESERVE_ORDER true);
+
+statement ok
+COPY aln TO '{TEST_DIR}/smb{threads}_sam_nohdr_partial.sam'
+(FORMAT SAM, INCLUDE_HEADER false, REFERENCE_LENGTHS 'ref_lens_partial', PRESERVE_ORDER true);
+
+statement ok
+COPY aln TO '{TEST_DIR}/smb{threads}_sam_nohdr_seq.sam' (FORMAT SAM, INCLUDE_HEADER false, SEQUENCE_DATA 'seq_data', PRESERVE_ORDER true);
+
+statement ok
+COPY (SELECT i AS read_id, * EXCLUDE (i, read_id) FROM alignments)
+TO '{TEST_DIR}/smb{threads}_sam_nohdr_bigint.sam' (FORMAT SAM, INCLUDE_HEADER false, PRESERVE_ORDER true);
+
+statement ok
+COPY (FROM aln WHERE false) TO '{TEST_DIR}/smb{threads}_sam_empty_hdr.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens');
+
+statement ok
+COPY (FROM aln WHERE false) TO '{TEST_DIR}/smb{threads}_sam_empty_nohdr.sam' (FORMAT SAM, INCLUDE_HEADER false);
+
+# Gzip SAM
+
+statement ok
+COPY aln TO '{TEST_DIR}/smb{threads}_samgz0_hdr_seq.sam.gz'
+(FORMAT SAM, COMPRESSION_LEVEL 0, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'seq_data', PRESERVE_ORDER true);
+
+statement ok
+COPY aln TO '{TEST_DIR}/smb{threads}_samgz0_nohdr_seq.sam.gz'
+(FORMAT SAM, COMPRESSION gzip, COMPRESSION_LEVEL 0, INCLUDE_HEADER false, SEQUENCE_DATA 'seq_data', PRESERVE_ORDER true);
+
+statement ok
+COPY long_aln TO '{TEST_DIR}/smb{threads}_samgz0_long.sam.gz'
+(FORMAT SAM, COMPRESSION_LEVEL 0, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'long_seq', PRESERVE_ORDER true);
+
+statement ok
+COPY aln TO '{TEST_DIR}/smbx{threads}_samgz_hdr_seq.sam.gz' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'seq_data', PRESERVE_ORDER true);
+
+# BAM
+
+statement ok
+COPY aln TO '{TEST_DIR}/smb{threads}_bam0.bam' (FORMAT BAM, COMPRESSION_LEVEL 0, REFERENCE_LENGTHS 'ref_lens', PRESERVE_ORDER true);
+
+statement ok
+COPY aln TO '{TEST_DIR}/smb{threads}_bam0_seq.bam'
+(FORMAT BAM, COMPRESSION_LEVEL 0, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'seq_data', PRESERVE_ORDER true);
+
+# A .bam path with no FORMAT writes BAM.
+statement ok
+COPY aln TO '{TEST_DIR}/smb{threads}_bam0_noformat.bam'
+(COMPRESSION_LEVEL 0, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'seq_data', PRESERVE_ORDER true);
+
+statement ok
+COPY long_aln TO '{TEST_DIR}/smb{threads}_bam0_long.bam'
+(FORMAT BAM, COMPRESSION_LEVEL 0, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'long_seq', PRESERVE_ORDER true);
+
+statement ok
+COPY (FROM aln WHERE false) TO '{TEST_DIR}/smb{threads}_bam0_empty.bam'
+(FORMAT BAM, COMPRESSION_LEVEL 0, REFERENCE_LENGTHS 'ref_lens');
+
+statement ok
+COPY aln TO '{TEST_DIR}/smbx{threads}_bam.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'seq_data', PRESERVE_ORDER true);
+
+# Pinned to 352ec60a's output at threads=1. Level-0 BGZF is the same on every platform: htslib writes stored blocks
+# itself, with zlib's and libdeflate's builds alike. The record order is in these bytes. sam_nohdr_partial matches
+# sam_nohdr: RNAME and RNEXT are written by name, so REFERENCE_LENGTHS does not change a headerless file. sam_lower and
+# bam0_noformat match sam_hdr and bam0_seq. sam_empty_nohdr is the empty file.
+query II
+SELECT replace(parse_filename(filename), 'smb{threads}_', '') AS f, md5(content)
+FROM read_blob('{TEST_DIR}/smb{threads}_*') ORDER BY f;
+----
+bam0.bam	546023cbe16f2645f61e6879a5ff990e
+bam0_empty.bam	87d89bd2740d5399d70b8dbc76433630
+bam0_long.bam	b094c3eb1df0a6666f604ea016f31b40
+bam0_noformat.bam	2256796b7d1481cebf29e63bb6c6a5bc
+bam0_seq.bam	2256796b7d1481cebf29e63bb6c6a5bc
+sam_empty_hdr.sam	18f02829651fd3fe5b7f39ba99ac98b6
+sam_empty_nohdr.sam	d41d8cd98f00b204e9800998ecf8427e
+sam_hdr.sam	bda045626eef4bc03bd019f08f1fa236
+sam_hdr_seq.sam	799661d675a3014dba5ba03f1e0f9abf
+sam_lower.sam	bda045626eef4bc03bd019f08f1fa236
+sam_nohdr.sam	d77b905915cf7ff8b01724bd022b045e
+sam_nohdr_bigint.sam	415500d574a49bc99bea3f4c30c1dd6e
+sam_nohdr_partial.sam	d77b905915cf7ff8b01724bd022b045e
+sam_nohdr_seq.sam	18eeb7ced52236ef41977c92c8ec1d2a
+samgz0_hdr_seq.sam.gz	29f4298c3a0afcc1d35da0c032e94fc1
+samgz0_long.sam.gz	d1d1e310c2457c9ba9647f59a17038f8
+samgz0_nohdr_seq.sam.gz	c734cb2aaefb1772ec1dbafc7674c28d
+
+# Gzip SAM at the default level decompresses to the uncompressed SAM of the same query.
+query I
+SELECT ref_text('{TEST_DIR}/smbx{threads}_samgz_hdr_seq.sam.gz') = content
+FROM read_text('{TEST_DIR}/smb{threads}_sam_hdr_seq.sam');
+----
+true
+
+# BAM at the default level holds level 0's records: every field read_alignments gives, and, with each record's index
+# in the file, its SEQ and QUAL.
+query I
+SELECT count(*) FROM read_alignments('{TEST_DIR}/smbx{threads}_bam.bam');
+----
+5000
+
+query I
+SELECT count(*) FROM (FROM read_alignments('{TEST_DIR}/smbx{threads}_bam.bam')
+                      EXCEPT ALL FROM read_alignments('{TEST_DIR}/smb{threads}_bam0_seq.bam'));
+----
+0
+
+query I
+SELECT count(*) FROM (SELECT sequence_index, read_id, sequence1, qual1
+                      FROM read_sequences_sam('{TEST_DIR}/smbx{threads}_bam.bam')
+                      EXCEPT ALL
+                      SELECT sequence_index, read_id, sequence1, qual1
+                      FROM read_sequences_sam('{TEST_DIR}/smb{threads}_bam0_seq.bam'));
+----
+0
+
+endloop

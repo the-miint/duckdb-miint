@@ -156,6 +156,8 @@ Only rules whose trigger appears in the diff can fire.
 | Any new or changed doc, docstring or comment; a test header comment; a `data/**/README*` | R7 |
 | A user-facing string: an exception message, a `docs/` page, a parameter description | R7, R9 |
 | A new file, moved code, feature- or platform-specific naming, a one-shot script, a fixture generator under `test/scripts/**`, a benchmark tree | R8 |
+| A function gains a callback the engine checks for (`prepare_batch`, `flush_batch`, `file_size_bytes`, `execution_mode`, a statistics or partition callback); a `plan` callback that rebinds a statement to another registration | R2 |
+| A doc or comment claiming output is the same across thread counts or runs; a doc stating where in a query a rule applies | R7, R4 |
 | A timing, throughput or memory claim in a comment, doc, commit message, benchmark table or PR description | R10 |
 | An external tool's behaviour that correctness depends on | Outside the rule set |
 
@@ -214,6 +216,8 @@ Safety must not rest on convention or a comment; and a guard must be real, so do
 - **A caught DuckDB exception is unwrapped.** A catch a DuckDB exception can reach (`std::exception`, `std::runtime_error`) that builds a message or a stored error string from it uses `ErrorData(e).RawMessage()`: `what()` is DuckDB's serialized form, and the user sees JSON inside the new message (`docs/internals/duckdb-engine-notes.md`, "Exceptions"). A worker thread's error is carried to the join as a `std::exception_ptr`. A catch around DuckDB-free code may keep `what()`.
 - **Interrupts are checked on every `Execute` call** when one claimed unit spans many chunks or remote reads; a check only between units leaves a cancel waiting on the whole unit.
 - **Threads follow DuckDB.** A function does not add its own `threads` parameter where DuckDB's setting applies [soft: ask what it adds]. An embedded tool that runs its own worker threads takes its count from DuckDB's setting [soft: ask how the count relates to DuckDB's own workers].
+- **A new engine callback unlocks what the engine gates on it.** DuckDB checks for some callbacks before it accepts an option or picks a mode: giving a COPY format `prepare_batch` and `flush_batch`, for one, makes the binder accept file rotation, which it then plans on all threads. List what the binder and planner accept once the callback exists, and test or refuse each under the format's contract.
+- **A public registration that rebinds to an internal one keeps the public name in errors.** DuckDB checks options against the function it binds, so its errors name the internal registration. Refuse what the format cannot take before rebinding, under the name the statement used, and test the message.
 
 ### R3 — C++ safety and concurrency [strong]
 
@@ -251,6 +255,7 @@ Safety must not rest on convention or a comment; and a guard must be real, so do
 - **Downloaded data that fails its checksum fails the run.** A test file `run_tests.sh` downloads skips only when the download fails; a downloaded file that does not match its pinned checksum is an error, since the committed expected values no longer apply to it. The pin lives in one committed manifest that the script reads, not in a copy in the script.
 - **A test of parallel output runs in parallel.** A streaming window over the scan (`row_number() OVER ()`) makes its pipeline single-threaded; compare the full rows of a parallel `CREATE TABLE AS`, ordered by `rowid`, with the serial result.
 - **Each documented input path has a test.** A reader documented to take `https://` or `s3://` paths reads one from the mock range server.
+- **Each place a doc says a rule applies has a test.** A rule documented to hold anywhere in a query, or in any subquery, gets a case for each place it implies: a FROM subquery, a CTE, a subquery in an expression, a join's input. Every example the doc gives is one of the cases.
 - **A check in `run_tests.sh` behaves the same on macOS and Linux.** `sha256sum -c` reads a checklist from stdin only when given `-`; without it, macOS fails every check and the guarded tests always skip.
 - **One manifest per fact.** A checksum list or provenance file that repeats what another committed manifest or an assertion already pins is dropped, not kept in step by hand.
 - **Fixtures are fixed.** A fixture's inputs are committed with it, so a test never depends on regenerating them. A large text fixture (sequences, an assembly graph, a log) is committed compressed, and a test that needs the file as a tool writes it decompresses a copy into the test directory (sqllogictest's `unzip`). A generated fixture of many cases is a few tables keyed by a case column, not a file per case and table, and is committed compressed even when each file is small.
@@ -293,6 +298,7 @@ Flag:
 - **A comment that contradicts the code beside it**, or the PR's own measurements; and the module comment a PR's change falsifies. Read the comments of every changed file, not only the hunks.
 - **A doc asserting a capability, URL, option or error timing that does not exist**, or denying one that does. Verify against the code.
 - **An integrity or coverage claim that outruns what was checked or measured.** "A damaged file raises an error" holds only where every byte is covered by a checksum or a structural check; "nearly all runs" gives the measured share or is softened.
+- **A determinism claim states its precondition.** Output that is the same at any thread count under an `ORDER BY` holds only for a total order, since a parallel sort puts ties in any order. A claim that holds under a condition names the condition.
 - **User-facing docs carrying internal notes.** Design rationale, benchmarks and implementation history go in `docs/internals/`; task pages say what a function does, its parameters, its output and its caveats, with the caveats beside the function they qualify.
 - **Undefined terms and symbols** [soft]: a symbol used before it is defined, a name a reader cannot expand, a unit conversion stated without its reason.
 - **Comments naming a test file, a distant module's internals, or an issue number of this repo** where the invariant could be stated in words. A pointer to the one doc that holds a rationale is fine, and so is a qualified external issue.
