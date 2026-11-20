@@ -19,6 +19,7 @@
 # Usage:
 #   ./scripts/check-duckdb-version.sh          # verify; exit 1 on any mismatch
 #   ./scripts/check-duckdb-version.sh --quiet  # only print problems
+#   ./scripts/check-duckdb-version.sh --print  # print the canonical version; check nothing
 #
 # Exit codes: 0 = consistent, 1 = mismatch or unreadable input.
 
@@ -30,6 +31,8 @@ cd "$REPO_DIR"
 
 QUIET=false
 [[ "${1:-}" == "--quiet" ]] && QUIET=true
+PRINT=false
+[[ "${1:-}" == "--print" ]] && PRINT=true
 
 WORKFLOW=".github/workflows/MainDistributionPipeline.yml"
 
@@ -56,6 +59,17 @@ fi
 
 mapfile -t wf_versions < <(grep -oE '^[[:space:]]*duckdb_version:[[:space:]]*v?[0-9]+\.[0-9]+\.[0-9]+' "$WORKFLOW" \
                            | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+')
+
+# --print: the canonical version alone, for the scripts that build or test against it
+# (build_wasm.sh, test_wasm_browser.sh). None of the checks below run.
+if $PRINT; then
+    if (( ${#wf_versions[@]} == 0 )); then
+        printf 'ERROR: no duckdb_version input in %s\n' "$WORKFLOW" >&2
+        exit 1
+    fi
+    printf '%s\n' "${wf_versions[0]}"
+    exit 0
+fi
 
 # The commit a duckdb release tag names, or empty: the local submodule clone first, then
 # ls-remote, which resolves a tag without cloning. ^{} dereferences an annotated tag.

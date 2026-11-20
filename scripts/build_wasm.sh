@@ -75,16 +75,10 @@ export VCPKG_TARGET_TRIPLET="${VCPKG_TARGET_TRIPLET:-wasm32-emscripten}"
 # DuckDB 2.0 takes its version from DUCKDB_VERSION whenever CMake configures. Without it the
 # build is a development version, the extension's metadata names the DuckDB commit instead of
 # the release, and duckdb-wasm refuses to load it (test_wasm_browser.sh fails at LOAD, though
-# the build and the import check pass). So it defaults to the version CI builds: the workflow
-# input scripts/check-duckdb-version.sh treats as canonical, read as test_wasm_browser.sh reads it.
+# the build and the import check pass). So it defaults to the version CI builds, the one
+# scripts/check-duckdb-version.sh treats as canonical; test_wasm_browser.sh tests against it too.
 if [ -z "${DUCKDB_VERSION:-}" ]; then
-    DUCKDB_VERSION="$(grep -oE '^[[:space:]]*duckdb_version:[[:space:]]*v?[0-9]+\.[0-9]+\.[0-9]+' \
-        "$REPO_DIR/.github/workflows/MainDistributionPipeline.yml" | head -1 | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+$' || true)"
-    if [ -z "$DUCKDB_VERSION" ]; then
-        echo "ERROR: DUCKDB_VERSION is not set, and .github/workflows/MainDistributionPipeline.yml has no"
-        echo "duckdb_version input to default it from."
-        exit 1
-    fi
+    DUCKDB_VERSION="$("$REPO_DIR/scripts/check-duckdb-version.sh" --print)"
 fi
 export DUCKDB_VERSION
 
