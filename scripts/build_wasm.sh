@@ -77,10 +77,16 @@ export VCPKG_TARGET_TRIPLET="${VCPKG_TARGET_TRIPLET:-wasm32-emscripten}"
 # the release, and duckdb-wasm refuses to load it (test_wasm_browser.sh fails at LOAD, though
 # the build and the import check pass). So it defaults to the version CI builds, the one
 # scripts/check-duckdb-version.sh treats as canonical; test_wasm_browser.sh tests against it too.
+# Before a DuckDB release is tagged there is none (the script's pre-release mode), and the build
+# is the duckdb submodule's development version, as CI's is then.
 if [ -z "${DUCKDB_VERSION:-}" ]; then
     DUCKDB_VERSION="$("$REPO_DIR/scripts/check-duckdb-version.sh" --print)"
 fi
-export DUCKDB_VERSION
+if [ -n "$DUCKDB_VERSION" ]; then
+    export DUCKDB_VERSION
+else
+    unset DUCKDB_VERSION
+fi
 
 if ! rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-emscripten; then
     echo "Installing Rust wasm32-unknown-emscripten target..."
@@ -88,7 +94,7 @@ if ! rustup target list --installed 2>/dev/null | grep -q wasm32-unknown-emscrip
 fi
 
 EMCC_VERSION=$(emcc --version 2>&1 | head -1 | grep -oP '\d+\.\d+\.\d+' || echo "unknown")
-echo "=== WASM build (emcc $EMCC_VERSION, DuckDB $DUCKDB_VERSION) ==="
+echo "=== WASM build (emcc $EMCC_VERSION, DuckDB ${DUCKDB_VERSION:-development version}) ==="
 echo "    CI uses emsdk 6.0.9"
 echo ""
 

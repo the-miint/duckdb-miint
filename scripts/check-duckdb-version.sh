@@ -59,10 +59,17 @@ fi
 
 mapfile -t wf_versions < <(grep -oE '^[[:space:]]*duckdb_version:[[:space:]]*v?[0-9]+\.[0-9]+\.[0-9]+' "$WORKFLOW" \
                            | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+')
+# Inputs that take the duckdb submodule pin instead of a literal (the pre-release mode below).
+n_pin=$(grep -cE '^[[:space:]]*duckdb_version:[[:space:]]*\$\{\{[[:space:]]*needs\.duckdb-submodule-version\.outputs\.version[[:space:]]*\}\}' "$WORKFLOW" || true)
 
 # --print: the canonical version alone, for the scripts that build or test against it
-# (build_wasm.sh, test_wasm_browser.sh). None of the checks below run.
+# (build_wasm.sh, test_wasm_browser.sh). None of the checks below run. In the pre-release
+# mode there is no release version: it prints nothing, says so on stderr, and succeeds.
 if $PRINT; then
+    if (( ${#wf_versions[@]} == 0 && n_pin == 2 )); then
+        printf 'PRE-RELEASE: %s builds the duckdb submodule pin, not a release tag\n' "$WORKFLOW" >&2
+        exit 0
+    fi
     if (( ${#wf_versions[@]} == 0 )); then
         printf 'ERROR: no duckdb_version input in %s\n' "$WORKFLOW" >&2
         exit 1
@@ -104,7 +111,6 @@ fi
 # literal. There is then no release version to hold the other spellings to, so report
 # that loudly and stop. Only the all-or-nothing form is accepted: a workflow mixing a
 # literal with the pin falls through to the normal checks and fails there.
-n_pin=$(grep -cE '^[[:space:]]*duckdb_version:[[:space:]]*\$\{\{[[:space:]]*needs\.duckdb-submodule-version\.outputs\.version[[:space:]]*\}\}' "$WORKFLOW" || true)
 if (( ${#wf_versions[@]} == 0 && n_pin == 2 )); then
     pinned_sha=$(git ls-tree HEAD duckdb 2>/dev/null | awk '{print $3}')
     msg="PRE-RELEASE: $WORKFLOW builds the duckdb submodule pin (${pinned_sha:0:10}), not a release tag. The Dockerfile, publish cron, Python CLI pin and wasm artifact name are NOT checked until literal duckdb_version inputs are restored on release day."

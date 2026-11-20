@@ -85,6 +85,10 @@ fi
 # The DuckDB version the extension targets: the one scripts/check-duckdb-version.sh treats as
 # canonical, which build_wasm.sh builds by default.
 DUCKDB_VERSION="$("$REPO_DIR/scripts/check-duckdb-version.sh" --print)"
+if [ -z "$DUCKDB_VERSION" ]; then
+    echo "ERROR: no DuckDB release to test against (pre-release); duckdb-wasm is published per release"
+    exit 1
+fi
 
 echo "=== Browser check: $WASM_FILE ==="
 exec node "$DRIVER_DIR/driver.mjs" --wasm "$WASM_FILE" --chrome "$CHROME" --duckdb-version "$DUCKDB_VERSION"
