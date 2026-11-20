@@ -439,12 +439,100 @@ Backfill BackfillNames(const NameAssignment &assignment, const TaxonomyStore &st
 }
 
 std::string_view PolyphyleticBase(std::string_view name) {
-	return {};
+	const size_t underscore = name.rfind('_');
+	if (underscore == std::string_view::npos || underscore == 0 || underscore + 1 == name.size()) {
+		return name;
+	}
+	const std::string_view suffix = name.substr(underscore + 1);
+	const bool capitals = std::all_of(suffix.begin(), suffix.end(), [](char c) { return c >= 'A' && c <= 'Z'; });
+	return capitals ? name.substr(0, underscore) : name;
 }
+
+namespace {
+// The name the first names of a node's labeled descendants agree on: their one distinct name, or
+// of two distinct names at one rank, the one whose PolyphyleticBase is the other.
+std::optional<RankName> AgreedName(const std::vector<uint32_t> &descendants, const std::vector<NodeLabel> &labels,
+                                   const TaxonomyStore &store) {
+	std::optional<RankName> first, second;
+	for (const uint32_t d : descendants) {
+		const RankName &name = labels[d].front();
+		if (!first || name == *first) {
+			first = name;
+		} else if (!second || name == *second) {
+			second = name;
+		} else {
+			return std::nullopt;
+		}
+	}
+	if (!second) {
+		return first;
+	}
+	if (first->rank != second->rank) {
+		return std::nullopt;
+	}
+	const std::string &a = store.NameText(first->rank, first->name);
+	const std::string &b = store.NameText(second->rank, second->name);
+	if (PolyphyleticBase(b) == a) {
+		return second;
+	}
+	if (PolyphyleticBase(a) == b) {
+		return first;
+	}
+	return std::nullopt;
+}
+} // namespace
 
 std::vector<NodeLabel> PromoteCommonNames(std::vector<NodeLabel> labels, const TaxonomyStore &store,
                                           const TreeIndex &tree) {
-	return {};
+	const uint32_t n = static_cast<uint32_t>(tree.size());
+	// Each node's internal children: those of v are children[offsets[v] .. offsets[v + 1]).
+	std::vector<uint32_t> offsets(n + 1, 0);
+	for (uint32_t v = 0; v < n; v++) {
+		if (v != tree.root() && !tree.is_tip(v)) {
+			offsets[tree.parent(v) + 1]++;
+		}
+	}
+	std::partial_sum(offsets.begin(), offsets.end(), offsets.begin());
+	std::vector<uint32_t> children(offsets[n]);
+	std::vector<uint32_t> next(offsets.begin(), offsets.end() - 1);
+	std::vector<uint32_t> preorder(n);
+	for (uint32_t v = 0; v < n; v++) {
+		preorder[tree.pre(v)] = v;
+		if (v != tree.root() && !tree.is_tip(v)) {
+			children[next[tree.parent(v)]++] = v;
+		}
+	}
+
+	std::vector<uint32_t> stack, descendants;
+	for (const uint32_t v : preorder) {
+		// v's nearest internal descendants with a non-empty label, found below the empty ones.
+		descendants.clear();
+		stack.assign(children.begin() + offsets[v], children.begin() + offsets[v + 1]);
+		while (!stack.empty()) {
+			const uint32_t d = stack.back();
+			stack.pop_back();
+			if (labels[d].empty()) {
+				stack.insert(stack.end(), children.begin() + offsets[d], children.begin() + offsets[d + 1]);
+			} else {
+				descendants.push_back(d);
+			}
+		}
+		if (descendants.empty()) {
+			continue;
+		}
+		for (bool more = true; more;) {
+			const auto name = AgreedName(descendants, labels, store);
+			if (!name || (!labels[v].empty() && name->rank <= labels[v].back().rank)) {
+				break;
+			}
+			labels[v].push_back(*name);
+			for (const uint32_t d : descendants) {
+				labels[d].erase(labels[d].begin());
+				more = more && labels[d].size() > 1;
+			}
+		}
+	}
+	return labels;
 }
 
 } // namespace miint
