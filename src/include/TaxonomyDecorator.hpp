@@ -269,9 +269,10 @@ std::string_view PolyphyleticBase(std::string_view name);
 //     suffixed one is promoted. tax2tree matches by substring, so Baci and Bacillus_A agree there.
 //   - A name no deeper than every name the node already holds stops the node's promotion before
 //     it is appended: a promoted name says the node is that taxon, which must fit below what the
-//     node already says it is. Such a name can only come from an inverted-rank descendant, whose
-//     name then stays where it was placed. tax2tree appends it, which gives the label two names
-//     at one rank or a shallower name after deeper ones.
+//     node already says it is. Such a name can only come from an inverted-rank descendant. It is
+//     never appended to a label that holds a name, but, as any name does, it moves up to the
+//     nodes with empty labels between its node and that node's named ancestor. tax2tree appends
+//     it, which gives the label two names at one rank or a shallower name after deeper ones.
 // Labels stay by ascending rank. `labels` must come from BackfillNames over `tree` and `store`.
 std::vector<NodeLabel> PromoteCommonNames(std::vector<NodeLabel> labels, const TaxonomyStore &store,
                                           const TreeIndex &tree);
@@ -335,7 +336,8 @@ struct EmittedLineages {
 
 // `labels` has one entry per node of `tree`, each with at most one part per rank, as
 // ParseNodeLabel gives them. A tip's label is ignored, its name being its id. Throws
-// std::invalid_argument when `labels` and `tree` differ in size.
+// std::invalid_argument when `labels` and `tree` differ in size, or when an internal node's label
+// holds a rank twice.
 EmittedLineages EmitLineages(const TreeIndex &tree, const std::vector<std::vector<LabelPart>> &labels);
 
 } // namespace miint

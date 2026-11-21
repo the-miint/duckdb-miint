@@ -1680,6 +1680,19 @@ TEST_CASE("EmitLineages on a one-node tree, and with labels of the wrong size", 
 	CHECK_THROWS_AS(EmitLineages(TreeOf({kNoParent, 0, 0}), labels), std::invalid_argument);
 }
 
+// ParseNodeLabel never gives a label that holds a rank twice, so one breaks EmitLineages'
+// precondition: an error naming the node and the rank, never a repeat whose ancestor is the node.
+TEST_CASE("EmitLineages rejects a label that holds a rank twice", "[taxonomy_decorator]") {
+	const auto tree = TreeOf({kNoParent, 0, 1, 1});
+	std::vector<std::vector<LabelPart>> labels(4);
+	labels[1] = Parts({{kFamily, "A"}, {kFamily, "B"}});
+	CHECK_THROWS_AS(EmitLineages(tree, labels), std::invalid_argument);
+	CHECK_THROWS_WITH(EmitLineages(tree, labels), ContainsSubstring("node 1") && ContainsSubstring("family"));
+	// With the rank already held above, as a repeat would be.
+	labels[0] = Parts({{kFamily, "R"}});
+	CHECK_THROWS_WITH(EmitLineages(tree, labels), ContainsSubstring("node 1") && ContainsSubstring("family"));
+}
+
 // The stages in order. F's tips are split between v's two clades and w, so F is eligible at w
 // alone, and a and b are named at the genus. Backfill gives a and b their family from the
 // hierarchy, and promotion then moves F up to v, which spans them both.

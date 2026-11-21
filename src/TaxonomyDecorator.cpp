@@ -63,10 +63,9 @@ CladeCountIndex::CladeCountIndex(TreeIndex tree, const TaxonomyStore &store,
 	}
 	// Tips are visited in preorder below, through node_at_, so each name's occurrences come out
 	// ascending.
-	node_at_.resize(n);
+	node_at_ = PreorderNodes(tree_);
 	size_t tips = 0;
 	for (uint32_t v = 0; v < n; v++) {
-		node_at_[tree_.pre(v)] = v;
 		tips += tree_.is_tip(v);
 		const auto &row = row_of_node[v];
 		if (!row) {
@@ -661,7 +660,13 @@ EmittedLineages EmitLineages(const TreeIndex &tree, const std::vector<std::vecto
 			continue;
 		}
 		path.push_back({v, set.size()});
+		uint8_t ranks_seen = 0;
 		for (const auto &part : labels[v]) {
+			if (ranks_seen & (1u << part.rank)) {
+				throw std::invalid_argument("EmitLineages: the label of node " + std::to_string(v) + " holds the " +
+				                            kLineageRanks[part.rank].column + " rank twice");
+			}
+			ranks_seen |= uint8_t(1u << part.rank);
 			if (holder[part.rank] == kNone) {
 				holder[part.rank] = v;
 				set.push_back(part.rank);
