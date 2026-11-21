@@ -5,26 +5,26 @@ seed 20261117, 20 random cases and the golden case
 exercised: 64 gap fills, 62 promotions, 1 polyphyletic merges
 command: conda run -n miint-beta-oracle python -I test/scripts/gen_tax2tree_assign_names_oracle.py --tax2tree PATH_TO_TAX2TREE_CHECKOUT
 
-M2 cases left out, each for the differences from miint it hits:
-case00: A.17: no named ancestor (miint fills to the domain)
-case02: A.2: inverted ranks (miint keeps the label); root named below the domain (miint fills it to the domain)
-case03: root named below the domain (miint fills it to the domain)
-case06: A.2: inverted ranks (miint keeps the label); root named below the domain (miint fills it to the domain)
-case07: root named below the domain (miint fills it to the domain)
-case08: root named below the domain (miint fills it to the domain)
-case09: root named below the domain (miint fills it to the domain)
-case10: root named below the domain (miint fills it to the domain)
-case11: root named below the domain (miint fills it to the domain)
-case13: root named below the domain (miint fills it to the domain)
-case15: root named below the domain (miint fills it to the domain)
-case17: root named below the domain (miint fills it to the domain)
-case18: root named below the domain (miint fills it to the domain)
+assign_names cases left out, each for the differences from miint it hits, numbered as in the header of test/cpp/test_TaxonomyDecoratorParity.cpp:
+case00: 6. no named ancestor (miint fills to the domain)
+case02: 5. root named below the domain (miint fills it to the domain); 7. inverted ranks (miint keeps the label)
+case03: 5. root named below the domain (miint fills it to the domain)
+case06: 5. root named below the domain (miint fills it to the domain); 7. inverted ranks (miint keeps the label)
+case07: 5. root named below the domain (miint fills it to the domain)
+case08: 5. root named below the domain (miint fills it to the domain)
+case09: 5. root named below the domain (miint fills it to the domain)
+case10: 5. root named below the domain (miint fills it to the domain)
+case11: 5. root named below the domain (miint fills it to the domain)
+case13: 5. root named below the domain (miint fills it to the domain)
+case15: 5. root named below the domain (miint fills it to the domain)
+case17: 5. root named below the domain (miint fills it to the domain)
+case18: 5. root named below the domain (miint fills it to the domain)
 
 Extra draws rejected, by difference (a draw can hit several):
-A.17: no named ancestor (miint fills to the domain): 3
-A.2: inverted ranks (miint keeps the label): 9
-equal F1 from different counts: 6
-root named below the domain (miint fills it to the domain): 38
+1. equal F1 from different counts: 6
+5. root named below the domain (miint fills it to the domain): 38
+6. no named ancestor (miint fills to the domain): 3
+7. inverted ranks (miint keeps the label): 9
 
 case01: 73 nodes, 40 tips, 31 with a lineage, min_count 1, 8 labels; 3 gap fills, 4 promotions, 0 polyphyletic merges
 case04: 95 nodes, 43 tips, 32 with a lineage, min_count 2, 8 labels; 3 gap fills, 3 promotions, 0 polyphyletic merges

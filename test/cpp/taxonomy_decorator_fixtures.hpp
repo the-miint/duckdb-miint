@@ -489,4 +489,17 @@ struct BackfillCoverage {
 	}
 };
 
+// The name at `rank` in the label of `holder`, a node EmitLineages gave as a rank's holder; empty
+// for kNone.
+inline std::string HolderName(const std::vector<std::vector<LabelPart>> &labels, uint32_t holder, size_t rank) {
+	if (holder != EmittedLineages::kNone) {
+		for (const auto &part : labels.at(holder)) {
+			if (part.rank == rank) {
+				return part.name;
+			}
+		}
+	}
+	return "";
+}
+
 } // namespace miint::test

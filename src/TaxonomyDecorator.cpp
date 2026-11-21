@@ -560,15 +560,11 @@ DecorateResult Decorate(const CladeCountIndex &index, const TaxonomyStore &store
 }
 
 namespace {
-bool IsSpace(char c) {
-	return c == ' ' || c == '\t' || c == '\n' || c == '\r';
-}
-
 std::string_view TrimSpace(std::string_view text) {
-	while (!text.empty() && IsSpace(text.front())) {
+	while (!text.empty() && IsLineageSpace(text.front())) {
 		text.remove_prefix(1);
 	}
-	while (!text.empty() && IsSpace(text.back())) {
+	while (!text.empty() && IsLineageSpace(text.back())) {
 		text.remove_suffix(1);
 	}
 	return text;
@@ -580,7 +576,7 @@ std::vector<LabelPart> ParseNodeLabel(std::string_view label) {
 	if (label.empty()) {
 		return parts;
 	}
-	auto fail = [&](std::string_view component, const char *why) {
+	auto fail = [&](std::string_view component, const std::string &why) {
 		throw std::invalid_argument("ParseNodeLabel: label \"" + std::string(label) + "\": component \"" +
 		                            std::string(component) + "\" " + why);
 	};
@@ -599,14 +595,21 @@ std::vector<LabelPart> ParseNodeLabel(std::string_view label) {
 		                                                   [&](const LineageRank &r) { return r.letter == letter; }) -
 		                                      kLineageRanks.begin());
 		if (rank == kRanks) {
-			fail(component, "has an unknown rank letter; the letters are dpcofgst, and k for the domain");
+			std::string letters;
+			for (const auto &r : kLineageRanks) {
+				letters += r.letter;
+			}
+			fail(component, "has an unknown rank letter; the letters are " + letters + ", and k for the domain");
 		}
 		const std::string_view name = component.substr(3);
 		if (name.empty()) {
 			fail(component, "has an empty name");
 		}
-		if (IsSpace(name.front())) {
+		if (IsLineageSpace(name.front())) {
 			fail(component, "has a name that starts with whitespace");
+		}
+		if (StartsWithRankPrefix(name)) {
+			fail(component, "has a name that starts with a rank prefix of its own");
 		}
 		if (seen[rank]) {
 			fail(component, "gives a rank the label already has");
@@ -662,6 +665,10 @@ EmittedLineages EmitLineages(const TreeIndex &tree, const std::vector<std::vecto
 		path.push_back({v, set.size()});
 		uint8_t ranks_seen = 0;
 		for (const auto &part : labels[v]) {
+			if (part.rank >= kRanks) {
+				throw std::invalid_argument("EmitLineages: the label of node " + std::to_string(v) + " holds rank " +
+				                            std::to_string(part.rank) + ", past the last");
+			}
 			if (ranks_seen & (1u << part.rank)) {
 				throw std::invalid_argument("EmitLineages: the label of node " + std::to_string(v) + " holds the " +
 				                            kLineageRanks[part.rank].column + " rank twice");

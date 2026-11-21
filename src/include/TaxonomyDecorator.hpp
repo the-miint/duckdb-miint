@@ -217,7 +217,7 @@ struct RankName {
 using NodeLabel = std::vector<RankName>;
 
 // A node whose preliminary name is at a shallower rank than its nearest named ancestor's
-// (tax2tree's levels < 0). tax2tree empties such a node's label, losing a name the fold
+// (tax2tree's levels < 0). tax2tree empties such a node's label, losing a name AssignNames
 // placed, unless the name is a domain, which it never compares; here the node keeps its
 // preliminary name, and this records that the ranks were inverted, at the domain too.
 struct InvertedBackfill {
@@ -245,7 +245,7 @@ struct Backfill {
 // ranks, the hierarchy's names stand in their place.
 //   - Tips, and internal nodes with no preliminary name, get an empty label.
 //   - With no named ancestor, the root included, the fill reaches rank 0. tax2tree skips such
-//     a node and keeps its name alone, so the shallower names the fold placed on it are lost:
+//     a node and keeps its name alone, so the shallower names AssignNames placed on it are lost:
 //     a root named down to the phylum leaves every lineage without a domain.
 //   - With the ancestor's rank equal to the node's or one above it, there is no gap to fill.
 //   - With the ancestor's rank deeper than the node's, the node keeps its preliminary name
@@ -256,7 +256,10 @@ Backfill BackfillNames(const NameAssignment &assignment, const TaxonomyStore &st
 // A name without its polyphyletic suffix, a trailing underscore and one or more capital letters:
 // "Bacillus_A" and "Bacillus_AB" give "Bacillus". A name without one is returned whole, as is a
 // name that is nothing but one ("_A"). Digits and lower-case letters are no suffix, so "Foo_1",
-// a decoration's own ordinal, and "Candidatus_Foo" are returned whole.
+// as tax2tree's make_names_unique numbers a name it finds on several nodes, "Foo_A1" and
+// "Candidatus_Foo" are returned whole. This is the suffix tax2tree's promotion looks for, but
+// anchored at the end of the name; tax2tree's pattern is anchored only at the start, so it finds
+// a suffix in "Foo_A1" and "Candidatus_Foo".
 std::string_view PolyphyleticBase(std::string_view name);
 
 // tax2tree's commonname_promotion over the labels BackfillNames gave a tree's nodes. In preorder,
@@ -281,7 +284,7 @@ std::vector<NodeLabel> PromoteCommonNames(std::vector<NodeLabel> labels, const T
 // ("d__Bacteria", "s__Escherichia coli"), joined by "; ". An empty label gives "".
 std::string FormatLabel(const NodeLabel &label, const TaxonomyStore &store);
 
-// Decoration after placement: AssignNames, BackfillNames, then PromoteCommonNames.
+// Decoration: AssignNames, then BackfillNames, then PromoteCommonNames.
 struct DecorateResult {
 	NameAssignment assignment;
 	// One label per node, after promotion.
@@ -302,11 +305,15 @@ struct LabelPart {
 };
 
 // A label read from text, as FormatLabel writes it or another tool did. Its components are
-// separated by ';' and trimmed of whitespace, and each is a rank letter (dpcofgst, or k for the
-// domain), two underscores and a name. They may come in any order; the parts come by ascending
-// rank. An empty label has no parts. Throws std::invalid_argument, naming the label and the
-// component, for an empty component, one not of that form, an unknown letter, an empty name or
-// one that starts with whitespace ("f__ A"), and a rank given twice.
+// separated by ';' and trimmed of whitespace (IsLineageSpace), and each is a rank letter
+// (dpcofgst, or k for the domain), two underscores and a name. The parts come by ascending rank.
+// An empty label has no parts. Throws std::invalid_argument, naming the label and the component,
+// for an empty component, one not of that form, an unknown letter, an empty name, a name that
+// starts with whitespace ("f__ A") or with a rank prefix of its own ("c__c__A"), and a rank given
+// twice. Unlike ParseLineageString, which reads a whole lineage, the components may come in any
+// order and skip ranks, as in a label another tool wrote (tax2tree can put a shallower name after
+// a deeper one); either k or d names the domain; and an empty name is an error, not a missing
+// rank.
 std::vector<LabelPart> ParseNodeLabel(std::string_view label);
 
 // A rank that a node's label holds and a label above it on its path already holds; the tips
@@ -337,7 +344,7 @@ struct EmittedLineages {
 // `labels` has one entry per node of `tree`, each with at most one part per rank, as
 // ParseNodeLabel gives them. A tip's label is ignored, its name being its id. Throws
 // std::invalid_argument when `labels` and `tree` differ in size, or when an internal node's label
-// holds a rank twice.
+// holds a rank twice or a rank past the last.
 EmittedLineages EmitLineages(const TreeIndex &tree, const std::vector<std::vector<LabelPart>> &labels);
 
 } // namespace miint

@@ -4,9 +4,9 @@ Fixtures for `test/cpp/test_TaxonomyDecoratorParity.cpp`, which checks that `Dec
 (`src/TaxonomyDecorator.cpp`) labels every internal node as tax2tree's stages after the fold
 do (`set_preliminary_name_and_rank`, `backfill_names_gap`, `commonname_promotion`), and that
 `EmitLineages` gives every tip tax2tree's lineage (`pull_consensus_strings`). tax2tree's
-correction stage is not run: miint's comes later. That test's header lists where miint differs
-from tax2tree; a case that hits a difference is left out, and `provenance.txt` lists which and
-why.
+correction stage is not run, as `Decorate` does not correct. That test's header numbers the
+differences between miint and tax2tree; a case that hits one is left out, and `provenance.txt`
+lists which, by those numbers.
 
 ## Files
 
@@ -15,7 +15,7 @@ Each table is gzip-compressed tab-separated text with a header line, and every r
 
 | File | Contents |
 |---|---|
-| `cases.tsv.gz` | `case, min_count`: 20 random cases (M2's that hit no difference, then `dec00` on) and `golden` |
+| `cases.tsv.gz` | `case, min_count`: 20 random cases (those of `data/tax2tree/assign_names/` that hit no difference, then `dec00` on) and `golden` |
 | `trees.tsv.gz` | `case, node_index, parent_index, name`: each case's tree, its nodes in index order; the root's parent and internal nodes' names are empty. Siblings ascend left to right |
 | `taxonomy.tsv.gz` | `case, feature_id`, then the eight rank columns, empty for NULL |
 | `expected_labels.tsv.gz` | `case, node_index, label`: each labeled internal node's label, as tax2tree writes it |
@@ -35,5 +35,6 @@ conda run -n miint-beta-oracle python -I test/scripts/gen_tax2tree_assign_names_
     --tax2tree PATH_TO_TAX2TREE_CHECKOUT
 ```
 
-The same script writes `data/tax2tree/assign_names/`. The output is deterministic: running it
-again leaves `git diff data/tax2tree` empty. tax2tree is never a build- or test-time dependency.
+The same script writes `data/tax2tree/assign_names/`. The output is deterministic for the
+tax2tree commit and the scikit-bio, numpy and Python versions `provenance.txt` records: running
+it again with those leaves `git diff data/tax2tree` empty. tax2tree is never a build- or test-time dependency.

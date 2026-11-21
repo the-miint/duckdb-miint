@@ -27,7 +27,7 @@ using Catch::Matchers::ContainsSubstring;
 using Catch::Matchers::WithinRel;
 
 namespace {
-enum Rank : size_t { kDomain, kPhylum, kClass, kOrder };
+enum Rank : size_t { kDomain, kPhylum, kClass, kOrder, kFamily, kGenus, kSpecies, kStrain };
 
 // A hand-built tree, numbered out of preorder so that a node id read as a preorder position,
 // or the reverse, gives wrong counts:
@@ -1092,9 +1092,9 @@ TEST_CASE("AssignNames matches the brute-force assignment", "[taxonomy_decorator
 }
 
 namespace {
-constexpr size_t kFamily = 4, kGenus = 5;
-
-// A label as text, "p__P1; c__C1", in the order it lists its names.
+// A label as text, "p__P1; c__C1", in the order it lists its names. The stage tests read labels
+// through this and LabelFrom rather than FormatLabel and ParseNodeLabel, so they don't depend on
+// the code the label tests check.
 std::string LabelText(const NodeLabel &label, const TaxonomyStore &store) {
 	std::string out;
 	for (const auto &[rank, name] : label) {
@@ -1387,7 +1387,7 @@ TEST_CASE("PromoteCommonNames hoists a lone descendant's name to the topmost nod
 	CHECK(LabelTexts(labels, store) == TextsOf(13, {{1, "s__S"}, {2, "g__Other"}}));
 }
 
-// Not a bug: a descendant's last name can be taken. a holds only F, which b also starts with, so F
+// A descendant's last name can be taken, as in tax2tree. a holds only F, which b also starts with, so F
 // goes up to v, which spans them both, and a is left unnamed. Refusing to take a last name would
 // leave F on a and on v, two nodes for one family.
 TEST_CASE("PromoteCommonNames takes a descendant's last name", "[taxonomy_decorator]") {
@@ -1428,8 +1428,8 @@ TEST_CASE("PromoteCommonNames visits ancestors before descendants", "[taxonomy_d
 	      TextsOf(11, {{kU, "d__D1; p__P1; c__C1; o__O1"}, {kA, "f__F1"}, {kB, "f__F2"}, {kC, "f__F3"}}));
 }
 
-// Two names agree when one is the other's polyphyletic base, and the suffixed one goes up: GTDB's
-// Bacillus_A is a part of Bacillus. Nothing else agrees. tax2tree matches by substring, so there
+// Two names agree when one is the other's polyphyletic base, and the suffixed one goes up, as
+// tax2tree merges them to keep GTDB's names. Nothing else agrees. tax2tree matches by substring, so there
 // Baci and Bacillus_A agree, and so do Candidatus and Candidatus_Foo.
 TEST_CASE("PromoteCommonNames merges a name with its polyphyletic variant, and nothing else", "[taxonomy_decorator]") {
 	struct Pair {
@@ -1457,6 +1457,20 @@ TEST_CASE("PromoteCommonNames merges a name with its polyphyletic variant, and n
 			      TextsOf(11, {{kU, u}, {kV, "g__" + promoted}, {kA, "s__S1"}, {kB, "s__S2"}, {kC, "g__Other"}}));
 		}
 	}
+}
+
+// A name and its polyphyletic variant agree only at one rank: at two, they are two taxa. Here a
+// holds the family Foo_A and b, inverted below u's order, the class Foo; merging them would put
+// a family on v and take b's class away.
+TEST_CASE("PromoteCommonNames never merges names at two ranks", "[taxonomy_decorator]") {
+	const auto store =
+	    StoreOf({{"D1", "P1", "C1", "O1", "Foo_A", "G1"}, {"D1", "P1", "Foo"}, {"D1", "P1", "C1", "O1", "Other"}});
+	const auto tree = TreeOf(kUvTree);
+	const std::string u = "d__D1; p__P1; c__C1; o__O1";
+	const auto labels = PromoteCommonNames(
+	    LabelsOf(store, 11, {{kU, u}, {kA, "f__Foo_A; g__G1"}, {kB, "c__Foo"}, {kC, "f__Other"}}), store, tree);
+	CHECK(LabelTexts(labels, store) ==
+	      TextsOf(11, {{kU, u}, {kA, "f__Foo_A; g__G1"}, {kB, "c__Foo"}, {kC, "f__Other"}}));
 }
 
 // Agreement counts distinct names: three never agree, while a name held twice is one name.
@@ -1494,8 +1508,9 @@ TEST_CASE("PromoteCommonNames never merges three distinct names", "[taxonomy_dec
 	      TextsOf(14, {{0, u}, {1, "g__Bacillus_A"}, {3, "s__S1"}, {4, "s__S2"}, {5, "s__S4"}, {2, "g__Other"}}));
 }
 
-// The suffix is GTDB's: an underscore and capital letters, at the end, after a non-empty base.
-// tax2tree's pattern is anchored only at the start, so it finds a suffix in Candidatus_Foo.
+// The suffix is the one tax2tree's promotion looks for: an underscore and capital letters, here at
+// the end, after a non-empty base. tax2tree's pattern is anchored only at the start, so it finds a
+// suffix in Candidatus_Foo and Foo_A1.
 TEST_CASE("PolyphyleticBase strips a trailing capital-letter suffix", "[taxonomy_decorator]") {
 	const std::pair<std::string_view, std::string_view> cases[] = {
 	    {"Bacillus_A", "Bacillus"},
@@ -1568,15 +1583,7 @@ std::vector<std::string> LineageTexts(const EmittedLineages &emitted,
 			if (r > 0) {
 				line += "|";
 			}
-			const uint32_t holder = emitted.holders[i][r];
-			if (holder == EmittedLineages::kNone) {
-				continue;
-			}
-			for (const auto &part : labels.at(holder)) {
-				if (part.rank == r) {
-					line += part.name;
-				}
-			}
+			line += HolderName(labels, emitted.holders[i][r], r);
 		}
 		out.push_back(line);
 	}
@@ -1600,21 +1607,24 @@ TEST_CASE("ParseNodeLabel reads components by their rank letter", "[taxonomy_dec
 	CHECK(ParseNodeLabel("f__A; g__B") == Parts({{kFamily, "A"}, {kGenus, "B"}}));
 	CHECK(ParseNodeLabel("f__A;g__B") == Parts({{kFamily, "A"}, {kGenus, "B"}}));
 	CHECK(ParseNodeLabel(" f__A ;\tg__B ") == Parts({{kFamily, "A"}, {kGenus, "B"}}));
+	CHECK(ParseNodeLabel("f__A\f;\vg__B") == Parts({{kFamily, "A"}, {kGenus, "B"}}));
 	CHECK(ParseNodeLabel("g__B; f__A") == Parts({{kFamily, "A"}, {kGenus, "B"}}));
 	CHECK(ParseNodeLabel("k__Bacteria") == Parts({{kDomain, "Bacteria"}}));
 	CHECK(ParseNodeLabel("d__Bacteria; s__Escherichia coli; t__K-12") ==
-	      Parts({{kDomain, "Bacteria"}, {6, "Escherichia coli"}, {7, "K-12"}}));
+	      Parts({{kDomain, "Bacteria"}, {kSpecies, "Escherichia coli"}, {kStrain, "K-12"}}));
 	CHECK(ParseNodeLabel("g__[Eubacterium]") == Parts({{kGenus, "[Eubacterium]"}}));
 	CHECK(ParseNodeLabel("").empty());
 }
 
 // A label that cannot be read is an error naming it and the component, never a guess: tax2tree
 // indexes a rank table with the first character and fails with a KeyError, or reads "x__" as a
-// name. A name may not start or end with whitespace, as no taxonomy name does.
+// name. A name may not start with whitespace, as no taxonomy name does, or with a rank prefix of
+// its own; whitespace at either end of a component is trimmed.
 TEST_CASE("ParseNodeLabel rejects a malformed label, naming it", "[taxonomy_decorator]") {
 	const std::pair<std::string_view, std::string_view> cases[] = {
-	    {"x__A", "x__A"},   {"D__A", "D__A"}, {"fA", "fA"},           {"f_A", "f_A"},         {"f__", "f__"},
-	    {"f__ A", "f__ A"}, {"f__A;", ""},    {"f__A; f__B", "f__B"}, {"d__A; k__B", "k__B"},
+	    {"x__A", "x__A"},       {"D__A", "D__A"},     {"fA", "fA"},           {"f_A", "f_A"},
+	    {"f__", "f__"},         {"f__ A", "f__ A"},   {"f__A;", ""},          {"f__A; f__B", "f__B"},
+	    {"d__A; k__B", "k__B"}, {"f__\vA", "f__\vA"}, {"c__c__A", "c__c__A"},
 	};
 	for (const auto &[label, component] : cases) {
 		INFO(label);
@@ -1624,8 +1634,8 @@ TEST_CASE("ParseNodeLabel rejects a malformed label, naming it", "[taxonomy_deco
 	}
 }
 
-// The text form of a label is what tree_decorate writes and what tax2tree writes: names in rank
-// order, each after its letter, joined by "; ".
+// The text form of a label is the one tax2tree writes: names in rank order, each after its
+// letter, joined by "; ".
 TEST_CASE("FormatLabel writes names in rank order with their letters", "[taxonomy_decorator]") {
 	const auto store = StoreOf({{"Bacteria", "Pseudomonadota", "Gammaproteobacteria", "Enterobacterales",
 	                             "Enterobacteriaceae", "Escherichia", "Escherichia coli"}});
@@ -1672,6 +1682,22 @@ TEST_CASE("EmitLineages records a rank held twice on a path", "[taxonomy_decorat
 	CHECK(emitted.repeats == std::vector<RankRepeat> {{1, kPhylum, 0}, {2, kClass, 1}});
 }
 
+// Repeats come by node, then rank, whatever order the walk meets them in. Here node 2 is above
+// node 1, so the walk meets 2's repeat first.
+TEST_CASE("EmitLineages lists repeats by node, then rank", "[taxonomy_decorator]") {
+	// root(0) [d__D1; p__P1] +-- w(2) [p__P2; c__C2] +-- v(1) [p__P3; c__C3] +-- t3, t4
+	//                                                +-- t5
+	const auto tree = TreeOf({kNoParent, 2, 0, 1, 1, 2});
+	std::vector<std::vector<LabelPart>> labels(6);
+	labels[0] = Parts({{kDomain, "D1"}, {kPhylum, "P1"}});
+	labels[2] = Parts({{kPhylum, "P2"}, {kClass, "C2"}});
+	labels[1] = Parts({{kPhylum, "P3"}, {kClass, "C3"}});
+	const auto emitted = EmitLineages(tree, labels);
+	CHECK(LineageTexts(emitted, labels) ==
+	      std::vector<std::string> {"3: D1|P1|C2|||||", "4: D1|P1|C2|||||", "5: D1|P1|C2|||||"});
+	CHECK(emitted.repeats == std::vector<RankRepeat> {{1, kPhylum, 0}, {1, kClass, 2}, {2, kPhylum, 0}});
+}
+
 TEST_CASE("EmitLineages on a one-node tree, and with labels of the wrong size", "[taxonomy_decorator]") {
 	const auto tree = TreeOf({kNoParent});
 	const std::vector<std::vector<LabelPart>> labels(1);
@@ -1691,6 +1717,9 @@ TEST_CASE("EmitLineages rejects a label that holds a rank twice", "[taxonomy_dec
 	// With the rank already held above, as a repeat would be.
 	labels[0] = Parts({{kFamily, "R"}});
 	CHECK_THROWS_WITH(EmitLineages(tree, labels), ContainsSubstring("node 1") && ContainsSubstring("family"));
+	// A rank past the last is no rank at all.
+	labels[1] = Parts({{kLineageRanks.size(), "A"}});
+	CHECK_THROWS_WITH(EmitLineages(tree, labels), ContainsSubstring("node 1") && ContainsSubstring("rank 8"));
 }
 
 // The stages in order. F's tips are split between v's two clades and w, so F is eligible at w

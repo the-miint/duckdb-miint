@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Generate the tax2tree parity fixture for AssignNames (src/TaxonomyDecorator.cpp).
+"""Generate the tax2tree parity fixtures for AssignNames and Decorate (src/TaxonomyDecorator.cpp).
 
 AssignNames ports how tax2tree gives a tree's internal nodes names: its pick_names and
 name_node_score_fold (tax2tree, BSD-3-Clause; Copyright (c) 2011, The tax2tree project;
@@ -31,7 +31,8 @@ indices, in one direction or the other, would match.
 
 It then generates a second fixture, for decoration after the fold (Decorate, FormatLabel and
 EmitLineages; test/cpp/test_TaxonomyDecoratorParity.cpp again), by running tax2tree's next
-stages on each case, unchanged and in `t2t decorate` order, without correction (miint's M5):
+stages on each case, unchanged and in `t2t decorate` order, without correction, which Decorate
+does not do:
 
   set_preliminary_name_and_rank, make_consensus_tree, backfill_names_gap,
   commonname_promotion, pull_consensus_strings
@@ -90,7 +91,7 @@ OUTDIR = os.path.normpath(os.path.join(HERE, "..", "..", "data", "tax2tree", "as
 DECORATE_OUTDIR = os.path.normpath(os.path.join(HERE, "..", "..", "data", "tax2tree", "decorate"))
 SEED = 20261117
 N_CASES = 20
-# Random cases in the decoration fixture: M2's cases that keep clear of every difference, then
+# Random cases in the decoration fixture: the assign_names cases that keep clear of every difference, then
 # more drawn under their own names. The hand-built golden case comes on top.
 N_DECORATE = 20
 MAX_ATTEMPTS = 1000
@@ -348,7 +349,7 @@ def poly_base(name):
 
 def run_decorate(nl, tree, tipname_map):
     """tax2tree's stages after the fold, unchanged and in `t2t decorate` order, skipping
-    correction (miint's M5): set_preliminary_name_and_rank, make_consensus_tree,
+    correction, which Decorate does not do: set_preliminary_name_and_rank, make_consensus_tree,
     backfill_names_gap, commonname_promotion, pull_consensus_strings.
 
     Returns each internal node's label by index, each tip's seven names by tip name (None where
@@ -362,18 +363,21 @@ def run_decorate(nl, tree, tipname_map):
             continue
         if node.is_root():
             if node.Rank > 0:
-                differences.add("root named below the domain (miint fills it to the domain)")
+                differences.add("5. root named below the domain (miint fills it to the domain)")
             continue
         if node.Rank == 0:
             continue
         ancestor = nl.get_nearest_named_ancestor(node)
         if ancestor is None:
-            differences.add("A.17: no named ancestor (miint fills to the domain)")
+            differences.add("6. no named ancestor (miint fills to the domain)")
         elif node.Rank < ancestor.Rank:
-            differences.add("A.2: inverted ranks (miint keeps the label)")
+            differences.add("7. inverted ranks (miint keeps the label)")
     _, lookup = nl.make_consensus_tree(tipname_map.values())
-    with contextlib.redirect_stdout(io.StringIO()):  # it prints each inverted node
+    printed = io.StringIO()
+    with contextlib.redirect_stdout(printed):  # it prints each inverted node
         nl.backfill_names_gap(tree, lookup)
+    if bool(printed.getvalue()) != any(d.startswith("7. ") for d in differences):
+        raise RuntimeError("tax2tree's report of inverted nodes disagrees with the generator's")
     backfilled = {node.idx: len(node.BackFillNames) for node in tree.non_tips(include_self=True)}
 
     merges = 0
@@ -387,7 +391,7 @@ def run_decorate(nl, tree, tipname_map):
             a, b = distinct
             base_exact = a[:3] == b[:3] and (poly_base(b[3:]) == a[3:] or poly_base(a[3:]) == b[3:])
             if len(result) == 1 and not base_exact:
-                differences.add("A.1: merged by substring (miint merges only a name and its own variant)")
+                differences.add("9. merged by substring (miint merges only a name and its own variant)")
             elif len(result) == 1:
                 merges += 1
             elif base_exact:
@@ -407,7 +411,7 @@ def run_decorate(nl, tree, tipname_map):
         if node.name:
             ranks = [RANK_LETTERS.index(part.strip()[0]) for part in node.name.split(";")]
             if any(later <= earlier for earlier, later in zip(ranks, ranks[1:])):
-                differences.add("A.4: label out of rank order (miint never promotes a name that shallow)")
+                differences.add("8. label out of rank order (miint never promotes a name that shallow)")
             labels[node.idx] = node.name
     lineages = {}
     for line in nl.pull_consensus_strings(tree):
@@ -643,7 +647,7 @@ def main():
 
 
 def write_decorate_fixture(nl, skbio, numpy, tax2tree, decorated):
-    """The decoration fixture: M2's cases that hit no difference from miint, more random cases
+    """The decoration fixture: the assign_names cases that hit no difference from miint, more random cases
     drawn under their own names until there are N_DECORATE, and the golden case."""
     excluded = [(name, differences) for name, *_, differences, _ in decorated if differences]
     kept = [case for case in decorated if not case[7]]
@@ -659,7 +663,7 @@ def write_decorate_fixture(nl, skbio, numpy, tax2tree, decorated):
                 nl, tree_rows, lineage_of, expected_postorder, min_count
             )
             if tax2tree_names is None:
-                rejected["equal F1 from different counts"] = rejected.get("equal F1 from different counts", 0) + 1
+                rejected["1. equal F1 from different counts"] = rejected.get("1. equal F1 from different counts", 0) + 1
                 continue
             labels, lineages, differences, counts = run_decorate(nl, tree, tipname_map)
             if not differences:
@@ -736,7 +740,10 @@ def write_decorate_fixture(nl, skbio, numpy, tax2tree, decorated):
             "command: conda run -n miint-beta-oracle python -I test/scripts/gen_tax2tree_assign_names_oracle.py "
             "--tax2tree PATH_TO_TAX2TREE_CHECKOUT\n"
         )
-        f.write("\nM2 cases left out, each for the differences from miint it hits:\n")
+        f.write(
+            "\nassign_names cases left out, each for the differences from miint it hits, numbered as in "
+            "the header of test/cpp/test_TaxonomyDecoratorParity.cpp:\n"
+        )
         for name, differences in excluded:
             f.write(f"{name}: {'; '.join(differences)}\n")
         f.write("\nExtra draws rejected, by difference (a draw can hit several):\n")

@@ -42,6 +42,7 @@
 #include "TaxonomyDecorator.hpp"
 #include "TaxonomyStore.hpp"
 #include "TreeIndex.hpp"
+#include "taxonomy_decorator_fixtures.hpp"
 #include "taxonomy_lineage.hpp"
 
 #include <zlib.h>
@@ -162,17 +163,6 @@ FixtureCase LoadCase(const Rows &tree_rows, const Rows &taxonomy_rows) {
 }
 
 // The name the label of `holder` gives at `rank`, or "" for no holder.
-std::string HolderName(const std::vector<std::vector<LabelPart>> &labels, uint32_t holder, size_t rank) {
-	if (holder != EmittedLineages::kNone) {
-		for (const auto &part : labels[holder]) {
-			if (part.rank == rank) {
-				return part.name;
-			}
-		}
-	}
-	return "";
-}
-
 } // namespace
 
 TEST_CASE("AssignNames matches tax2tree on the committed fixture", "[taxonomy_decorator]") {
@@ -280,7 +270,7 @@ TEST_CASE("Decorate and EmitLineages match tax2tree on the committed fixture", "
 		for (size_t i = 0; i < emitted.tips.size(); i++) {
 			std::string line = tree_rows[emitted.tips[i]][2];
 			for (size_t r = 0; r < kLineageRanks.size(); r++) {
-				line += "\t" + HolderName(parsed, emitted.holders[i][r], r);
+				line += "\t" + test::HolderName(parsed, emitted.holders[i][r], r);
 			}
 			observed_lineages.push_back(line);
 		}
