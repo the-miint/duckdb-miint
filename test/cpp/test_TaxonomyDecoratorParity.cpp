@@ -116,6 +116,63 @@ std::string Line(uint32_t node, size_t rank, const std::string &name) {
 	return std::to_string(node) + "\t" + kLineageRanks[rank].column + "\t" + name;
 }
 
+// A case's taxonomy store, and the counting index over its tree with each named tip's row.
+struct FixtureCase {
+	TaxonomyStore store;
+	CladeCountIndex index;
+};
+
+FixtureCase LoadCase(const Rows &tree_rows, const Rows &taxonomy_rows) {
+	std::vector<uint32_t> parent(tree_rows.size());
+	for (uint32_t v = 0; v < tree_rows.size(); v++) {
+		const auto &fields = tree_rows[v];
+		REQUIRE(ToIndex(fields[0]) == v);
+		parent[v] = fields[1].empty() ? TreeIndex::NO_PARENT : ToIndex(fields[1]);
+	}
+
+	std::vector<TaxonomyRow> rows;
+	for (const auto &fields : taxonomy_rows) {
+		TaxonomyRow taxonomy_row {fields[0], {}};
+		for (size_t r = 0; r < kLineageRanks.size(); r++) {
+			if (!fields[1 + r].empty()) {
+				taxonomy_row.ranks[r] = fields[1 + r];
+			}
+		}
+		rows.push_back(std::move(taxonomy_row));
+	}
+	TaxonomyStore store(rows);
+	std::vector<std::optional<size_t>> row_of_node(tree_rows.size());
+	size_t rows_on_tips = 0;
+	for (uint32_t v = 0; v < tree_rows.size(); v++) {
+		if (!tree_rows[v][2].empty()) {
+			row_of_node[v] = store.FindRow(tree_rows[v][2]);
+			rows_on_tips += row_of_node[v].has_value();
+		}
+	}
+	// Every taxonomy row is a tip's, and cleaning keeps every lineage whole (difference 3).
+	// Otherwise a fixture that drifted from its tree, or a cleaning rule that differs from
+	// tax2tree's, would only lose tips, and could still agree on what was left.
+	REQUIRE(rows_on_tips == store.RowCount());
+	REQUIRE(store.Truncations().empty());
+	for (size_t row = 0; row < store.RowCount(); row++) {
+		REQUIRE(store.IsInformative(row));
+	}
+	CladeCountIndex index(TreeIndex::Build(parent, std::vector<double>(parent.size(), 1.0)), store, row_of_node);
+	return {std::move(store), std::move(index)};
+}
+
+// The name the label of `holder` gives at `rank`, or "" for no holder.
+std::string HolderName(const std::vector<std::vector<LabelPart>> &labels, uint32_t holder, size_t rank) {
+	if (holder != EmittedLineages::kNone) {
+		for (const auto &part : labels[holder]) {
+			if (part.rank == rank) {
+				return part.name;
+			}
+		}
+	}
+	return "";
+}
+
 } // namespace
 
 TEST_CASE("AssignNames matches tax2tree on the committed fixture", "[taxonomy_decorator]") {
@@ -139,41 +196,9 @@ TEST_CASE("AssignNames matches tax2tree on the committed fixture", "[taxonomy_de
 		REQUIRE(expectations.count(name) == 1);
 
 		const auto &tree_rows = trees.at(name);
-		std::vector<uint32_t> parent(tree_rows.size());
-		for (uint32_t v = 0; v < tree_rows.size(); v++) {
-			const auto &fields = tree_rows[v];
-			REQUIRE(ToIndex(fields[0]) == v);
-			parent[v] = fields[1].empty() ? TreeIndex::NO_PARENT : ToIndex(fields[1]);
-		}
-
-		std::vector<TaxonomyRow> rows;
-		for (const auto &fields : taxonomies.at(name)) {
-			TaxonomyRow taxonomy_row {fields[0], {}};
-			for (size_t r = 0; r < kLineageRanks.size(); r++) {
-				if (!fields[1 + r].empty()) {
-					taxonomy_row.ranks[r] = fields[1 + r];
-				}
-			}
-			rows.push_back(std::move(taxonomy_row));
-		}
-		TaxonomyStore store(rows);
-		std::vector<std::optional<size_t>> row_of_node(tree_rows.size());
-		size_t rows_on_tips = 0;
-		for (uint32_t v = 0; v < tree_rows.size(); v++) {
-			if (!tree_rows[v][2].empty()) {
-				row_of_node[v] = store.FindRow(tree_rows[v][2]);
-				rows_on_tips += row_of_node[v].has_value();
-			}
-		}
-		// Every taxonomy row is a tip's, and cleaning keeps every lineage whole (difference 3).
-		// Otherwise a fixture that drifted from its tree, or a cleaning rule that differs from
-		// tax2tree's, would only lose tips, and could still agree on what was left.
-		REQUIRE(rows_on_tips == store.RowCount());
-		REQUIRE(store.Truncations().empty());
-		for (size_t row = 0; row < store.RowCount(); row++) {
-			REQUIRE(store.IsInformative(row));
-		}
-		CladeCountIndex index(TreeIndex::Build(parent, std::vector<double>(parent.size(), 1.0)), store, row_of_node);
+		const auto fixture = LoadCase(tree_rows, taxonomies.at(name));
+		const TaxonomyStore &store = fixture.store;
+		const CladeCountIndex &index = fixture.index;
 		const uint32_t root = index.Tree().root();
 
 		std::vector<std::string> expected;
@@ -222,37 +247,9 @@ TEST_CASE("Decorate and EmitLineages match tax2tree on the committed fixture", "
 
 		const auto &tree_rows = trees.at(name);
 		const uint32_t n = static_cast<uint32_t>(tree_rows.size());
-		std::vector<uint32_t> parent(n);
-		for (uint32_t v = 0; v < n; v++) {
-			REQUIRE(ToIndex(tree_rows[v][0]) == v);
-			parent[v] = tree_rows[v][1].empty() ? TreeIndex::NO_PARENT : ToIndex(tree_rows[v][1]);
-		}
-		std::vector<TaxonomyRow> rows;
-		for (const auto &fields : taxonomies.at(name)) {
-			TaxonomyRow taxonomy_row {fields[0], {}};
-			for (size_t r = 0; r < kLineageRanks.size(); r++) {
-				if (!fields[1 + r].empty()) {
-					taxonomy_row.ranks[r] = fields[1 + r];
-				}
-			}
-			rows.push_back(std::move(taxonomy_row));
-		}
-		TaxonomyStore store(rows);
-		std::vector<std::optional<size_t>> row_of_node(n);
-		size_t rows_on_tips = 0;
-		for (uint32_t v = 0; v < n; v++) {
-			if (!tree_rows[v][2].empty()) {
-				row_of_node[v] = store.FindRow(tree_rows[v][2]);
-				rows_on_tips += row_of_node[v].has_value();
-			}
-		}
-		// As for AssignNames: every row is a tip's, and cleaning keeps every lineage whole.
-		REQUIRE(rows_on_tips == store.RowCount());
-		REQUIRE(store.Truncations().empty());
-		for (size_t r = 0; r < store.RowCount(); r++) {
-			REQUIRE(store.IsInformative(r));
-		}
-		CladeCountIndex index(TreeIndex::Build(parent, std::vector<double>(n, 1.0)), store, row_of_node);
+		const auto fixture = LoadCase(tree_rows, taxonomies.at(name));
+		const TaxonomyStore &store = fixture.store;
+		const CladeCountIndex &index = fixture.index;
 
 		const auto result = Decorate(index, store, min_count);
 		REQUIRE(result.labels.size() == n);
@@ -283,13 +280,7 @@ TEST_CASE("Decorate and EmitLineages match tax2tree on the committed fixture", "
 		for (size_t i = 0; i < emitted.tips.size(); i++) {
 			std::string line = tree_rows[emitted.tips[i]][2];
 			for (size_t r = 0; r < kLineageRanks.size(); r++) {
-				line += "\t";
-				const uint32_t holder = emitted.holders[i][r];
-				for (const auto &part : holder == EmittedLineages::kNone ? std::vector<LabelPart> {} : parsed[holder]) {
-					if (part.rank == r) {
-						line += part.name;
-					}
-				}
+				line += "\t" + HolderName(parsed, emitted.holders[i][r], r);
 			}
 			observed_lineages.push_back(line);
 		}

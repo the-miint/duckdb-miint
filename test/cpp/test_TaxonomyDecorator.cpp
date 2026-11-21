@@ -1346,6 +1346,13 @@ NodeLabel LabelFrom(const TaxonomyStore &store, std::string_view text) {
 	return label;
 }
 
+// A lineage D1; P1; C1; O1; F1, then `deeper`.
+std::vector<std::string> UnderF1(std::vector<std::string> deeper) {
+	std::vector<std::string> out {"D1", "P1", "C1", "O1", "F1"};
+	out.insert(out.end(), deeper.begin(), deeper.end());
+	return out;
+}
+
 // The labels of n nodes, from text; unlisted nodes have empty labels.
 std::vector<NodeLabel> LabelsOf(const TaxonomyStore &store, size_t n,
                                 std::initializer_list<std::pair<uint32_t, std::string>> labels) {
@@ -1436,13 +1443,7 @@ TEST_CASE("PromoteCommonNames merges a name with its polyphyletic variant, and n
 	                      {"Candidatus", "Candidatus_Foo", ""}};
 	for (const auto &[a, b, promoted] : pairs) {
 		INFO(a << " and " << b);
-		const std::vector<std::string> shared {"D1", "P1", "C1", "O1", "F1"};
-		auto with = [&](std::vector<std::string> deeper) {
-			auto out = shared;
-			out.insert(out.end(), deeper.begin(), deeper.end());
-			return out;
-		};
-		const auto store = StoreOf({with({a, "S1"}), with({b, "S2"}), with({"Other"})});
+		const auto store = StoreOf({UnderF1({a, "S1"}), UnderF1({b, "S2"}), UnderF1({"Other"})});
 		const auto tree = TreeOf(kUvTree);
 		const std::string u = "d__D1; p__P1; c__C1; o__O1; f__F1";
 		const auto labels = PromoteCommonNames(
@@ -1464,14 +1465,8 @@ TEST_CASE("PromoteCommonNames never merges three distinct names", "[taxonomy_dec
 	//      |        +-- b(4) +-- t8, t9
 	//      |        +-- e(5) +-- t10, t11
 	//      +-- c(2) +-- t12, t13
-	const std::vector<std::string> shared {"D1", "P1", "C1", "O1", "F1"};
-	auto with = [&](std::vector<std::string> deeper) {
-		auto out = shared;
-		out.insert(out.end(), deeper.begin(), deeper.end());
-		return out;
-	};
-	const auto store = StoreOf({with({"Bacillus", "S1"}), with({"Bacillus_A", "S2"}), with({"Bacillus_B", "S3"}),
-	                            with({"Bacillus", "S4"}), with({"Other"})});
+	const auto store = StoreOf({UnderF1({"Bacillus", "S1"}), UnderF1({"Bacillus_A", "S2"}),
+	                            UnderF1({"Bacillus_B", "S3"}), UnderF1({"Bacillus", "S4"}), UnderF1({"Other"})});
 	const auto tree = TreeOf({kNoParent, 0, 0, 1, 1, 1, 3, 3, 4, 4, 5, 5, 2, 2});
 	const std::string u = "d__D1; p__P1; c__C1; o__O1; f__F1";
 
@@ -1531,13 +1526,7 @@ TEST_CASE("PromoteCommonNames never moves a name onto a node named deeper", "[ta
 	// u(0) +-- v(1) +-- n(3) +-- t4, t5
 	//      |        +-- t6
 	//      +-- c(2) +-- t7, t8
-	const std::vector<std::string> shared {"D1", "P1", "C1", "O1", "F1"};
-	auto with = [&](std::vector<std::string> deeper) {
-		auto out = shared;
-		out.insert(out.end(), deeper.begin(), deeper.end());
-		return out;
-	};
-	const auto store = StoreOf({with({"G1", "Z"}), with({"G1", "Other"}), with({"Y"})});
+	const auto store = StoreOf({UnderF1({"G1", "Z"}), UnderF1({"G1", "Other"}), UnderF1({"Y"})});
 	const auto tree = TreeOf({kNoParent, 0, 0, 1, 3, 3, 1, 2, 2});
 	const std::string u = "d__D1; p__P1; c__C1; o__O1; f__F1; g__G1";
 	const auto labels =

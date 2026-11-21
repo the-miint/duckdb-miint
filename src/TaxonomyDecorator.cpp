@@ -25,6 +25,15 @@ void RequireMinCount(const char *caller, uint32_t min_count) {
 uint32_t CeilHalf(uint32_t total) {
 	return total / 2 + total % 2;
 }
+
+// The tree's nodes in preorder, so each comes after its parent.
+std::vector<uint32_t> PreorderNodes(const TreeIndex &tree) {
+	std::vector<uint32_t> nodes(tree.size());
+	for (uint32_t v = 0; v < nodes.size(); v++) {
+		nodes[tree.pre(v)] = v;
+	}
+	return nodes;
+}
 } // namespace
 
 uint32_t F1Score::Threshold(uint32_t total, uint32_t min_count) {
@@ -395,12 +404,8 @@ Backfill BackfillNames(const NameAssignment &assignment, const TaxonomyStore &st
 
 	// Per node, itself if it has a preliminary name, else its nearest ancestor that has one, else
 	// kNone; filled in preorder, so a node's parent is filled before it.
-	std::vector<uint32_t> preorder(n);
-	for (uint32_t v = 0; v < n; v++) {
-		preorder[tree.pre(v)] = v;
-	}
 	std::vector<uint32_t> named(n, kNone);
-	for (const uint32_t v : preorder) {
+	for (const uint32_t v : PreorderNodes(tree)) {
 		const uint32_t parent = tree.parent(v);
 		named[v] = assignment.Preliminary(v) ? v : parent == kNone ? kNone : named[parent];
 	}
@@ -497,16 +502,14 @@ std::vector<NodeLabel> PromoteCommonNames(std::vector<NodeLabel> labels, const T
 	std::partial_sum(offsets.begin(), offsets.end(), offsets.begin());
 	std::vector<uint32_t> children(offsets[n]);
 	std::vector<uint32_t> next(offsets.begin(), offsets.end() - 1);
-	std::vector<uint32_t> preorder(n);
 	for (uint32_t v = 0; v < n; v++) {
-		preorder[tree.pre(v)] = v;
 		if (v != tree.root() && !tree.is_tip(v)) {
 			children[next[tree.parent(v)]++] = v;
 		}
 	}
 
 	std::vector<uint32_t> stack, descendants;
-	for (const uint32_t v : preorder) {
+	for (const uint32_t v : PreorderNodes(tree)) {
 		// v's nearest internal descendants with a non-empty label, found below the empty ones.
 		descendants.clear();
 		stack.assign(children.begin() + offsets[v], children.begin() + offsets[v + 1]);
@@ -637,10 +640,6 @@ EmittedLineages EmitLineages(const TreeIndex &tree, const std::vector<std::vecto
 		}
 	}
 	out.holders.resize(out.tips.size());
-	std::vector<uint32_t> preorder(n);
-	for (uint32_t v = 0; v < n; v++) {
-		preorder[tree.pre(v)] = v;
-	}
 
 	// The holder of each rank on the path from the root to the node being visited. Each internal
 	// node on that path is on `path`, with the length `set` had when it was entered; the ranks it
@@ -649,7 +648,7 @@ EmittedLineages EmitLineages(const TreeIndex &tree, const std::vector<std::vecto
 	holder.fill(kNone);
 	std::vector<std::pair<uint32_t, size_t>> path;
 	std::vector<size_t> set;
-	for (const uint32_t v : preorder) {
+	for (const uint32_t v : PreorderNodes(tree)) {
 		while (!path.empty() && !tree.is_ancestor_or_self(path.back().first, v)) {
 			for (size_t i = path.back().second; i < set.size(); i++) {
 				holder[set[i]] = kNone;
