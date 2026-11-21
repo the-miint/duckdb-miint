@@ -357,6 +357,7 @@ def run_decorate(nl, tree, tipname_map):
     the fixture can use), and counts of what the case exercises.
     """
     differences = set()
+    inverted_below_domain = False
     nl.set_preliminary_name_and_rank(tree)
     for node in tree.non_tips(include_self=True):
         if node.name is None:
@@ -365,18 +366,19 @@ def run_decorate(nl, tree, tipname_map):
             if node.Rank > 0:
                 differences.add("5. root named below the domain (miint fills it to the domain)")
             continue
-        if node.Rank == 0:
-            continue
         ancestor = nl.get_nearest_named_ancestor(node)
         if ancestor is None:
-            differences.add("6. no named ancestor (miint fills to the domain)")
+            if node.Rank > 0:
+                differences.add("6. no named ancestor (miint fills to the domain)")
         elif node.Rank < ancestor.Rank:
-            differences.add("7. inverted ranks (miint keeps the label)")
+            differences.add("7. inverted ranks (miint keeps the label and records the inversion)")
+            # tax2tree never compares a domain's rank, so it reports only the others.
+            inverted_below_domain = inverted_below_domain or node.Rank > 0
     _, lookup = nl.make_consensus_tree(tipname_map.values())
     printed = io.StringIO()
-    with contextlib.redirect_stdout(printed):  # it prints each inverted node
+    with contextlib.redirect_stdout(printed):  # it prints each inverted node below the domain
         nl.backfill_names_gap(tree, lookup)
-    if bool(printed.getvalue()) != any(d.startswith("7. ") for d in differences):
+    if bool(printed.getvalue()) != inverted_below_domain:
         raise RuntimeError("tax2tree's report of inverted nodes disagrees with the generator's")
     backfilled = {node.idx: len(node.BackFillNames) for node in tree.non_tips(include_self=True)}
 

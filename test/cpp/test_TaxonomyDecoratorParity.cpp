@@ -29,7 +29,8 @@
 // 6. A node below the root with no named ancestor. Decorate fills its label up to the domain;
 //    tax2tree keeps its deepest name alone, losing the shallower names the fold gave it.
 // 7. Inverted ranks: a node named at a shallower rank than its nearest named ancestor. Decorate
-//    keeps its name and records the inversion; tax2tree empties its label.
+//    keeps its name and records the inversion; tax2tree empties its label, unless the name is a
+//    domain, whose rank it never compares.
 // 8. Promotion of a name no deeper than the ranks the node's path holds. Decorate stops the
 //    node's promotion; tax2tree appends the name, moving an inverted name up, or leaving the label
 //    out of rank order or with two names at one rank. Only an inverted-rank node leads to it.
@@ -162,7 +163,6 @@ FixtureCase LoadCase(const Rows &tree_rows, const Rows &taxonomy_rows) {
 	return {std::move(store), std::move(index)};
 }
 
-// The name the label of `holder` gives at `rank`, or "" for no holder.
 } // namespace
 
 TEST_CASE("AssignNames matches tax2tree on the committed fixture", "[taxonomy_decorator]") {

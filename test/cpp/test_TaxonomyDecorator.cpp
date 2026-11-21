@@ -1777,7 +1777,10 @@ TEST_CASE("Decorate places, backfills and promotes", "[taxonomy_decorator]") {
 // FormatLabel and ParseNodeLabel, and wherever no inverted-rank backfill was recorded, each tip's
 // path holds every rank at most once, in order from the root, so EmitLineages records no repeat.
 // An inversion is the one source of a repeat: an inverted node keeps its name, every repeat is at
-// an inverted node or below one, and the paths to the other tips stay in rank order. The trials
+// an inverted node or below one, and the paths to the other tips stay in rank order. Rank safety
+// keeps two names at one rank off a path: a node holds a name only where at least half its tips
+// are, so every ancestor has as many, and an ancestor holding another name at that rank would have
+// two eligible there. The trials
 // must include both kinds, and some promotion.
 TEST_CASE("Decorate's labels keep every path in rank order unless a backfill was inverted", "[taxonomy_decorator]") {
 	std::mt19937 rng(20261121);

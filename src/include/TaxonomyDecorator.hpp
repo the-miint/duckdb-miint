@@ -268,8 +268,9 @@ std::string_view PolyphyleticBase(std::string_view name);
 // label and removes it from each of theirs, stopping after the round that leaves one of them with
 // one name or none, so a descendant's last name can be taken. With one such descendant, agreement
 // is trivial, so a name moves up to the topmost node whose only labeled descendant holds it.
-//   - Two names agree when they are equal, or when one is the other's PolyphyleticBase, and the
-//     suffixed one is promoted. tax2tree matches by substring, so Baci and Bacillus_A agree there.
+//   - Two names agree when they are equal, or when, at one rank, one is the other's
+//     PolyphyleticBase, and the suffixed one is promoted. tax2tree matches by substring, so Baci
+//     and Bacillus_A agree there.
 //   - A name no deeper than every rank the node's path from the root holds, its own label
 //     included, stops the node's promotion before it is appended: a promoted name says the node is
 //     that taxon, which must fit below what the node's lineage already says it is, and a node with

@@ -7,9 +7,9 @@ command: conda run -n miint-beta-oracle python -I test/scripts/gen_tax2tree_assi
 
 assign_names cases left out, each for the differences from miint it hits, numbered as in the header of test/cpp/test_TaxonomyDecoratorParity.cpp:
 case00: 6. no named ancestor (miint fills to the domain)
-case02: 5. root named below the domain (miint fills it to the domain); 7. inverted ranks (miint keeps the label)
+case02: 5. root named below the domain (miint fills it to the domain); 7. inverted ranks (miint keeps the label and records the inversion)
 case03: 5. root named below the domain (miint fills it to the domain)
-case06: 5. root named below the domain (miint fills it to the domain); 7. inverted ranks (miint keeps the label)
+case06: 5. root named below the domain (miint fills it to the domain); 7. inverted ranks (miint keeps the label and records the inversion)
 case07: 5. root named below the domain (miint fills it to the domain)
 case08: 5. root named below the domain (miint fills it to the domain)
 case09: 5. root named below the domain (miint fills it to the domain)
@@ -24,7 +24,7 @@ Extra draws rejected, by difference (a draw can hit several):
 1. equal F1 from different counts: 6
 5. root named below the domain (miint fills it to the domain): 38
 6. no named ancestor (miint fills to the domain): 3
-7. inverted ranks (miint keeps the label): 9
+7. inverted ranks (miint keeps the label and records the inversion): 9
 
 case01: 73 nodes, 40 tips, 31 with a lineage, min_count 1, 8 labels; 3 gap fills, 4 promotions, 0 polyphyletic merges
 case04: 95 nodes, 43 tips, 32 with a lineage, min_count 2, 8 labels; 3 gap fills, 3 promotions, 0 polyphyletic merges
