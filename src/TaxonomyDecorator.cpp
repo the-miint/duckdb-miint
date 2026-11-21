@@ -587,6 +587,10 @@ std::vector<LabelPart> ParseNodeLabel(std::string_view label) {
 		                            std::string(component) + "\" " + why);
 	};
 	std::array<bool, kRanks> seen {};
+	// The shallowest component with an empty name: no name at its rank, unless a deeper rank is
+	// named, which makes it a gap.
+	std::string_view empty_component;
+	size_t empty_rank = kRanks;
 	for (size_t start = 0;;) {
 		const size_t end = std::min(label.find(';', start), label.size());
 		const std::string_view component = TrimSpace(label.substr(start, end - start));
@@ -608,10 +612,7 @@ std::vector<LabelPart> ParseNodeLabel(std::string_view label) {
 			fail(component, "has an unknown rank letter; the letters are " + letters + ", and k for the domain");
 		}
 		const std::string_view name = component.substr(3);
-		if (name.empty()) {
-			fail(component, "has an empty name");
-		}
-		if (IsLineageSpace(name.front())) {
+		if (!name.empty() && IsLineageSpace(name.front())) {
 			fail(component, "has a name that starts with whitespace");
 		}
 		if (StartsWithRankPrefix(name)) {
@@ -621,13 +622,23 @@ std::vector<LabelPart> ParseNodeLabel(std::string_view label) {
 			fail(component, "gives a rank the label already has");
 		}
 		seen[rank] = true;
-		parts.push_back({rank, std::string(name)});
+		if (name.empty()) {
+			if (rank < empty_rank) {
+				empty_rank = rank;
+				empty_component = component;
+			}
+		} else {
+			parts.push_back({rank, std::string(name)});
+		}
 		if (end == label.size()) {
 			break;
 		}
 		start = end + 1;
 	}
 	std::sort(parts.begin(), parts.end(), [](const LabelPart &a, const LabelPart &b) { return a.rank < b.rank; });
+	if (!parts.empty() && parts.back().rank > empty_rank) {
+		fail(empty_component, "has an empty name, but the label names a deeper rank: a gap");
+	}
 	return parts;
 }
 

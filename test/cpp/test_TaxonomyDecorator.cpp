@@ -1644,6 +1644,21 @@ TEST_CASE("ParseNodeLabel reads components by their rank letter", "[taxonomy_dec
 	CHECK(ParseNodeLabel("").empty());
 }
 
+// An empty name says the label has no name at that rank, as in Greengenes' "g__; s__", so long as
+// the label names no deeper rank; above a named rank it is a gap, and the label is malformed.
+TEST_CASE("ParseNodeLabel reads an empty name below every named rank as no name", "[taxonomy_decorator]") {
+	CHECK(ParseNodeLabel("f__").empty());
+	CHECK(ParseNodeLabel("g__; s__").empty());
+	CHECK(ParseNodeLabel("p__B; c__") == Parts({{kPhylum, "B"}}));
+	CHECK(ParseNodeLabel("s__; g__G") == Parts({{kGenus, "G"}}));
+	for (const std::string_view gap : {"p__B; c__; o__D", "o__D; c__", "c__; f__; g__G"}) {
+		INFO(gap);
+		const std::string error = ParseError(gap);
+		CHECK_THAT(error, ContainsSubstring(std::string(gap)));
+		CHECK_THAT(error, ContainsSubstring("\"c__\"") && ContainsSubstring("gap"));
+	}
+}
+
 // A label that cannot be read is an error naming it and the component, never a guess: tax2tree
 // indexes a rank table with the first character and fails with a KeyError, or reads "x__" as a
 // name. A name may not start with whitespace, as no taxonomy name does, or with a rank prefix of
@@ -1651,7 +1666,7 @@ TEST_CASE("ParseNodeLabel reads components by their rank letter", "[taxonomy_dec
 TEST_CASE("ParseNodeLabel rejects a malformed label, naming it", "[taxonomy_decorator]") {
 	const std::pair<std::string_view, std::string_view> cases[] = {
 	    {"x__A", "x__A"},       {"D__A", "D__A"},     {"fA", "fA"},           {"f_A", "f_A"},
-	    {"f__", "f__"},         {"f__ A", "f__ A"},   {"f__A;", ""},          {"f__A; f__B", "f__B"},
+	    {"f__ A", "f__ A"},     {"f__A;", ""},        {"f__A; f__B", "f__B"}, {"c__; c__C", "c__C"},
 	    {"d__A; k__B", "k__B"}, {"f__\vA", "f__\vA"}, {"c__c__A", "c__c__A"},
 	};
 	for (const auto &[label, component] : cases) {

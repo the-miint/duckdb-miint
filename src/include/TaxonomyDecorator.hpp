@@ -308,14 +308,14 @@ struct LabelPart {
 
 // A label read from text, as FormatLabel writes it or another tool did. Its components are
 // separated by ';' and trimmed of whitespace (IsLineageSpace), and each is a rank letter
-// (dpcofgst, or k for the domain), two underscores and a name. The parts come by ascending rank.
-// An empty label has no parts. Throws std::invalid_argument, naming the label and the component,
-// for an empty component, one not of that form, an unknown letter, an empty name, a name that
-// starts with whitespace ("f__ A") or with a rank prefix of its own ("c__c__A"), and a rank given
-// twice. Unlike ParseLineageString, which reads a whole lineage, the components may come in any
-// order and skip ranks, as in a label another tool wrote (tax2tree can put a shallower name after
-// a deeper one); either k or d names the domain; and an empty name is an error, not a missing
-// rank.
+// (dpcofgst, or k for the domain), two underscores and a name. A component with an empty name
+// ("s__") gives no name at its rank. The parts come by ascending rank; an empty label has none.
+// Throws std::invalid_argument, naming the label and the component, for an empty component, one
+// not of that form, an unknown letter, a name that starts with whitespace ("f__ A") or with a rank
+// prefix of its own ("c__c__A"), a rank given twice, and an empty name at a rank above one the
+// label names, a gap ("p__B; c__; o__D"). Unlike ParseLineageString, which reads a whole lineage,
+// the components may come in any order and start at any rank, as in a label another tool wrote
+// (tax2tree can put a shallower name after a deeper one), and either k or d names the domain.
 std::vector<LabelPart> ParseNodeLabel(std::string_view label);
 
 // A rank that a node's label holds and a label above it on its path already holds; the tips
