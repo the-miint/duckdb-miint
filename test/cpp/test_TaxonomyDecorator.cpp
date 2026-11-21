@@ -1564,6 +1564,34 @@ TEST_CASE("PromoteCommonNames never gives a node a second name at one rank", "[t
 	CHECK(LabelTexts(labels, store) == TextsOf(9, {{0, u}, {1, "f__F1; g__G"}, {3, "f__F2"}, {2, "f__F3"}}));
 }
 
+// A promoted name must be deeper than every rank the node's path already holds, not only its own
+// label's: an empty-labeled node already says what its ancestors say. So an inverted name stays
+// on the node it was placed on, where the inversion record finds it, and an inverted node takes
+// no name at a rank its path holds above it.
+TEST_CASE("PromoteCommonNames leaves an inverted name where it was placed", "[taxonomy_decorator]") {
+	SECTION("an empty-labeled node takes no inverted name") {
+		// u [d..o] +-- v [] +-- a [c__C2] +-- t5, t6
+		//          |        +-- b []      +-- t7, t8
+		//          +-- c [f__F9]          +-- t9, t10
+		const auto store = StoreOf({{"D1", "P1", "C1", "O1", "F9"}, {"D1", "P1", "C2"}});
+		const auto tree = TreeOf(kUvTree);
+		const std::string u = "d__D1; p__P1; c__C1; o__O1";
+		const auto labels =
+		    PromoteCommonNames(LabelsOf(store, 11, {{kU, u}, {kA, "c__C2"}, {kC, "f__F9"}}), store, tree);
+		CHECK(LabelTexts(labels, store) == TextsOf(11, {{kU, u}, {kA, "c__C2"}, {kC, "f__F9"}}));
+	}
+	SECTION("an inverted node takes no name at a rank its path holds") {
+		// u(0) [d..o] +-- d(1) [c__C2] +-- e(2) [o__Ox; f__Fx] +-- t3, t4
+		//             +-- c(5) [f__F9] +-- t6, t7
+		const auto store = StoreOf({{"D1", "P1", "C1", "O1", "F9"}, {"D1", "P1", "C2", "Ox", "Fx"}});
+		const auto tree = TreeOf({kNoParent, 0, 1, 2, 2, 0, 5, 5});
+		const std::string u = "d__D1; p__P1; c__C1; o__O1";
+		const auto labels = PromoteCommonNames(
+		    LabelsOf(store, 8, {{0, u}, {1, "c__C2"}, {2, "o__Ox; f__Fx"}, {5, "f__F9"}}), store, tree);
+		CHECK(LabelTexts(labels, store) == TextsOf(8, {{0, u}, {1, "c__C2"}, {2, "o__Ox; f__Fx"}, {5, "f__F9"}}));
+	}
+}
+
 namespace {
 std::vector<LabelPart> Parts(std::initializer_list<std::pair<size_t, std::string>> parts) {
 	std::vector<LabelPart> out;
@@ -1748,8 +1776,9 @@ TEST_CASE("Decorate places, backfills and promotes", "[taxonomy_decorator]") {
 // tax2tree's validate_all_paths, on our own output: on random trees, every label survives
 // FormatLabel and ParseNodeLabel, and wherever no inverted-rank backfill was recorded, each tip's
 // path holds every rank at most once, in order from the root, so EmitLineages records no repeat.
-// An inversion is the one source of a repeat, and the trials must include both kinds, and some
-// promotion.
+// An inversion is the one source of a repeat: an inverted node keeps its name, every repeat is at
+// an inverted node or below one, and the paths to the other tips stay in rank order. The trials
+// must include both kinds, and some promotion.
 TEST_CASE("Decorate's labels keep every path in rank order unless a backfill was inverted", "[taxonomy_decorator]") {
 	std::mt19937 rng(20261121);
 	size_t with_inversion = 0, without_inversion = 0, promoted = 0;
@@ -1776,13 +1805,36 @@ TEST_CASE("Decorate's labels keep every path in rank order unless a backfill was
 			}
 			const auto emitted = EmitLineages(index.Tree(), parsed);
 			REQUIRE(emitted.tips.size() == emitted.holders.size());
-			if (!result.inverted.empty()) {
-				with_inversion++;
-				continue;
+			// Whether v is an inverted node or below one.
+			const auto below_inversion = [&](uint32_t v) {
+				for (; v != kNoParent; v = c.tree.parent[v]) {
+					for (const auto &inverted : result.inverted) {
+						if (inverted.node == v) {
+							return true;
+						}
+					}
+				}
+				return false;
+			};
+			for (const auto &inverted : result.inverted) {
+				INFO("inverted node " << inverted.node);
+				const auto &label = result.labels[inverted.node];
+				CHECK(std::find(label.begin(), label.end(), RankName {inverted.rank, inverted.name}) != label.end());
 			}
-			without_inversion++;
-			CHECK(emitted.repeats.empty());
+			for (const auto &repeat : emitted.repeats) {
+				INFO("repeat at node " << repeat.node);
+				CHECK(below_inversion(repeat.node));
+			}
+			if (result.inverted.empty()) {
+				without_inversion++;
+				CHECK(emitted.repeats.empty());
+			} else {
+				with_inversion++;
+			}
 			for (const uint32_t tip : emitted.tips) {
+				if (below_inversion(tip)) {
+					continue;
+				}
 				// The ranks of the labels on the tip's path, from the root down.
 				std::vector<size_t> ranks;
 				for (uint32_t v = c.tree.parent[tip]; v != kNoParent; v = c.tree.parent[v]) {

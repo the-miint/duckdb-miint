@@ -507,8 +507,15 @@ std::vector<NodeLabel> PromoteCommonNames(std::vector<NodeLabel> labels, const T
 		}
 	}
 
+	// Per node, once visited, one past the deepest rank its path from the root holds, its own label
+	// included; 0 when the path holds none. A name promoted onto a node must be deeper than that.
+	std::vector<uint8_t> path_bound(n, 0);
 	std::vector<uint32_t> stack, descendants;
 	for (const uint32_t v : PreorderNodes(tree)) {
+		size_t bound = v == tree.root() ? 0 : path_bound[tree.parent(v)];
+		if (!labels[v].empty()) {
+			bound = std::max(bound, labels[v].back().rank + 1);
+		}
 		// v's nearest internal descendants with a non-empty label, found below the empty ones.
 		descendants.clear();
 		stack.assign(children.begin() + offsets[v], children.begin() + offsets[v + 1]);
@@ -521,20 +528,19 @@ std::vector<NodeLabel> PromoteCommonNames(std::vector<NodeLabel> labels, const T
 				descendants.push_back(d);
 			}
 		}
-		if (descendants.empty()) {
-			continue;
-		}
-		for (bool more = true; more;) {
+		for (bool more = !descendants.empty(); more;) {
 			const auto name = AgreedName(descendants, labels, store);
-			if (!name || (!labels[v].empty() && name->rank <= labels[v].back().rank)) {
+			if (!name || name->rank < bound) {
 				break;
 			}
 			labels[v].push_back(*name);
+			bound = name->rank + 1;
 			for (const uint32_t d : descendants) {
 				labels[d].erase(labels[d].begin());
 				more = more && labels[d].size() > 1;
 			}
 		}
+		path_bound[v] = static_cast<uint8_t>(bound);
 	}
 	return labels;
 }

@@ -30,9 +30,9 @@
 //    tax2tree keeps its deepest name alone, losing the shallower names the fold gave it.
 // 7. Inverted ranks: a node named at a shallower rank than its nearest named ancestor. Decorate
 //    keeps its name and records the inversion; tax2tree empties its label.
-// 8. Promotion of a name no deeper than the node's names. Decorate stops the node's promotion;
-//    tax2tree appends the name, leaving the label out of rank order or with two names at one
-//    rank. Only an inverted-rank node leads to it.
+// 8. Promotion of a name no deeper than the ranks the node's path holds. Decorate stops the
+//    node's promotion; tax2tree appends the name, moving an inverted name up, or leaving the label
+//    out of rank order or with two names at one rank. Only an inverted-rank node leads to it.
 // 9. Polyphyletic merges. Decorate merges only a name and its own variant (Bacillus with
 //    Bacillus_A); tax2tree merges any name with one that contains it and has a capital-letter
 //    suffix somewhere (Baci with Bacillus_A).

@@ -270,12 +270,13 @@ std::string_view PolyphyleticBase(std::string_view name);
 // is trivial, so a name moves up to the topmost node whose only labeled descendant holds it.
 //   - Two names agree when they are equal, or when one is the other's PolyphyleticBase, and the
 //     suffixed one is promoted. tax2tree matches by substring, so Baci and Bacillus_A agree there.
-//   - A name no deeper than every name the node already holds stops the node's promotion before
-//     it is appended: a promoted name says the node is that taxon, which must fit below what the
-//     node already says it is. Such a name can only come from an inverted-rank descendant. It is
-//     never appended to a label that holds a name, but, as any name does, it moves up to the
-//     nodes with empty labels between its node and that node's named ancestor. tax2tree appends
-//     it, which gives the label two names at one rank or a shallower name after deeper ones.
+//   - A name no deeper than every rank the node's path from the root holds, its own label
+//     included, stops the node's promotion before it is appended: a promoted name says the node is
+//     that taxon, which must fit below what the node's lineage already says it is, and a node with
+//     an empty label says what its ancestors say. Such a name can only come from an inverted-rank
+//     node, so an inverted name stays on the node it was placed on, and an inverted-rank node takes
+//     no name at a rank its path holds above it. tax2tree appends the name, which moves an inverted
+//     name up, or gives a label two names at one rank or a shallower name after deeper ones.
 // Labels stay by ascending rank. `labels` must come from BackfillNames over `tree` and `store`.
 std::vector<NodeLabel> PromoteCommonNames(std::vector<NodeLabel> labels, const TaxonomyStore &store,
                                           const TreeIndex &tree);
