@@ -1638,24 +1638,42 @@ TEST_CASE("ParseNodeLabel reads components by their rank letter", "[taxonomy_dec
 	CHECK(ParseNodeLabel("f__A\f;\vg__B") == Parts({{kFamily, "A"}, {kGenus, "B"}}));
 	CHECK(ParseNodeLabel("g__B; f__A") == Parts({{kFamily, "A"}, {kGenus, "B"}}));
 	CHECK(ParseNodeLabel("k__Bacteria") == Parts({{kDomain, "Bacteria"}}));
-	CHECK(ParseNodeLabel("d__Bacteria; s__Escherichia coli; t__K-12") ==
-	      Parts({{kDomain, "Bacteria"}, {kSpecies, "Escherichia coli"}, {kStrain, "K-12"}}));
+	CHECK(ParseNodeLabel("g__Escherichia; s__Escherichia coli; t__K-12") ==
+	      Parts({{kGenus, "Escherichia"}, {kSpecies, "Escherichia coli"}, {kStrain, "K-12"}}));
 	CHECK(ParseNodeLabel("g__[Eubacterium]") == Parts({{kGenus, "[Eubacterium]"}}));
 	CHECK(ParseNodeLabel("").empty());
 }
 
 // An empty name says the label has no name at that rank, as in Greengenes' "g__; s__", so long as
-// the label names no deeper rank; above a named rank it is a gap, and the label is malformed.
+// the label names no deeper rank; above a named rank it is a gap, and the label is malformed. The
+// error names the shallowest empty component, the one the deeper names leave a gap below.
 TEST_CASE("ParseNodeLabel reads an empty name below every named rank as no name", "[taxonomy_decorator]") {
 	CHECK(ParseNodeLabel("f__").empty());
 	CHECK(ParseNodeLabel("g__; s__").empty());
 	CHECK(ParseNodeLabel("p__B; c__") == Parts({{kPhylum, "B"}}));
 	CHECK(ParseNodeLabel("s__; g__G") == Parts({{kGenus, "G"}}));
-	for (const std::string_view gap : {"p__B; c__; o__D", "o__D; c__", "c__; f__; g__G"}) {
+	for (const std::string_view gap : {"p__B; c__; o__D", "o__D; c__", "c__; f__; g__G", "s__; c__; o__D"}) {
 		INFO(gap);
 		const std::string error = ParseError(gap);
 		CHECK_THAT(error, ContainsSubstring(std::string(gap)));
 		CHECK_THAT(error, ContainsSubstring("\"c__\"") && ContainsSubstring("gap"));
+	}
+}
+
+// The ranks a label names are contiguous: decoration fills every rank between a node's name and its
+// named ancestor's from the taxonomy, so a label that leaves one out is malformed, like an empty
+// name above a named rank. The error names the component below the rank left out.
+TEST_CASE("ParseNodeLabel rejects a label that leaves out a rank between two it names", "[taxonomy_decorator]") {
+	const std::pair<std::string_view, std::string_view> cases[] = {
+	    {"p__B; o__D", "o__D"},
+	    {"o__D; p__B", "o__D"},
+	    {"d__Bacteria; s__Escherichia coli; t__K-12", "s__Escherichia coli"},
+	};
+	for (const auto &[label, component] : cases) {
+		INFO(label);
+		const std::string error = ParseError(label);
+		CHECK_THAT(error, ContainsSubstring(std::string(label)));
+		CHECK_THAT(error, ContainsSubstring("\"" + std::string(component) + "\"") && ContainsSubstring("gap"));
 	}
 }
 
@@ -1793,10 +1811,9 @@ TEST_CASE("Decorate places, backfills and promotes", "[taxonomy_decorator]") {
 // path holds every rank at most once, in order from the root, so EmitLineages records no repeat.
 // An inversion is the one source of a repeat: an inverted node keeps its name, every repeat is at
 // an inverted node or below one, and the paths to the other tips stay in rank order. Rank safety
-// keeps two names at one rank off a path: a node holds a name only where at least half its tips
-// are, so every ancestor has as many, and an ancestor holding another name at that rank would have
-// two eligible there. The trials
-// must include both kinds, and some promotion.
+// keeps two names at one rank off a path: a node holds a name only where at least half of that
+// name's tips are, so every ancestor has as many, and an ancestor holding another name at that rank
+// would have two eligible names there. The trials must include both kinds, and some promotion.
 TEST_CASE("Decorate's labels keep every path in rank order unless a backfill was inverted", "[taxonomy_decorator]") {
 	std::mt19937 rng(20261121);
 	size_t with_inversion = 0, without_inversion = 0, promoted = 0;

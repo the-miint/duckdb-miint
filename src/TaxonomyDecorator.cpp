@@ -586,6 +586,8 @@ std::vector<LabelPart> ParseNodeLabel(std::string_view label) {
 		throw std::invalid_argument("ParseNodeLabel: label \"" + std::string(label) + "\": component \"" +
 		                            std::string(component) + "\" " + why);
 	};
+	// Each rank's component, once the label gives the rank.
+	std::array<std::string_view, kRanks> component_at {};
 	std::array<bool, kRanks> seen {};
 	// The shallowest component with an empty name: no name at its rank, unless a deeper rank is
 	// named, which makes it a gap.
@@ -622,6 +624,7 @@ std::vector<LabelPart> ParseNodeLabel(std::string_view label) {
 			fail(component, "gives a rank the label already has");
 		}
 		seen[rank] = true;
+		component_at[rank] = component;
 		if (name.empty()) {
 			if (rank < empty_rank) {
 				empty_rank = rank;
@@ -638,6 +641,12 @@ std::vector<LabelPart> ParseNodeLabel(std::string_view label) {
 	std::sort(parts.begin(), parts.end(), [](const LabelPart &a, const LabelPart &b) { return a.rank < b.rank; });
 	if (!parts.empty() && parts.back().rank > empty_rank) {
 		fail(empty_component, "has an empty name, but the label names a deeper rank: a gap");
+	}
+	for (size_t i = 1; i < parts.size(); i++) {
+		if (parts[i].rank != parts[i - 1].rank + 1) {
+			fail(component_at[parts[i].rank], std::string("has no ") + kLineageRanks[parts[i - 1].rank + 1].column +
+			                                      " above it in the label: a gap");
+		}
 	}
 	return parts;
 }

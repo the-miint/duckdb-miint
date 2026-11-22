@@ -308,14 +308,17 @@ struct LabelPart {
 
 // A label read from text, as FormatLabel writes it or another tool did. Its components are
 // separated by ';' and trimmed of whitespace (IsLineageSpace), and each is a rank letter
-// (dpcofgst, or k for the domain), two underscores and a name. A component with an empty name
-// ("s__") gives no name at its rank. The parts come by ascending rank; an empty label has none.
-// Throws std::invalid_argument, naming the label and the component, for an empty component, one
-// not of that form, an unknown letter, a name that starts with whitespace ("f__ A") or with a rank
-// prefix of its own ("c__c__A"), a rank given twice, and an empty name at a rank above one the
-// label names, a gap ("p__B; c__; o__D"). Unlike ParseLineageString, which reads a whole lineage,
-// the components may come in any order and start at any rank, as in a label another tool wrote
-// (tax2tree can put a shallower name after a deeper one), and either k or d names the domain.
+// (dpcofgst, or k for the domain), two underscores and a name. The ranks a label names are
+// contiguous, as decoration fills every rank between a node's name and its named ancestor's; a
+// component with an empty name ("s__") gives no name at its rank, below every named one. The parts
+// come by ascending rank; an empty label has none. Throws std::invalid_argument, naming the label
+// and the component, for an empty component, one not of that form, an unknown letter, a name that
+// starts with whitespace ("f__ A") or with a rank prefix of its own ("c__c__A"), and a rank given
+// twice; then, once every component is read, for a gap: an empty name above a named rank
+// ("p__B; c__; o__D") or a rank left out between two named ones ("p__B; o__D"). Unlike
+// ParseLineageString, which reads a whole lineage, the components may come in any order (tax2tree
+// can put a shallower name after a deeper one), either k or d names the domain, and an empty name
+// above a named rank is a gap, not a missing rank.
 std::vector<LabelPart> ParseNodeLabel(std::string_view label);
 
 // A rank that a node's label holds and a label above it on its path already holds; the tips
