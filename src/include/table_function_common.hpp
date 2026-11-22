@@ -23,6 +23,10 @@ bool IsGzipped(const std::string &path);
 // Parse include_filepath named parameter (optional BOOLEAN, default false)
 bool ParseIncludeFilepathParameter(const named_argument_map_t &named_parameters);
 
+// Parse the max_batch_bytes named parameter (optional VARCHAR such as '16KB' or '1MiB', default 64 MiB): the bytes at
+// which a sequence reader closes a chunk.
+uint64_t ParseMaxBatchBytesParameter(const named_argument_map_t &named_parameters);
+
 // Row-count estimate for a table function that streams files, so the query optimizer knows
 // roughly how big the scan is. Without one, DuckDB assumes a tiny scan and can pick it as a
 // join's build side -- hashing a multi-GB file into memory instead of streaming it.

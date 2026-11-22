@@ -386,7 +386,8 @@ Verified on DuckDB 2.0 (`d54cbbe`). Under the default `preserve_insertion_order`
 
     `EXPLAIN` names the batch operators "Batch Create Table As", "Batch Insert" and
     "Batch Copy To File".
-  - `read_fastx` declares one through `ScanBatchIndex`
+  - A reader whose rows have an order, that claims whole files in increasing order and never puts
+    two in one chunk, can declare one through `ScanBatchIndex`
     ([architecture.md](architecture.md#output-order)).
 - **The batch-index contract:**
   - `get_partition_data` runs after each non-empty chunk, so the local state must still describe

@@ -2,6 +2,7 @@
 #include "SAMReader.hpp"
 #include "QualScore.hpp"
 #include "remote_file_helper.hpp"
+#include "scan_batch_index.hpp"
 #include "table_function_common.hpp"
 #include "hfile_duckdb.hpp"
 #include "duckdb/common/error_data.hpp"
@@ -22,13 +23,14 @@ public:
 		std::vector<std::string> file_paths;
 		bool include_filepath;
 		bool uses_stdin;
+		uint64_t max_batch_bytes;
 
 		std::vector<std::string> names;
 		std::vector<LogicalType> types;
 
-		Data(const std::vector<std::string> &paths, bool include_fp, bool stdin_used)
-		    : file_paths(paths), include_filepath(include_fp), uses_stdin(stdin_used), names(SequenceColumnNames()),
-		      types(SequenceColumnTypes()) {
+		Data(const std::vector<std::string> &paths, bool include_fp, bool stdin_used, uint64_t max_bytes)
+		    : file_paths(paths), include_filepath(include_fp), uses_stdin(stdin_used), max_batch_bytes(max_bytes),
+		      names(SequenceColumnNames()), types(SequenceColumnTypes()) {
 			if (include_filepath) {
 				names.emplace_back("filepath");
 				types.emplace_back(LogicalType::VARCHAR);
@@ -43,16 +45,18 @@ public:
 		size_t next_file_idx;
 		bool uses_stdin;
 		std::vector<uint64_t> file_sequence_counters;
+		// Chunks per file with a batch index of their own (ScanBatchIndex).
+		idx_t batch_stride;
 
+		// A file is read by one thread at a time, so a scan can use one thread per file; DuckDB's `threads`
+		// setting bounds that. stdin is always a scan's only path (Bind refuses it in a list), so it gets one.
 		idx_t MaxThreads() const override {
-			if (uses_stdin) {
-				return 1;
-			}
-			return std::min<idx_t>(readers.size(), 8);
+			return readers.size();
 		}
 
 		GlobalState(const std::vector<std::string> &paths, FileSystem &fs, bool stdin_used, int db_threads)
-		    : filepaths(paths), next_file_idx(0), uses_stdin(stdin_used) {
+		    : filepaths(paths), next_file_idx(0), uses_stdin(stdin_used),
+		      batch_stride(ScanBatchIndex::Stride(paths.size())) {
 			for (const auto &path : paths) {
 				try {
 					if (miint::RemoteFileHelper::IsRemotePath(path)) {
@@ -75,8 +79,8 @@ public:
 			// rest sit idle; an HTSlib worker pool decompresses blocks ahead of the parser
 			// (blocks stay in order, so output is identical). With multiple files we rely
 			// on file-level parallelism instead -- giving every reader its own pool would
-			// oversubscribe (up to min(files, 8) readers run concurrently, each spawning a
-			// pool), so we deliberately leave the multi-file path single-threaded per file.
+			// oversubscribe (a reader per thread runs concurrently, each spawning a pool), so
+			// we deliberately leave the multi-file path single-threaded per file.
 			// The pool is sized from DuckDB's `threads` setting: up to 4 threads beside the one
 			// running the scan (set_threads starts no pool for fewer than 2). HTSlib adds one
 			// more thread that reads the compressed blocks and hands them to the pool. db_threads is
@@ -91,11 +95,18 @@ public:
 	struct LocalState : public LocalTableFunctionState {
 		size_t current_file_idx;
 		bool has_file;
+		// Chunks emitted from the current file, and the batch index of the last chunk emitted.
+		idx_t file_chunks;
+		idx_t batch_index;
+		// The read the last chunk held back, because it would have taken that chunk past max_batch_bytes; the next
+		// chunk starts with it. It points into the current file's reader, valid until that reader reads again, and
+		// only this thread reads that file.
+		const bam1_t *held_read;
 		// Reused across Execute calls to accumulate one chunk's raw quality bytes before a
 		// single bulk copy into the qual1 LIST child (avoids per-record heap allocation).
 		std::vector<uint8_t> qual_scratch;
 
-		LocalState() : current_file_idx(0), has_file(false) {
+		LocalState() : current_file_idx(0), has_file(false), file_chunks(0), batch_index(0), held_read(nullptr) {
 		}
 	};
 
@@ -108,6 +119,8 @@ public:
 	                                                     GlobalTableFunctionState *global_state);
 
 	static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output);
+
+	static OperatorPartitionData GetPartitionData(ClientContext &context, TableFunctionGetPartitionInput &input);
 
 	static TableFunction GetFunction();
 	static void Register(ExtensionLoader &loader);

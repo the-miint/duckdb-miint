@@ -32,13 +32,13 @@ All table functions follow a similar structure:
 <a name="output-order"></a>
 **Output order.** Under the default `preserve_insertion_order`, a consumer that keeps order runs on one thread unless its source says how its rows are ordered; [duckdb-engine-notes.md](duckdb-engine-notes.md#output-order-costs-threads-and-memory) lists those consumers, DuckDB's rules for a batch index, and what a batch index costs in memory. A reader that can run on several threads (a `MaxThreads()` above 1) declares one of two things:
 - **Rows in no fixed order** (an aligner's output, or rows from async jobs): `order_preservation_type = OrderPreservationType::NO_ORDER`.
-- **Rows with an order** (a file's records, files in the order given): a batch index, set through `get_partition_data`. A reader that claims whole files in increasing order under its lock, and never puts two files in one chunk, uses `ScanBatchIndex` (`src/include/scan_batch_index.hpp`), with `read_fastx` as the example:
+- **Rows with an order** (a file's records, files in the order given): a batch index, set through `get_partition_data`. A reader that claims whole files in increasing order under its lock, and never puts two files in one chunk, uses `ScanBatchIndex` (`src/include/scan_batch_index.hpp`), with `read_fastx` and `read_sequences_sam` as examples:
   - the global state computes `ScanBatchIndex::Stride` once, from the file count;
   - the local state counts the chunks emitted from the claimed file, resetting the count at each claim;
   - `Execute` sets the chunk's index with `ScanBatchIndex::Index`;
   - `get_partition_data` returns it through `ScanBatchIndex::PartitionData`;
   - `Bind` calls `ScanBatchIndex::KeepForSeveralFiles`, which withholds the index from a one-file scan;
-  - a chunk's bytes are capped as well as its rows, as `read_fastx`'s `max_batch_bytes` does.
+  - a chunk's bytes are capped as well as its rows, as the examples' `max_batch_bytes` parameters do.
 
 A reader that runs on one thread needs neither: its consumer runs on one thread anyway.
 

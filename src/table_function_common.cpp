@@ -3,6 +3,7 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/numeric_utils.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/common/types/vector.hpp"
 #include "duckdb/common/vector/constant_vector.hpp"
@@ -46,6 +47,30 @@ bool ParseIncludeFilepathParameter(const named_argument_map_t &named_parameters)
 		return fp_param->second.GetValue<bool>();
 	}
 	return false;
+}
+
+uint64_t ParseMaxBatchBytesParameter(const named_argument_map_t &named_parameters) {
+	// Default byte budget: 64 MiB. Large enough that typical short-read workflows
+	// always fill STANDARD_VECTOR_SIZE (~600 KB per chunk) without being capped, but
+	// small enough to prevent multi-GB chunks when reading large sequences
+	// (e.g. bacterial genomes at ~5 MB/record would otherwise blow past RAM at 2048x).
+	// A chunk is also a batch index's batch, which order-keeping sinks hold whole
+	// (docs/internals/duckdb-engine-notes.md, "Output order costs threads and memory").
+	uint64_t max_batch_bytes = 64ULL * 1024 * 1024;
+	auto mbb_param = named_parameters.find("max_batch_bytes");
+	if (mbb_param != named_parameters.end() && !mbb_param->second.IsNull()) {
+		std::string raw = mbb_param->second.ToString();
+		idx_t parsed = 0;
+		std::string err = StringUtil::TryParseFormattedBytes(raw, parsed);
+		if (!err.empty()) {
+			throw InvalidInputException("max_batch_bytes: %s", err);
+		}
+		if (parsed == 0) {
+			throw InvalidInputException("max_batch_bytes must be greater than 0");
+		}
+		max_batch_bytes = static_cast<uint64_t>(parsed);
+	}
+	return max_batch_bytes;
 }
 
 unique_ptr<NodeStatistics> EstimateFileScanCardinality(const std::vector<std::string> &paths, idx_t bytes_per_row) {

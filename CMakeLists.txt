@@ -733,11 +733,15 @@ if(BUILD_UNITTESTS)
     test/cpp/test_CopySequenceDeferral.cpp
     test/cpp/test_CopyRecordDeferral.cpp
     test/cpp/test_CopySequenceOrder.cpp
-    test/cpp/test_ReadFastxBatchIndex.cpp)
-  # It includes SequenceReader.hpp, whose members depend on MIINT_STATIC_BUILD:
-  # compiled as the miint it links was, or the two disagree on the class.
-  set_source_files_properties(test/cpp/test_ReadFastxBatchIndex.cpp
-                              PROPERTIES COMPILE_DEFINITIONS MIINT_STATIC_BUILD)
+    test/cpp/test_ReadFastxBatchIndex.cpp
+    test/cpp/test_ReadSequencesSamBatchIndex.cpp)
+  # They include SequenceReader.hpp and hfile_duckdb.hpp, whose declarations
+  # depend on MIINT_STATIC_BUILD: compiled as the miint they link was, or the
+  # two disagree on the classes.
+  set_source_files_properties(
+    test/cpp/test_ReadFastxBatchIndex.cpp
+    test/cpp/test_ReadSequencesSamBatchIndex.cpp PROPERTIES COMPILE_DEFINITIONS
+                                                            MIINT_STATIC_BUILD)
   target_link_libraries(tests_duckdb Catch2::Catch2WithMain duckdb_static)
   link_extension_libraries(tests_duckdb "")
   # These set RLIMIT_FSIZE, so POSIX only

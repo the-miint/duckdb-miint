@@ -1,0 +1,276 @@
+# name: test/sql/read_sequences_sam_batch_index.test
+# description: With insertion order kept, what read_sequences_sam feeds an order-keeping consumer comes out in file order, then record order, at 1 and at 8 threads: a CREATE TABLE AS and a query's result keep it, and an order-kept COPY CSV and COPY UBAM of a glob of uBAM files write the source's reads in that order, with md5s pinned at commit 333f98d1. The source spans more files than threads, and files of two chunks. A multi-file scan feeds DuckDB's batch sinks and a one-file scan declares no batch index. max_batch_bytes closes a chunk before the read that would pass it.
+# group: [sql]
+
+require miint
+
+# 12 files of 2,100 to 2,900 reads of 40 to 199 bases, so each spans two chunks of 2,048 rows; 30,000 reads. Derived
+# from md5 and arithmetic only, so they are the same on every platform and DuckDB version.
+statement ok
+CREATE TABLE src AS
+SELECT *, list_transform(range(length(sequence1)), lambda j: ((i + j + k) % 41)::UTINYINT) AS qual1
+FROM (SELECT k, i, 'f' || k || '_' || i AS read_id,
+             left(repeat(translate(md5(k || '/' || i), '0123456789abcdef', 'ACGTACGTACGTACGT'), 8), 40 + (i * 7 + k) % 160)
+                 AS sequence1,
+             (i * 7919 + k)::INTEGER AS zmw
+      FROM range(10, 22) a(k), range(0, 2900) b(i)
+      WHERE i < 2100 + 400 * (k % 3));
+
+# Each file in its own record order. Two-digit numbers sort as the files are claimed. File 15 carries a read group and
+# a tag, which read_sequences_sam does not return.
+loop k 10 15
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM src WHERE k = {k} ORDER BY i) TO '{TEST_DIR}/rsb_in_{k}.bam' (FORMAT UBAM);
+
+endloop
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1, zmw FROM src WHERE k = 15 ORDER BY i) TO '{TEST_DIR}/rsb_in_15.bam'
+(FORMAT UBAM, READ_GROUP {ID: 'rg15', PL: 'PACBIO'}, TAGS {zm: 'zmw'});
+
+loop k 16 22
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM src WHERE k = {k} ORDER BY i) TO '{TEST_DIR}/rsb_in_{k}.bam' (FORMAT UBAM);
+
+endloop
+
+# The bytes each order-kept COPY below must write: the source's reads in file order, then record order, written from
+# the source table. sequence_index counts from 1 in each file.
+statement ok
+COPY (SELECT i + 1 AS sequence_index, read_id, NULL AS comment, sequence1, NULL AS sequence2, qual1, NULL AS qual2
+      FROM src ORDER BY k, i)
+TO '{TEST_DIR}/rsb_out_expected.csv' (FORMAT CSV);
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM src ORDER BY k, i)
+TO '{TEST_DIR}/rsb_out_expected.bam' (FORMAT UBAM, COMPRESSION_LEVEL 0);
+
+foreach thr 1 8
+
+statement ok
+SET threads={thr};
+
+# --- CREATE TABLE AS keeps file order, then record order ---
+# rowid follows insertion order, so row n of the table must be read n of the source in (file, record) order.
+
+statement ok
+CREATE OR REPLACE TABLE ctas AS
+SELECT filepath, sequence_index, read_id FROM read_sequences_sam('{TEST_DIR}/rsb_in_*.bam', include_filepath = true);
+
+query II
+SELECT count(*), count(*) FILTER (WHERE c.read_id IS DISTINCT FROM s.read_id)
+FROM ctas c FULL JOIN (SELECT read_id, row_number() OVER (ORDER BY k, i) - 1 AS pos FROM src) s ON c.rowid = s.pos;
+----
+30000	0
+
+# Each row's filepath names the file it was read from, and its sequence_index is its place in that file.
+query I
+SELECT count(*) FROM ctas
+WHERE read_id <> 'f' || regexp_extract(filepath, 'rsb_in_(\d+)\.bam$', 1) || '_' || (sequence_index - 1);
+----
+0
+
+# The same with chunks of at most about 16 KB, about 65 reads, so each file spans dozens of chunks.
+statement ok
+CREATE OR REPLACE TABLE ctas_small AS
+SELECT read_id FROM read_sequences_sam('{TEST_DIR}/rsb_in_*.bam', max_batch_bytes = '16KB');
+
+query II
+SELECT count(*), count(*) FILTER (WHERE c.read_id IS DISTINCT FROM s.read_id)
+FROM ctas_small c FULL JOIN (SELECT read_id, row_number() OVER (ORDER BY k, i) - 1 AS pos FROM src) s ON c.rowid = s.pos;
+----
+30000	0
+
+# --- A query's result keeps the order ---
+# At 8 threads DuckDB collects a query's result by batch index, so this catches a wrong index; a missing one would
+# still keep the order, on one thread, and the EXPLAIN checks below catch that. The source's (file, record) order
+# hashes the same, below the loop.
+
+query I
+SELECT read_id FROM read_sequences_sam('{TEST_DIR}/rsb_in_*.bam')
+----
+30000 values hashing to 094b55c5f2430068a07191616837cad3
+
+# --- COPY CSV writes the same order ---
+
+statement ok
+COPY (FROM read_sequences_sam('{TEST_DIR}/rsb_in_*.bam')) TO '{TEST_DIR}/rsb_out_{thr}.csv' (FORMAT CSV);
+
+query II
+SELECT md5(content), md5(content) = (SELECT md5(content) FROM read_text('{TEST_DIR}/rsb_out_expected.csv'))
+FROM read_text('{TEST_DIR}/rsb_out_{thr}.csv');
+----
+eb95795142c69c1831279ec3dc1af46d	true
+
+# --- Order-kept COPY UBAM of the glob writes the source's reads in order ---
+# With PRESERVE_ORDER true this writer keeps order on one thread, so it checks the order files are claimed and read in,
+# not the batch index.
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM read_sequences_sam('{TEST_DIR}/rsb_in_*.bam'))
+TO '{TEST_DIR}/rsb_out_{thr}.bam' (FORMAT UBAM, COMPRESSION_LEVEL 0, PRESERVE_ORDER true);
+
+query II
+SELECT md5(content), md5(content) = (SELECT md5(content) FROM read_blob('{TEST_DIR}/rsb_out_expected.bam'))
+FROM read_blob('{TEST_DIR}/rsb_out_{thr}.bam');
+----
+c5e8ca0e048ac36bdf3a5f98d2ffcc6a	true
+
+endloop
+
+query I
+SELECT read_id FROM src ORDER BY k, i
+----
+30000 values hashing to 094b55c5f2430068a07191616837cad3
+
+# --- With order kept, read_sequences_sam feeds DuckDB's batch sinks ---
+# DuckDB uses them only over a source with a batch index (docs/internals/duckdb-engine-notes.md, "Output order costs
+# threads and memory").
+
+statement ok
+SET threads=8;
+
+query II
+EXPLAIN CREATE TABLE ex AS FROM read_sequences_sam('{TEST_DIR}/rsb_in_*.bam');
+----
+physical_plan	<REGEX>:.*Batch Create Table As.*
+
+statement ok
+CREATE TABLE ins AS SELECT * FROM read_sequences_sam('{TEST_DIR}/rsb_in_10.bam') LIMIT 0;
+
+query II
+EXPLAIN INSERT INTO ins SELECT * FROM read_sequences_sam('{TEST_DIR}/rsb_in_*.bam');
+----
+physical_plan	<REGEX>:.*Batch Insert.*
+
+query II
+EXPLAIN COPY (FROM read_sequences_sam('{TEST_DIR}/rsb_in_*.bam')) TO '{TEST_DIR}/rsb_ex.csv' (FORMAT CSV);
+----
+physical_plan	<REGEX>:.*Batch Copy To File.*
+
+# Two files keep it.
+query II
+EXPLAIN CREATE TABLE ex2 AS FROM read_sequences_sam(['{TEST_DIR}/rsb_in_10.bam', '{TEST_DIR}/rsb_in_11.bam']);
+----
+physical_plan	<REGEX>:.*Batch Create Table As.*
+
+# --- A one-file scan declares no batch index ---
+# ScanBatchIndex::KeepForSeveralFiles says why: a file, a list of one file, and a glob that matches one file. The first
+# query keeps the <!REGEX> ones below from passing on a plan that is empty or has no CREATE TABLE AS.
+
+query II
+EXPLAIN CREATE TABLE ex1 AS FROM read_sequences_sam('{TEST_DIR}/rsb_in_10.bam');
+----
+physical_plan	<REGEX>:.*Create Table As.*
+
+query II
+EXPLAIN CREATE TABLE ex1 AS FROM read_sequences_sam('{TEST_DIR}/rsb_in_10.bam');
+----
+physical_plan	<!REGEX>:.*Batch.*
+
+query II
+EXPLAIN CREATE TABLE ex1 AS FROM read_sequences_sam(['{TEST_DIR}/rsb_in_10.bam']);
+----
+physical_plan	<!REGEX>:.*Batch.*
+
+query II
+EXPLAIN COPY (FROM read_sequences_sam('{TEST_DIR}/rsb_in_21*.bam')) TO '{TEST_DIR}/rsb_ex1.csv' (FORMAT CSV);
+----
+physical_plan	<!REGEX>:.*Batch.*
+
+# --- max_batch_bytes closes a chunk before the read that would pass it ---
+# A read counts its name, its bases and its qualities. With ROW_GROUP_SIZE 1 a COPY flushes each chunk on its own, and
+# DuckDB logs each flush with its row count. These scans read one file each.
+
+statement ok
+CALL enable_logging('PhysicalOperator', storage = 'memory');
+
+# Short reads fill 2,048-row chunks at the default: 2,500 reads of 40 to 199 bases.
+statement ok
+COPY (SELECT read_id FROM read_sequences_sam('{TEST_DIR}/rsb_in_10.bam')) TO '{TEST_DIR}/rsb_short.csv' (FORMAT CSV, ROW_GROUP_SIZE 1);
+
+query III
+SELECT count(*), sum(info.rows::BIGINT), max(info.rows::BIGINT)
+FROM duckdb_logs_parsed('PhysicalOperator')
+WHERE event = 'FlushBatch' AND parse_filename(info.file) = 'rsb_short.csv';
+----
+2	2500	2048
+
+# Ten reads of 300,000 bases count 600,002 bytes each, so under '1MB' (1,000,000 bytes) a second read would pass the
+# limit and waits for the next chunk: ten chunks of one. Keeping the read that passes the limit would give chunks of
+# two, and counting the bases alone chunks of three.
+statement ok
+COPY (SELECT 'h' || i AS read_id, repeat('ACGT', 75000) AS sequence1, list_resize([]::UTINYINT[], 300000, 30::UTINYINT) AS qual1
+      FROM range(10) r(i))
+TO '{TEST_DIR}/rsb_hifi.bam' (FORMAT UBAM);
+
+statement ok
+COPY (SELECT read_id FROM read_sequences_sam('{TEST_DIR}/rsb_hifi.bam', max_batch_bytes = '1MB'))
+TO '{TEST_DIR}/rsb_hifi.csv' (FORMAT CSV, ROW_GROUP_SIZE 1);
+
+query III
+SELECT count(*), sum(info.rows::BIGINT), max(info.rows::BIGINT)
+FROM duckdb_logs_parsed('PhysicalOperator')
+WHERE event = 'FlushBatch' AND parse_filename(info.file) = 'rsb_hifi.csv';
+----
+10	10	1
+
+# The default holds at most about 64 MiB. Four reads of 23 MB, without qualities (QUAL '*' in a SAM file, which counts
+# 0 bytes), so each counts 23,000,002 bytes: under 64 MiB a chunk takes two, as a third would pass it; a limit of
+# 69,000,006 bytes or more would take three, and one under 46,000,004 one.
+statement ok
+COPY (SELECT 'g' || i AS qname, 4 AS flag, '*' AS rname, 0 AS pos, 255 AS mapq, '*' AS cigar, '*' AS rnext, 0 AS pnext,
+             0 AS tlen,
+             left(repeat(translate(md5(i::VARCHAR), '0123456789abcdef', 'ACGTACGTACGTACGT'), 718750), 23000000) AS seq,
+             '*' AS qual
+      FROM range(4) r(i))
+TO '{TEST_DIR}/rsb_big.sam' (FORMAT CSV, HEADER false, DELIMITER E'\t');
+
+statement ok
+COPY (SELECT read_id, length(sequence1) AS n FROM read_sequences_sam('{TEST_DIR}/rsb_big.sam'))
+TO '{TEST_DIR}/rsb_big.csv' (FORMAT CSV, ROW_GROUP_SIZE 1);
+
+query III
+SELECT count(*), sum(info.rows::BIGINT), max(info.rows::BIGINT)
+FROM duckdb_logs_parsed('PhysicalOperator')
+WHERE event = 'FlushBatch' AND parse_filename(info.file) = 'rsb_big.csv';
+----
+2	4	2
+
+# A limit of one byte still returns every read, one per chunk, and the same reads.
+query II
+SELECT (SELECT count(*) FROM read_sequences_sam('{TEST_DIR}/rsb_in_10.bam', max_batch_bytes = '1B')),
+       (SELECT count(*) FROM (FROM read_sequences_sam('{TEST_DIR}/rsb_in_10.bam', max_batch_bytes = '1B')
+                              EXCEPT ALL FROM read_sequences_sam('{TEST_DIR}/rsb_in_10.bam')));
+----
+2500	0
+
+# NULL takes the default.
+query I
+SELECT count(*) FROM read_sequences_sam('{TEST_DIR}/rsb_in_10.bam', max_batch_bytes = NULL);
+----
+2500
+
+# --- max_batch_bytes is parsed and checked as read_fastx's is ---
+
+statement error
+FROM read_sequences_sam('{TEST_DIR}/rsb_in_10.bam', max_batch_bytes = 'not_a_size');
+----
+max_batch_bytes: Memory must have a number (e.g. 1GB)
+
+statement error
+FROM read_sequences_sam('{TEST_DIR}/rsb_in_10.bam', max_batch_bytes = '1048576');
+----
+max_batch_bytes: Unknown unit for memory: ''
+
+statement error
+FROM read_sequences_sam('{TEST_DIR}/rsb_in_10.bam', max_batch_bytes = '0B');
+----
+max_batch_bytes must be greater than 0
+
+statement error
+FROM read_sequences_sam('{TEST_DIR}/rsb_in_10.bam', max_batch_bytes = '0MB');
+----
+max_batch_bytes must be greater than 0
