@@ -130,9 +130,9 @@ private:
 // Exposed for testing. Not part of the supported surface.
 namespace krepp_detail {
 
-// IUPAC nucleotide codes, both cases. krepp subscripts a 128-entry table with a
-// plain char, so bytes outside ASCII are not merely unmatched - they index out
-// of range. Shared with the index builder, which needs the same rule for
+// IUPAC nucleotide codes, both cases. krepp reads every other byte as N
+// (seq_nt4_table, ext/krepp/src/common.cpp:11), so a stray character would be
+// placed as an ambiguous base rather than reported. Shared with the index builder, which needs the same rule for
 // reference sequences: a stray newline followed by '>' in a sequence would
 // otherwise open a second FASTA record inside a reference's file, and krepp
 // folds every record in that file into the same leaf.
@@ -168,16 +168,16 @@ std::map<std::string, std::set<std::string>> ValidateIndexLayout(const std::stri
 // one index, with the part that is expected to differ removed.
 //
 // krepp builds the suffix as "-m<M>r<R>" + ("-frac"|"-no_frac")
-// (ext/krepp/src/index.cpp:249-251). Index::load_partial_index reads k, w, h, m,
+// (ext/krepp/src/index.cpp:406-408). Index::load_partial_index reads k, w, h, m,
 // r and frac out of each partial's metadata, and LSHF::check_compatible requires
 // m, h, k, frac and the LSH positions to match, plus r when frac is true
-// (ext/krepp/src/lshf.cpp:163-170). So what has to agree depends on frac:
+// (ext/krepp/src/lshf.cpp:161-168). So what has to agree depends on frac:
 //   - frac := false: r is the residue that says WHICH partial this is, and is
 //     removed. Splitting the residues of one index across jobs and pointing
 //     krepp at the collected directory is the supported way to build a large
 //     index, so treating a differing r as a different index refuses layouts that
 //     work.
-//   - frac := true: r is a cumulative threshold (ext/krepp/src/rqseq.cpp:133)
+//   - frac := true: r is a cumulative threshold (ext/krepp/src/rqseq.cpp:126)
 //     and is kept, so a frac := true index is a single partial.
 //
 // Returns the suffix unchanged if it does not have that shape, so an
@@ -185,20 +185,20 @@ std::map<std::string, std::set<std::string>> ValidateIndexLayout(const std::stri
 std::string PartialHashConfig(const std::string &suffix);
 
 // The filename suffix krepp gives every file of one partial. The single place
-// this is built; ext/krepp/src/index.cpp:249-251 is what it mirrors.
+// this is built; ext/krepp/src/index.cpp:406-408 is what it mirrors.
 std::string PartialSuffix(uint32_t m, uint32_t r, bool frac);
 
 // Reads k, w and h out of a partial's BINARY `metadata<suffix>`.
 //
 // Not the `metadata<suffix>.txt` sidecar. The sidecar is advisory: krepp writes
-// it after the binary (ext/krepp/src/index.cpp:410-420), synthesises it when it
-// is missing (:122-135), and never consults it for compatibility. The binary is
-// mandatory - load_partial_index error_exits without it (:52-55) - it is what
-// LSHF::check_compatible is fed from (:57-69), and the completeness check above
+// it after the binary (ext/krepp/src/index.cpp:567-577), synthesises it when it
+// is missing (:186-199), and never consults it for compatibility. The binary is
+// mandatory - load_partial_index error_exits without it (:122-125) - it is what
+// LSHF::check_compatible is fed from (:127-140), and the completeness check above
 // already requires it, so a complete partial always has one. Reading the
 // sidecar instead meant a partial that had lost its .txt was silently skipped,
 // which mattered most for `w`: krepp compares m, h, k, frac, r under
-// frac := true, and the positions, but never w (ext/krepp/src/lshf.cpp:163-170),
+// frac := true, and the positions, but never w (ext/krepp/src/lshf.cpp:161-168),
 // so this is the only w check there
 // is, and skipping it produced a wrong placement result with no error at all.
 //

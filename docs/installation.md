@@ -146,7 +146,7 @@ Pass these to CMake via `EXT_FLAGS` (e.g. `EXT_FLAGS="-DMIINT_ENABLE_UNIFRAC=OFF
 | `MIINT_ENABLE_ST3` | `ON` | SourceTracker3 microbial source attribution, `sourcetracker()` (Rust) |
 | `MIINT_ENABLE_GPL_BOUNDARY` | `ON` | gpl-boundary subsystem (process pipes + Arrow IPC over POSIX shm) |
 | `MIINT_ENABLE_UNIFRAC` | `ON` | UniFrac (PCoA / PERMANOVA / Faith PD) — requires libomp on macOS |
-| `MIINT_ENABLE_KREPP` | `ON` | krepp phylogenetic placement and index building (`place_krepp`, `krepp_index_create`) — requires the parallel-hashmap and boost-math headers from vcpkg |
+| `MIINT_ENABLE_KREPP` | `ON` | krepp phylogenetic placement and index building (`place_krepp`, `krepp_index_create`) — requires the parallel-hashmap headers from vcpkg |
 
 WASM (Emscripten) builds automatically disable HDF5, SortMeRNA, sylph, gpl-boundary, krepp, MAFFT, and libcurl. MAFFT is off because its fixed-size local arrays need 2–4 MB stack frames and duckdb-wasm runs with a 1 MB stack. UniFrac, vsearch, rype and SourceTracker3 remain enabled. The Rust crates use the C++ side's exception model, so on `wasm_eh`, the only WASM platform miint ships, they are built with WebAssembly exceptions (see [the Rust glue](internals/embedded-tools.md#rust-crates-via-the-miint_rust_glue-umbrella)); SourceTracker3 runs its sampler on the calling thread there. UniFrac builds against a dedicated single-threaded WASM target (`libssu_wasm.a` / `libskbb_wasm.a`, Eigen-backed, OpenMP stubbed out), and vsearch runs its work on the calling thread (`src/include/vsearch_serial.hpp`) because its threaded entry points cannot start threads there; results are identical to native.
 
