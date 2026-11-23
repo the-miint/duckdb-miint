@@ -44,3 +44,29 @@ ORDER BY function_name;
 parse_gff_attributes	true	true
 prodigal_proteins	true	true
 read_fastx	true	true
+
+query TIIII
+SELECT function_name,
+       function_type = 'table' AND parameters[1] = parameter_name,
+       starts_with(split_part(description, 'Full documentation: ', 2), 'https://')
+           AND ends_with(description, '/reading/#' || anchor),
+       starts_with(examples[1], first_example),
+       option_example IS NULL OR list_contains(examples, option_example)
+FROM duckdb_functions()
+JOIN (VALUES
+    ('read_alignment_header', 'path', 'read_alignment_headerpath',
+     'SELECT tid, reference, length FROM read_alignment_header(''reads.bam'') ORDER BY tid;', NULL),
+    ('read_alignments', 'filename', 'sam-and-bam',
+     'SELECT * FROM ''alignments.sam'';', 'SELECT read_id, sequence, qual FROM read_alignments(''alignments.sam'', include_seq_qual = true);'),
+    ('read_paf', 'filename', 'paf',
+     'SELECT * FROM ''alignments.paf'';', 'SELECT * FROM read_paf(''samples/*.paf.gz'', include_filepath = true);'),
+    ('read_sequences_sam', 'filename', 'read_sequences_samfilename',
+     'SELECT read_id, sequence1, qual1 FROM read_sequences_sam(''reads.bam'');', 'SELECT * FROM read_sequences_sam(''samples/*.bam'', include_filepath = true);')
+) AS reference(function_name, parameter_name, anchor, first_example, option_example) USING (function_name)
+WHERE extension_name = 'miint'
+ORDER BY function_name;
+----
+read_alignment_header	true	true	true	true
+read_alignments	true	true	true	true
+read_paf	true	true	true	true
+read_sequences_sam	true	true	true	true

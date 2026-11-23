@@ -5,6 +5,8 @@
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
+#include "duckdb/parser/parsed_data/create_table_function_info.hpp"
+#include "miint_function_reference.hpp"
 
 // htslib comes in via SAMReader.hpp, which owns the SAMFilePtr/SAMHeaderPtr RAII
 // wrappers used below (note the version-prefixed include path this tree uses).
@@ -110,11 +112,16 @@ void ReadAlignmentHeaderTableFunction::Execute(ClientContext &, TableFunctionInp
 }
 
 TableFunction ReadAlignmentHeaderTableFunction::GetFunction() {
-	return TableFunction("read_alignment_header", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal, InitLocal);
+	auto tf = TableFunction("read_alignment_header", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal, InitLocal);
+	tf.GetSignature().GetParameter(0).SetName("path");
+	return tf;
 }
 
 void ReadAlignmentHeaderTableFunction::Register(ExtensionLoader &loader) {
-	loader.RegisterFunction(GetFunction());
+	CreateTableFunctionInfo info(GetFunction());
+	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
+	info.descriptions.push_back(::miint::reference::read_alignment_header());
+	loader.RegisterFunction(std::move(info));
 }
 
 } // namespace duckdb

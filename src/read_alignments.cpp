@@ -10,6 +10,8 @@
 #include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/vector_size.hpp"
+#include "duckdb/parser/parsed_data/create_table_function_info.hpp"
+#include "miint_function_reference.hpp"
 #include "miint_named_parameter.hpp"
 
 namespace duckdb {
@@ -257,6 +259,7 @@ void ReadAlignmentsTableFunction::Execute(ClientContext &context, TableFunctionI
 
 TableFunction ReadAlignmentsTableFunction::GetFunction() {
 	auto tf = TableFunction("read_alignments", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
+	tf.GetSignature().GetParameter(0).SetName("filename");
 	AddNamedParameter(tf, "reference_lengths", LogicalType::ANY);
 	AddNamedParameter(tf, "include_filepath", LogicalType::BOOLEAN);
 	AddNamedParameter(tf, "include_seq_qual", LogicalType::BOOLEAN);
@@ -264,8 +267,10 @@ TableFunction ReadAlignmentsTableFunction::GetFunction() {
 }
 
 void ReadAlignmentsTableFunction::Register(ExtensionLoader &loader) {
-	// Register the main function
-	loader.RegisterFunction(GetFunction());
+	CreateTableFunctionInfo info(GetFunction());
+	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
+	info.descriptions.push_back(::miint::reference::read_alignments());
+	loader.RegisterFunction(std::move(info));
 
 	// Register backward compatibility alias
 	auto read_sam_alias = TableFunction("read_sam", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
