@@ -9,6 +9,7 @@ A reader expands each path it is given as DuckDB's own readers do: a `file:` URI
 - [Reading a file by its name](#reading-a-file-by-its-name) - `FROM 'reads.fq.gz'`, as DuckDB reads `FROM 'x.parquet'`.
 - [FASTA / FASTQ](#fasta-and-fastq) - FASTA and FASTQ sequence files.
 - [SAM / BAM](#sam-and-bam) - SAM and BAM alignment files.
+    - [`read_sequences_sam(filename)`](#read_sequences_samfilename) - Sequences and quality scores in the `read_fastx` layout.
     - [`read_alignment_header(path)`](#read_alignment_headerpath) - A header's `@SQ` lines as `(tid, reference, length)`.
 - [PAF](#paf) - PAF pairwise alignment files, as written by minimap2 and other long-read tools.
 - [GFA](#gfa) - GFA 1 assembly graphs.
@@ -215,218 +216,245 @@ HAVING AVG(q) >= 30;
 ```
 <!-- END REFERENCE: read_fastx -->
 
+<!-- BEGIN REFERENCE: read_alignments -->
 ### SAM and BAM
 
-Reading SAM/BAM alignment files occurs through the `read_alignments` table function. Header information is optional. SEQ and QUAL fields are by default not included. 
-
-Sequence data can be read from SAM/BAM into a `read_fastx` compatible schema using `read_sequences_sam`. 
-
-**Basic example:**
+Read SAM and BAM alignment records. Use `include_seq_qual` to return sequence and quality scores.
 
 ```sql
 SELECT * FROM 'alignments.sam';
 SELECT * FROM 'alignments.bam';
 ```
 
-**Parameters:**
+DuckDB uses `read_alignments` for these [file suffixes](#reading-a-file-by-its-name). Use the function to pass options, read stdin, or open a file with a different suffix.
 
-- `filename` (VARCHAR or VARCHAR[]): Path to SAM/BAM file(s), glob pattern (e.g., `'data/*.bam'`), or `-` / `/dev/stdin` for standard input
-    - **Glob patterns**: When a single VARCHAR contains glob characters (`*`, `?`, `[`), files are expanded and sorted alphabetically
-    - **Arrays**: VARCHAR[] elements are treated as literal paths (no glob expansion)
-- `reference_lengths` (VARCHAR, optional): Table or view name containing reference sequences for headerless SAM files. Must have at least 2 columns: first column = reference name (VARCHAR, BIGINT or UUID, matched as its text (BIGINT in decimal, UUID in the lowercase hyphenated form)), second column = reference length (INTEGER/BIGINT). Column names don't matter. Views are fully supported and can include computed columns.
-- `include_filepath` (BOOLEAN, optional, default false): Add filepath column to output
-- `include_seq_qual` (BOOLEAN, optional, default false): Add sequence and quality score columns to output. When enabled, primary alignments (non-secondary, non-supplementary) and unmapped reads must have SEQ/QUAL data or an error will be raised.
+#### Read sequence data or track source files
 
-**Output schema includes:**
-
-- `position` (BIGINT): 1-based start position
-- `stop_position` (BIGINT): 1-based stop position (computed from CIGAR using `bam_endpos`)
-- `cigar` (VARCHAR): CIGAR string; `''` for a record whose CIGAR field is `*`, never NULL
-- `sequence` (VARCHAR, optional): Read sequence from SEQ field (when include_seq_qual=true)
-- `qual` (UTINYINT[], optional): Quality scores as array of integers 0-93 (when include_seq_qual=true)
-- Plus other standard SAM fields and optional tags
-
-**Behavior:**
-
-- Supports both SAM (text) and BAM (binary) formats
-- Auto-detects file format from content
-- Supports gzip-compressed SAM files
-- Supports stdin input using `-` or `/dev/stdin` (single file only, not in arrays)
-- Reads files in parallel, one thread per file, up to DuckDB's `threads` setting; stdin is read on one thread
-- For headerless SAM files, provide reference information via `reference_lengths` parameter
-
-**Examples:**
 ```sql
--- Read SAM file with header
-SELECT * FROM read_alignments('alignments.sam');
+SELECT read_id, sequence, qual FROM read_alignments('alignments.sam', include_seq_qual = true);
+```
 
--- Read BAM file
-SELECT * FROM read_alignments('alignments.bam');
+```sql
+SELECT * FROM read_alignments('samples/*.bam', include_filepath = true);
+SELECT * FROM read_alignments(['file1.sam', 'file2.bam'], include_filepath = true);
+```
 
--- Read headerless SAM file (requires reference table)
+Use [`read_sequences_sam`](#read_sequences_samfilename) when you want sequence rows compatible with `read_fastx`. Use [`read_alignment_header`](#read_alignment_headerpath) to inspect the reference dictionary.
+
+#### SAM and BAM parameters
+
+| Parameter | Type | Default | Purpose |
+| --- | --- | --- | --- |
+| `filename` | `VARCHAR` or `VARCHAR[]` | Required | Path, glob, list of literal paths, or `-` / `/dev/stdin` for standard input. |
+| `reference_lengths` | `VARCHAR` | Omitted | Name of a table or view supplying reference names and lengths for headerless SAM. |
+| `include_filepath` | `BOOLEAN` | `false` | Include the source path. |
+| `include_seq_qual` | `BOOLEAN` | `false` | Include the SAM sequence and Phred scores. |
+
+#### SAM and BAM output columns
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `read_id` | `VARCHAR` | Query name (QNAME). |
+| `flags` | `USMALLINT` | SAM bit flags (FLAG). |
+| `reference` | `VARCHAR` | Reference name (RNAME), or `*` if unavailable. |
+| `position` | `BIGINT` | 1-based start (POS), or 0 if unavailable. |
+| `stop_position` | `BIGINT` | 1-based exclusive end from the CIGAR, or 0 for an unmapped record. See [Coordinate conventions](#coordinate-conventions). |
+| `mapq` | `UTINYINT` | Mapping quality (MAPQ). |
+| `cigar` | `VARCHAR` | CIGAR string, or an empty string when the SAM field is `*`. |
+| `mate_reference` | `VARCHAR` | Mate reference (RNEXT), `=` for the same reference, or `*` if unavailable. |
+| `mate_position` | `BIGINT` | 1-based mate start (PNEXT), or 0 if unavailable. |
+| `template_length` | `BIGINT` | Signed template length (TLEN). |
+| `tag_as`, `tag_xs`, `tag_ys`, `tag_xn`, `tag_xm`, `tag_xo`, `tag_xg`, `tag_nm` | `BIGINT` | The corresponding integer SAM tags, or `NULL` when absent. |
+| `tag_yt`, `tag_md`, `tag_sa` | `VARCHAR` | The corresponding text SAM tags, or `NULL` when absent. |
+| `sequence` | `VARCHAR` | SEQ, returned with `include_seq_qual = true`. |
+| `qual` | `UTINYINT[]` | Phred scores (0–93), returned with `include_seq_qual = true`. Missing qualities produce an empty list. |
+| `filepath` | `VARCHAR` | Source path, returned with `include_filepath = true`. |
+
+#### Paths, compression, and parallel reads
+
+The reader detects SAM or BAM from the file contents and supports gzip-compressed SAM. A glob's matches are sorted alphabetically. List entries are literal paths. Files can be read in parallel, with one thread per file up to DuckDB's `threads` setting. `read_sam` is a compatibility alias for `read_alignments`.
+
+#### Headerless SAM and standard input
+
+For headerless SAM, pass a reference table or view. The first column contains reference names as `VARCHAR`, `BIGINT`, or `UUID`. Matching uses the text representation, including decimal integers and lowercase hyphenated UUIDs. The second column contains lengths as `INTEGER` or `BIGINT`. Column names are arbitrary and views may compute the columns. When reading multiple local files, all inputs must agree on whether they contain reference dictionary entries (`@SQ`).
+
+```sql
 CREATE TABLE my_refs AS
   SELECT 'chr1' AS name, 248956422 AS length
   UNION ALL SELECT 'chr2', 242193529;
-SELECT * FROM read_alignments('headerless.sam', reference_lengths='my_refs');
-
--- Read multiple files with filepath tracking
-SELECT * FROM read_alignments(['file1.sam', 'file2.bam'], include_filepath=true);
-
--- Read all BAM files matching a glob pattern (sorted alphabetically)
-SELECT * FROM read_alignments('samples/*.bam', include_filepath=true);
-
--- Glob pattern matching specific files
-SELECT COUNT(*) FROM read_alignments('data/sample_*.bam');
-
--- Include sequence and quality scores
-SELECT read_id, sequence, qual
-FROM read_alignments('alignments.sam', include_seq_qual=true);
-
--- Analyze quality scores
-SELECT read_id, sequence, list_avg(qual) as avg_qual
-FROM read_alignments('alignments.bam', include_seq_qual=true)
-WHERE list_avg(qual) >= 30;
-
--- Filter by sequence length
-SELECT read_id, len(sequence) as seq_len
-FROM read_alignments('alignments.sam', include_seq_qual=true)
-WHERE len(sequence) >= 100;
-
--- Read from stdin with header
-SELECT * FROM read_alignments('/dev/stdin');
-
--- Read headerless SAM from stdin (requires reference table)
-CREATE TABLE refs AS SELECT 'chr1' AS name, 248956422 AS length;
-SELECT * FROM read_alignments('-', reference_lengths='refs');
-
--- Backward compatible: read_sam still works
-SELECT * FROM read_sam('alignments.sam');
+SELECT * FROM read_alignments('headerless.sam', reference_lengths = 'my_refs');
 ```
 
-**Stdin limitations:**
+Read stdin with `-` or `/dev/stdin` as the only input. It uses one thread. Apply the same header and reference-table rules to stdin.
 
-- Cannot be used in multi-file arrays (e.g., `['/dev/stdin', 'file.sam']` will error)
-- Data with headers works without `reference_lengths`
-- Headerless data requires `reference_lengths` parameter
-- User must know whether their stdin data contains headers
+```sql
+SELECT * FROM read_alignments('/dev/stdin');
+```
 
-**Malformed records fail the scan.** A record htslib cannot parse — a malformed field, a truncated record, a reference id outside the header's range — raises `Failed to read SAM/BAM record: the file is truncated or malformed`, with the line number for text SAM. Earlier versions dropped such a record and carried on, so a corrupt file read back as a silently short table. If you need to salvage what is readable from a damaged file, repair it first (e.g. `samtools view`), rather than relying on the reader to skip past the damage.
+Use [`read_sequences_sam`](#read_sequences_samfilename) to read sequences from an unaligned BAM with no reference dictionary.
 
-One case is *not* detectable and matches `samtools` exactly: a BGZF file truncated at a block boundary looks like a cleanly-ended file to htslib, so it reads back as a short table with no error. `samtools quickcheck <file>` is the tool for that — it verifies the BGZF EOF marker and exits non-zero when it is missing.
+#### Missing sequence and malformed records
 
+With `include_seq_qual = true`, primary and unmapped records must carry SEQ. On reverse-strand alignments, SEQ is the sequence as stored in SAM, reverse-complemented relative to the original read. Hard-clipped bases are absent.
+
+A record htslib cannot parse, such as a malformed field, truncated record, or out-of-range reference ID, raises `Failed to read SAM/BAM record: the file is truncated or malformed`. The error includes the line number for text SAM. A BGZF file truncated at a block boundary can look like a clean end of file to htslib. `samtools quickcheck <file>` can detect a missing BGZF EOF marker.
+
+<!-- END REFERENCE: read_alignments -->
+
+<!-- BEGIN REFERENCE: read_sequences_sam -->
+#### `read_sequences_sam(filename)`
+
+Read SAM and BAM sequences in the same column layout as `read_fastx`.
+
+```sql
+SELECT read_id, sequence1, qual1 FROM read_sequences_sam('reads.bam');
+```
+
+```sql
+SELECT * FROM read_sequences_sam('samples/*.bam', include_filepath = true);
+```
+
+| Parameter | Type | Default | Purpose |
+| --- | --- | --- | --- |
+| `filename` | `VARCHAR` or `VARCHAR[]` | Required | Path, glob, list of literal paths, or `-` / `/dev/stdin` as the only input. |
+| `include_filepath` | `BOOLEAN` | `false` | Include the source path. |
+
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `sequence_index` | `BIGINT` | 1-based record index within each file. |
+| `read_id` | `VARCHAR` | Query name (QNAME). |
+| `comment`, `sequence2` | `VARCHAR` | Always `NULL`. |
+| `sequence1` | `VARCHAR` | Sequence as stored in the alignment record. |
+| `qual1` | `UTINYINT[]` | Phred scores, or `NULL` if absent. |
+| `qual2` | `UTINYINT[]` | Always `NULL`. |
+| `filepath` | `VARCHAR` | Source path, returned with `include_filepath = true`. |
+
+Each alignment record produces one row. Mates remain separate records even when they share a query name. Primary and unmapped records must carry SEQ. Use `read_alignments` for flags, coordinates, or alignment tags.
+
+<!-- END REFERENCE: read_sequences_sam -->
+
+<!-- BEGIN REFERENCE: read_alignment_header -->
 #### `read_alignment_header(path)`
 
-Read a SAM/BAM **header's `@SQ` lines** as rows of `(tid, reference, length)`. This is the only way to
-see a reference's `tid` — its index in the `@SQ` list — from SQL.
+Read the reference names and lengths from a local SAM or BAM header in header order.
 
 ```sql
 SELECT tid, reference, length FROM read_alignment_header('reads.bam') ORDER BY tid;
 ```
 
-**Output schema:**
+| Parameter | Type | Default | Purpose |
+| --- | --- | --- | --- |
+| `path` | `VARCHAR` | Required | Single local SAM or BAM path. |
 
-| Column | Type | Description |
+| Column | Type | Meaning |
 | --- | --- | --- |
-| `tid` | INTEGER | the reference's index in the `@SQ` list — this *is* the record's `refID` on disk |
-| `reference` | VARCHAR | reference name (`SN:`) |
-| `length` | BIGINT | reference length (`LN:`). BIGINT, not INTEGER: `LN` can exceed 2^31 |
+| `tid` | `INTEGER` | 0-based index in the `@SQ` list, which is the BAM record's on-disk `refID`. |
+| `reference` | `VARCHAR` | Reference name (`SN:`). |
+| `length` | `BIGINT` | Reference length (`LN:`), which can exceed 2³¹. |
 
-**Why it exists.** A BAM is coordinate-sorted by **tid**, not by reference name, and no other function
-exposes tid. `read_alignments` / `read_sam` decode each record's `reference` through the file's own
-header, and name↔tid is a bijection fixed when the header is built — so reading names back yields
-ascending *names* whatever the `@SQ` order was. That makes tid ordering unobservable through the record
-readers, which is why the `@SQ` ordering contract in [Writing](writing.md#sam-and-bam) could not be
-checked for BAM from SQL before this function existed.
+The function reads only the header. An intact header remains readable if a record is malformed. A header with no `@SQ` lines returns zero rows, as is common for unaligned BAM files written with `COPY … (FORMAT UBAM)`. Use `read_alignments` to stream alignment records from remote storage.
 
-**Behavior:**
+BAM coordinate sort uses `tid` as its reference sort key. `read_alignments` exposes the reference names resolved from the file's own header. To verify the [SAM and BAM writer's reference order](writing.md#sam-and-bam), compare each `tid` to the index produced by sorting the reference names.
 
-- Reads **only** the header. `sam_read1` is never called, so a file with intact `@SQ` lines and a
-  corrupt *record* is read successfully here even though `read_alignments` fails the scan on it.
-- A header with **no `@SQ` lines returns zero rows, not an error** — unaligned BAM/SAM legitimately has
-  no references, including the uBAM files `COPY … (FORMAT UBAM)` writes.
-- Works on both BAM and text SAM.
-- **Local paths only.** `https://`, `s3://` and friends are rejected at bind with a clear error; use
-  `read_alignments` if you need remote streaming, or download the file first. Single path only — no
-  glob, no list.
-
-**Verifying a coordinate-sorted BAM:**
 ```sql
--- @SQ is emitted name-sorted, so tid order must equal name order.
 SELECT COUNT(*) = 0 AS header_is_name_sorted FROM (
   SELECT tid, ROW_NUMBER() OVER (ORDER BY reference) - 1 AS expected_tid
   FROM read_alignment_header('sorted.bam')
 ) WHERE tid != expected_tid;
 ```
 
+<!-- END REFERENCE: read_alignment_header -->
+
+<!-- BEGIN REFERENCE: read_paf -->
 ### PAF
 
-Read PAF (Pairwise mApping Format) files, the tab-separated alignment format minimap2 and many long-read tools write, through the `read_paf` table function. Each row is one PAF record.
-
-**Basic example:**
+Read Pairwise Mapping Format (PAF) alignment records with 1-based half-open query and target intervals.
 
 ```sql
 SELECT * FROM 'alignments.paf';
+SELECT * FROM 'alignments.paf.gz';
 ```
 
-**Parameters:**
+DuckDB uses `read_paf` for these [file suffixes](#reading-a-file-by-its-name). Call the function to pass options or open a file with a different suffix.
 
-- `filename` (VARCHAR or VARCHAR[]): Path to PAF file(s), or a glob pattern (e.g., `'data/*.paf.gz'`)
-    - **Glob patterns**: When a single VARCHAR contains glob characters (`*`, `?`, `[`), files are expanded and sorted alphabetically
-    - **Arrays**: VARCHAR[] elements are treated as literal paths (no glob expansion)
-- `include_filepath` (BOOLEAN, optional, default false): Add a `filepath` column to the output
+#### Read several PAF files
 
-**Output schema:**
+```sql
+SELECT * FROM read_paf('samples/*.paf.gz', include_filepath = true);
+```
 
-- `read_id` (VARCHAR): Query sequence name (PAF column 1)
-- `query_length` (BIGINT): Query sequence length
-- `query_start` (BIGINT): Start of the aligned block on the query, 1-based; PAF's 0-based start `+ 1`
-- `query_stop` (BIGINT): End of the aligned block on the query, exclusive; PAF's end `+ 1`
-- `strand` (VARCHAR): `+` or `-`; `*` for an unmapped record
-- `reference` (VARCHAR): Target sequence name; `*` for an unmapped record
-- `reference_length` (BIGINT): Target sequence length
-- `position` (BIGINT): Start of the aligned block on the target, 1-based; PAF's 0-based start `+ 1`
-- `stop_position` (BIGINT): End of the aligned block on the target, exclusive; PAF's end `+ 1`
-- `residue_matches` (BIGINT): Number of matching bases (PAF column 10)
-- `block_length` (BIGINT): Alignment block length (PAF column 11)
-- `mapq` (UTINYINT): Mapping quality; 255 means missing
-- minimap2's tags, one typed column each, NULL when the record does not carry it. These are the tags its manual lists for PAF, except `SA`, which minimap2 writes only in SAM; the names follow `read_alignments`' `tag_<name>` columns:
+#### PAF parameters
 
-  | Column | Type | Tag |
-  |---|---|---|
-  | `tag_tp` | VARCHAR | `tp:A`, alignment type: `P` primary, `S` secondary, `I` / `i` inversion |
-  | `tag_cm` | BIGINT | `cm:i`, minimizers on the chain |
-  | `tag_s1` | BIGINT | `s1:i`, chaining score |
-  | `tag_s2` | BIGINT | `s2:i`, chaining score of the best secondary chain |
-  | `tag_nm` | BIGINT | `NM:i`, mismatches and gaps in the alignment |
-  | `tag_md` | VARCHAR | `MD:Z`, for regenerating the reference sequence of the alignment |
-  | `tag_as` | BIGINT | `AS:i`, DP alignment score |
-  | `tag_ms` | BIGINT | `ms:i`, DP score of the best-scoring segment |
-  | `tag_nn` | BIGINT | `nn:i`, ambiguous bases in the alignment |
-  | `tag_ts` | VARCHAR | `ts:A`, transcript strand (splice mode) |
-  | `tag_cg` | VARCHAR | `cg:Z`, CIGAR |
-  | `tag_cs` | VARCHAR | `cs:Z`, difference string |
-  | `tag_dv` | DOUBLE | `dv:f`, approximate per-base divergence |
-  | `tag_de` | DOUBLE | `de:f`, gap-compressed per-base divergence |
-  | `tag_rl` | BIGINT | `rl:i`, length of query regions with repetitive seeds |
-  | `tag_zd` | BIGINT | `zd:i`, Z-drop break: bit 1 left, bit 2 right |
-- `tags` (MAP(VARCHAR, VARCHAR)): Every other optional field after column 12, as `tag → value`
-- `filepath` (VARCHAR, optional): File path when `include_filepath=true`
+| Parameter | Type | Default | Purpose |
+| --- | --- | --- | --- |
+| `filename` | `VARCHAR` or `VARCHAR[]` | Required | Path, glob, or list of literal paths. |
+| `include_filepath` | `BOOLEAN` | `false` | Include the source path. |
 
-**Behavior:**
+#### PAF output columns
 
-- Both intervals move to miint's 1-based half-open convention ([Coordinate conventions](#coordinate-conventions)): the target interval matches `read_alignments`, so `stop_position - position` is the aligned target length, and `query_stop - query_start` is the aligned query length. The query interval is on the read as sequenced, even on the `-` strand, as PAF writes it (see [Reads](#reads)).
-- An unmapped record (`minimap2 --paf-no-hit`) reports `strand` and `reference` as `*` and `position` / `stop_position` as 0, as `read_alignments` does for an unplaced unmapped SAM record (RNAME `*`, POS 0). It has no aligned block on the query either, so `query_start` / `query_stop` are 0 too.
-- minimap2's tags are typed as they are read: `NM:i:3` becomes `tag_nm = 3`. Any other tag goes into `tags` as text, `zz:i:7` as `tags['zz'] = '7'`, its type letter checked against its value and dropped; a single map has one value type, so cast these when you need numbers. A float (`f`) may also be `nan`, `inf` or `infinity`, in any case and with an optional sign, as htslib (and so `read_alignments`) reads one; a float too large for a DOUBLE reads as an infinity, as htslib's `strtod` gives. Untyped `key:value` fields, which some tools write instead of SAM-style tags, are accepted as well. An untyped field with one of minimap2's names is read as its column's type.
-- gzip-compressed files (`.gz`) are decompressed transparently, including multi-member (bgzip) files. Remote paths (`s3://`, `https://`) are read through DuckDB's file system.
-- One thread reads each file; several files are read in parallel.
-- An empty file returns no rows.
-- stdin is not supported.
+Each row is one PAF record.
 
-**Malformed records fail the scan.** The error names the file, the line and the defect:
+| Column | Type | Meaning |
+| --- | --- | --- |
+| `read_id` | `VARCHAR` | Query sequence name. |
+| `query_length` | `BIGINT` | Query sequence length. |
+| `query_start` | `BIGINT` | 1-based start of the aligned query block. |
+| `query_stop` | `BIGINT` | Exclusive end of the aligned query block. |
+| `strand` | `VARCHAR` | `+` or `-`, or `*` for an unmapped record. |
+| `reference` | `VARCHAR` | Target sequence name, or `*` for an unmapped record. |
+| `reference_length` | `BIGINT` | Target sequence length. |
+| `position` | `BIGINT` | 1-based start of the aligned target block. |
+| `stop_position` | `BIGINT` | Exclusive end of the aligned target block. |
+| `residue_matches` | `BIGINT` | Number of matching bases. |
+| `block_length` | `BIGINT` | Alignment block length. |
+| `mapq` | `UTINYINT` | Mapping quality, with 255 indicating a missing value. |
+| `tags` | `MAP(VARCHAR, VARCHAR)` | Optional fields without a dedicated column, keyed by tag name. |
+| `filepath` | `VARCHAR` | Source path, returned with `include_filepath = true`. |
+
+#### PAF coordinates and unmapped records
+
+Both intervals use MIINT's [1-based half-open convention](#coordinate-conventions). The reader adds 1 to both ends of each mapped interval. The target interval matches `read_alignments`, so `stop_position - position` is the aligned target length, and `query_stop - query_start` is the aligned query length. The query interval is on the [read as sequenced](#reads), including on the reverse strand.
+
+An unmapped record, such as one produced by `minimap2 --paf-no-hit`, has `*` for `strand` and `reference` and 0 for all four interval endpoints.
+
+#### Optional PAF tags
+
+Minimap2's PAF tags have typed columns. An absent tag is `NULL`. Minimap2 writes the `SA` tag only in SAM.
+
+| Column | Type | Tag |
+|---|---|---|
+| `tag_tp` | VARCHAR | `tp:A`, alignment type (`P` primary, `S` secondary, `I` / `i` inversion) |
+| `tag_cm` | BIGINT | `cm:i`, minimizers on the chain |
+| `tag_s1` | BIGINT | `s1:i`, chaining score |
+| `tag_s2` | BIGINT | `s2:i`, chaining score of the best secondary chain |
+| `tag_nm` | BIGINT | `NM:i`, mismatches and gaps in the alignment |
+| `tag_md` | VARCHAR | `MD:Z`, for regenerating the reference sequence of the alignment |
+| `tag_as` | BIGINT | `AS:i`, DP alignment score |
+| `tag_ms` | BIGINT | `ms:i`, DP score of the best-scoring segment |
+| `tag_nn` | BIGINT | `nn:i`, ambiguous bases in the alignment |
+| `tag_ts` | VARCHAR | `ts:A`, transcript strand (splice mode) |
+| `tag_cg` | VARCHAR | `cg:Z`, CIGAR |
+| `tag_cs` | VARCHAR | `cs:Z`, difference string |
+| `tag_dv` | DOUBLE | `dv:f`, approximate per-base divergence |
+| `tag_de` | DOUBLE | `de:f`, gap-compressed per-base divergence |
+| `tag_rl` | BIGINT | `rl:i`, length of query regions with repetitive seeds |
+| `tag_zd` | BIGINT | `zd:i`, Z-drop break (bit 1 left, bit 2 right) |
+
+The reader converts `NM:i:3` to the integer `tag_nm = 3`. For tags without a dedicated column, it validates the type letter against the value and stores only the text value. For example, `zz:i:7` becomes `tags['zz'] = '7'`. Cast map values when you need numbers.
+
+Float tags (`f`) accept `nan`, `inf`, and `infinity` in any case with an optional sign. Values outside the finite `DOUBLE` range overflow to infinity. The reader also accepts untyped `key:value` fields. When a key has a dedicated column, the reader converts the value to that column's type.
+
+#### PAF paths, compression, and parallel reads
+
+A glob's matches are sorted alphabetically. Lists contain literal paths. The reader decompresses gzip files, including multi-member (bgzip) files, and opens remote paths such as `s3://` and `https://` through DuckDB's file system. Files can be read in parallel, with one thread per file. Empty files return zero rows. PAF input must be a file path, glob, or list of paths.
+
+#### Malformed PAF records
+
+A malformed record fails the scan. The error identifies the file, line, and defect.
 
 - fewer than 12 fields, or a blank line
 - an empty query or target name
-- a field that is not a whole non-negative integer, or a mapping quality above 255
+- a fractional, negative, or non-numeric value in one of the first 12 fields that requires an integer, or a mapping quality above 255
 - an interval that runs backwards or past its sequence's length
 - a strand other than `+` or `-`, except `*` on an unmapped record
 - `*` as only one of strand and target name, or an unmapped record with a non-zero query or target start or end
@@ -434,7 +462,8 @@ SELECT * FROM 'alignments.paf';
 - a malformed tag, or a tag that appears twice on one line
 - one of minimap2's tags with a type letter other than the one in the table, or a value that does not fit its column (an integer beyond 64 bits)
 
-**Examples:**
+#### Filter and summarize PAF alignments
+
 ```sql
 -- Primary alignments of reads with at most 2% divergence
 SELECT read_id, reference, position, stop_position
@@ -452,6 +481,8 @@ GROUP BY read_id, query_length;
 -- Unaligned reads
 SELECT read_id FROM read_paf('reads.paf') WHERE reference = '*';
 ```
+
+<!-- END REFERENCE: read_paf -->
 
 ### GFA
 

@@ -8,9 +8,11 @@
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/list_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
+#include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 #include <read_sequences_sam.hpp>
 #include <cstring>
 #include <stdexcept>
+#include "miint_function_reference.hpp"
 #include "miint_named_parameter.hpp"
 
 namespace duckdb {
@@ -198,11 +200,15 @@ void ReadSequencesSamTableFunction::Execute(ClientContext &context, TableFunctio
 
 TableFunction ReadSequencesSamTableFunction::GetFunction() {
 	auto tf = TableFunction("read_sequences_sam", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
+	tf.GetSignature().GetParameter(0).SetName("filename");
 	AddNamedParameter(tf, "include_filepath", LogicalType::BOOLEAN);
 	return tf;
 }
 
 void ReadSequencesSamTableFunction::Register(ExtensionLoader &loader) {
-	loader.RegisterFunction(GetFunction());
+	CreateTableFunctionInfo info(GetFunction());
+	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
+	info.descriptions.push_back(::miint::reference::read_sequences_sam());
+	loader.RegisterFunction(std::move(info));
 }
 } // namespace duckdb

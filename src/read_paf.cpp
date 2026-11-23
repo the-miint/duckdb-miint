@@ -1,9 +1,11 @@
 #include "read_paf.hpp"
+#include "miint_function_reference.hpp"
 
 #include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/string_vector.hpp"
+#include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 
 #include <stdexcept>
 
@@ -213,7 +215,12 @@ void ReadPafTableFunction::Execute(ClientContext &context, TableFunctionInput &d
 }
 
 void ReadPafTableFunction::Register(ExtensionLoader &loader) {
-	loader.RegisterFunction(MakeLineScanFunction("read_paf", Execute, Bind, InitLocal));
+	auto tf = MakeLineScanFunction("read_paf", Execute, Bind, InitLocal);
+	tf.GetSignature().GetParameter(0).SetName("filename");
+	CreateTableFunctionInfo info(std::move(tf));
+	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
+	info.descriptions.push_back(::miint::reference::read_paf());
+	loader.RegisterFunction(std::move(info));
 }
 
 } // namespace duckdb

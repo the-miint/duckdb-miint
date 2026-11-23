@@ -30,6 +30,29 @@ inline duckdb::FunctionDescription prodigal_proteins() {
 	return doc;
 }
 
+inline duckdb::FunctionDescription read_alignment_header() {
+	duckdb::FunctionDescription doc;
+	doc.description = "Read the reference names and lengths from a local SAM or BAM header in header order. Full documentation: ";
+	doc.description += documentation_root;
+	doc.description += "/reading/#read_alignment_headerpath";
+	doc.examples = {
+	    "SELECT tid, reference, length FROM read_alignment_header('reads.bam') ORDER BY tid;"
+	};
+	return doc;
+}
+
+inline duckdb::FunctionDescription read_alignments() {
+	duckdb::FunctionDescription doc;
+	doc.description = "Read SAM and BAM alignment records. Use `include_seq_qual` to return sequence and quality scores. Full documentation: ";
+	doc.description += documentation_root;
+	doc.description += "/reading/#sam-and-bam";
+	doc.examples = {
+	    "SELECT * FROM 'alignments.sam';\nSELECT * FROM 'alignments.bam';",
+	    "SELECT read_id, sequence, qual FROM read_alignments('alignments.sam', include_seq_qual = true);"
+	};
+	return doc;
+}
+
 inline duckdb::FunctionDescription read_fastx() {
 	duckdb::FunctionDescription doc;
 	doc.description = "Read FASTA and FASTQ files, including paired-end reads. Pass a path, a glob, or a list of literal paths. Full documentation: ";
@@ -38,6 +61,30 @@ inline duckdb::FunctionDescription read_fastx() {
 	doc.examples = {
 	    "SELECT * FROM 'sequences.fasta';\nSELECT * FROM 'reads.fastq.gz';",
 	    "SELECT * FROM read_fastx('R1.fastq', sequence2 = 'R2.fastq');"
+	};
+	return doc;
+}
+
+inline duckdb::FunctionDescription read_paf() {
+	duckdb::FunctionDescription doc;
+	doc.description = "Read Pairwise Mapping Format (PAF) alignment records with 1-based half-open query and target intervals. Full documentation: ";
+	doc.description += documentation_root;
+	doc.description += "/reading/#paf";
+	doc.examples = {
+	    "SELECT * FROM 'alignments.paf';\nSELECT * FROM 'alignments.paf.gz';",
+	    "SELECT * FROM read_paf('samples/*.paf.gz', include_filepath = true);"
+	};
+	return doc;
+}
+
+inline duckdb::FunctionDescription read_sequences_sam() {
+	duckdb::FunctionDescription doc;
+	doc.description = "Read SAM and BAM sequences in the same column layout as `read_fastx`. Full documentation: ";
+	doc.description += documentation_root;
+	doc.description += "/reading/#read_sequences_samfilename";
+	doc.examples = {
+	    "SELECT read_id, sequence1, qual1 FROM read_sequences_sam('reads.bam');",
+	    "SELECT * FROM read_sequences_sam('samples/*.bam', include_filepath = true);"
 	};
 	return doc;
 }
