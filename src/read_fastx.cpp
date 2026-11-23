@@ -10,7 +10,9 @@
 #include "duckdb/storage/statistics/node_statistics.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include <read_fastx.hpp>
+#include "miint_function_reference.hpp"
 #include "miint_named_parameter.hpp"
+#include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 
 namespace duckdb {
 
@@ -311,6 +313,7 @@ static unique_ptr<NodeStatistics> ReadFastxCardinality(ClientContext &context, c
 
 TableFunction ReadFastxTableFunction::GetFunction() {
 	auto tf = TableFunction("read_fastx", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
+	tf.GetSignature().GetParameter(0).SetName("filename");
 	AddNamedParameter(tf, "sequence2", LogicalType::ANY);
 	AddNamedParameter(tf, "include_filepath", LogicalType::BOOLEAN);
 	AddNamedParameter(tf, "qual_offset", LogicalType::BIGINT);
@@ -322,6 +325,9 @@ TableFunction ReadFastxTableFunction::GetFunction() {
 }
 
 void ReadFastxTableFunction::Register(ExtensionLoader &loader) {
-	loader.RegisterFunction(GetFunction());
+	CreateTableFunctionInfo info(GetFunction());
+	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
+	info.descriptions.push_back(::miint::reference::read_fastx());
+	loader.RegisterFunction(std::move(info));
 }
 }; // namespace duckdb

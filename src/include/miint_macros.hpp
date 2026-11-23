@@ -5,6 +5,7 @@
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/statement/create_statement.hpp"
 #include "duckdb/parser/parsed_data/create_macro_info.hpp"
+#include "miint_function_reference.hpp"
 #include "predict_genes.hpp"
 
 namespace duckdb {
@@ -3094,7 +3095,8 @@ public:
 		// Parse with the built-in parser, as DuckDB does for its own default macros: built-in semantics (no
 		// connection settings, as before) and the process-wide compiled grammar, so the PEG grammar is compiled once
 		// rather than once per macro.
-		auto register_macro = [&](const std::string &sql, const char *name) {
+		auto register_macro = [&](const std::string &sql, const char *name,
+		                          FunctionDescription (*describe)() = nullptr) {
 			auto parser = Parser::GetBuiltinParser();
 			parser.ParseQuery(sql);
 			if (parser.statements.size() != 1 || parser.statements[0]->type != StatementType::CREATE_STATEMENT) {
@@ -3113,12 +3115,15 @@ public:
 			// macros and RegisterType). Mark accordingly.
 			macro_info.internal = true;
 			macro_info.temporary = true;
+			if (describe) {
+				macro_info.descriptions.push_back(describe());
+			}
 			loader.RegisterFunction(macro_info);
 		};
 
 		register_macro(MIINT_WARNINGS, "miint_warnings");
 
-		register_macro(PARSE_GFF_ATTRIBUTES, "parse_gff_attributes");
+		register_macro(PARSE_GFF_ATTRIBUTES, "parse_gff_attributes", ::miint::reference::parse_gff_attributes);
 		register_macro(READ_GFF, "read_gff");
 		// The _miint_gff_ helpers before the macros that use them.
 		register_macro(MIINT_GFF_ENCODE, "_miint_gff_encode");
@@ -3131,7 +3136,7 @@ public:
 		register_macro(PRODIGAL_STRAND, "_miint_prodigal_strand");
 		register_macro(PRODIGAL_GENE_DATA, "_miint_prodigal_gene_data");
 		register_macro(PRODIGAL_FASTA_RECORDS, "_miint_prodigal_fasta_records");
-		register_macro(PRODIGAL_PROTEINS, "prodigal_proteins");
+		register_macro(PRODIGAL_PROTEINS, "prodigal_proteins", ::miint::reference::prodigal_proteins);
 		register_macro(PRODIGAL_GENES, "prodigal_genes");
 		register_macro(PRODIGAL_GFF_LINES, "_miint_prodigal_gff_lines");
 		// The _miint_gfa_ helpers before the views that use them.
