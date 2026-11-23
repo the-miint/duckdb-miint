@@ -507,7 +507,7 @@ by `place_krepp`. Embedded as a statically linked C++ library built from
 11 of the upstream `src/*.cpp` files; `src/krepp.cpp` (the CLI entry point)
 and `src/api.cpp` (its embedding facade) are excluded. miint reads an index
 built by krepp's own command-line tool or by `krepp_index_create`.
-Pinned at tag v0.12.1 (commit 0991266).
+Pinned at tag v0.12.3 (commit e6de5de).
 
 - Repository: https://github.com/bo1929/krepp
 - License: MIT

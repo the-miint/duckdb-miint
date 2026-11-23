@@ -87,8 +87,8 @@ unique_ptr<FunctionData> PlaceKreppTableFunction::Bind(ClientContext &context, T
 	// arguments krepp itself would have refused.
 	//
 	// tau > hdist_th is memory-unsafe, not merely useless: Minfo sizes
-	// hdisthist_v to hdist_th + 1 (query.hpp:320-322) and get_leq_tau sums
-	// hdisthist_v[0..tau] with unchecked operator[] (query.hpp:358-364).
+	// hdisthist_v to hdist_th + 1 (query.hpp:319-321) and get_leq_tau sums
+	// hdisthist_v[0..tau] with unchecked operator[] (query.hpp:357-363).
 	if (data->config.hdist_th < data->config.tau) {
 		throw BinderException("place_krepp: tau (%d) must not exceed hdist_th (%d)", data->config.tau,
 		                      data->config.hdist_th);

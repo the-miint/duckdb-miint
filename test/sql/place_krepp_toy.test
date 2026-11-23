@@ -209,13 +209,7 @@ SELECT count(*) FROM place_krepp(
 ----
 0
 
-# Compared on the set of placed fragments and the row count, not on the
-# measures. like_weight_ratio is not reproducible run to run - krepp normalizes
-# it over a hash map keyed by node pointer, so the accumulation order moves with
-# the heap. Measured on this index: 28 to 102 of 404 rows differ between two calls in
-# one process, by up to 2.5e-4 absolute (3.9e-3 relative), while likelihood,
-# distance, distal_length and pendant_length are bit-identical. krepp's own CLI
-# is less stable still - across processes it varies which edges appear at all.
+# RNA and DNA input place the same reads, in the same number of rows.
 query I
 WITH rna AS (
     SELECT DISTINCT fragment
@@ -236,6 +230,23 @@ SELECT (SELECT count(*) FROM place_krepp(query_table='toy_reads_rna',
                                          index_path='{MIINT_KREPP_TOY_INDEX}'));
 ----
 true
+
+# Two calls return the same rows in every column, like_weight_ratio included,
+# with multi on and off: krepp breaks ties and orders its sums by node, not by
+# hash-map order (ext/krepp/src/query.cpp:172-179, :353-361, :409-412, :432-438).
+# Before krepp v0.12.2, like_weight_ratio differed in 28 to 102 of 404 rows
+# between two calls on this index.
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM place_krepp(query_table='toy_reads', index_path='{MIINT_KREPP_TOY_INDEX}')
+     EXCEPT ALL
+     SELECT * FROM place_krepp(query_table='toy_reads', index_path='{MIINT_KREPP_TOY_INDEX}'))
+    UNION ALL
+    (SELECT * FROM place_krepp(query_table='toy_reads', index_path='{MIINT_KREPP_TOY_INDEX}', multi=false)
+     EXCEPT ALL
+     SELECT * FROM place_krepp(query_table='toy_reads', index_path='{MIINT_KREPP_TOY_INDEX}', multi=false)));
+----
+0
 
 # --- reads shorter than k ---------------------------------------------------
 #
@@ -497,9 +508,8 @@ true
 # the IBatch constructor. Replace either with a literal in KreppPlacer and no
 # other assertion in this suite moves.
 #
-# Which edge multi=false picks is not reproducible (see the Reproducibility
-# table in docs/phylogeny.md), but the cardinality is: at most one row per
-# fragment, and never more rows than the multi-on run.
+# multi=false returns at most one row per fragment, and never more rows than
+# the multi-on run.
 
 query I
 SELECT count(*) = count(DISTINCT fragment)
@@ -530,7 +540,7 @@ true
 # A larger chisq cutoff admits more candidate edges. Strict `>`, not `>=`: with
 # chisq hardcoded inside KreppPlacer both sides would be the same query and
 # `>=` would hold trivially, which is the mutation this is meant to catch.
-# Measured on this index: chisq 0.001/2.706/10.0/100.0 give 264/404/514/872 rows.
+# Measured on this index: chisq 0.001/2.706/10.0/100.0 give 403/403/508/869 rows.
 query I
 SELECT (SELECT count(*) FROM place_krepp(query_table='toy_reads',
             index_path='{MIINT_KREPP_TOY_INDEX}', chisq=10.0))
@@ -590,7 +600,7 @@ WHERE p.distal_length > coalesce(b.branch_length, 0.0);
 0
 
 # Anti-vacuity, and the other half of the discriminator: some pendant_length
-# exceeds its edge's branch length (161 of 404 rows, measured on this index), so
+# exceeds its edge's branch length (161 of 403 rows, measured on this index), so
 # a swap moves those values into distal_length and the query above fails.
 query I
 SELECT count(*) > 0
@@ -604,7 +614,7 @@ true
 # least d_x - distal_length, where d_x is the Jukes-Cantor distance krepp derives
 # from distance: -0.75 * ln(1 - 4/3 * distance) (Minfo::jukes_cantor_dist, CJC).
 # So pendant_length + distal_length >= d_x on every row except one whose pendant
-# fell back to a leaf distance; on this index that is every one of the 404 rows.
+# fell back to a leaf distance; on this index that is every one of the 403 rows.
 # Swapping pendant_length with distance breaks it on 129 rows, reading distance
 # into pendant_length on 20, and reading distal_length into it on 168. The sum is
 # symmetric in pendant_length and distal_length, so it cannot see that swap; the
@@ -689,7 +699,8 @@ could not be parsed
 # likelihood landscape both ways depending on the data. What IS being asserted
 # is that the parameter arrives at all.
 #
-# Measured on this index: hdist_th 1/2/4/8/20 give 405/406/404/319/229 rows.
+# Measured on this index: hdist_th 1/2/4/8/20 give 407/402/403/318/235 rows
+# (tau 1 at hdist_th 1, tau 2 otherwise).
 query I
 SELECT (SELECT count(*) FROM place_krepp(query_table='toy_reads',
             index_path='{MIINT_KREPP_TOY_INDEX}', hdist_th=2, tau=2))
@@ -698,9 +709,9 @@ SELECT (SELECT count(*) FROM place_krepp(query_table='toy_reads',
 ----
 true
 
-# tau gates the placement filter (ext/krepp/src/query.cpp:294, :342: a
+# tau gates the placement filter (ext/krepp/src/query.cpp:343, :396: a
 # candidate survives when the k-mers within tau of it weigh more than 1). It is
-# inert at the default hdist_th on this corpus - 404 rows at tau 0, 1, 2 and 4
+# inert at the default hdist_th on this corpus - 403 rows at tau 0, 1, 2 and 4
 # alike - because every surviving candidate already clears the bar at tau=0.
 # Widening hdist_th surfaces the marginal candidates it is meant to judge:
 # measured 229 rows at tau=0 against 522 at tau=20.
@@ -734,10 +745,7 @@ SELECT count(*) > 0 FROM place_krepp(query_table='toy_reads',
 ----
 true
 
-# Same placements, not merely a similar number of them. Measured: the
-# (fragment, edge_num) sets are identical and likelihood, distal_length,
-# pendant_length and distance agree exactly; only like_weight_ratio moves,
-# which docs/phylogeny.md already records as not reproducible.
+# Same placements, not merely a similar number of them.
 query II
 SELECT
   (SELECT count(*) FROM (
