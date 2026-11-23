@@ -1,4 +1,4 @@
-# krepp phylogenetic placement (v0.12.1, commit 0991266). Its one header-only
+# krepp phylogenetic placement (v0.12.3, commit e6de5de). Its one header-only
 # dependency, parallel-hashmap, comes from vcpkg rather than krepp's own
 # submodules. ext/krepp/src/krepp.cpp is omitted: it holds main() and the CLI11
 # argument layer. ext/krepp/src/api.cpp, krepp's embedding facade, is omitted

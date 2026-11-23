@@ -11,18 +11,12 @@ require-env KREPP_AVAILABLE
 # letting krepp's error_exit take the whole process down. None of it needs an
 # index to exist.
 #
-# A note for whoever adds cases with multi=false. report_placement ranks
-# candidates with a non-stable std::sort over a vector built by iterating a
-# hash map keyed by node pointer, then takes .back() - so equal-ranking
-# candidates swap with the heap layout. Measured on the toy index: over six
-# runs of `krepp place --no-multi`, 1 of 92 fragments alternated between two
-# edges. Use `krepp place`, not `krepp dist`, for any such measurement; dist
-# goes through report_distances and is a different, noisier code path.
-#
-# multi left on (the default) keeps the candidate set stable but NOT the
-# numbers: like_weight_ratio is normalized over that same pointer-keyed
-# iteration order and moves between loads. See the Reproducibility table in
-# docs/phylogeny.md for what is and is not safe to assert.
+# Since krepp v0.12.2, placement rows are identical from one call to the next,
+# like_weight_ratio included and with multi on or off: multi=false keeps the
+# first of equivalent candidates in edge-number order
+# (ext/krepp/src/query.cpp:432-438). See Reproducibility under place_krepp in
+# docs/phylogeny.md. When comparing against krepp's CLI, use `krepp place`, not
+# `krepp dist`: dist goes through report_distances, a different code path.
 #
 # NOT covered here: the end-to-end pipe -> krepp -> jplace -> rows path, which
 # needs a built index. See test/sql/place_krepp_toy.test.

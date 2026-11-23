@@ -470,8 +470,8 @@ fi
 # test/sql/place_krepp_toy.test skips; the validation tests in
 # test/sql/place_krepp.test still run.
 #
-# NOTE ON THE BINARY. As of 2026-11-19 bioconda's newest krepp is 0.11.1, while
-# the submodule pins v0.12.1 (0991266) - so `conda install bioconda::krepp`
+# NOTE ON THE BINARY. As of 2026-11-23 bioconda's newest krepp is 0.12.1, while
+# the submodule pins v0.12.3 (e6de5de) - so `conda install bioconda::krepp`
 # gives a binary older than the linked library. Build it from source at the submodule's commit
 # (`git clone https://github.com/bo1929/krepp && cd krepp &&
 # git checkout <ext/krepp's commit> && git submodule update --init --recursive

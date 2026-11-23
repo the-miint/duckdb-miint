@@ -23,16 +23,12 @@ require-env MIINT_KREPP_TOY_REFS
 # The index is built here from krepp's toy references rather than taken from
 # MIINT_KREPP_TOY_INDEX, which needs a krepp CLI build.
 #
-# The comparison is per read, not row for row, because krepp itself does not
-# return the same rows from one place_krepp call to the next, even with
-# identical arguments (docs/phylogeny.md, "Reproducibility"). like_weight_ratio
-# moves between calls, so it is left out. The set of candidate edges can also
-# differ by one between calls with identical arguments, so an exact row-for-row
-# match can fail with no batching involved. What stayed stable in every call
-# measured, and so what is asserted here: which reads place, no
-# (fragment, edge_num) twice, and identical stable columns on every edge both
-# calls return. A read lost or placed twice at a batch boundary breaks the
-# first two; a read placed with another read's sequence breaks the third.
+# Since krepp v0.12.2 two calls with identical arguments return identical rows
+# (docs/phylogeny.md, "Reproducibility"), so every batching returns exactly the
+# baseline's rows, like_weight_ratio included. The narrower checks before that
+# one say which way a mismatch went: a read lost or placed twice at a batch
+# boundary breaks the first two; a read placed with another read's sequence
+# breaks the third.
 
 statement ok
 SET threads = 4;
@@ -59,7 +55,7 @@ CREATE TABLE toy_reads AS SELECT read_id, sequence1 FROM read_fastx('ext/krepp/t
 
 statement ok
 CREATE TABLE baseline AS
-SELECT * EXCLUDE (like_weight_ratio) FROM place_krepp(query_table='toy_reads', index_path='{TEST_DIR}/toy_index');
+SELECT * FROM place_krepp(query_table='toy_reads', index_path='{TEST_DIR}/toy_index');
 
 # Something is placed, so the comparisons below are not two empty sets agreeing.
 # More than one read is, so a cut between reads can matter.
@@ -71,25 +67,25 @@ true
 # One read per batch: as many batches as reads, every boundary exercised.
 statement ok
 CREATE TABLE one_row AS
-SELECT * EXCLUDE (like_weight_ratio) FROM place_krepp(query_table='toy_reads', index_path='{TEST_DIR}/toy_index', batch_size := 1);
+SELECT * FROM place_krepp(query_table='toy_reads', index_path='{TEST_DIR}/toy_index', batch_size := 1);
 
 # One base per batch: every read is longer than that, so each is a batch of its own.
 statement ok
 CREATE TABLE one_base AS
-SELECT * EXCLUDE (like_weight_ratio) FROM place_krepp(query_table='toy_reads', index_path='{TEST_DIR}/toy_index', batch_bases := 1);
+SELECT * FROM place_krepp(query_table='toy_reads', index_path='{TEST_DIR}/toy_index', batch_bases := 1);
 
 # Both limits given. Every toy read is 150 bases, so 400 bases holds two reads
 # (a third would make 450), before the row limit of 5: batches of 2.
 statement ok
 CREATE TABLE mixed AS
-SELECT * EXCLUDE (like_weight_ratio) FROM place_krepp(query_table='toy_reads', index_path='{TEST_DIR}/toy_index',
+SELECT * FROM place_krepp(query_table='toy_reads', index_path='{TEST_DIR}/toy_index',
                           batch_size := 5, batch_bases := 400);
 
 # The largest batch_size there is: every read in one batch. The stream must not
 # try to reserve that many rows up front.
 statement ok
 CREATE TABLE one_batch AS
-SELECT * EXCLUDE (like_weight_ratio) FROM place_krepp(query_table='toy_reads', index_path='{TEST_DIR}/toy_index',
+SELECT * FROM place_krepp(query_table='toy_reads', index_path='{TEST_DIR}/toy_index',
                           batch_size := 9223372036854775807);
 
 # Every call in one table, so each check below covers all of them at once.
@@ -147,3 +143,48 @@ SELECT (SELECT count(*) FROM (
      = (SELECT count(*) FROM variant_names) * (SELECT count(DISTINCT fragment) FROM baseline);
 ----
 true
+
+# Every batching returns the baseline's rows exactly, in every column.
+query I
+SELECT count(*) FROM (
+    (SELECT v.variant, b.* FROM variant_names v, baseline b
+     EXCEPT ALL SELECT * FROM variants)
+    UNION ALL
+    (SELECT * FROM variants
+     EXCEPT ALL SELECT v.variant, b.* FROM variant_names v, baseline b));
+----
+0
+
+# A placer keeps one pair of krepp IMers for every query it places and resets
+# them per query (src/KreppPlacer.cpp). On one thread there is one placer, so
+# the later reads of the full table are placed after the earlier ones on the
+# same IMers. Placed alone, they must give the same rows: state left over from
+# an earlier query would change them.
+statement ok
+SET threads = 1;
+
+statement ok
+CREATE TABLE late_reads AS
+SELECT read_id, sequence1 FROM read_fastx('ext/krepp/test/query_toy.fq') OFFSET 50;
+
+statement ok
+CREATE TABLE after_others AS
+SELECT p.* FROM place_krepp(query_table='toy_reads', index_path='{TEST_DIR}/toy_index') p
+SEMI JOIN late_reads l ON p.fragment = l.read_id;
+
+statement ok
+CREATE TABLE alone AS
+SELECT * FROM place_krepp(query_table='late_reads', index_path='{TEST_DIR}/toy_index');
+
+query I
+SELECT count(*) > 0 FROM alone;
+----
+true
+
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM alone EXCEPT ALL SELECT * FROM after_others)
+    UNION ALL
+    (SELECT * FROM after_others EXCEPT ALL SELECT * FROM alone));
+----
+0

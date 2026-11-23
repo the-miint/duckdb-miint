@@ -510,8 +510,9 @@ SELECT read_id, sequence1 FROM read_fastx('queries.fq');
 
 SELECT * FROM place_krepp(query_table='reads', index_path='index_toy');
 
--- One row per read, chosen deterministically. Prefer this over multi=false,
--- which lets krepp break score ties on hash-map iteration order.
+-- One row per read: the highest like_weight_ratio, ties to the lower edge.
+-- multi=false also returns one row per read, but by krepp's own ranking
+-- (see Reproducibility above).
 SELECT DISTINCT ON (fragment) fragment, edge_num, like_weight_ratio
 FROM place_krepp(query_table='reads', index_path='index_toy')
 ORDER BY fragment, like_weight_ratio DESC, edge_num;
@@ -570,7 +571,7 @@ Build the index [`place_krepp`](#phylogenetic-placement-krepp) reads, from relat
 - `sdust_t` (INTEGER, default 0), `sdust_w` (INTEGER, default 0): SDUST low-complexity masking threshold and window. Both 0 disables masking; krepp warns that enabling it makes its subsampling model slightly inaccurate.
 - `threads` (INTEGER, default 1, maximum 256): Threads krepp spreads the build over. Available only when the extension was built with an OpenMP runtime present — `SELECT * FROM miint_versions() WHERE library = 'krepp-openmp'` returns a row when it was. On a build without one, `threads := 1` is accepted and anything larger is **refused rather than clamped**, because a thread count that is quietly ignored is indistinguishable from a slow machine. The 256 ceiling is a guard rail, not a tuning limit: krepp passes the value to `omp_set_num_threads` unclamped, and when the runtime cannot create that many threads it aborts the process rather than failing the call.
 
-  Which files a threaded build changes: krepp merges each node's children in whatever order their tasks finish, so the colour arrays (`cmer`'s subset column, and `crecord`) differ between a serial and a threaded build. The *k*-mers indexed and the bucket each lands in do not — `inc-m4r1-frac` was byte-identical across 1 and 4 threads, and `total_num_kmers` was unchanged. Note that no two builds are byte-identical across *every* file regardless of thread count, because `metadata-*.txt` records a build timestamp. Placement output is not a clean comparison in either direction — `place_krepp` is not reproducible run to run even single-threaded, for reasons that predate this parameter and are unrelated to it; the variation observed was confined to `like_weight_ratio`, with `edge_num` and the distances stable.
+  Which files a threaded build changes: krepp merges each node's children in whatever order their tasks finish, so the colour arrays (`cmer`'s subset column, and `crecord`) differ between a serial and a threaded build. The *k*-mers indexed and the bucket each lands in do not — `inc-m4r1-frac` was byte-identical across 1 and 4 threads, and `total_num_kmers` was unchanged. Note that no two builds are byte-identical across *every* file regardless of thread count, because `metadata-*.txt` records a build timestamp. Whether `place_krepp` returns the same rows from a serial and a threaded build of the same references has not been measured.
 
   Scaling is sublinear and flattens early. Measured through `krepp_index_create` on a ten-core Apple M1 Max over the 25-genome corpus in `ext/krepp/test`, one run per point: about 10.1 s at one thread, 5.0 s at four, 4.6 s at eight.
 
