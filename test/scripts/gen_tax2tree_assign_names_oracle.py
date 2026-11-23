@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Generate the tax2tree parity fixture for AssignNames (src/TaxonomyDecorator.cpp).
+"""Generate the tax2tree parity fixtures for AssignNames and Decorate (src/TaxonomyDecorator.cpp).
 
 AssignNames ports how tax2tree gives a tree's internal nodes names: its pick_names and
 name_node_score_fold (tax2tree, BSD-3-Clause; Copyright (c) 2011, The tax2tree project;
@@ -29,6 +29,22 @@ decided by postorder; and among those, one whose node has a smaller index than a
 node's, and one whose node has a larger index. Without the last two, a tie-break that compared
 indices, in one direction or the other, would match.
 
+It then generates a second fixture, for decoration after the fold (Decorate, FormatLabel and
+EmitLineages; test/cpp/test_TaxonomyDecoratorParity.cpp again), by running tax2tree's next
+stages on each case, unchanged and in `t2t decorate` order, without correction, which Decorate
+does not do:
+
+  set_preliminary_name_and_rank, make_consensus_tree, backfill_names_gap,
+  commonname_promotion, pull_consensus_strings
+
+A case is left out of it when it hits a difference from miint that the parity test's header
+lists: a root named below the domain, a node with no named ancestor, an inverted-rank node, a
+label out of rank order, or a merge by substring. The cases left out are listed with the
+differences they hit; more cases, drawn under their own names (dec00, ...), bring the random
+ones to N_DECORATE. A hand-built golden case, Greengenes-shaped with GTDB-style names and genome
+ids, comes on top, and must hit no difference and include a gap fill, a promotion and a merge of
+a name with its polyphyletic variant.
+
 Outputs, under data/tax2tree/assign_names/, each table gzip-compressed with no timestamp or
 file name in its header, so the same tables give the same bytes:
   cases.tsv.gz          case, min_count
@@ -41,14 +57,28 @@ file name in its header, so the same tables give the same bytes:
                         seed, the redraws, how many names each tie-break decided and by which
                         index, the command
 
+Outputs, under data/tax2tree/decorate/, in the same form:
+  cases.tsv.gz              case, min_count
+  trees.tsv.gz              case, node_index, parent_index (empty for the root), name (tips only)
+  taxonomy.tsv.gz           case, feature_id, then the eight rank columns (empty for NULL)
+  expected_labels.tsv.gz    case, node_index, label: each internal node's label after promotion,
+                            as tax2tree writes it ("f__X; g__Y"), by node
+  expected_lineages.tsv.gz  case, feature_id, then the eight rank columns: each tip's lineage
+                            from pull_consensus_strings, bare names, empty for tax2tree's "x__";
+                            every tip, by node
+  provenance.txt            the versions, the cases left out and why, the extra draws rejected,
+                            what the cases exercise, the command
+
 Usage, from the repository root:
   conda run -n miint-beta-oracle python -I test/scripts/gen_tax2tree_assign_names_oracle.py \\
       --tax2tree PATH_TO_TAX2TREE_CHECKOUT
-Running it again must leave `git diff data/tax2tree/assign_names` empty.
+Running it again must leave `git diff data/tax2tree` empty.
 """
 import argparse
+import contextlib
 import gzip
 import hashlib
+import io
 import os
 import platform
 import random
@@ -58,8 +88,13 @@ from fractions import Fraction
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUTDIR = os.path.normpath(os.path.join(HERE, "..", "..", "data", "tax2tree", "assign_names"))
+DECORATE_OUTDIR = os.path.normpath(os.path.join(HERE, "..", "..", "data", "tax2tree", "decorate"))
 SEED = 20261117
 N_CASES = 20
+# Random cases in the decoration fixture: the assign_names cases that keep clear of every difference, then
+# more drawn under their own names. The hand-built golden case comes on top.
+N_DECORATE = 20
+MAX_ATTEMPTS = 1000
 RANK_LETTERS = "dpcofgs"
 COLUMNS = ["domain", "phylum", "class", "order", "family", "genus", "species", "strain"]
 
@@ -178,8 +213,13 @@ def draw_case(rng):
     return tree_rows, lineage_of, [index[v] for v in postorder(children)]
 
 
-def build_skbio_tree(tree_rows, expected_postorder):
-    """An skbio TreeNode with each node's index in attribute `idx`, tips named T<index>.
+def tip_name(names, idx):
+    """A tip's name: T<index>, or the one `names` gives it."""
+    return f"T{idx}" if names is None else names[idx]
+
+
+def build_skbio_tree(tree_rows, expected_postorder, names=None):
+    """An skbio TreeNode with each node's index in attribute `idx`, tips named by tip_name.
 
     Internal nodes stay unnamed: load_tree would read a numeric internal name, such as an index,
     as a support value and drop it.
@@ -188,7 +228,7 @@ def build_skbio_tree(tree_rows, expected_postorder):
 
     nodes = {}
     for idx, _, is_tip in tree_rows:
-        node = TreeNode(name=f"T{idx}" if is_tip else None)
+        node = TreeNode(name=tip_name(names, idx) if is_tip else None)
         node.idx = idx
         nodes[idx] = node
     # Siblings ascend left to right, so appending each node to its parent in index order keeps
@@ -203,11 +243,11 @@ def build_skbio_tree(tree_rows, expected_postorder):
     return root
 
 
-def consensus_lines(lineage_of):
+def consensus_lines(lineage_of, names=None):
     lines = []
     for idx in sorted(lineage_of):
         fields = [f"{RANK_LETTERS[r]}__{name or ''}" for r, name in enumerate(lineage_of[idx])]
-        lines.append(f"T{idx}\t" + "; ".join(fields))
+        lines.append(f"{tip_name(names, idx)}\t" + "; ".join(fields))
     return lines
 
 
@@ -263,14 +303,15 @@ def score_names(nl, tree, counts):
     return False, decided, postorder_ties
 
 
-def run_tax2tree(nl, tree_rows, lineage_of, expected_postorder, min_count):
-    """The names each internal node keeps, or None for a draw to reject, and the tie-break
-    counts, with the names postorder decided counted by whether a smaller or a larger index won
-    (a winner between two tied nodes counts as both)."""
-    lines = consensus_lines(lineage_of)
+def run_tax2tree(nl, tree_rows, lineage_of, expected_postorder, min_count, names=None):
+    """The names each internal node keeps, or None for a draw to reject; the tie-break counts,
+    with the names postorder decided counted by whether a smaller or a larger index won (a
+    winner between two tied nodes counts as both); and the tree and consensus map, for
+    run_decorate to go on with."""
+    lines = consensus_lines(lineage_of, names)
     nl.determine_rank_order(lines[0].split("\t")[1])
     tipname_map = nl.load_consensus_map(lines, False)
-    tree = nl.load_tree(build_skbio_tree(tree_rows, expected_postorder), tipname_map)
+    tree = nl.load_tree(build_skbio_tree(tree_rows, expected_postorder, names), tipname_map)
     counts = nl.collect_names_at_ranks_counts(tree)
     nl.decorate_ntips(tree)
     nl.decorate_name_relative_freqs(tree, counts, min_count)
@@ -278,7 +319,7 @@ def run_tax2tree(nl, tree_rows, lineage_of, expected_postorder, min_count):
     nl.pick_names(tree)
     rational_tie, decided, postorder_ties = score_names(nl, tree, counts)
     if rational_tie:
-        return None, None
+        return None, None, None, None
     nl.name_node_score_fold(tree)
     kept = []
     holder = {}
@@ -294,7 +335,210 @@ def run_tax2tree(nl, tree_rows, lineage_of, expected_postorder, min_count):
         assert winner in tied, (rank, name, winner, tied)
         decided["postorder, won by a smaller index"] += winner < max(tied)
         decided["postorder, won by a larger index"] += winner > min(tied)
-    return sorted(kept), decided
+    return sorted(kept), decided, tree, tipname_map
+
+
+def poly_base(name):
+    """PolyphyleticBase: a bare name without a trailing underscore and capital letters, when what
+    precedes them is not empty."""
+    head, sep, tail = name.rpartition("_")
+    if sep and head and tail and all("A" <= ch <= "Z" for ch in tail):
+        return head
+    return name
+
+
+def run_decorate(nl, tree, tipname_map):
+    """tax2tree's stages after the fold, unchanged and in `t2t decorate` order, skipping
+    correction, which Decorate does not do: set_preliminary_name_and_rank, make_consensus_tree,
+    backfill_names_gap, commonname_promotion, pull_consensus_strings.
+
+    Returns each internal node's label by index, each tip's seven names by tip name (None where
+    tax2tree writes an empty "x__"), the differences from miint the case hits (empty for a case
+    the fixture can use), and counts of what the case exercises.
+    """
+    differences = set()
+    inverted_below_domain = False
+    nl.set_preliminary_name_and_rank(tree)
+    for node in tree.non_tips(include_self=True):
+        if node.name is None:
+            continue
+        if node.is_root():
+            if node.Rank > 0:
+                differences.add("5. root named below the domain (miint fills it to the domain)")
+            continue
+        ancestor = nl.get_nearest_named_ancestor(node)
+        if ancestor is None:
+            if node.Rank > 0:
+                differences.add("6. no named ancestor (miint fills to the domain)")
+        elif node.Rank < ancestor.Rank:
+            differences.add("7. inverted ranks (miint keeps the label and records the inversion)")
+            # tax2tree never compares a domain's rank, so it reports only the others.
+            inverted_below_domain = inverted_below_domain or node.Rank > 0
+    _, lookup = nl.make_consensus_tree(tipname_map.values())
+    printed = io.StringIO()
+    with contextlib.redirect_stdout(printed):  # it prints each inverted node below the domain
+        nl.backfill_names_gap(tree, lookup)
+    if bool(printed.getvalue()) != inverted_below_domain:
+        raise RuntimeError("tax2tree's report of inverted nodes disagrees with the generator's")
+    backfilled = {node.idx: len(node.BackFillNames) for node in tree.non_tips(include_self=True)}
+
+    merges = 0
+    original = nl.polyphyletic_unique
+
+    def checked(names):
+        nonlocal merges
+        result = original(names)
+        distinct = sorted(set(names))
+        if len(distinct) == 2:
+            a, b = distinct
+            base_exact = a[:3] == b[:3] and (poly_base(b[3:]) == a[3:] or poly_base(a[3:]) == b[3:])
+            if len(result) == 1 and not base_exact:
+                differences.add("9. merged by substring (miint merges only a name and its own variant)")
+            elif len(result) == 1:
+                merges += 1
+            elif base_exact:
+                raise RuntimeError(f"tax2tree kept {a} and {b} apart, which miint merges")
+        return result
+
+    nl.polyphyletic_unique = checked
+    try:
+        nl.commonname_promotion(tree)
+    finally:
+        nl.polyphyletic_unique = original
+
+    labels = {}
+    promotions = 0
+    for node in tree.non_tips(include_self=True):
+        promotions += len(node.BackFillNames) > backfilled[node.idx]
+        if node.name:
+            ranks = [RANK_LETTERS.index(part.strip()[0]) for part in node.name.split(";")]
+            if any(later <= earlier for earlier, later in zip(ranks, ranks[1:])):
+                differences.add("8. label out of rank order (miint never promotes a name that shallow)")
+            labels[node.idx] = node.name
+    lineages = {}
+    for line in nl.pull_consensus_strings(tree):
+        tip, consensus = line.split("\t")
+        lineages[tip] = [part.split("__", 1)[1] or None for part in consensus.split("; ")]
+    stats = {
+        "gap fills": sum(1 for count in backfilled.values() if count > 1),
+        "promotions": promotions,
+        "polyphyletic merges": merges,
+    }
+    return labels, lineages, sorted(differences), stats
+
+
+# The golden case: Greengenes-shaped, with GTDB-style names and genome ids. Two domains, so the
+# root is unnamed; each domain's clade holds two phyla, so it is named at the domain alone.
+# Bacillus and Bacillus_A merge on promotion at Bacillaceae's node; Escherichia's E. albertii
+# clade holds most of its genomes, so the clade holding E. coli and E. fergusonii is unnamed, and
+# promotion moves their order, family and genus up to it. One genome carries no taxonomy.
+GOLDEN_LINEAGES = {
+    "subtilis": ["Bacillota", "Bacilli", "Bacillales", "Bacillaceae", "Bacillus", "Bacillus subtilis"],
+    "cereus": ["Bacillota", "Bacilli", "Bacillales", "Bacillaceae", "Bacillus_A", "Bacillus_A cereus"],
+    "aureus": ["Bacillota", "Bacilli", "Bacillales", "Staphylococcaceae", "Staphylococcus", "Staphylococcus aureus"],
+    "coli": [
+        "Pseudomonadota",
+        "Gammaproteobacteria",
+        "Enterobacterales",
+        "Enterobacteriaceae",
+        "Escherichia",
+        "Escherichia coli",
+    ],
+    "fergusonii": [
+        "Pseudomonadota",
+        "Gammaproteobacteria",
+        "Enterobacterales",
+        "Enterobacteriaceae",
+        "Escherichia",
+        "Escherichia fergusonii",
+    ],
+    "albertii": [
+        "Pseudomonadota",
+        "Gammaproteobacteria",
+        "Enterobacterales",
+        "Enterobacteriaceae",
+        "Escherichia",
+        "Escherichia albertii",
+    ],
+    "aeruginosa": [
+        "Pseudomonadota",
+        "Gammaproteobacteria",
+        "Pseudomonadales",
+        "Pseudomonadaceae",
+        "Pseudomonas",
+        "Pseudomonas aeruginosa",
+    ],
+    "smithii": [
+        "Methanobacteriota",
+        "Methanobacteria",
+        "Methanobacteriales",
+        "Methanobacteriaceae",
+        "Methanobrevibacter",
+        "Methanobrevibacter smithii",
+    ],
+    "maritimus": [
+        "Thermoproteota",
+        "Nitrososphaeria",
+        "Nitrososphaerales",
+        "Nitrosopumilaceae",
+        "Nitrosopumilus",
+        "Nitrosopumilus maritimus",
+    ],
+}
+GOLDEN_DOMAIN = {key: "Archaea" if key in ("smithii", "maritimus") else "Bacteria" for key in GOLDEN_LINEAGES}
+
+
+def genomes(key, *ids):
+    return [(genome, key) for genome in ids]
+
+
+# Each internal node is a list of children; each tip is (genome id, lineage key or None).
+GOLDEN_TREE = [
+    [  # Bacteria
+        [  # Bacillota
+            [  # Bacillaceae
+                genomes("subtilis", "G000009045", "G000227465"),
+                genomes("cereus", "G000007825", "G000789275"),
+            ],
+            genomes("aureus", "G000013425", "G000144955"),
+        ],
+        [  # Pseudomonadota
+            [  # E. coli and E. fergusonii
+                genomes("coli", "G000005845", "G000008865"),
+                genomes("fergusonii", "G000026225", "G000190695"),
+            ],
+            genomes("albertii", "G000512125", "G000759775", "G001549955", "G002741595", "G003034175"),
+            genomes("aeruginosa", "G000006765", "G000014625"),
+        ],
+    ],
+    [  # Archaea
+        genomes("smithii", "G000016525", "G000190615"),
+        genomes("maritimus", "G000018465", "G000875775"),
+    ],
+    ("G900000001", None),
+]
+
+
+def golden_case():
+    """The golden case as draw_case gives a random one, numbered in preorder, plus its tip names."""
+    tree_rows, lineage_of, names, post = [], {}, {}, []
+
+    def visit(node, parent):
+        idx = len(tree_rows)
+        is_tip = isinstance(node, tuple)
+        tree_rows.append((idx, parent, is_tip))
+        if is_tip:
+            genome, key = node
+            names[idx] = genome
+            if key is not None:
+                lineage_of[idx] = [GOLDEN_DOMAIN[key], *GOLDEN_LINEAGES[key]]
+        else:
+            for child in node:
+                visit(child, idx)
+        post.append(idx)
+
+    visit(GOLDEN_TREE, None)
+    return tree_rows, lineage_of, names, post
 
 
 def write_tsv_gz(path, header, rows):
@@ -325,6 +569,8 @@ def main():
     decided_total = {}
     drawn = []
     stats = []
+    # (name, min_count, tree_rows, lineage_of, tip names or None, labels, lineages, differences, counts)
+    decorated = []
     for i in range(N_CASES):
         name = f"case{i:02d}"
         attempt = 0
@@ -332,7 +578,7 @@ def main():
             rng = case_rng(name, attempt)
             tree_rows, lineage_of, expected_postorder = draw_case(rng)
             min_count = rng.choice([1, 2])
-            kept, decided = run_tax2tree(nl, tree_rows, lineage_of, expected_postorder, min_count)
+            kept, decided, tree, tipname_map = run_tax2tree(nl, tree_rows, lineage_of, expected_postorder, min_count)
             if kept is not None:
                 break
             redraws += 1
@@ -340,6 +586,7 @@ def main():
         for rule, count in decided.items():
             decided_total[rule] = decided_total.get(rule, 0) + count
         drawn.append((name, min_count, tree_rows, lineage_of, kept))
+        decorated.append((name, min_count, tree_rows, lineage_of, None, *run_decorate(nl, tree, tipname_map)))
         root = next(idx for idx, parent, _ in tree_rows if parent is None)
         tips = sum(1 for row in tree_rows if row[2])
         below_root = sum(1 for idx, _, _ in kept if idx != root)
@@ -397,6 +644,121 @@ def main():
         f.write("\n")
         for line in stats:
             f.write(line + "\n")
+
+    write_decorate_fixture(nl, skbio, numpy, tax2tree, decorated)
+
+
+def write_decorate_fixture(nl, skbio, numpy, tax2tree, decorated):
+    """The decoration fixture: the assign_names cases that hit no difference from miint, more random cases
+    drawn under their own names until there are N_DECORATE, and the golden case."""
+    excluded = [(name, differences) for name, *_, differences, _ in decorated if differences]
+    kept = [case for case in decorated if not case[7]]
+    rejected = {}
+    k = 0
+    while len(kept) < N_DECORATE:
+        name = f"dec{k:02d}"
+        for attempt in range(MAX_ATTEMPTS):
+            rng = case_rng(name, attempt)
+            tree_rows, lineage_of, expected_postorder = draw_case(rng)
+            min_count = rng.choice([1, 2])
+            tax2tree_names, _, tree, tipname_map = run_tax2tree(
+                nl, tree_rows, lineage_of, expected_postorder, min_count
+            )
+            if tax2tree_names is None:
+                rejected["1. equal F1 from different counts"] = rejected.get("1. equal F1 from different counts", 0) + 1
+                continue
+            labels, lineages, differences, counts = run_decorate(nl, tree, tipname_map)
+            if not differences:
+                kept.append((name, min_count, tree_rows, lineage_of, None, labels, lineages, differences, counts))
+                break
+            for difference in differences:
+                rejected[difference] = rejected.get(difference, 0) + 1
+        else:
+            sys.exit(f"{name}: no draw in {MAX_ATTEMPTS} keeps clear of every difference")
+        k += 1
+
+    tree_rows, lineage_of, names, expected_postorder = golden_case()
+    tax2tree_names, _, tree, tipname_map = run_tax2tree(nl, tree_rows, lineage_of, expected_postorder, 2, names)
+    if tax2tree_names is None:
+        sys.exit("golden: two candidates tie on F1 from different counts; change the golden tree")
+    labels, lineages, differences, counts = run_decorate(nl, tree, tipname_map)
+    if differences:
+        sys.exit(f"golden: hits {differences}; change the golden tree")
+    if counts["polyphyletic merges"] == 0 or counts["promotions"] == 0 or counts["gap fills"] == 0:
+        sys.exit(f"golden: lacks a merge, a promotion or a gap fill ({counts}); change the golden tree")
+    kept.append(("golden", 2, tree_rows, lineage_of, names, labels, lineages, differences, counts))
+
+    totals = {}
+    for *_, counts in kept:
+        for what, count in counts.items():
+            totals[what] = totals.get(what, 0) + count
+
+    os.makedirs(DECORATE_OUTDIR, exist_ok=True)
+    write_tsv_gz(os.path.join(DECORATE_OUTDIR, "cases.tsv.gz"), ["case", "min_count"], [(c[0], c[1]) for c in kept])
+    write_tsv_gz(
+        os.path.join(DECORATE_OUTDIR, "trees.tsv.gz"),
+        ["case", "node_index", "parent_index", "name"],
+        [
+            (name, idx, parent, tip_name(names, idx) if is_tip else None)
+            for name, _, tree_rows, _, names, *_ in kept
+            for idx, parent, is_tip in tree_rows
+        ],
+    )
+    write_tsv_gz(
+        os.path.join(DECORATE_OUTDIR, "taxonomy.tsv.gz"),
+        ["case", "feature_id", *COLUMNS],
+        [
+            (name, tip_name(names, idx), *lineage_of[idx], None)
+            for name, _, _, lineage_of, names, *_ in kept
+            for idx in sorted(lineage_of)
+        ],
+    )
+    write_tsv_gz(
+        os.path.join(DECORATE_OUTDIR, "expected_labels.tsv.gz"),
+        ["case", "node_index", "label"],
+        [(name, idx, labels[idx]) for name, _, _, _, _, labels, *_ in kept for idx in sorted(labels)],
+    )
+    write_tsv_gz(
+        os.path.join(DECORATE_OUTDIR, "expected_lineages.tsv.gz"),
+        ["case", "feature_id", *COLUMNS],
+        [
+            (name, tip_name(names, idx), *lineages[tip_name(names, idx)], None)
+            for name, _, tree_rows, _, names, _, lineages, *_ in kept
+            for idx, _, is_tip in tree_rows
+            if is_tip
+        ],
+    )
+
+    with open(os.path.join(DECORATE_OUTDIR, "provenance.txt"), "w", newline="\n") as f:
+        f.write("Generated by test/scripts/gen_tax2tree_assign_names_oracle.py.\n")
+        f.write(f"tax2tree: commit {git(['rev-parse', 'HEAD'], tax2tree)}, no tracked changes\n")
+        f.write(f"scikit-bio {skbio.__version__}, numpy {numpy.__version__}, Python {platform.python_version()}\n")
+        f.write(f"seed {SEED}, {len(kept) - 1} random cases and the golden case\n")
+        f.write(
+            f"exercised: {totals['gap fills']} gap fills, {totals['promotions']} promotions, "
+            f"{totals['polyphyletic merges']} polyphyletic merges\n"
+        )
+        f.write(
+            "command: conda run -n miint-beta-oracle python -I test/scripts/gen_tax2tree_assign_names_oracle.py "
+            "--tax2tree PATH_TO_TAX2TREE_CHECKOUT\n"
+        )
+        f.write(
+            "\nassign_names cases left out, each for the differences from miint it hits, numbered as in "
+            "the header of test/cpp/test_TaxonomyDecoratorParity.cpp:\n"
+        )
+        for name, differences in excluded:
+            f.write(f"{name}: {'; '.join(differences)}\n")
+        f.write("\nExtra draws rejected, by difference (a draw can hit several):\n")
+        for difference in sorted(rejected):
+            f.write(f"{difference}: {rejected[difference]}\n")
+        f.write("\n")
+        for name, min_count, tree_rows, lineage_of, _, labels, lineages, _, counts in kept:
+            tips = sum(1 for row in tree_rows if row[2])
+            f.write(
+                f"{name}: {len(tree_rows)} nodes, {tips} tips, {len(lineage_of)} with a lineage, min_count {min_count}, "
+                f"{len(labels)} labels; {counts['gap fills']} gap fills, {counts['promotions']} promotions, "
+                f"{counts['polyphyletic merges']} polyphyletic merges\n"
+            )
 
 
 if __name__ == "__main__":
