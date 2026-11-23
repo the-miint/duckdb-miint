@@ -1,0 +1,264 @@
+# name: test/sql/copy_sam_parallel.test
+# description: COPY FORMAT SAM/BAM on 8 threads from a source that can be scanned in parallel. With PRESERVE_ORDER true, records are written in input order, and with an ORDER BY (and no option) in its order. With neither, order is not kept (the default), but the file holds exactly the records the order-kept COPY writes: headered and headerless SAM, gzip SAM, BAM with SEQUENCE_DATA, partitioned output, and a source that declares no order.
+# group: [sql]
+
+require miint
+
+require parquet
+
+statement ok
+SET threads=8;
+
+# 20,000 alignments over 30 references (unmapped every 25th), read from a Parquet file of 10 row groups so that the
+# scan feeding the COPY can run on several threads, as it does when order is off.
+statement ok
+CREATE TABLE src AS
+SELECT i, i % 4 AS bucket, 'r' || i AS read_id,
+       (CASE WHEN i % 25 = 0 THEN 4 ELSE 0 END | CASE WHEN i % 3 = 0 THEN 16 ELSE 0 END)::USMALLINT AS flags,
+       CASE WHEN i % 25 = 0 THEN NULL ELSE 'c' || lpad(((i * 7) % 30)::VARCHAR, 2, '0') END AS reference,
+       CASE WHEN i % 25 = 0 THEN NULL ELSE 1 + (i * 37) % 50000 END::BIGINT AS position,
+       CASE WHEN i % 25 = 0 THEN NULL ELSE i % 61 END::UTINYINT AS mapq,
+       CASE WHEN i % 25 = 0 THEN NULL WHEN i % 2 = 0 THEN '50M' ELSE '5S40M5S' END AS cigar,
+       '*' AS mate_reference, 0::BIGINT AS mate_position, 0::BIGINT AS template_length,
+       CASE WHEN i % 25 = 0 THEN NULL ELSE i % 100 END::BIGINT AS tag_as,
+       CASE WHEN i % 7 = 0 THEN NULL ELSE (i % 50)::VARCHAR END AS tag_md
+FROM range(0, 20000) r(i);
+
+statement ok
+COPY src TO '{TEST_DIR}/src.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 2048);
+
+query I
+SELECT count(DISTINCT row_group_id) FROM parquet_metadata('{TEST_DIR}/src.parquet');
+----
+10
+
+statement ok
+CREATE VIEW p AS SELECT * EXCLUDE (i, bucket) FROM read_parquet('{TEST_DIR}/src.parquet');
+
+statement ok
+CREATE TABLE ref_lens AS SELECT 'c' || lpad(k::VARCHAR, 2, '0') AS name, 60000::BIGINT AS length FROM range(30) t(k);
+
+statement ok
+CREATE TABLE seqs AS
+SELECT read_id, left(repeat(translate(md5(read_id), '0123456789abcdef', 'ACGTACGTACGTACGT'), 2), 50) AS sequence1,
+       list_transform(range(50), lambda j: ((i + j) % 41)::UTINYINT) AS qual1
+FROM src;
+
+# A file's lines, without their order: read_csv decompresses gzip.
+statement ok
+CREATE MACRO sam_lines(path) AS TABLE
+SELECT line FROM read_csv(path, columns = {'line': 'VARCHAR'}, delim = E'\x1f', quote = '', escape = '', header = false,
+                          auto_detect = false);
+
+# --- PRESERVE_ORDER true: records are written in input order ---
+# read_sequences_sam numbers records from 1 in file order, and record k must be source row k - 1. With order kept the
+# COPY runs on one thread; were the batches written as they were finished, they would come out of order.
+
+statement ok
+COPY p TO '{TEST_DIR}/kept.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'seqs', PRESERVE_ORDER true);
+
+query II
+SELECT count(*), count(*) FILTER (WHERE read_id <> 'r' || (sequence_index - 1)) FROM read_sequences_sam('{TEST_DIR}/kept.bam');
+----
+20000	0
+
+statement ok
+COPY p TO '{TEST_DIR}/kept.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', PRESERVE_ORDER true);
+
+statement ok
+COPY p TO '{TEST_DIR}/kept_nohdr.sam' (FORMAT SAM, INCLUDE_HEADER false, PRESERVE_ORDER true);
+
+statement ok
+COPY p TO '{TEST_DIR}/kept_gz.sam.gz' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', PRESERVE_ORDER true);
+
+# --- An ORDER BY keeps its order, with no option ---
+# Record k must be the k-th row in the ORDER BY's order, which is not the input's. Too few rows come out of DuckDB's
+# sort in order even to a COPY that keeps none (docs/internals/architecture.md, "Tests to copy"), so this sorts 200,000
+# alignments, read from a Parquet file of 10 row groups (checked below): enough that a COPY that dropped the ORDER BY
+# (as PRESERVE_ORDER false does) writes them out of order.
+
+statement ok
+CREATE TABLE many_aln AS
+SELECT 'm' || i AS read_id, 0::USMALLINT AS flags, 'c' || lpad(((i * 7) % 30)::VARCHAR, 2, '0') AS reference,
+       (1 + (i * 7919) % 59000)::BIGINT AS position, 60::UTINYINT AS mapq, '20M' AS cigar, '*' AS mate_reference,
+       0::BIGINT AS mate_position, 0::BIGINT AS template_length
+FROM range(0, 200000) r(i);
+
+statement ok
+COPY many_aln TO '{TEST_DIR}/many_aln.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 20480);
+
+query I
+SELECT count(DISTINCT row_group_id) FROM parquet_metadata('{TEST_DIR}/many_aln.parquet');
+----
+10
+
+statement ok
+CREATE TABLE many_seq AS
+SELECT read_id, 'ACGTACGTACGTACGTACGT' AS sequence1, list_transform(range(20), lambda j: 30::UTINYINT) AS qual1
+FROM many_aln;
+
+statement ok
+COPY (FROM read_parquet('{TEST_DIR}/many_aln.parquet') ORDER BY reference, position, read_id)
+TO '{TEST_DIR}/sorted.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'many_seq');
+
+query II
+SELECT count(*), count(*) FILTER (WHERE b.read_id <> s.read_id)
+FROM read_sequences_sam('{TEST_DIR}/sorted.bam') b
+JOIN (SELECT read_id, row_number() OVER (ORDER BY reference, position, read_id) AS k FROM many_aln) s
+  ON b.sequence_index = s.k;
+----
+200000	0
+
+# No two rows tie on this ORDER BY (read_id is unique), so the file is the same at any thread count. Rows that tie can
+# come out of DuckDB's sort in either order.
+statement ok
+SET threads=1;
+
+statement ok
+COPY (FROM read_parquet('{TEST_DIR}/many_aln.parquet') ORDER BY reference, position, read_id)
+TO '{TEST_DIR}/sorted_t1.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'many_seq');
+
+statement ok
+SET threads=8;
+
+query I
+SELECT count(DISTINCT md5(content)) FROM read_blob(['{TEST_DIR}/sorted.bam', '{TEST_DIR}/sorted_t1.bam']);
+----
+1
+
+# Each check below counts what is in one output and not in the other, duplicates included, both ways: 0 when the two
+# hold the same records the same number of times. A SAM file is compared line by line, header lines included; a BAM
+# file record by record, SEQ and QUAL included.
+
+# --- Order off ---
+
+statement ok
+COPY p TO '{TEST_DIR}/off.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', PRESERVE_ORDER false);
+
+query II
+SELECT (SELECT count(*) FROM sam_lines('{TEST_DIR}/off.sam')),
+       (SELECT count(*) FROM ((FROM sam_lines('{TEST_DIR}/off.sam') EXCEPT ALL FROM sam_lines('{TEST_DIR}/kept.sam'))
+                              UNION ALL
+                              (FROM sam_lines('{TEST_DIR}/kept.sam') EXCEPT ALL FROM sam_lines('{TEST_DIR}/off.sam'))));
+----
+20030	0
+
+# The header still comes first, its @SQ lines in name order (a reference's place in them is its index in a BAM).
+query I
+SELECT string_agg(replace(line, E'\t', ' '), ',') FROM (FROM sam_lines('{TEST_DIR}/off.sam') LIMIT 3);
+----
+@SQ SN:c00 LN:60000,@SQ SN:c01 LN:60000,@SQ SN:c02 LN:60000
+
+# Headerless, where references are learned from the records.
+statement ok
+COPY p TO '{TEST_DIR}/off_nohdr.sam' (FORMAT SAM, INCLUDE_HEADER false, PRESERVE_ORDER false);
+
+query II
+SELECT (SELECT count(*) FROM sam_lines('{TEST_DIR}/off_nohdr.sam')),
+       (SELECT count(*) FROM ((FROM sam_lines('{TEST_DIR}/off_nohdr.sam') EXCEPT ALL FROM sam_lines('{TEST_DIR}/kept_nohdr.sam'))
+                              UNION ALL
+                              (FROM sam_lines('{TEST_DIR}/kept_nohdr.sam') EXCEPT ALL FROM sam_lines('{TEST_DIR}/off_nohdr.sam'))));
+----
+20000	0
+
+statement ok
+COPY p TO '{TEST_DIR}/off_gz.sam.gz' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', PRESERVE_ORDER false);
+
+query II
+SELECT (SELECT count(*) FROM sam_lines('{TEST_DIR}/off_gz.sam.gz')),
+       (SELECT count(*) FROM ((FROM sam_lines('{TEST_DIR}/off_gz.sam.gz') EXCEPT ALL FROM sam_lines('{TEST_DIR}/kept_gz.sam.gz'))
+                              UNION ALL
+                              (FROM sam_lines('{TEST_DIR}/kept_gz.sam.gz') EXCEPT ALL FROM sam_lines('{TEST_DIR}/off_gz.sam.gz'))));
+----
+20030	0
+
+statement ok
+COPY p TO '{TEST_DIR}/off.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'seqs', PRESERVE_ORDER false);
+
+query II
+SELECT (SELECT count(*) FROM read_alignments('{TEST_DIR}/off.bam')),
+       (SELECT count(*) FROM ((FROM read_alignments('{TEST_DIR}/off.bam', include_seq_qual := true)
+                               EXCEPT ALL FROM read_alignments('{TEST_DIR}/kept.bam', include_seq_qual := true))
+                              UNION ALL
+                              (FROM read_alignments('{TEST_DIR}/kept.bam', include_seq_qual := true)
+                               EXCEPT ALL FROM read_alignments('{TEST_DIR}/off.bam', include_seq_qual := true))));
+----
+20000	0
+
+# --- PARTITION_BY: one file per bucket, each complete ---
+# Batches for different files are prepared concurrently and are handed one file's global state, so a prepare that read
+# anything file-specific would put records in the wrong file, or name a reference wrongly. Order is off for every
+# partitioned COPY.
+
+statement ok
+COPY (SELECT bucket, * EXCLUDE (i, bucket) FROM read_parquet('{TEST_DIR}/src.parquet'))
+TO '{TEST_DIR}/part_bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'seqs', PARTITION_BY (bucket));
+
+query III
+SELECT count(DISTINCT filepath), count(*),
+       count(*) FILTER (WHERE regexp_extract(filepath, 'bucket=([0-9]+)', 1)::BIGINT <> substr(read_id, 2)::BIGINT % 4)
+FROM read_alignments('{TEST_DIR}/part_bam/*/*', include_filepath := true);
+----
+4	20000	0
+
+query I
+SELECT count(*) FROM (
+    (SELECT * EXCLUDE (filepath) FROM read_alignments('{TEST_DIR}/part_bam/*/*', include_filepath := true, include_seq_qual := true)
+     EXCEPT ALL FROM read_alignments('{TEST_DIR}/kept.bam', include_seq_qual := true))
+    UNION ALL
+    (FROM read_alignments('{TEST_DIR}/kept.bam', include_seq_qual := true)
+     EXCEPT ALL SELECT * EXCLUDE (filepath) FROM read_alignments('{TEST_DIR}/part_bam/*/*', include_filepath := true, include_seq_qual := true)));
+----
+0
+
+statement ok
+COPY (SELECT bucket, * EXCLUDE (i, bucket) FROM read_parquet('{TEST_DIR}/src.parquet'))
+TO '{TEST_DIR}/part_nohdr' (FORMAT SAM, INCLUDE_HEADER false, PARTITION_BY (bucket));
+
+query II
+SELECT (SELECT count(*) FROM sam_lines('{TEST_DIR}/part_nohdr/*/*')),
+       (SELECT count(*) FROM ((FROM sam_lines('{TEST_DIR}/part_nohdr/*/*') EXCEPT ALL FROM sam_lines('{TEST_DIR}/kept_nohdr.sam'))
+                              UNION ALL
+                              (FROM sam_lines('{TEST_DIR}/kept_nohdr.sam') EXCEPT ALL FROM sam_lines('{TEST_DIR}/part_nohdr/*/*'))));
+----
+20000	0
+
+# --- A source that declares no order ---
+# align_minimap2 declares NO_ORDER, so a COPY of it never keeps order. Its records must equal those of the same
+# alignments materialized first and written with order kept. 300 reads of 100 bases, taken from five references
+# (every third reverse-complemented), and 20 that match nothing, written unmapped.
+
+statement ok
+CREATE TABLE mm_subj AS
+SELECT 'm' || k AS read_id, repeat(translate(md5('ref' || k), '0123456789abcdef', 'ACGTTGCAAGCTTCGA'), 63) AS sequence1
+FROM range(5) t(k);
+
+statement ok
+CREATE TABLE mm_reflen AS SELECT read_id AS name, length(sequence1)::BIGINT AS length FROM mm_subj;
+
+statement ok
+CREATE TABLE mm_q AS
+SELECT 'q' || j AS read_id,
+       CASE WHEN j >= 300 THEN repeat('T', 100)
+            WHEN j % 3 = 0 THEN reverse(translate(substr(s.sequence1, 1 + (j * 13) % 1800, 100), 'ACGT', 'TGCA'))
+            ELSE substr(s.sequence1, 1 + (j * 13) % 1800, 100) END AS sequence1
+FROM range(320) r(j) JOIN mm_subj s ON s.read_id = 'm' || (j % 5);
+
+statement ok
+CREATE TABLE mm_kept AS FROM align_minimap2('mm_q', subject_table := 'mm_subj', max_secondary := 0, include_unmapped := true);
+
+statement ok
+COPY mm_kept TO '{TEST_DIR}/mm_kept.bam' (FORMAT BAM, REFERENCE_LENGTHS 'mm_reflen', PRESERVE_ORDER true);
+
+statement ok
+COPY (FROM align_minimap2('mm_q', subject_table := 'mm_subj', max_secondary := 0, include_unmapped := true))
+TO '{TEST_DIR}/mm_off.bam' (FORMAT BAM, REFERENCE_LENGTHS 'mm_reflen');
+
+query III
+SELECT (SELECT count(*) FROM read_alignments('{TEST_DIR}/mm_off.bam')),
+       (SELECT count(*) FROM read_alignments('{TEST_DIR}/mm_off.bam') WHERE flags & 4 = 0),
+       (SELECT count(*) FROM ((FROM read_alignments('{TEST_DIR}/mm_off.bam') EXCEPT ALL FROM read_alignments('{TEST_DIR}/mm_kept.bam'))
+                              UNION ALL
+                              (FROM read_alignments('{TEST_DIR}/mm_kept.bam') EXCEPT ALL FROM read_alignments('{TEST_DIR}/mm_off.bam'))));
+----
+320	300	0

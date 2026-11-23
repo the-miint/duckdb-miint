@@ -128,6 +128,7 @@ SequenceReader::ParseResult SequenceReader::parse_record(Stream &stream, klibpp:
 				problem = "text before the first record; FASTQ files must start with a '@' header line";
 				return ParseResult::MALFORMED;
 			}
+			state.fastq = c == FASTQ_HEADER;
 		} else {
 			// The previous record did not end at the next header: it was FASTQ, or it ended at a
 			// NUL or the end of the input. The next line must be a header, though blank lines,
@@ -166,6 +167,15 @@ SequenceReader::ParseResult SequenceReader::parse_record(Stream &stream, klibpp:
 	}
 	if (c != '\n') {
 		stream.getuntil(SEP_LINE, rec.comment, nullptr);
+	}
+	// Callers decide whether a file has qualities from its first header (IsFastq), so a record of the other format
+	// would lose its qualities, or get empty ones.
+	if (fastq != state.fastq) {
+		problem =
+		    record() +
+		    (fastq ? "a FASTQ record ('@' header) in a FASTA file" : "a FASTA record ('>' header) in a FASTQ file") +
+		    "; a file must be all FASTA or all FASTQ";
+		return ParseResult::MALFORMED;
 	}
 	size_t sequence_lines = 0;
 	while ((c = stream.getc()) && c != FASTA_HEADER && c != FASTQ_HEADER && c != FASTQ_SEPARATOR) {
@@ -293,10 +303,12 @@ std::vector<klibpp::KSeq> SequenceReader::read_stream(StreamVar &var, int n, con
 // allocation) across more records; smaller values cap the transient memory overshoot
 // when a single poll pulls in records that together exceed max_bytes. 16 is a
 // compromise: for short-read FASTQ a 2048-record chunk needs ~128 polls instead of
-// 2048 (cuts ~94% of per-record allocation overhead), while for bacterial genomes
-// (~5 MB/record) the worst-case overshoot is 16 * 5 MB = 80 MB -- negligible next to
-// a 512 MB default budget. Any tail records beyond the stop point are pushed back
-// into buffered_read1_ / buffered_read2_ for the next call, so nothing is dropped.
+// 2048 (cuts ~94% of per-record allocation overhead). Larger records get smaller polls
+// (dynamic_poll_n); only where record lengths jump, as from a plasmid to bacterial
+// genomes (~5 MB/record), can one hold up to 16 * 5 MB = 80 MB past the caller's
+// budget. Any tail records beyond the stop point are pushed back into buffered_read1_ /
+// buffered_read2_ for the next call, so nothing is dropped, and the chunk itself still
+// stops at the budget.
 static constexpr int POLL_CHUNK_SIZE = 16;
 
 // Bytes contributed by a single record. Counted against the per-chunk budget so that
@@ -332,7 +344,8 @@ static int dynamic_poll_n(size_t observed_record_bytes, size_t room, int remaini
 // raised by the first Take the records before it cannot satisfy. As with read_stream, a poll
 // that fails loses the records it read before the error, and since the thread's polls are not
 // read()'s, read() can fail a few records sooner than without it. From its first poll the thread
-// is the only one to parse the stream, so it alone touches the stream's parser state.
+// is the only one to parse the stream, so it alone writes the stream's parser state. Other threads
+// read only `fastq` (IsFastq), which the constructor's first parse set before the thread started.
 class SequenceReader::ReadAhead {
 public:
 	ReadAhead(StreamVar &stream, const std::string &source, StreamState &state, size_t peeked_record_bytes,
@@ -476,7 +489,7 @@ SequenceReader::SequenceReader(const std::string &path1, const std::optional<std
 	// Check if first file is empty by attempting to peek at first record
 	buffered_read1_ = read_stream(sequence1_reader_, 1, source1_, state1_);
 	bool is_empty1 = buffered_read1_.empty();
-	bool is_fasta1 = !is_empty1 && buffered_read1_[0].qual.empty();
+	bool is_fasta1 = !is_empty1 && !state1_.fastq;
 
 	if (is_empty1 && !allow_empty) {
 		throw std::runtime_error("Empty file: " + path1);
@@ -492,7 +505,7 @@ SequenceReader::SequenceReader(const std::string &path1, const std::optional<std
 		// Check if second file is empty and detect format
 		buffered_read2_ = read_stream(sequence2_reader_.value(), 1, source2_, state2_);
 		bool is_empty2 = buffered_read2_.empty();
-		bool is_fasta2 = !is_empty2 && buffered_read2_[0].qual.empty();
+		bool is_fasta2 = !is_empty2 && !state2_.fastq;
 
 		if (is_empty1 != is_empty2) { // both empty only gets here with allow_empty
 			throw std::runtime_error("Empty file: " + (is_empty1 ? path1 : path2.value()));
@@ -546,7 +559,7 @@ SequenceReader::SequenceReader(DuckDBSeqStreamHandle stream1, DuckDBSeqStreamHan
 
 	buffered_read1_ = read_stream(sequence1_reader_, 1, source1_, state1_);
 	bool is_empty1 = buffered_read1_.empty();
-	bool is_fasta1 = !is_empty1 && buffered_read1_[0].qual.empty();
+	bool is_fasta1 = !is_empty1 && !state1_.fastq;
 
 	if (is_empty1 && !allow_empty) {
 		throw std::runtime_error("Empty stream");
@@ -563,7 +576,7 @@ SequenceReader::SequenceReader(DuckDBSeqStreamHandle stream1, DuckDBSeqStreamHan
 
 		buffered_read2_ = read_stream(sequence2_reader_.value(), 1, source2_, state2_);
 		bool is_empty2 = buffered_read2_.empty();
-		bool is_fasta2 = !is_empty2 && buffered_read2_[0].qual.empty();
+		bool is_fasta2 = !is_empty2 && !state2_.fastq;
 
 		if (is_empty1 != is_empty2) { // both empty only gets here with allow_empty
 			throw std::runtime_error(is_empty1 ? "Empty stream" : "Empty stream (sequence2)");
@@ -606,14 +619,14 @@ SequenceReader::SequenceReader(AsperaSeqStreamHandle stream1, AsperaSeqStreamHan
 	if (buffered_read1_.empty()) {
 		throw std::runtime_error("Empty stream");
 	}
-	bool is_fasta1 = buffered_read1_[0].qual.empty();
+	bool is_fasta1 = !state1_.fastq;
 
 	if (paired_) {
 		buffered_read2_ = read_stream(sequence2_reader_.value(), 1, source2_, state2_);
 		if (buffered_read2_.empty()) {
 			throw std::runtime_error("Empty stream (sequence2)");
 		}
-		bool is_fasta2 = buffered_read2_[0].qual.empty();
+		bool is_fasta2 = !state2_.fastq;
 
 		validate_format_consistency(is_fasta1, is_fasta2, allow_format_mismatch);
 	}

@@ -413,8 +413,8 @@ static void UBAMCopySink(ExecutionContext &context, FunctionData &bind_data, Glo
 			if (!fmt.validity.RowIsValid(tag_idx)) {
 				continue;
 			}
-			// BAM 'i' aux tags are int32. A value outside that range fails loud here
-			// (checked cast) rather than silently truncating as copy_sam.cpp does.
+			// BAM 'i' aux tags are int32. A value outside that range fails here
+			// (a checked cast).
 			int32_t v = NumericCast<int32_t>(ReadIntCell(fmt, tag.type, tag_idx));
 			if (bam_aux_append(lstate.record.get(), tag.tag.c_str(), 'i', sizeof(int32_t),
 			                   reinterpret_cast<uint8_t *>(&v)) < 0) {

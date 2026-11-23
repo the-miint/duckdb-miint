@@ -15,6 +15,7 @@ Global pairwise sequence search, powered by the [vsearch](https://github.com/tor
 `search_sequences_vsearch(query_table, db='ref_table', id=threshold, [options])`
 
 **Parameters:**
+
 - `query_table` (VARCHAR): Name of a table or view containing query sequences. Must have `read_id` (VARCHAR, BIGINT, or UUID — see *Identifier-column types* below) and `sequence1` (VARCHAR) columns.
 - `db` (VARCHAR, required): Name of a table or view containing reference sequences. Same schema requirements as `query_table` (its `read_id` type is independent of the query's).
 - `id` (DOUBLE, required): Minimum identity threshold (0.0-1.0). No silent default — must be specified explicitly.
@@ -38,6 +39,7 @@ Global pairwise sequence search, powered by the [vsearch](https://github.com/tor
 | `accepted` | BOOLEAN | True if hit passes identity threshold |
 
 **Identifier-column types (`read_id`, `target_id`):**
+
 - The query and reference `read_id` columns may each be `VARCHAR`, `BIGINT`, or `UUID`, independently. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time with the message `Column 'read_id' in table '<table>' must be VARCHAR, BIGINT, or UUID`.
 - The output `read_id` mirrors the query table's type; `target_id` (a reference label) mirrors the reference table's type. They can differ (e.g. a `UUID` query against a `BIGINT` reference). `BIGINT`/`UUID` ids round-trip through their decimal / canonical-lowercase forms. Search emits one row per hit, so neither id is ever NULL.
 
@@ -57,6 +59,7 @@ SELECT count(DISTINCT read_id) FROM search_sequences_vsearch('queries', db:='ref
 ```
 
 **Behavior:**
+
 - Each query produces 0 to `maxaccepts` output rows
 - Results include both accepted (above threshold) and weak (near-miss) hits; use the `accepted` column to filter
 - Plus-strand only (no reverse complement search)
@@ -65,6 +68,7 @@ SELECT count(DISTINCT read_id) FROM search_sequences_vsearch('queries', db:='ref
 - RNA sequences (U) are automatically converted to DNA (T)
 
 **Error conditions:**
+
 - Error if `db` or `id` parameter is missing
 - Error if `id` is not between 0.0 and 1.0
 - Error if query or reference table does not exist or lacks required columns

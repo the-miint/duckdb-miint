@@ -21,11 +21,20 @@ Most of these functions take a `sequence_table` parameter that references a Duck
 
 Build a RYpe `.ryxdi` index directly from a DuckDB table of chunked reference sequences, without going through the `rype` CLI. The references are supplied in an at-rest *chunked* layout (one row per fixed-size block of a sequence) — the same shape microbiome reference data is stored in for efficient columnar storage. Chunks belonging to a feature are reassembled, in order, before minimizers are extracted, so minimizers spanning chunk boundaries are computed correctly.
 
+```sql
+-- Chunked reference table (e.g. genomes stored as 64 KB blocks)
+--   chunks(feature_idx BIGINT, chunk_index INTEGER, chunk_data VARCHAR)
+-- and a feature -> bucket mapping
+--   refmap(feature_idx BIGINT, bucket_name VARCHAR)
+SELECT * FROM rype_index_create('chunks', 'bacteria.ryxdi', mapping_table := 'refmap');
+```
+
 **Parameters:**
+
 - `chunk_table` (VARCHAR): Name of a DuckDB table or view of chunked sequences. Must have columns:
-  - `feature_idx` (BIGINT): identifier of the reference sequence a chunk belongs to
-  - `chunk_index` (INTEGER): 0-based block order within the feature
-  - `chunk_data` (VARCHAR or BLOB): the sequence bytes for the block
+    - `feature_idx` (BIGINT): identifier of the reference sequence a chunk belongs to
+    - `chunk_index` (INTEGER): 0-based block order within the feature
+    - `chunk_data` (VARCHAR or BLOB): the sequence bytes for the block
 - `output_path` (VARCHAR): Path of the `.ryxdi` index directory to create
 - `mapping_table` (VARCHAR, optional): Name of a table or view mapping each feature to a bucket. Must have columns `feature_idx` (BIGINT) and `bucket_name` (VARCHAR), with each `feature_idx` appearing at most once. If omitted, every feature is placed into a single bucket named `unnamed-bucket`
 - `k` (INTEGER, optional, default 64): K-mer size. Must be 16, 32, or 64 (constrained by RY-space 1-bit encoding fitting in uint64)
@@ -36,6 +45,7 @@ Build a RYpe `.ryxdi` index directly from a DuckDB table of chunked reference se
 - `feed_window_features` (BIGINT, optional, default 0): Advanced. Number of features per internal feed window (see *Behavior*); 0 auto-sizes each window from a memory budget. Set a small value to force more, smaller windows. Rarely needed.
 
 **Output schema:** a single status row.
+
 - `output_path` (VARCHAR): The path of the index that was created (echoes the input)
 - `k` (INTEGER): The k-mer size used
 - `w` (INTEGER): The window size used
@@ -44,6 +54,7 @@ Build a RYpe `.ryxdi` index directly from a DuckDB table of chunked reference se
 **Input order:** the `chunk_table` may be in **any** physical order — chunks are sorted as part of the build. Within each feature, `chunk_index` must still be 0-based and gap-free; a missing or duplicate `chunk_index` (a genuinely malformed feature) fails the build with a clear RYpe error (e.g. `expected chunk_index N but got M`, or `first chunk_index must be 0`).
 
 **Behavior:**
+
 - Memory is bounded regardless of corpus size. The build never sorts the whole corpus at once — a single `ORDER BY` over many 64 KB chunks would buffer everything and run out of memory, because DuckDB cannot spill large variable-length sort payloads. Instead the features are partitioned into windows (contiguous `feature_idx` ranges, auto-sized to a per-window memory budget, or set explicitly via `feed_window_features`), each window is read and sorted independently (multi-threaded, spillable), and the windows are spliced into one stream so chunks still reach RYpe fully ordered. The small bucket mapping is read into memory.
 - Inputs are validated at bind time: a missing table, a missing required column, `k` not in {16, 32, 64}, or `w < 1` all raise an error before any build work begins.
 - A duplicate `feature_idx` in `mapping_table` is rejected.
@@ -52,12 +63,6 @@ Build a RYpe `.ryxdi` index directly from a DuckDB table of chunked reference se
 
 **Examples:**
 ```sql
--- Chunked reference table (e.g. genomes stored as 64 KB blocks)
---   chunks(feature_idx BIGINT, chunk_index INTEGER, chunk_data VARCHAR)
--- and a feature -> bucket mapping
---   refmap(feature_idx BIGINT, bucket_name VARCHAR)
-SELECT * FROM rype_index_create('chunks', 'bacteria.ryxdi', mapping_table := 'refmap');
-
 -- Build with a larger k-mer and custom window
 SELECT * FROM rype_index_create('chunks', 'bacteria.ryxdi', mapping_table := 'refmap', k := 64, w := 50);
 
@@ -71,6 +76,7 @@ SELECT * FROM rype_classify('bacteria.ryxdi', 'reads');
 ```
 
 **Error conditions:**
+
 - `chunk_table` (or `mapping_table`) does not exist
 - `chunk_table` missing a required column (`feature_idx`, `chunk_index`, `chunk_data`)
 - `k` not in {16, 32, 64}, or `w < 1`
@@ -84,21 +90,28 @@ SELECT * FROM rype_classify('bacteria.ryxdi', 'reads');
 Classify sequences against a RYpe index, returning bucket assignments with confidence scores.
 
 **Parameters:**
-- `index_path` (VARCHAR): Path to a RYpe index directory (`.ryxdi`)
-- `sequence_table` (VARCHAR): Name of a DuckDB table or view containing sequences. Must have columns: identifier column + `sequence1` (VARCHAR or BLOB) + optional `sequence2` (VARCHAR or BLOB)
-- `id_column` (VARCHAR, optional, default `'read_id'`): Name of the identifier column in the sequence table
-- `threshold` (DOUBLE, optional, default 0.1): Minimum score threshold (0.0-1.0). Only matches with score >= threshold are returned
-- `negative_index` (VARCHAR, optional): Path to a second RYpe index used as a negative filter
-- `max_memory` (BIGINT, optional, default 0): Byte budget for RYpe's internal batch sizing (how many reads it accumulates before each pass over the index). 0 derives one — see [Memory budget](#memory-budget) below
-- `debug` (BOOLEAN, optional, default false): Report the chosen batch size and the memory estimates behind it through `miint_warnings()` — see [Memory budget](#memory-budget)
+
+| Parameter | Type and default | Description |
+| --- | --- | --- |
+| `index_path` | VARCHAR | Path to a RYpe index directory (`.ryxdi`) |
+| `sequence_table` | VARCHAR | Name of a DuckDB table or view containing sequences. Must have columns: identifier column + `sequence1` (VARCHAR or BLOB) + optional `sequence2` (VARCHAR or BLOB) |
+| `id_column` | VARCHAR, optional, default `'read_id'` | Name of the identifier column in the sequence table |
+| `threshold` | DOUBLE, optional, default 0.1 | Minimum score threshold (0.0-1.0). Only matches with score >= threshold are returned |
+| `negative_index` | VARCHAR, optional | Path to a second RYpe index used as a negative filter |
+| `max_memory` | BIGINT, optional, default 0 | Byte budget for RYpe's internal batch sizing (how many reads it accumulates before each pass over the index). 0 derives one — see [Memory budget](#memory-budget) below |
+| `debug` | BOOLEAN, optional, default false | Report the chosen batch size and the memory estimates behind it through `miint_warnings()` — see [Memory budget](#memory-budget) |
 
 **Output schema:**
-- `read_id` (VARCHAR): Sequence identifier from the input table
-- `bucket_id` (UINTEGER): Numeric bucket identifier
-- `bucket_name` (VARCHAR): Human-readable bucket name from the index
-- `score` (DOUBLE): Classification confidence score (0.0-1.0)
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `read_id` | VARCHAR | Sequence identifier from the input table |
+| `bucket_id` | UINTEGER | Numeric bucket identifier |
+| `bucket_name` | VARCHAR | Human-readable bucket name from the index |
+| `score` | DOUBLE | Classification confidence score (0.0-1.0) |
 
 **Behavior:**
+
 - A sequence can match multiple buckets (one row per match above threshold)
 - Sequences with no matches above the threshold produce no output rows
 - Paired-end handling follows the **contents** of `sequence2`, not merely the presence of the column. This matters because `read_fastx` always emits a `sequence2` column, so single-end reads loaded the obvious way carry an all-NULL one; treating that as paired-end would halve the batch size and double the number of index passes. The check samples the first chunk of the single pass over your relation rather than scanning it separately — the relation is read exactly once, which it must be, since a view or a registered Arrow relation need not return the same rows twice. A relation that only becomes paired well after its first few thousand rows is therefore sized as single-end; set `max_memory` if that under-budgets
@@ -132,6 +145,7 @@ SELECT * FROM rype_classify('my_index.ryxdi', 'paired');
 ```
 
 **Error conditions:**
+
 - `index_path` does not point to a valid `.ryxdi` index directory
 - `sequence_table` does not exist, or is missing the identifier column or `sequence1`, or has a `sequence1` or `sequence2` that is not VARCHAR or BLOB
 - `threshold` outside the 0.0-1.0 range
@@ -153,6 +167,7 @@ SELECT * FROM kept ANTI JOIN align_minimap2('kept', index_path := 'host.mmi') US
 but reads `sequence_table` once and stores nothing between the stages, so the relation can be a view straight over `read_fastx`. The joins keep every row whose `read_id` is NULL, since a join never matches NULL; `rype_filter` drops such a row when either stage would remove it. The relation is the first argument here, and the index the first in `rype_classify`.
 
 **Parameters:**
+
 - `sequence_table` (VARCHAR): Name of a DuckDB table or view. Must have `sequence1` (VARCHAR or BLOB); `sequence2` (VARCHAR or BLOB) is optional. A `read_id` column is optional too: RYpe does not need one, and minimap2 uses it only to name the reads, so with a minimap2 index it must be VARCHAR, BIGINT or UUID. Every other column is carried through untouched
 - `index_path` (VARCHAR): Path to a RYpe index directory (`.ryxdi`), typically of the host
 - `minimap2_index_path` (VARCHAR, optional): Path to a minimap2 index (`.mmi`) of the host, built as one part, as [`save_minimap2_index`](alignment_reference.md#index-creation-with-minimap2) always builds it. Omit it to filter with RYpe alone
@@ -161,12 +176,13 @@ but reads `sequence_table` once and stores nothing between the stages, so the re
 **Output schema:** every column of `sequence_table`, with its name and type, for the rows kept.
 
 **Behavior:**
+
 - **RYpe:** a row is dropped exactly when `rype_classify(index_path, sequence_table, threshold := threshold)` returns a match for it. A pair is scored over both mates together, as `rype_classify` scores it, and a row whose `sequence2` is NULL is classified as single-end. A read shorter than the index's k has no minimizers, matches nothing, and is kept
 - **minimap2:** the rows RYpe keeps are mapped with `align_minimap2`'s defaults (the `sr` preset), and a row is dropped when `align_minimap2` would return any alignment for it, of either mate. Each read is named by its `read_id`, as `align_minimap2` names it, so that equal hits are broken the same way; with no `read_id` column, or a NULL one, the read is mapped unnamed
 - **Short reads only:** minimap2 runs when the mean `sequence1` length over the first chunk of the scan (up to 2,048 rows) is under 300, the reads its short-read preset is for. Otherwise, for long reads or an empty relation, the minimap2 index is never opened, and RYpe alone decides
 - **Rows come out in no fixed order** on more than one thread, as `rype_classify`'s and `align_minimap2`'s do, whatever `preserve_insertion_order` is set to. Add an `ORDER BY` to put them in an order, for instance `read_fastx`'s `sequence_index`
 - **Read once:** the relation is read in a single pass, so a view, including one over files still to be decompressed, or a registered Arrow relation, works
-- **Threads:** RYpe classifies and minimap2 maps as background tasks, which DuckDB's async pool (`async_threads`) runs and its idle threads take up too. RYpe works a batch of reads ahead of minimap2, and minimap2 maps on as many threads at once as `SET threads` allows. The query itself only writes the rows out, so a writer that takes them in order on one thread, as `COPY ... (FORMAT FASTQ)` does, does not hold the mapping to one. With `async_threads` set to 0, both run in the query itself instead
+- **Threads:** RYpe classifies and minimap2 maps as background tasks, which DuckDB's async pool (`async_threads`) runs and its idle threads take up too. RYpe works a batch of reads ahead of minimap2, and minimap2 maps on as many threads at once as `SET threads` allows. The query itself only writes the rows out. As they come in no fixed order, `COPY ... (FORMAT FASTQ)` and `(FORMAT FASTA)` write them on all of DuckDB's threads; a writer that takes rows on one thread would not hold the mapping to one either. With `async_threads` set to 0, both run in the query itself instead
 - **Memory** is sized automatically, with no `max_memory` parameter; see [Memory budget](#memory-budget)
 - The minimap2 index is loaded whole, once. A multi-part index would have to be loaded part by part with every read held meanwhile, so it is refused, with an error naming the file, once its first part has loaded and before any row is returned; rebuild it as one part (`minimap2 -d` builds one part when `-I` is larger than the reference)
 
@@ -188,6 +204,7 @@ SELECT * FROM rype_filter('reads', 'human.ryxdi', 'human.mmi') ORDER BY sequence
 ```
 
 **Error conditions:**
+
 - A NULL `sequence_table`, `index_path` or `minimap2_index_path`, or an empty `minimap2_index_path` (omit it to filter with RYpe alone)
 - `sequence_table` does not exist, or names a common table expression (a `WITH` name; create a view or table instead)
 - `sequence_table` has no `sequence1`, or a `sequence1` or `sequence2` that is not VARCHAR or BLOB
@@ -204,6 +221,7 @@ SELECT * FROM rype_filter('reads', 'human.ryxdi', 'human.mmi') ORDER BY sequence
 Compute the log-ratio of classification scores between two single-bucket RYpe indices. For each input sequence, this returns `log10(numerator_score / denominator_score)`, indicating which index the sequence is more similar to.
 
 **Parameters:**
+
 - `numerator_path` (VARCHAR): Path to a single-bucket RYpe index directory (`.ryxdi`) used as the numerator
 - `denominator_path` (VARCHAR): Path to a single-bucket RYpe index directory (`.ryxdi`) used as the denominator
 - `sequence_table` (VARCHAR): Name of a DuckDB table or view containing sequences. Must have columns: identifier column + `sequence1` (VARCHAR or BLOB) + optional `sequence2` (VARCHAR or BLOB)
@@ -213,11 +231,13 @@ Compute the log-ratio of classification scores between two single-bucket RYpe in
 - `debug` (BOOLEAN, optional, default false): Report the chosen batch size and the memory estimates behind it through `miint_warnings()` — see [Memory budget](#memory-budget)
 
 **Output schema:**
+
 - `read_id` (VARCHAR): Sequence identifier from the input table
 - `log_ratio` (DOUBLE): `log10(numerator_score / denominator_score)`. Positive values indicate the sequence matches the numerator index more strongly; negative values indicate the denominator. Special values: `+inf` (only numerator matches), `-inf` (only denominator matches), `NaN` (neither index matches)
 - `fast_path` (INTEGER): 1 if the read was classified via the fast-path (skipped denominator), 0 otherwise
 
 **Behavior:**
+
 - Both indices must be single-bucket indices (multi-bucket indices are rejected)
 - Returns exactly one row per input sequence
 - Paired-end handling follows the **contents** of `sequence2`, not merely the presence of the column. This matters because `read_fastx` always emits a `sequence2` column, so single-end reads loaded the obvious way carry an all-NULL one; treating that as paired-end would halve the batch size and double the number of index passes. The check samples the first chunk of the single pass over your relation rather than scanning it separately — the relation is read exactly once, which it must be, since a view or a registered Arrow relation need not return the same rows twice. A relation that only becomes paired well after its first few thousand rows is therefore sized as single-end; set `max_memory` if that under-budgets
@@ -258,6 +278,7 @@ SELECT * FROM rype_log_ratio('host.ryxdi', 'microbe.ryxdi', 'seqs', id_column :=
 ```
 
 **Error conditions:**
+
 - Either `numerator_path` or `denominator_path` is not a valid `.ryxdi` index directory
 - Either index is not a single-bucket index (multi-bucket indices are rejected)
 - `sequence_table` does not exist, or is missing the identifier column or `sequence1`, or has a `sequence1` or `sequence2` that is not VARCHAR or BLOB
@@ -269,20 +290,27 @@ SELECT * FROM rype_log_ratio('host.ryxdi', 'microbe.ryxdi', 'seqs', id_column :=
 Extract deduplicated minimizer hash sets from sequences for both forward and reverse complement strands.
 
 **Parameters:**
-- `sequence_table` (VARCHAR): Name of a DuckDB table or view with identifier column + `sequence1` (VARCHAR or BLOB)
-- `k` (BIGINT): K-mer size. Must be 16, 32, or 64 (constrained by RY-space 1-bit encoding fitting in uint64)
-- `w` (BIGINT): Window size for minimizer selection. Must be > 0
-- `salt` (UBIGINT, optional, default 6148914691236517205): Hash salt for reproducible but varied minimizer selection
-- `id_column` (VARCHAR, optional, default `'read_id'`): Name of the identifier column
-- `max_memory` (BIGINT, optional, default 0): Byte budget for RYpe's internal batch sizing (how many reads it accumulates before each pass over the index). 0 derives one — see [Memory budget](#memory-budget) below
-- `debug` (BOOLEAN, optional, default false): Report the chosen batch size and the memory estimates behind it through `miint_warnings()` — see [Memory budget](#memory-budget)
+
+| Parameter | Type and default | Description |
+| --- | --- | --- |
+| `sequence_table` | VARCHAR | Name of a DuckDB table or view with identifier column + `sequence1` (VARCHAR or BLOB) |
+| `k` | BIGINT | K-mer size. Must be 16, 32, or 64 (constrained by RY-space 1-bit encoding fitting in uint64) |
+| `w` | BIGINT | Window size for minimizer selection. Must be > 0 |
+| `salt` | UBIGINT, optional, default 6148914691236517205 | Hash salt for reproducible but varied minimizer selection |
+| `id_column` | VARCHAR, optional, default `'read_id'` | Name of the identifier column |
+| `max_memory` | BIGINT, optional, default 0 | Byte budget for RYpe's internal batch sizing (how many reads it accumulates before each pass over the index). 0 derives one — see [Memory budget](#memory-budget) below |
+| `debug` | BOOLEAN, optional, default false | Report the chosen batch size and the memory estimates behind it through `miint_warnings()` — see [Memory budget](#memory-budget) |
 
 **Output schema:**
-- `read_id` (VARCHAR): Sequence identifier from the input table
-- `fwd_set` (UBIGINT[]): Sorted, deduplicated minimizer hashes from the forward strand
-- `rc_set` (UBIGINT[]): Sorted, deduplicated minimizer hashes from the reverse complement strand
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `read_id` | VARCHAR | Sequence identifier from the input table |
+| `fwd_set` | UBIGINT[] | Sorted, deduplicated minimizer hashes from the forward strand |
+| `rc_set` | UBIGINT[] | Sorted, deduplicated minimizer hashes from the reverse complement strand |
 
 **Behavior:**
+
 - Returns one row per input sequence
 - Sequences shorter than k produce empty lists
 - Hash sets are sorted and deduplicated (set semantics)
@@ -313,6 +341,7 @@ WHERE a.read_id < b.read_id;
 ```
 
 **Error conditions:**
+
 - `sequence_table` does not exist, or is missing the identifier column or `sequence1`, or has a `sequence1` that is not VARCHAR or BLOB
 - `k` not in {16, 32, 64}
 - `w` not greater than 0
@@ -324,22 +353,29 @@ WHERE a.read_id < b.read_id;
 Extract minimizer hashes with their positions for both forward and reverse complement strands. Unlike `rype_extract_minimizer_set`, this preserves positional information and may contain duplicate hashes at different positions.
 
 **Parameters:**
-- `sequence_table` (VARCHAR): Name of a DuckDB table or view with identifier column + `sequence1` (VARCHAR or BLOB)
-- `k` (BIGINT): K-mer size. Must be 16, 32, or 64
-- `w` (BIGINT): Window size for minimizer selection. Must be > 0
-- `salt` (UBIGINT, optional, default 6148914691236517205): Hash salt for reproducible but varied minimizer selection
-- `id_column` (VARCHAR, optional, default `'read_id'`): Name of the identifier column
-- `max_memory` (BIGINT, optional, default 0): Byte budget for RYpe's internal batch sizing (how many reads it accumulates before each pass over the index). 0 derives one — see [Memory budget](#memory-budget) below
-- `debug` (BOOLEAN, optional, default false): Report the chosen batch size and the memory estimates behind it through `miint_warnings()` — see [Memory budget](#memory-budget)
+
+| Parameter | Type and default | Description |
+| --- | --- | --- |
+| `sequence_table` | VARCHAR | Name of a DuckDB table or view with identifier column + `sequence1` (VARCHAR or BLOB) |
+| `k` | BIGINT | K-mer size. Must be 16, 32, or 64 |
+| `w` | BIGINT | Window size for minimizer selection. Must be > 0 |
+| `salt` | UBIGINT, optional, default 6148914691236517205 | Hash salt for reproducible but varied minimizer selection |
+| `id_column` | VARCHAR, optional, default `'read_id'` | Name of the identifier column |
+| `max_memory` | BIGINT, optional, default 0 | Byte budget for RYpe's internal batch sizing (how many reads it accumulates before each pass over the index). 0 derives one — see [Memory budget](#memory-budget) below |
+| `debug` | BOOLEAN, optional, default false | Report the chosen batch size and the memory estimates behind it through `miint_warnings()` — see [Memory budget](#memory-budget) |
 
 **Output schema:**
-- `read_id` (VARCHAR): Sequence identifier from the input table
-- `fwd_hashes` (UBIGINT[]): Minimizer hashes from the forward strand
-- `fwd_positions` (UBIGINT[]): Positions corresponding to each forward hash
-- `rc_hashes` (UBIGINT[]): Minimizer hashes from the reverse complement strand
-- `rc_positions` (UBIGINT[]): Positions corresponding to each reverse complement hash
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `read_id` | VARCHAR | Sequence identifier from the input table |
+| `fwd_hashes` | UBIGINT[] | Minimizer hashes from the forward strand |
+| `fwd_positions` | UBIGINT[] | Positions corresponding to each forward hash |
+| `rc_hashes` | UBIGINT[] | Minimizer hashes from the reverse complement strand |
+| `rc_positions` | UBIGINT[] | Positions corresponding to each reverse complement hash |
 
 **Behavior:**
+
 - Returns one row per input sequence
 - Sequences shorter than k produce empty lists
 - Hash and position arrays always have the same length per strand (i.e., `len(fwd_hashes) = len(fwd_positions)`)
@@ -364,6 +400,7 @@ ORDER BY read_id, pos;
 ```
 
 **Error conditions:**
+
 - `sequence_table` does not exist, or is missing the identifier column or `sequence1`, or has a `sequence1` that is not VARCHAR or BLOB
 - `k` not in {16, 32, 64}
 - `w` not greater than 0

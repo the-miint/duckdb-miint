@@ -1,7 +1,6 @@
 #include "TaxonomyStore.hpp"
 
 #include <algorithm>
-#include <map>
 #include <stdexcept>
 #include <utility>
 
@@ -94,6 +93,138 @@ const std::vector<std::string> &DefaultBadNameTokens() {
 	return tokens;
 }
 
+const char *TaxonomyViolationKindName(TaxonomyViolationKind kind) {
+	switch (kind) {
+	case TaxonomyViolationKind::InvalidId:
+		return "invalid_id";
+	case TaxonomyViolationKind::InvalidValue:
+		return "invalid_value";
+	case TaxonomyViolationKind::DuplicateId:
+		return "duplicate_id";
+	case TaxonomyViolationKind::Gap:
+		return "gap";
+	}
+	throw std::invalid_argument("TaxonomyViolationKindName: unknown kind");
+}
+
+std::vector<RowViolation> FindRowViolations(const std::vector<TaxonomyRow> &rows) {
+	// How many rows carry each id. An empty id names no feature, so it is never a repeat.
+	std::unordered_map<std::string_view, size_t> id_count;
+	for (const auto &row : rows) {
+		if (!row.feature_id.empty()) {
+			id_count[row.feature_id]++;
+		}
+	}
+
+	std::vector<RowViolation> violations;
+	for (size_t i = 0; i < rows.size(); i++) {
+		const auto &row = rows[i];
+		if (row.feature_id.empty()) {
+			violations.push_back({TaxonomyViolationKind::InvalidId, i, 0, nullptr, 0, 0});
+		} else if (const size_t count = id_count.at(row.feature_id); count > 1) {
+			violations.push_back({TaxonomyViolationKind::DuplicateId, i, 0, nullptr, count, 0});
+		}
+		for (size_t r = 0; r < kRanks; r++) {
+			if (!row.ranks[r]) {
+				continue;
+			}
+			if (const char *why = ValueProblem(*row.ranks[r])) {
+				violations.push_back({TaxonomyViolationKind::InvalidValue, i, r, why, 0, 0});
+			}
+		}
+		// The first NULL rank is a gap when any deeper rank is set.
+		size_t first_null = 0;
+		while (first_null < kRanks && row.ranks[first_null]) {
+			first_null++;
+		}
+		for (size_t deeper = first_null + 1; deeper < kRanks; deeper++) {
+			if (row.ranks[deeper]) {
+				violations.push_back({TaxonomyViolationKind::Gap, i, first_null, nullptr, 0, deeper});
+				break;
+			}
+		}
+	}
+	return violations;
+}
+
+std::vector<MultipleParents> FindMultipleParents(const std::vector<TaxonomyRow> &rows,
+                                                 const std::vector<size_t> *depths) {
+	if (depths && depths->size() != rows.size()) {
+		throw std::invalid_argument("FindMultipleParents: " + std::to_string(depths->size()) + " depths for " +
+		                            std::to_string(rows.size()) + " rows");
+	}
+	// The row's value at `rank`, or nullptr when it is NULL or at or below the row's depth.
+	auto value = [&](size_t row, size_t rank) -> const std::string * {
+		if (depths && rank >= (*depths)[row]) {
+			return nullptr;
+		}
+		const auto &v = rows[row].ranks[rank];
+		return v ? &*v : nullptr;
+	};
+	// Parents compare by text, and a NULL parent equals only another NULL.
+	auto same_parent = [](const std::string *a, const std::string *b) {
+		return a == b || (a && b && *a == *b);
+	};
+
+	constexpr size_t kNone = std::numeric_limits<size_t>::max();
+	struct Label {
+		const std::string *first_parent;
+		// The label's index in `found` once a second parent is seen, else kNone.
+		size_t conflict;
+	};
+	// First pass: each label's first parent, and the labels seen under a second one, in the
+	// order that happens. A label is a rank and a name, so each rank has its own map.
+	std::array<std::unordered_map<std::string_view, Label>, kRanks> labels;
+	std::vector<MultipleParents> found;
+	for (size_t i = 0; i < rows.size(); i++) {
+		for (size_t r = 1; r < kRanks; r++) {
+			const std::string *name = value(i, r);
+			if (!name) {
+				continue;
+			}
+			const std::string *parent = value(i, r - 1);
+			auto [it, inserted] = labels[r].try_emplace(*name, Label {parent, kNone});
+			if (!inserted && it->second.conflict == kNone && !same_parent(it->second.first_parent, parent)) {
+				it->second.conflict = found.size();
+				found.push_back({r, {}});
+			}
+		}
+	}
+	if (found.empty()) {
+		return found;
+	}
+
+	// Second pass: every row under each parent of those labels, the parents in the order each
+	// was first seen, which input order gives.
+	struct ParentSlots {
+		std::unordered_map<std::string_view, size_t> named;
+		size_t null_parent = kNone;
+	};
+	std::vector<ParentSlots> slots(found.size());
+	for (size_t i = 0; i < rows.size(); i++) {
+		for (size_t r = 1; r < kRanks; r++) {
+			const std::string *name = value(i, r);
+			if (!name) {
+				continue;
+			}
+			const size_t conflict = labels[r].at(*name).conflict;
+			if (conflict == kNone) {
+				continue;
+			}
+			auto &by_parent = found[conflict].rows_by_parent;
+			auto &slot = slots[conflict];
+			const std::string *parent = value(i, r - 1);
+			size_t &index = parent ? slot.named.try_emplace(*parent, kNone).first->second : slot.null_parent;
+			if (index == kNone) {
+				index = by_parent.size();
+				by_parent.emplace_back();
+			}
+			by_parent[index].push_back(i);
+		}
+	}
+	return found;
+}
+
 TaxonomyStore::TaxonomyStore(const std::vector<TaxonomyRow> &rows, const std::vector<std::string> &bad_name_tokens) {
 	std::vector<std::string> lower_tokens;
 	for (const auto &token : bad_name_tokens) {
@@ -109,43 +240,34 @@ TaxonomyStore::TaxonomyStore(const std::vector<TaxonomyRow> &rows, const std::ve
 	for (const auto &row : rows) {
 		feature_ids_.push_back(row.feature_id);
 	}
-	// How many times each repeated id occurs; ids that occur once are not listed.
-	std::unordered_map<std::string_view, size_t> repeats;
+	// Each id's first row.
 	for (size_t i = 0; i < feature_ids_.size(); i++) {
-		if (!feature_ids_[i].empty() && !row_of_id_.emplace(feature_ids_[i], i).second) {
-			repeats.emplace(feature_ids_[i], 1).first->second++;
+		if (!feature_ids_[i].empty()) {
+			row_of_id_.emplace(feature_ids_[i], i);
 		}
 	}
 
 	Problems problems;
-	for (size_t i = 0; i < rows.size(); i++) {
-		const auto &id = feature_ids_[i];
-		const auto &ranks = rows[i].ranks;
-		if (id.empty()) {
-			problems.Add("row " + std::to_string(i + 1) + " has an empty feature_id");
-		} else if (auto repeat = repeats.find(id); repeat != repeats.end() && row_of_id_.at(id) == i) {
-			problems.Add(RowText(id, i) + " appears " + std::to_string(repeat->second) + " times");
-		}
-		for (size_t r = 0; r < kRanks; r++) {
-			if (!ranks[r]) {
-				continue;
+	for (const auto &v : FindRowViolations(rows)) {
+		const auto &id = feature_ids_[v.row];
+		const auto &ranks = rows[v.row].ranks;
+		switch (v.kind) {
+		case TaxonomyViolationKind::InvalidId:
+			problems.Add("row " + std::to_string(v.row + 1) + " has an empty feature_id");
+			break;
+		case TaxonomyViolationKind::DuplicateId:
+			// One problem per repeated id, at its first row, however often it repeats.
+			if (row_of_id_.at(id) == v.row) {
+				problems.Add(RowText(id, v.row) + " appears " + std::to_string(v.count) + " times");
 			}
-			if (const char *why = ValueProblem(*ranks[r])) {
-				problems.Add(RowText(id, i) + ", column '" + kLineageRanks[r].column + "': value '" + *ranks[r] + "' " +
-				             why);
-			}
-		}
-		for (size_t r = 0; r + 1 < kRanks; r++) {
-			if (ranks[r]) {
-				continue;
-			}
-			for (size_t deeper = r + 1; deeper < kRanks; deeper++) {
-				if (ranks[deeper]) {
-					problems.Add(RowText(id, i) + ": '" + kLineageRanks[r].column + "' is NULL but deeper rank '" +
-					             kLineageRanks[deeper].column + "' is not");
-					break;
-				}
-			}
+			break;
+		case TaxonomyViolationKind::InvalidValue:
+			problems.Add(RowText(id, v.row) + ", column '" + kLineageRanks[v.rank].column + "': value '" +
+			             *ranks[v.rank] + "' " + v.reason);
+			break;
+		case TaxonomyViolationKind::Gap:
+			problems.Add(RowText(id, v.row) + ": '" + kLineageRanks[v.rank].column + "' is NULL but deeper rank '" +
+			             kLineageRanks[v.deeper].column + "' is not");
 			break;
 		}
 	}
@@ -154,17 +276,8 @@ TaxonomyStore::TaxonomyStore(const std::vector<TaxonomyRow> &rows, const std::ve
 	// Clean, intern and link each lineage to its parent names.
 	names_.assign(rows.size() * kRanks, kMissingName);
 	std::array<std::unordered_map<std::string, NameId>, kRanks> name_ids;
-	// The row that first interned each name, to show the lineage a parent came from.
-	std::array<std::vector<size_t>, kRanks> first_row;
-	// Names seen under more than one parent, in the order the second parent appeared. Each
-	// distinct parent is kept with the row it first came from.
-	struct Conflict {
-		size_t rank;
-		NameId name;
-		std::vector<std::pair<NameId, size_t>> parents;
-	};
-	std::vector<Conflict> conflicts;
-	std::map<std::pair<size_t, NameId>, size_t> conflict_index;
+	// Each row's cleaned depth: its ranks from there down are missing.
+	std::vector<size_t> depths(rows.size());
 
 	std::string lower;
 	for (size_t i = 0; i < rows.size(); i++) {
@@ -192,6 +305,7 @@ TaxonomyStore::TaxonomyStore(const std::vector<TaxonomyRow> &rows, const std::ve
 			}
 			depth = 0;
 		}
+		depths[i] = depth;
 
 		for (size_t r = 0; r < depth; r++) {
 			const NameId parent = r == 0 ? kMissingName : names_[i * kRanks + r - 1];
@@ -203,44 +317,33 @@ TaxonomyStore::TaxonomyStore(const std::vector<TaxonomyRow> &rows, const std::ve
 					                            " distinct names at rank '" + kLineageRanks[r].column + "'");
 				}
 				name_text_[r].push_back(*ranks[r]);
+				// The first parent seen. A name with a second one fails the check below.
 				parent_[r].push_back(parent);
-				first_row[r].push_back(i);
-			} else if (parent_[r][name] != parent) {
-				auto [entry, added] = conflict_index.emplace(std::make_pair(r, name), conflicts.size());
-				if (added) {
-					conflicts.push_back({r, name, {{parent_[r][name], first_row[r][name]}}});
-				}
-				auto &seen = conflicts[entry->second].parents;
-				auto same_parent = [&](const std::pair<NameId, size_t> &p) {
-					return p.first == parent;
-				};
-				if (std::none_of(seen.begin(), seen.end(), same_parent)) {
-					seen.emplace_back(parent, i);
-				}
 			}
 			names_[i * kRanks + r] = name;
 		}
 	}
 
-	for (const auto &conflict : conflicts) {
-		const size_t listed = std::min(conflict.parents.size(), kMaxListedParents);
-		std::string problem = "'" + name_text_[conflict.rank][conflict.name] + "' (" +
-		                      kLineageRanks[conflict.rank].column + ") is under " +
-		                      std::to_string(conflict.parents.size()) + " different " +
-		                      kLineageRanks[conflict.rank - 1].column + " names:";
+	// Parents are checked over the cleaned lineages, so a placeholder that cleaning removed
+	// cannot conflict.
+	for (const auto &label : FindMultipleParents(rows, &depths)) {
+		const auto &by_parent = label.rows_by_parent;
+		const size_t listed = std::min(by_parent.size(), kMaxListedParents);
+		std::string problem = "'" + *rows[by_parent[0][0]].ranks[label.rank] + "' (" +
+		                      kLineageRanks[label.rank].column + ") is under " + std::to_string(by_parent.size()) +
+		                      " different " + kLineageRanks[label.rank - 1].column + " names:";
 		for (size_t p = 0; p < listed; p++) {
-			// The lineage above the name in the row the parent came from, joined with "; " as
+			// The lineage above the name in the first row under this parent, joined with "; " as
 			// tax2tree writes labels, for reading. (FormatLineage writes lineages for parsing.)
-			const size_t row = conflict.parents[p].second;
+			const size_t row = by_parent[p][0];
 			std::string lineage;
-			for (size_t r = 0; r < conflict.rank; r++) {
-				lineage += (r == 0 ? "" : "; ") + std::string(1, kLineageRanks[r].letter) + "__" +
-				           name_text_[r][names_[row * kRanks + r]];
+			for (size_t r = 0; r < label.rank; r++) {
+				lineage += (r == 0 ? "" : "; ") + std::string(1, kLineageRanks[r].letter) + "__" + *rows[row].ranks[r];
 			}
 			problem += (p == 0 ? " [" : ", [") + lineage + "]";
 		}
-		if (conflict.parents.size() > listed) {
-			problem += ", and " + std::to_string(conflict.parents.size() - listed) + " more";
+		if (by_parent.size() > listed) {
+			problem += ", and " + std::to_string(by_parent.size() - listed) + " more";
 		}
 		problems.Add(std::move(problem));
 	}

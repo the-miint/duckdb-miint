@@ -5,16 +5,16 @@ MIINT exposes a variety of methods for high throughput alignment. In general, MI
 ## Table of contents
 
 - [bowtie2](#bowtie2) - Read alignment with bowtie2.
-  - [Index creation](#index-creation-with-bowtie2) - Creating an index for use later.
-  - [Single index alignment](#single-index-alignment-with-bowtie2) - Aligning to a single index.
-  - [Sharded alignment](#sharded-alignment-with-bowtie2) - Aligning to many indices.
+    - [Index creation](#index-creation-with-bowtie2) - Creating an index for use later.
+    - [Single index alignment](#single-index-alignment-with-bowtie2) - Aligning to a single index.
+    - [Sharded alignment](#sharded-alignment-with-bowtie2) - Aligning to many indices.
 - [minimap2](#minimap2) - Read alignment with minimap2.
-  - [Index creation](#index-creation-with-minimap2) - Creating an index for use later.
-  - [Single index alignment](#single-index-alignment-with-minimap2) - Aligning to a single index.
-  - [Sharded alignment](#sharded-alignment-with-minimap2) - Aligning to many indices.
+    - [Index creation](#index-creation-with-minimap2) - Creating an index for use later.
+    - [Single index alignment](#single-index-alignment-with-minimap2) - Aligning to a single index.
+    - [Sharded alignment](#sharded-alignment-with-minimap2) - Aligning to many indices.
 - [SortMeRNA](#sortmerna) - Read alignment with SortMeRNA.
-  - [Alignment with SAM output] - Alignment with SAM output like minimap2 and bowtie2.
-  - [Alignment with rRNA output] - Aligning with the native rRNA output.
+    - [Alignment with SAM output] - Alignment with SAM output like minimap2 and bowtie2.
+    - [Alignment with rRNA output] - Aligning with the native rRNA output.
 
 ### bowtie2
 
@@ -27,16 +27,21 @@ Build and save a bowtie2 index to disk. This is the bowtie2 analogue of `save_mi
 **Use case:** Build per-shard bowtie2 indexes once, then align many query sets against them with `align_bowtie2_sharded`. `align_bowtie2_sharded` expects each shard's index at `<shard_directory>/<shard_name>/index.*.bt2`, so build each shard with `output_path = '<shard_directory>/<shard_name>/index'`.
 
 **Parameters:**
+
 - `subject_table` (VARCHAR): Name of table or view containing subject/reference sequences. Must have `read_fastx`-compatible schema. Cannot contain paired-end data (sequence2 must be NULL or absent). The `read_id` column may be `VARCHAR` or `BIGINT`; `BIGINT` ids are stringified before being written into the index (recovered subject names are always `VARCHAR`).
 - `output_path` (VARCHAR): Basename **prefix** for the index. bowtie2-build writes multiple files (`<output_path>.1.bt2`, `.2.bt2`, `.3.bt2`, `.4.bt2`, `.rev.1.bt2`, `.rev.2.bt2`). The parent directory is created if it does not exist. Note this differs from `save_minimap2_index`, which writes a single `.mmi` file.
 - `threads` (INTEGER, default: 1): Number of threads `bowtie2-build` may use. Must be >= 1.
 
 **Output schema:**
-- `success` (BOOLEAN): Always true if function completes successfully
-- `index_path` (VARCHAR): The `output_path` prefix the index files were written under
-- `num_subjects` (BIGINT): Number of subject sequences indexed
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `success` | BOOLEAN | Always true if function completes successfully |
+| `index_path` | VARCHAR | The `output_path` prefix the index files were written under |
+| `num_subjects` | BIGINT | Number of subject sequences indexed |
 
 **Behavior:**
+
 - Loads all subject sequences from the table (rejects an empty table and rejects paired subjects)
 - Submits them to the gpl-boundary daemon's `bowtie2-build` tool, which writes the `.bt2` files at `output_path`
 - Returns a single row with success status and metadata
@@ -63,6 +68,7 @@ SELECT * FROM align_bowtie2_sharded('queries',
 ```
 
 **Error handling:**
+
 - Error if subject_table does not exist
 - Error if subject_table contains paired-end data (sequence2 not NULL)
 - Error if subject_table is empty (no sequences to index)
@@ -70,6 +76,7 @@ SELECT * FROM align_bowtie2_sharded('queries',
 - Error if tables lack required columns (read_id, sequence1)
 
 **Performance notes:**
+
 - Building an index takes time proportional to the total reference size
 - Index files are typically 10-30% of the original FASTA size
 - Loading a pre-built index is 10-30x faster than building it from sequences
@@ -77,12 +84,14 @@ SELECT * FROM align_bowtie2_sharded('queries',
 - Index files are portable across systems with the same minimap2 version
 
 **When to use pre-built indexes:**
+
 - **Large reference databases**: WoLr2, RefSeq bacterial genomes, custom marker gene databases
 - **Multiple metagenome samples**: When aligning different samples to the same reference database
 - **Production pipelines**: Build indexes during setup, use them in production runs
 - **Shared infrastructure**: Build indexes once, share them across users/jobs
 
 **When NOT to use pre-built indexes:**
+
 - **Small references**: For small reference sets (<10MB), on-the-fly indexing is fast enough
 - **One-time alignments**: If aligning only once, the index-building time won't be recovered
 
@@ -93,19 +102,30 @@ Align query sequences to subject sequences using Bowtie2. This function enables 
 Bowtie2 runs out of process via the `gpl-boundary` daemon (an Apache-licensed process-isolation host shipped separately from this extension). Sequences cross the boundary as Arrow IPC; bowtie2's command line is never user-controlled.
 
 **Requirements:**
+
 - The `gpl-boundary` daemon must be installed. Easiest path: `SELECT install_gpl_boundary();`. The miint extension itself does not link bowtie2.
 
+```sql
+-- Create tables with sequence data
+CREATE TABLE subjects AS SELECT * FROM 'references.fasta';
+CREATE TABLE queries AS SELECT * FROM 'reads.fastq';
+
+-- Basic alignment
+SELECT * FROM align_bowtie2('queries', 'subjects');
+```
+
 **Parameters:**
+
 - `query_table` (VARCHAR): Name of table or view containing query sequences. Must have `read_fastx`-compatible schema (read_id, sequence1, optional sequence2/qual1/qual2). The `read_id` column may be `VARCHAR`, `BIGINT`, or `UUID` (see *Identifier-column types* below).
 - `subject_table` (VARCHAR): Name of table or view containing subject/reference sequences. Must have `read_fastx`-compatible schema. Cannot contain paired-end data (sequence2 must be NULL or absent). The `read_id` column may be `VARCHAR`, `BIGINT`, or `UUID`.
 - `preset` (VARCHAR, optional): Bowtie2 preset for alignment sensitivity
-  - `'very-fast'`: Fastest, least sensitive
-  - `'fast'`: Fast alignment
-  - `'sensitive'`: More sensitive (slower)
-  - `'very-sensitive'`: Most sensitive, slowest
+    - `'very-fast'`: Fastest, least sensitive
+    - `'fast'`: Fast alignment
+    - `'sensitive'`: More sensitive (slower)
+    - `'very-sensitive'`: Most sensitive, slowest
 - `local` (BOOLEAN, default: false): Use local alignment mode instead of end-to-end
-  - `false` (default): End-to-end alignment (entire read must align)
-  - `true`: Local alignment (soft-clipping allowed at ends)
+    - `false` (default): End-to-end alignment (entire read must align)
+    - `true`: Local alignment (soft-clipping allowed at ends)
 - `threads` (INTEGER, default: 1): Number of threads for Bowtie2 alignment (daemon `nthreads`)
 - `max_secondary` (INTEGER, default: 1): Maximum alignments to report per query (`-k`)
 - `quiet` (BOOLEAN, default: true): Runs Bowtie2 with `--quiet`. Keep the default. miint never surfaces Bowtie2's stderr alignment statistics to SQL, so `quiet := false` has **no user-visible effect** — it only makes the daemon emit per-batch summaries that miint immediately drains and discards, adding overhead for no benefit.
@@ -146,6 +166,7 @@ Unknown parameters are rejected at bind time by DuckDB's binder (e.g. `presset :
 
 **Output schema:**
 Returns the same schema as `read_alignments` (21 columns):
+
 - `read_id` (VARCHAR, BIGINT, or UUID — mirrors the query side): Query sequence identifier
 - `flags` (USMALLINT): SAM alignment flags
 - `reference` (VARCHAR, BIGINT, or UUID — mirrors the subject side): Subject sequence identifier
@@ -169,6 +190,7 @@ Returns the same schema as `read_alignments` (21 columns):
 - `tag_sa` (VARCHAR): Supplementary alignment info
 
 **Identifier-column types (`read_id`, `reference`, `mate_reference`):**
+
 - The input columns may be `VARCHAR`, `BIGINT`, or `UUID`. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time with the message `Column '<name>' in table '<table>' must be VARCHAR, BIGINT, or UUID`.
 - The output `read_id` column type mirrors the query side; `reference` and `mate_reference` mirror the subject side. Query and subject id types are independent (mixed BIGINT/VARCHAR is allowed).
 - The daemon wire schema is always strings — BIGINT support is C++/DuckDB-only. On egress, the codec parses decimal strings back to `int64_t`; on ingress, `BIGINT` values are stringified by DuckDB's implicit `Value::GetValue<std::string>()` cast before crossing the Arrow IPC boundary.
@@ -177,6 +199,7 @@ Returns the same schema as `read_alignments` (21 columns):
 - NULL `read_id` rows are rejected at row time with `NULL read_id or sequence1 in query table` — same contract as VARCHAR. The daemon's input schema requires both columns non-null.
 
 **Behavior:**
+
 - Subject sequences are loaded at bind time and indexed via the daemon's `bowtie2-build` tool (index must fit in RAM)
 - Query sequences are streamed across the gpl-boundary as Arrow IPC batches
 - Supports both single-end and paired-end query sequences (paired-end auto-detected from the query table's `sequence2`/`qual2` columns)
@@ -184,13 +207,6 @@ Returns the same schema as `read_alignments` (21 columns):
 
 **Examples:**
 ```sql
--- Create tables with sequence data
-CREATE TABLE subjects AS SELECT * FROM read_fastx('references.fasta');
-CREATE TABLE queries AS SELECT * FROM read_fastx('reads.fastq');
-
--- Basic alignment
-SELECT * FROM align_bowtie2('queries', 'subjects');
-
 -- Get primary alignments only with high sensitivity
 SELECT read_id, reference, position, mapq, cigar
 FROM align_bowtie2('queries', 'subjects', preset='very-sensitive', max_secondary=1)
@@ -227,12 +243,14 @@ COPY (
 ```
 
 **Error handling:**
+
 - Error if query_table or subject_table does not exist
 - Error if subject_table contains paired-end data (sequence2 not NULL)
 - Error if tables lack required columns (read_id, sequence1)
 - Error if the `gpl-boundary` daemon is not installed (see `SELECT install_gpl_boundary();`)
 
 **Performance notes:**
+
 - Bowtie2 is optimized for short reads (typically <500bp); for long reads, use `align_minimap2`
 - The `threads` parameter controls Bowtie2's internal parallelism
 - Query sequences are streamed in batches of 1024 to limit memory usage
@@ -254,14 +272,16 @@ Align query sequences against multiple pre-built Bowtie2 index shards. Each shar
 The sharded path emits only mapped reads (the daemon is invoked with `--no-unal`); use `align_bowtie2` directly if you need to inspect unaligned records.
 
 **Requirements:**
+
 - The `gpl-boundary` daemon must be installed (see `SELECT install_gpl_boundary();`).
 
 **Parameters:**
+
 - `query_table` (VARCHAR): Name of table or view containing query sequences. Must have `read_fastx`-compatible schema (read_id, sequence1, optional sequence2/qual1/qual2). The `read_id` column may be `VARCHAR`, `BIGINT`, or `UUID` (see *Identifier-column types* below).
 - `shard_directory` (VARCHAR, required): Path to directory containing shard subdirectories. Each shard's Bowtie2 index is expected at `<shard_directory>/<shard_name>/index` (i.e., files like `<shard_name>/index.1.bt2`, `<shard_name>/index.rev.1.bt2`, etc.)
 - `read_to_shard` (VARCHAR, required): Name of table or view that maps reads to shards. Must have columns:
-  - `read_id`: Read identifier. Must match the storage type of `query_table.read_id` exactly — VARCHAR with VARCHAR, BIGINT with BIGINT. Mismatched types are rejected at bind time.
-  - `shard_name` (VARCHAR): Name of the shard this read should be aligned against
+    - `read_id`: Read identifier. Must match the storage type of `query_table.read_id` exactly — VARCHAR with VARCHAR, BIGINT with BIGINT. Mismatched types are rejected at bind time.
+    - `shard_name` (VARCHAR): Name of the shard this read should be aligned against
 - `preset` (VARCHAR, optional): Bowtie2 sensitivity preset ('very-fast', 'fast', 'sensitive', 'very-sensitive')
 - `local` (BOOLEAN, default: false): Use local alignment mode instead of end-to-end
 - `max_secondary` (INTEGER, default: 1): Maximum alignments to report per query (`-k`)
@@ -281,12 +301,14 @@ The `no_unal` knob is intentionally not exposed: the sharded path always emits o
 Returns the same 21-column schema as `align_bowtie2` and `read_alignments`.
 
 **Identifier-column types (`read_id`, `reference`, `mate_reference`):**
+
 - The query side (`query_table.read_id` and `read_to_shard.read_id`) may be `VARCHAR`, `BIGINT`, or `UUID`. Both must share the same type — `ValidateReadToShardSchema` enforces strict equality so the underlying JOIN never relies on implicit casts. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time.
 - The output `read_id` column mirrors the query side.
 - The output `reference` and `mate_reference` columns are **always VARCHAR** in sharded mode. Sharded alignment always loads prebuilt Bowtie2 indexes, and reference names inside those indexes are opaque bytes — the same contract as `align_minimap2_sharded`. Cast in SQL (`CAST(reference AS BIGINT)`) if you need integer semantics downstream.
 - For `BIGINT`/`UUID` `read_id`, NULL input rows that have no entry in `read_to_shard` are silently skipped (the JOIN filters them out before they reach the daemon).
 
 **Behavior:**
+
 - At bind time, reads the `read_to_shard` table to discover shards; per-shard index existence is verified at InitGlobal (not Bind) so the planner doesn't pay filesystem-stat cost on wide shard sets.
 - Cross-shard parallelism is driven by `SET threads`: each DuckDB worker thread owns its own gpl-boundary daemon and claims shards atomically. Per-shard bowtie2 internal threading starts at `max_threads_per_shard` and ramps up for surviving shards once all shards are claimed (see `max_threads_per_shard` above) — this keeps the box saturated when a skewed shard-size distribution would otherwise leave a large shard running alone at the end of a run.
 - **Memory budget:** with the mm-off default, each concurrently-processed shard holds its FM-index resident in its daemon process (not shared mmap pages). Budget at least **2× the on-disk index size per concurrent shard** (≈2.5–3× for headroom), i.e. roughly `ceil(SET threads / max_threads_per_shard) × 2× <largest index>` of RAM. This memory lives in the gpl-boundary daemon **subprocesses**, so DuckDB's `memory_limit` does *not* bound it. If you hit memory pressure, raise `max_threads_per_shard` to lower the concurrent-shard count. (For reference: WOL3 shard indexes are ~0.75–0.85 GB on disk and ~2.5 GB resident per concurrent shard.)
@@ -353,6 +375,7 @@ SELECT * FROM align_bowtie2_sharded('paired_queries',
 ```
 
 **Error handling:**
+
 - Error if `shard_directory` does not exist
 - Error if any shard's Bowtie2 index files are missing (e.g., no `index.1.bt2` at `<shard_directory>/<shard_name>/index`)
 - Error if `query_table` or `read_to_shard` table/view does not exist
@@ -361,6 +384,7 @@ SELECT * FROM align_bowtie2_sharded('paired_queries',
 - Error if the `gpl-boundary` daemon is not installed (see `SELECT install_gpl_boundary();`)
 
 **Performance notes:**
+
 - Shards are processed sequentially; per-shard bowtie2 parallelism comes from `max_threads_per_shard`
 - The `threads` parameter is ignored (a warning is emitted); use `max_threads_per_shard` instead
 - Shards are sorted by read count (largest first) so the first shard's index stays hot in the daemon's worker pool
@@ -384,6 +408,7 @@ Build and save a minimap2 index to disk for reuse. This provides 10-30x performa
 **Use case:** Build indexes once for large reference databases (e.g., WoLr2 phylogenetic markers, RefSeq genomes, custom OGU databases), then use them repeatedly with `align_minimap2(..., index_path='file.mmi')` instead of rebuilding the index each time.
 
 **Parameters:**
+
 - `subject_table` (VARCHAR): Name of table or view containing subject/reference sequences. Must have `read_fastx`-compatible schema. Cannot contain paired-end data (sequence2 must be NULL or absent). The `read_id` column may be `VARCHAR`, `BIGINT`, or `UUID`; `BIGINT` ids are stringified to decimal before being written into the index. When the index is later loaded via `align_minimap2(..., index_path=...)`, the recovered subject names are always `VARCHAR` (see *Identifier-column types* in `align_minimap2`).
 - `output_path` (VARCHAR): Path where the index file (.mmi) will be saved
 - `preset` (VARCHAR, default: 'sr'): Minimap2 preset (same options as `align_minimap2`)
@@ -392,11 +417,15 @@ Build and save a minimap2 index to disk for reuse. This provides 10-30x performa
 
 
 **Output schema:**
-- `success` (BOOLEAN): Always true if function completes successfully
-- `index_path` (VARCHAR): Path to the created index file
-- `num_subjects` (BIGINT): Number of subject sequences indexed
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `success` | BOOLEAN | Always true if function completes successfully |
+| `index_path` | VARCHAR | Path to the created index file |
+| `num_subjects` | BIGINT | Number of subject sequences indexed |
 
 **Behavior:**
+
 - Loads all subject sequences from the table
 - Builds minimap2 index in memory with specified parameters
 - Writes index to disk in .mmi format
@@ -458,18 +487,28 @@ Align query sequences to subject sequences using minimap2. This function enables
 
 **Performance:** For large reference databases (e.g., human genome), use pre-built indexes via `index_path` for 10-30x faster alignment. Build indexes once with `save_minimap2_index`, then reuse them across multiple queries.
 
+```sql
+-- Create tables with sequence data
+CREATE TABLE subjects AS SELECT * FROM 'references.fasta';
+CREATE TABLE queries AS SELECT * FROM 'reads.fastq';
+
+-- Basic alignment using subject_table (builds index on-the-fly)
+SELECT * FROM align_minimap2('queries', subject_table='subjects');
+```
+
 **Parameters:**
+
 - `query_table` (VARCHAR): Name of table or view containing query sequences. Must have `read_fastx`-compatible schema (read_id, sequence1, optional sequence2/qual1/qual2). The `read_id` column may be `VARCHAR`, `BIGINT`, or `UUID` (see *Identifier-column types* below).
 - `subject_table` (VARCHAR, optional): Name of table or view containing subject/reference sequences. Must have `read_fastx`-compatible schema. Cannot contain paired-end data (sequence2 must be NULL or absent). The `read_id` column may be `VARCHAR`, `BIGINT`, or `UUID`. **Either `subject_table` OR `index_path` must be provided, but not both.**
 - `index_path` (VARCHAR, optional): Path to pre-built minimap2 index file (.mmi). Use `save_minimap2_index()` to create index files. **Either `subject_table` OR `index_path` must be provided, but not both.**
 - `per_subject_database` (BOOLEAN, default: false): Build separate index for each subject sequence (only valid with `subject_table`, not with `index_path`)
-  - `false` (default): Build single index from all subjects, align all queries once (efficient for many subjects)
-  - `true`: Build index per subject, align all queries against each (useful for per-genome analysis)
+    - `false` (default): Build single index from all subjects, align all queries once (efficient for many subjects)
+    - `true`: Build index per subject, align all queries against each (useful for per-genome analysis)
 - `preset` (VARCHAR, default: 'sr'): Minimap2 preset
-  - `'sr'`: Short reads (Illumina), k=21
-  - `'map-ont'`: Oxford Nanopore reads, k=15
-  - `'map-pb'`: PacBio reads, k=19
-  - Other minimap2 presets also supported
+    - `'sr'`: Short reads (Illumina), k=21
+    - `'map-ont'`: Oxford Nanopore reads, k=15
+    - `'map-pb'`: PacBio reads, k=19
+    - Other minimap2 presets also supported
 - `max_secondary` (INTEGER, default: 5): Maximum secondary alignments to report per query. Set to 0 for primary alignments only
 - `k` (INTEGER, optional): K-mer size (overrides preset default if specified). **Warning:** Ignored when using `index_path` (k-mer size is baked into the pre-built index)
 - `w` (INTEGER, optional): Minimizer window size (overrides preset default if specified). **Warning:** Ignored when using `index_path` (window size is baked into the pre-built index)
@@ -541,6 +580,7 @@ WHERE reference IS NULL;   -- queries that were measured and did not align
 
 **Output schema:**
 Returns the same schema as `read_alignments` (21 columns):
+
 - `read_id` (VARCHAR, BIGINT, or UUID — mirrors `query_table.read_id`): Query sequence identifier
 - `flags` (USMALLINT): SAM alignment flags
 - `reference` (VARCHAR, BIGINT, or UUID — mirrors `subject_table.read_id`; always VARCHAR when using `index_path`): Subject sequence identifier
@@ -564,6 +604,7 @@ Returns the same schema as `read_alignments` (21 columns):
 - `tag_sa` (VARCHAR): Supplementary alignment info
 
 **Identifier-column types (`read_id`, `reference`, `mate_reference`):**
+
 - The input columns may be `VARCHAR`, `BIGINT`, or `UUID`. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time with the message `Column '<name>' in table '<table>' must be VARCHAR, BIGINT, or UUID`.
 - The output `read_id` column type mirrors the query side. The output `reference` and `mate_reference` types mirror the subject side, **except when using `index_path`** — subject names stored in a `.mmi` file are opaque bytes, so both default to `VARCHAR` regardless of what the source table looked like when the index was built.
 - `BIGINT` ids are stringified to decimal on the wire; `UUID` ids are stringified to their canonical 36-char lowercase form. Both are parsed back to the original storage type on output (a `UUID` round-trips case-insensitively — uppercase input comes back canonical lowercase).
@@ -571,6 +612,7 @@ Returns the same schema as `read_alignments` (21 columns):
 - For `BIGINT`/`UUID` columns, NULL input values and the SAM `'*'` unmapped sentinel are both surfaced as SQL NULL in the output. VARCHAR sentinels (`'*'`, `'='`) pass through verbatim, preserving pre-existing behaviour.
 
 **Behavior:**
+
 - Subject sequences are loaded into memory at bind time (must fit in RAM)
 - Query sequences are processed in batches for memory efficiency
 - Supports both single-end and paired-end query sequences, and maps a pair as minimap2 does. The presets for forward-reverse pairs (`sr`, its alias `short`, and `splice:sr`) flag a pair proper (`0x2`) when its mates face each other, close together on one reference; every other preset flags a pair proper only when both mates lie on one strand. `splice:sr` maps each mate alone and then pairs the hits; every other preset maps a pair as one fragment, and under `sr` and `short` a pair can then map when neither of its mates maps alone. Positions, strands and CIGARs are reported against each mate as given
@@ -582,13 +624,6 @@ Returns the same schema as `read_alignments` (21 columns):
 
 **Examples:**
 ```sql
--- Create tables with sequence data
-CREATE TABLE subjects AS SELECT * FROM read_fastx('references.fasta');
-CREATE TABLE queries AS SELECT * FROM read_fastx('reads.fastq');
-
--- Basic alignment using subject_table (builds index on-the-fly)
-SELECT * FROM align_minimap2('queries', subject_table='subjects');
-
 -- Get only primary alignments
 SELECT read_id, reference, position, mapq, cigar
 FROM align_minimap2('queries', subject_table='subjects', max_secondary=0)
@@ -656,6 +691,7 @@ SELECT * FROM align_minimap2('paired_queries', subject_table='subjects', max_sec
 ```
 
 **Error handling:**
+
 - Error if query_table does not exist
 - Error if neither `subject_table` nor `index_path` is provided
 - Error if both `subject_table` and `index_path` are provided
@@ -668,6 +704,7 @@ SELECT * FROM align_minimap2('paired_queries', subject_table='subjects', max_sec
 - Warning if `k` or `w` parameters are specified with `index_path` (these values are ignored)
 
 **Performance notes:**
+
 - **Pre-built indexes provide 10-30x faster alignment** for large reference databases
 - Use `save_minimap2_index()` to build indexes once, then reuse them across multiple query sets
 - Index files (.mmi) store k-mer size and window size, so `k` and `w` parameters are ignored when using `index_path`
@@ -678,6 +715,7 @@ SELECT * FROM align_minimap2('paired_queries', subject_table='subjects', max_sec
 - Secondary alignments can significantly increase output size; use `max_secondary=0` for primary-only results
 
 **Limitations:**
+
 - Subject sequences must fit in memory (loaded at bind time for indexing when using `subject_table`)
 - No support for reading sequences directly from files (use tables/views from `read_fastx`)
 
@@ -694,6 +732,7 @@ minimap2 -d ref.mmi -I 2G ref.fa
 A multi-part index also requires the query relation to be replayed once per part, so `align_minimap2` snapshots it into a TEMP table up front (dropping `qual1`/`qual2`, which alignment never reads) rather than streaming it once. That snapshot is built by streaming the query relation and appending each chunk as it arrives, rather than one query that pulls the whole corpus through before returning — so the snapshot's own working set while it's being written is bounded to roughly a chunk at a time, not the whole corpus. The snapshot's *final storage*, like any TEMP table, is buffer-managed and respects `memory_limit`/spills to `temp_directory`. Budget headroom for the query corpus (read IDs + sequences only, post-`qual` drop) on top of the largest-part budget above; for a corpus in the tens of millions of short reads this is comparably sized to a single index part.
 
 Trade-offs specific to multi-part indexes:
+
 - Runtime is roughly linear in part count — every query is aligned against every part in turn, unlike `align_minimap2_sharded`, which aligns each read against exactly one shard it was pre-assigned to. Prefer sharding when reads can be assigned to shards ahead of time.
 - Primary/secondary selection and mapping quality are computed **per part**, matching the minimap2 CLI's own behavior for multi-part indexes: a read that chains in two parts produces one primary alignment per part, and `mapq` is only meaningful within a part — there is no cross-part reconciliation.
 - `include_unmapped` is rejected for a multi-part index: a read with no chain in part 1 routinely maps in part 3, so a per-part synthetic "unmapped" row would claim a read did not align when it may align in a later part — the same reasoning `align_minimap2_sharded` already applies to the same parameter.
@@ -708,11 +747,12 @@ A single-part `.mmi` (the default output of `minimap2 -d` with no `-I`, and alwa
 Align query sequences against multiple pre-built minimap2 index shards in parallel. Each shard is a separate `.mmi` index file, and a mapping table specifies which reads should be aligned against which shard. This is designed for large-scale metagenomic workflows where the reference database is split across multiple shards and reads have been pre-assigned to shards (e.g., by a prior classification step).
 
 **Parameters:**
+
 - `query_table` (VARCHAR): Name of table or view containing query sequences. Must have `read_fastx`-compatible schema (read_id, sequence1, optional sequence2/qual1/qual2). The `read_id` column may be `VARCHAR`, `BIGINT`, or `UUID` (see *Identifier-column types* below).
 - `shard_directory` (VARCHAR, required): Path to directory containing pre-built minimap2 index files. Each shard's index is expected at `<shard_directory>/<shard_name>.mmi`
 - `read_to_shard` (VARCHAR, required): Name of table or view that maps reads to shards. Must have columns:
-  - `read_id`: Read identifier. Must match the storage type of `query_table.read_id` exactly — VARCHAR with VARCHAR, BIGINT with BIGINT. Mismatched types are rejected at bind time.
-  - `shard_name` (VARCHAR): Name of the shard this read should be aligned against
+    - `read_id`: Read identifier. Must match the storage type of `query_table.read_id` exactly — VARCHAR with VARCHAR, BIGINT with BIGINT. Mismatched types are rejected at bind time.
+    - `shard_name` (VARCHAR): Name of the shard this read should be aligned against
 - `preset` (VARCHAR, default: 'sr'): Minimap2 preset ('sr', 'map-ont', 'map-pb', etc.)
 - `max_secondary` (INTEGER, default: 5): Maximum secondary alignments per query. Set to 0 for primary only
 - `eqx` (BOOLEAN, default: true): Use =/X CIGAR operators instead of M
@@ -727,12 +767,14 @@ Align query sequences against multiple pre-built minimap2 index shards in parall
 Returns the same 21-column schema as `align_minimap2` and `read_alignments`.
 
 **Identifier-column types (`read_id`, `reference`, `mate_reference`):**
+
 - The query side (`query_table.read_id` and `read_to_shard.read_id`) may be `VARCHAR`, `BIGINT`, or `UUID`. Both must share the same type — `ValidateReadToShardSchema` enforces strict equality so the underlying JOIN never relies on implicit casts. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time with the message `Column 'read_id' in table '<table>' must be VARCHAR, BIGINT, or UUID`.
 - The output `read_id` column mirrors the query side.
 - The output `reference` and `mate_reference` columns are **always VARCHAR** in sharded mode. Sharded alignment always loads prebuilt `.mmi` indexes, and subject names inside an `.mmi` are opaque bytes — the same contract as `align_minimap2(index_path=...)`. If the index was built from a `BIGINT` subject table via `save_minimap2_index`, the values come back as their decimal string form (e.g. `'2001'`); cast in SQL if you need integer semantics downstream.
 - For `BIGINT`/`UUID` `read_id`, NULL input rows that have no entry in `read_to_shard` are silently skipped (the pipeline never sees them). The SAM `'='` mate-reference sentinel is irrelevant here because the subject side is VARCHAR — `'='` passes through verbatim, matching the existing VARCHAR contract.
 
 **Behavior:**
+
 - At bind time, reads the `read_to_shard` table to discover shards and validate that each `<shard_name>.mmi` file exists in `shard_directory`
 - Shards are processed in parallel (one DuckDB thread per shard), each loading its `.mmi` index independently
 - A shard whose `.mmi` is multi-part (built with `minimap2 -I <batch>`, see *Large references* above) is streamed one part at a time; its reads are aligned against every part, and peak memory per active shard is the largest single part. Runtime for that shard scales with its part count, and the query's progress estimate grows as each new part is discovered (the part count is not knowable before the file is walked), so the reported percentage can step backwards when a shard rolls onto its next part
@@ -800,6 +842,7 @@ SELECT * FROM align_minimap2_sharded('nanopore_reads',
 ```
 
 **Error handling:**
+
 - Error if `shard_directory` does not exist
 - Error if any `<shard_name>.mmi` file referenced in `read_to_shard` does not exist in `shard_directory`
 - Error if a `.mmi` file is not a valid minimap2 index
@@ -808,6 +851,7 @@ SELECT * FROM align_minimap2_sharded('nanopore_reads',
 - Error if `read_to_shard` table contains NULL `shard_name` values
 
 **Performance notes:**
+
 - Parallelism is one DuckDB thread per shard; control with `SET threads=N`
 - Shards are sorted by read count (largest first) for better load balancing
 - Pre-built indexes avoid redundant index building across runs
@@ -822,6 +866,7 @@ rRNA filtering / alignment against an rRNA reference database, given as one FAST
 Emits the standard 21-column SAM schema shared with `align_minimap2` / `align_bowtie2`. For a schema preserving SortMeRNA's native identity / coverage / e-value / edit-distance fields, use [`align_sortmerna_rrna`](#alignment-with-rrna-output) below.
 
 **Parameters:**
+
 - `query_table` (VARCHAR, positional): Name of a table or view with columns `read_id` (VARCHAR, BIGINT, or UUID — see *Identifier-column types* below), `sequence1` (VARCHAR), and optionally `sequence2` (VARCHAR) when `paired := true`.
 - `ref_paths` (VARCHAR[]): A one-element list holding the path of the reference FASTA file. More than one path is an error: SortMeRNA builds one index from one file, so concatenate the files, or load them into a table and pass `subject_table`.
 - `subject_table` (VARCHAR): Name of a table or view holding the references, with columns `read_id` (VARCHAR, BIGINT, or UUID) and `sequence1` (VARCHAR). A VARCHAR id containing whitespace is an error when the query runs. Rows with a NULL `read_id` or `sequence1` are skipped; a non-NULL `sequence2` is an error.
@@ -836,6 +881,7 @@ Emits the standard 21-column SAM schema shared with `align_minimap2` / `align_bo
 - `forward_only`, `reverse_only`, `full_search` (BOOLEAN): Strand-search controls.
 
 **Output schema:** Same 21 columns as [`align_minimap2`](#single-index-alignment-with-minimap2). SortMeRNA-specific notes:
+
 - `mapq` is always `255` — SortMeRNA does not compute mapping quality; 255 is the SAM convention for "unavailable".
 - `tag_as` carries the raw Smith-Waterman score; `tag_nm` carries edit distance. Both are NULL for unaligned rows.
 - `tag_xs`, `tag_ys`, `tag_xn`, `tag_xm`, `tag_xo`, `tag_xg`, `tag_yt`, `tag_md`, `tag_sa` are always NULL — SortMeRNA does not produce these.
@@ -843,12 +889,14 @@ Emits the standard 21-column SAM schema shared with `align_minimap2` / `align_bo
 - Paired-end: `flags & 0x2` (proper pair) is set when both mates aligned, regardless of reference. This is weaker than SAM's standard "concordant orientation within insert size" meaning — SortMeRNA is an rRNA classifier with no notion of insert size or orientation. When both mates aligned but to different references, `mate_reference` reports the actual partner reference name (rather than `=`), so cross-reference pairs remain distinguishable.
 
 **Identifier-column types (`read_id`):**
+
 - The input `read_id` column may be `VARCHAR`, `BIGINT`, or `UUID`. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time with the message `Column 'read_id' in table '<table>' must be VARCHAR, BIGINT, or UUID`.
 - The output `read_id` column type mirrors the query side. `reference` and `mate_reference` are `VARCHAR` (FASTA header ids) with `ref_paths`, and mirror the subject table's `read_id` type with `subject_table`, so results join back to it without a cast.
 - With a `VARCHAR` reference column, the SAM `=` mate-reference sentinel is kept verbatim for paired-end output when both mates map to the same reference. A `BIGINT`/`UUID` column cannot hold `=`, so there it is resolved to the reference itself, as in `align_minimap2` / `align_bowtie2`.
 - For `BIGINT`/`UUID` `read_id`, rows with NULL `read_id` are skipped at ingress (matching the existing `ProcessSingleChunk` row-skip convention used by VARCHAR query tables).
 
 **Caveats:**
+
 - **No minimum-score filter by default:** without `evalue`, every positive Smith-Waterman hit is reported. The `sortmerna` CLI keeps only hits above a minimum score derived from its `-e` (default 1e-5). The library's e-values are not computed the way the CLI's are (see below), so neither `evalue` nor a filter on `e_value` or `score` (`tag_as`) in SQL is guaranteed to reproduce the CLI's row set exactly.
 - **E-value divergence from the CLI:** the library computes per-query Karlin-Altschul e-values; the CLI sums / corrects across the full database. The reference and its start and end (`reference` / `position` here, with `stop_position` the CLI's end + 1; `ref_name` / `ref_start` / `ref_end` in `align_sortmerna_rrna`) and the CIGAR match the CLI's exactly; `align_sortmerna_rrna`'s identity and coverage match to the CLI's one decimal.
 - **Process-wide serialization:** SortMeRNA's `g_run_mutex` serializes calls process-wide. Concurrent `align_sortmerna` / `align_sortmerna_rrna` queries will block on each other at the library level. The DuckDB function deliberately runs on a single DuckDB thread (`MaxThreads() == 1`) to avoid queueing behind the mutex twice.
@@ -899,6 +947,7 @@ Same aligner as `align_sortmerna` but emits SortMeRNA's native output schema, wh
 Paired-end mode produces two rows per input row with `segment_idx` 0 (forward) and 1 (reverse), even when one or both mates failed to align.
 
 **Identifier-column types (`read_id`):**
+
 - The input `read_id` column may be `VARCHAR`, `BIGINT`, or `UUID`. Other numeric types (INTEGER, UBIGINT, HUGEINT, DOUBLE) are rejected at bind time with the message `Column 'read_id' in table '<table>' must be VARCHAR, BIGINT, or UUID`.
 - The output `read_id` column type mirrors the query side. `ref_name` follows the reference source as described in the output schema above.
 - For `BIGINT`/`UUID` `read_id`, rows with NULL `read_id` are skipped at ingress (matching the existing `ProcessSingleChunk` row-skip convention used by VARCHAR query tables).

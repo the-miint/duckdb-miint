@@ -34,6 +34,23 @@ inline std::ostream &operator<<(std::ostream &os, const NotPlacedName &s) {
 	          << static_cast<int>(s.reason) << "}";
 }
 
+inline std::ostream &operator<<(std::ostream &os, const RankName &s) {
+	return os << "{rank " << s.rank << ", name " << s.name << "}";
+}
+
+inline std::ostream &operator<<(std::ostream &os, const LabelPart &s) {
+	return os << "{rank " << s.rank << ", name \"" << s.name << "\"}";
+}
+
+inline std::ostream &operator<<(std::ostream &os, const RankRepeat &s) {
+	return os << "{node " << s.node << ", rank " << s.rank << ", ancestor " << s.ancestor << "}";
+}
+
+inline std::ostream &operator<<(std::ostream &os, const InvertedBackfill &s) {
+	return os << "{node " << s.node << ", rank " << s.rank << ", name " << s.name << ", ancestor " << s.ancestor
+	          << ", ancestor_rank " << s.ancestor_rank << "}";
+}
+
 } // namespace miint
 
 namespace miint::test {
@@ -368,5 +385,121 @@ struct NaiveCoverage {
 		return missing;
 	}
 };
+
+// What BackfillNames should give, by brute force: each named node's nearest named ancestor
+// found by walking parent pointers, and its fill by walking Parent() up from its preliminary
+// name. Preorder positions are never used.
+struct NaiveBackfill {
+	std::vector<NodeLabel> labels;
+	std::vector<InvertedBackfill> inverted;
+	// How often each rule applied with an effect on a label, so a test can require that all did.
+	size_t root_filled = 0;        // a root whose preliminary name is below rank 0
+	size_t filled_to_domain = 0;   // another node with no named ancestor, named below rank 0
+	size_t no_gap = 0;             // the ancestor's rank equal to the node's, or one above it
+	size_t gap_filled = 0;         // the ancestor's rank two or more above the node's
+	size_t fold_name_dropped = 0;  // a name the fold gave a node that its label lacks
+	size_t fold_name_replaced = 0; // a fold name whose rank the fill reached with another name
+};
+
+inline NaiveBackfill naive_backfill(const TaxonomyCase &c, const TaxonomyStore &store,
+                                    const NameAssignment &assignment) {
+	const uint32_t n = static_cast<uint32_t>(c.tree.parent.size());
+	NaiveBackfill out;
+	out.labels.resize(n);
+	// The names at ranks from_rank..rank on the hierarchy path up from (rank, name).
+	auto chain = [&](size_t from_rank, size_t rank, NameId name) {
+		NodeLabel label {{rank, name}};
+		for (size_t r = rank; r > from_rank; r--) {
+			name = store.Parent(r, name);
+			label.insert(label.begin(), {r - 1, name});
+		}
+		return label;
+	};
+	for (uint32_t v = 0; v < n; v++) {
+		const NameScore *own = assignment.Preliminary(v);
+		if (own == nullptr) {
+			continue;
+		}
+		auto &label = out.labels[v];
+		uint32_t ancestor = c.tree.parent[v];
+		while (ancestor != kNoParent && assignment.Preliminary(ancestor) == nullptr) {
+			ancestor = c.tree.parent[ancestor];
+		}
+		if (ancestor == kNoParent) {
+			label = chain(0, own->rank, own->name);
+			(c.tree.parent[v] == kNoParent ? out.root_filled : out.filled_to_domain) += own->rank > 0;
+		} else if (const size_t ancestor_rank = assignment.Preliminary(ancestor)->rank; own->rank < ancestor_rank) {
+			label = {{own->rank, own->name}};
+			out.inverted.push_back({v, own->rank, own->name, ancestor, ancestor_rank});
+		} else if (own->rank - ancestor_rank <= 1) {
+			label = {{own->rank, own->name}};
+			out.no_gap++;
+		} else {
+			label = chain(ancestor_rank + 1, own->rank, own->name);
+			out.gap_filled++;
+		}
+		for (const auto &fold : assignment.NamesAt(v)) {
+			const auto at_rank = std::find_if(label.begin(), label.end(),
+			                                  [&](const RankName &entry) { return entry.rank == fold.rank; });
+			out.fold_name_dropped += at_rank == label.end();
+			out.fold_name_replaced += at_rank != label.end() && at_rank->name != fold.name;
+		}
+	}
+	return out;
+}
+
+// Over many naive_backfill results, whether each rule applied, as NaiveCoverage does for
+// AssignNames.
+struct BackfillCoverage {
+	size_t root_filled = 0;
+	size_t filled_to_domain = 0;
+	size_t no_gap = 0;
+	size_t gap_filled = 0;
+	size_t inverted = 0;
+	size_t fold_name_dropped = 0;
+	size_t fold_name_replaced = 0;
+
+	void Add(const NaiveBackfill &backfill) {
+		root_filled += backfill.root_filled;
+		filled_to_domain += backfill.filled_to_domain;
+		no_gap += backfill.no_gap;
+		gap_filled += backfill.gap_filled;
+		inverted += backfill.inverted.size();
+		fold_name_dropped += backfill.fold_name_dropped;
+		fold_name_replaced += backfill.fold_name_replaced;
+	}
+
+	// What never occurred; empty when everything did.
+	std::vector<std::string> Missing() const {
+		const std::pair<size_t, const char *> all[] = {
+		    {root_filled, "a fill to rank 0 for a root named below it"},
+		    {filled_to_domain, "a fill to rank 0 for another node with no named ancestor"},
+		    {no_gap, "a node one rank below its named ancestor, or at its rank"},
+		    {gap_filled, "a gap filled from the hierarchy"},
+		    {inverted, "an inverted-rank node"},
+		    {fold_name_dropped, "a fold name dropped"},
+		    {fold_name_replaced, "a fold name replaced by the hierarchy's"}};
+		std::vector<std::string> missing;
+		for (const auto &[count, label] : all) {
+			if (count == 0) {
+				missing.push_back(label);
+			}
+		}
+		return missing;
+	}
+};
+
+// The name at `rank` in the label of `holder`, a node EmitLineages gave as a rank's holder; empty
+// for kNone.
+inline std::string HolderName(const std::vector<std::vector<LabelPart>> &labels, uint32_t holder, size_t rank) {
+	if (holder != EmittedLineages::kNone) {
+		for (const auto &part : labels.at(holder)) {
+			if (part.rank == rank) {
+				return part.name;
+			}
+		}
+	}
+	return "";
+}
 
 } // namespace miint::test

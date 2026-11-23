@@ -67,19 +67,23 @@ File not found: nonexistent.fastq
 ```
 
 **Test organization:**
+
 - `statement ok` - Statement should execute without error
 - `statement error` - Statement should raise an error (followed by expected error message)
 - `query <types>` - Query should return specific results
-  - Types: `I` (INTEGER), `R` (REAL/DOUBLE), `T` (TEXT), etc.
+    - Types: `I` (INTEGER), `R` (REAL/DOUBLE), `T` (TEXT), etc.
 - `----` - Separator between query and expected output
 
 **Example test files:**
+
 - `test/sql/read_alignments.test` - SAM/BAM reading functionality
 - `test/sql/read_fastx.test` - FASTA/FASTQ reading functionality
 - `test/sql/alignment_functions.test` - Alignment analysis functions
 - `test/sql/copy_sam.test` - SAM/BAM writing functionality
+- `test/sql/copy_sam_bytes.test`, `copy_sam_batches.test`, `copy_sam_parallel.test` - SAM/BAM output pinned by md5 at 1 and 8 threads, DuckDB's batches, and writing with order off (`copy_fastx_*.test` do the same for FASTA/FASTQ); `test/cpp/test_CopySequenceOrder.cpp` (`tests_duckdb`) checks which COPYs keep order
 
 **Good practices for SQL tests:**
+
 - Test error cases first (missing files, invalid parameters)
 - Test basic functionality with simple inputs
 - Test edge cases (empty files, NULL values, boundary conditions)
@@ -89,6 +93,7 @@ File not found: nonexistent.fastq
 - A test that reads through a glob and asserts `filepath` values selects `replace(filepath, '\', '/')`: glob expansion returns native separators on Windows. A single path or an explicit path list keeps the caller's string and needs no wrapping.
 - Pin an error that must come before any work with `EXPLAIN`: it binds and plans the query without running `InitGlobal` or the scan. For a function that loads an index, a nonexistent index path shows the same thing, since a check made after the load would fail on the missing file instead.
 - A `max_execution_time` test (`SET max_execution_time`, then `statement error` expecting "Query exceeded maximum execution time") needs work many times longer than the deadline, and a function call that returns one chunk or less. DuckDB's pipeline calls its own throttled deadline check for every chunk (`docs/internals/duckdb-engine-notes.md`, "Interrupts and `max_execution_time`"), so a call whose output runs to many chunks can be stopped by DuckDB once the work is done, and the test then passes against a function that never checks. Run a mutation check of such a test more than once.
+- A writer's failed write or close is tested in `tests_duckdb` with the file-size limit lowered (`RLIMIT_FSIZE`, with `SIGXFSZ` ignored so a write past it fails with `EFBIG`): `test_CopySamWriteFailure.cpp` and `test_CopyBiomWriteFailure.cpp`. Set in the process, the limit can sit one byte under the size the file needs, which no SQL test can arrange. POSIX only.
 - `typeof()` is folded to a constant when the query binds, so it reports the bound type, as `DESCRIBE` does, not the type of the vectors a run returns. To check what a run returns, compare values in the input's own type.
 - Write files under `{TEST_DIR}`, the per-process scratch directory unittest substitutes into a test's SQL. Under `MIINT_TEST_JOBS`, test files and the C++ tests run at the same time in one working directory, so any other path a test writes must be one no other test reads or writes. For the same reason the parallel runner gives each SQL process a spill directory under its `{TEST_DIR}` (`docs/internals/duckdb-engine-notes.md`, "Storage").
 
@@ -104,10 +109,10 @@ A skipped file is not a passing one, and the suite's skip count is part of its r
 - The live GTDB test (`require-env GTDB_AVAILABLE`) skips unless `MIINT_GTDB_LIVE_TEST=1`: every run downloads up to about 60 MB from GTDB. No CI run sets it. On every run, `read_gtdb_https.test` downloads releases from `data/gtdb/releases/` through the range server, whose fault paths (listed in `test/scripts/range_http_server.py`) drop, fail and slow a download, and `test/shell/read_gtdb_download_killed.sh` kills a download partway.
 - `read_sra_real_data.test` (`require-env SRA_REAL_DATA`) reads three whole runs that `run_tests.sh` downloads from NCBI's bucket into `data/cache/sra` and checks against the sha256s in `data/sra/real_oracles.csv`, which also holds the md5s of `fasterq-dump`'s output for them. It skips when a download fails. A downloaded object that does not match its sha256 fails the run instead: NCBI replaced the object or the file is damaged, and either way the committed md5s no longer apply to it.
 - `test/shell/load_miint_concurrent.sh` (many databases in one process loading the extension at once) skips unless `MIINT_LOAD_RACE_TEST=1`, which CI sets only in its nightly run, with 100 processes: it takes minutes, and on a 4-CPU runner the race it guards against hits about one process in 30. With the opt-in set, `run_tests.sh` fails unless `MIINT_TEST_PYTHON` (default `python3`) has the duckdb matching this build.
-  - The rest of `run_tests.sh` sends miint's Portal, checklist and Reports requests to the mock `test/scripts/ena_webin_mock.py`, through the base URLs `test/scripts/ena_mock_env.sh` exports. The Portal base covers every Portal request, so a live test run with it would read from the mock; the live tests run after the httpfs pass instead, without those variables and with `ENA_AVAILABLE`, which nothing else sets.
-  - On every run, `read_ena_sequences_mock.test` reads runs through the mock, from `data/ena/`, `read_ena_sequences_open_errors_mock.test` checks the warnings for a run whose file cannot be opened, and `read_ena_input_errors.test` checks the ENA read functions' input errors, which need no request. `read_ena_sequences_resume_mock.test` sets DuckDB's `http_retries`, `http_retry_wait_ms` (1 ms) and `http_retry_backoff` itself, and reads the runs that recover before those that never do.
-  - `http_client_waits_mock.test` holds each HTTP client in a wait and checks that `max_execution_time` ends it and fails the query as interrupted, also where a failed request would be skipped or reported as a failed submission. The mock answers 503 to everything under `/unavailable/` and to a GET whose path holds `UNAVAILABLE`, and keeps a BLAST search waiting by its query's label. The test points NCBI and BLAST at the mock with the `miint_ncbi_eutils_url` and `miint_blast_url` settings rather than environment variables, which the live NCBI tests and the tutorials' NCBI downloads would also see. It sets `GLOBAL http_retries = 0`, which turns off DuckDB's own retries of a GET (`docs/internals/duckdb-engine-notes.md`, "Interrupts and `max_execution_time`").
-  - `onboarding-tutorials/run_tutorial_tests.sh` starts the same mock unless `MIINT_TUTORIAL_LIVE=1`, which CI also sets only nightly. Live, each tutorial gets three attempts, a minute apart (`MIINT_TUTORIAL_LIVE_ATTEMPTS` changes the count), since EBI also drops FASTQ transfers partway; a pass after a failed attempt shows as a warning on the run. Against the mock a tutorial gets one attempt. The tutorials still fetch a genome from NCBI and install httpfs from DuckDB's extension repository on every run.
+    - The rest of `run_tests.sh` sends miint's Portal, checklist and Reports requests to the mock `test/scripts/ena_webin_mock.py`, through the base URLs `test/scripts/ena_mock_env.sh` exports. The Portal base covers every Portal request, so a live test run with it would read from the mock; the live tests run after the httpfs pass instead, without those variables and with `ENA_AVAILABLE`, which nothing else sets.
+    - On every run, `read_ena_sequences_mock.test` reads runs through the mock, from `data/ena/`, `read_ena_sequences_open_errors_mock.test` checks the warnings for a run whose file cannot be opened, and `read_ena_input_errors.test` checks the ENA read functions' input errors, which need no request. `read_ena_sequences_resume_mock.test` sets DuckDB's `http_retries`, `http_retry_wait_ms` (1 ms) and `http_retry_backoff` itself, and reads the runs that recover before those that never do.
+    - `http_client_waits_mock.test` holds each HTTP client in a wait and checks that `max_execution_time` ends it and fails the query as interrupted, also where a failed request would be skipped or reported as a failed submission. The mock answers 503 to everything under `/unavailable/` and to a GET whose path holds `UNAVAILABLE`, and keeps a BLAST search waiting by its query's label. The test points NCBI and BLAST at the mock with the `miint_ncbi_eutils_url` and `miint_blast_url` settings rather than environment variables, which the live NCBI tests and the tutorials' NCBI downloads would also see. It sets `GLOBAL http_retries = 0`, which turns off DuckDB's own retries of a GET (`docs/internals/duckdb-engine-notes.md`, "Interrupts and `max_execution_time`").
+    - `onboarding-tutorials/run_tutorial_tests.sh` starts the same mock unless `MIINT_TUTORIAL_LIVE=1`, which CI also sets only nightly. Live, each tutorial gets three attempts, a minute apart (`MIINT_TUTORIAL_LIVE_ATTEMPTS` changes the count), since EBI also drops FASTQ transfers partway; a pass after a failed attempt shows as a warning on the run. Against the mock a tutorial gets one attempt. The tutorials still fetch a genome from NCBI and install httpfs from DuckDB's extension repository on every run.
 
 ## C++ Unit Tests
 
@@ -130,14 +135,14 @@ Core algorithms and internal utilities are tested using the Catch2 framework. C+
 **Code organization for testing:**
 
 1. **`miint` namespace** - Pure C++ code (algorithms, parsers, utilities)
-   - Location: `src/` files, internal headers
-   - Tested with: Catch2 C++ unit tests (`test/cpp/`)
-   - Examples: CIGAR parsing, MD tag parsing, interval compression
+    - Location: `src/` files, internal headers
+    - Tested with: Catch2 C++ unit tests (`test/cpp/`)
+    - Examples: CIGAR parsing, MD tag parsing, interval compression
 
 2. **`duckdb` namespace** - DuckDB integration code (table functions, scalar functions)
-   - Location: `src/` files (e.g., `alignment_functions.cpp`, `read_fastx.cpp`)
-   - Tested with: SQL logic tests (`test/sql/`)
-   - Examples: Function registration, DuckDB vector operations, parameter binding
+    - Location: `src/` files (e.g., `alignment_functions.cpp`, `read_fastx.cpp`)
+    - Tested with: SQL logic tests (`test/sql/`)
+    - Examples: Function registration, DuckDB vector operations, parameter binding
 
 **Example C++ test structure:**
 ```cpp
@@ -168,12 +173,14 @@ TEST_CASE("ParseCigar - Basic operations", "[alignment_functions]") {
 ```
 
 **Example test files:**
+
 - `test/cpp/test_AlignmentFunctions.cpp` - CIGAR/MD parsing, identity calculations
 - `test/cpp/test_SequenceReader.cpp` - FASTQ/FASTA parsing
 - `test/cpp/test_SAMReader.cpp` - SAM/BAM reading logic
 - `test/cpp/test_IntervalCompressor.cpp` - Interval merging algorithm
 
 **Good practices for C++ tests:**
+
 - Use `TEST_CASE()` for grouping related tests
 - Use `SECTION()` for organizing variations within a test case
 - Use descriptive test names that explain what is being tested
@@ -244,11 +251,13 @@ fi
 ```
 
 **Example test files:**
+
 - `test/shell/read_alignments_stdin.sh` - Tests for reading SAM/BAM from stdin
 - `test/shell/cron_publish_extension.sh` - Scenario tests for run selection in `scripts/cron-publish-extension.sh` (stubbed `gh`, `mail`, `ssh`, `rsync` and `hostname`; skips without jq, flock and GNU coreutils)
 - `test/shell/release_community_extension.sh` - Scenario tests for `scripts/release-community-extension.sh`: what it refuses, and the PR it opens, updates or readies (local bare repositories and a stubbed `gh`; skips without jq)
 
 **Good practices for shell tests:**
+
 - Use `set -e` to exit on first error
 - Test both success and error cases
 - Use `grep -q` to verify expected output substrings
@@ -259,6 +268,7 @@ fi
 ## Test Data
 
 Test data files are organized in `data/` subdirectories:
+
 - `data/sam/` - SAM/BAM test files
 - `data/fastq/` - FASTQ/FASTA test files
 - `data/biom/` - BIOM format test files

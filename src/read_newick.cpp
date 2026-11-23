@@ -1,4 +1,5 @@
 #include "read_newick.hpp"
+#include "id_column_utils.hpp"
 #include <iostream>
 #include "remote_file_helper.hpp"
 #include "table_function_common.hpp"
@@ -220,16 +221,16 @@ unique_ptr<LocalTableFunctionState> ReadNewickTableFunction::InitLocal(Execution
 
 void ReadNewickTableFunction::EmitNodeRows(const std::vector<NodeRow> &rows, size_t start_idx, size_t count,
                                            DataChunk &output, idx_t output_offset, bool include_filepath,
-                                           const std::string &filepath) {
+                                           const std::string &filepath, const LogicalType &name_type,
+                                           const std::vector<std::optional<std::string>> *labels) {
 	for (size_t i = 0; i < count; ++i) {
 		const auto &row = rows[start_idx + i];
 
 		// node_index
 		FlatVector::GetDataMutable<int64_t>(output.data[0])[output_offset + i] = row.node_index;
 
-		// name (empty string if not specified, never NULL)
-		auto &name_vec = output.data[1];
-		FlatVector::GetDataMutable<string_t>(name_vec)[output_offset + i] = StringVector::AddString(name_vec, row.name);
+		// name: a VARCHAR name is '' if not specified, never NULL; a BIGINT or UUID one is NULL
+		EmitIdCell(output.data[1], output_offset + i, row.name, name_type);
 
 		// branch_length (nullable - NaN becomes NULL)
 		auto &bl_vec = output.data[2];
@@ -262,6 +263,18 @@ void ReadNewickTableFunction::EmitNodeRows(const std::vector<NodeRow> &rows, siz
 		if (include_filepath) {
 			auto &fp_vec = output.data[6];
 			FlatVector::GetDataMutable<string_t>(fp_vec)[output_offset + i] = StringVector::AddString(fp_vec, filepath);
+		}
+
+		// label (if given)
+		if (labels) {
+			auto &label_vec = output.data[include_filepath ? 7 : 6];
+			const auto &label = (*labels)[start_idx + i];
+			if (label.has_value()) {
+				FlatVector::GetDataMutable<string_t>(label_vec)[output_offset + i] =
+				    StringVector::AddString(label_vec, *label);
+			} else {
+				FlatVector::ValidityMutable(label_vec).SetInvalid(output_offset + i);
+			}
 		}
 	}
 }

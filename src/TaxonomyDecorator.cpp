@@ -1,9 +1,11 @@
 #include "TaxonomyDecorator.hpp"
 
 #include <algorithm>
+#include <array>
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 
 namespace miint {
@@ -22,6 +24,15 @@ void RequireMinCount(const char *caller, uint32_t min_count) {
 // ceil(total / 2): the fewest of a name's tips that give recall of at least one half.
 uint32_t CeilHalf(uint32_t total) {
 	return total / 2 + total % 2;
+}
+
+// The tree's nodes in preorder, so each comes after its parent.
+std::vector<uint32_t> PreorderNodes(const TreeIndex &tree) {
+	std::vector<uint32_t> nodes(tree.size());
+	for (uint32_t v = 0; v < nodes.size(); v++) {
+		nodes[tree.pre(v)] = v;
+	}
+	return nodes;
 }
 } // namespace
 
@@ -52,10 +63,9 @@ CladeCountIndex::CladeCountIndex(TreeIndex tree, const TaxonomyStore &store,
 	}
 	// Tips are visited in preorder below, through node_at_, so each name's occurrences come out
 	// ascending.
-	node_at_.resize(n);
+	node_at_ = PreorderNodes(tree_);
 	size_t tips = 0;
 	for (uint32_t v = 0; v < n; v++) {
-		node_at_[tree_.pre(v)] = v;
 		tips += tree_.is_tip(v);
 		const auto &row = row_of_node[v];
 		if (!row) {
@@ -385,6 +395,323 @@ NameAssignment AssignNames(const CladeCountIndex &index, uint32_t min_count) {
 		}
 	}
 	return NameAssignment(std::move(scores), std::move(not_placed), static_cast<uint32_t>(tree.size()));
+}
+
+Backfill BackfillNames(const NameAssignment &assignment, const TaxonomyStore &store, const TreeIndex &tree) {
+	const uint32_t n = static_cast<uint32_t>(tree.size());
+	constexpr uint32_t kNone = TreeIndex::NO_PARENT;
+
+	// Per node, itself if it has a preliminary name, else its nearest ancestor that has one, else
+	// kNone; filled in preorder, so a node's parent is filled before it.
+	std::vector<uint32_t> named(n, kNone);
+	for (const uint32_t v : PreorderNodes(tree)) {
+		const uint32_t parent = tree.parent(v);
+		named[v] = assignment.Preliminary(v) ? v : parent == kNone ? kNone : named[parent];
+	}
+
+	Backfill out;
+	out.labels.resize(n);
+	for (uint32_t v = 0; v < n; v++) {
+		const NameScore *own = assignment.Preliminary(v);
+		if (own == nullptr) {
+			continue;
+		}
+		// The shallowest rank the label reaches: 0 with no named ancestor, else the rank below the
+		// ancestor's, and the node's own when that is deeper than the node's.
+		size_t from = 0;
+		const uint32_t parent = tree.parent(v);
+		if (const uint32_t ancestor = parent == kNone ? kNone : named[parent]; ancestor != kNone) {
+			const size_t ancestor_rank = assignment.Preliminary(ancestor)->rank;
+			if (own->rank < ancestor_rank) {
+				out.inverted.push_back({v, own->rank, own->name, ancestor, ancestor_rank});
+			}
+			from = std::min(ancestor_rank + 1, own->rank);
+		}
+		// The names at ranks from..own->rank up the hierarchy from the preliminary name. Every name
+		// below rank 0 has a parent one rank shallower (TaxonomyStore::Parent), so the walk never
+		// meets a gap.
+		auto &label = out.labels[v];
+		label.resize(own->rank - from + 1);
+		NameId name = own->name;
+		for (size_t r = own->rank;; r--) {
+			label[r - from] = {r, name};
+			if (r == from) {
+				break;
+			}
+			name = store.Parent(r, name);
+		}
+	}
+	return out;
+}
+
+std::string_view PolyphyleticBase(std::string_view name) {
+	const size_t underscore = name.rfind('_');
+	if (underscore == std::string_view::npos || underscore == 0 || underscore + 1 == name.size()) {
+		return name;
+	}
+	const std::string_view suffix = name.substr(underscore + 1);
+	const bool capitals = std::all_of(suffix.begin(), suffix.end(), [](char c) { return c >= 'A' && c <= 'Z'; });
+	return capitals ? name.substr(0, underscore) : name;
+}
+
+namespace {
+// The name the first names of a node's labeled descendants agree on: their one distinct name, or
+// of two distinct names at one rank, the one whose PolyphyleticBase is the other.
+std::optional<RankName> AgreedName(const std::vector<uint32_t> &descendants, const std::vector<NodeLabel> &labels,
+                                   const TaxonomyStore &store) {
+	std::optional<RankName> first, second;
+	for (const uint32_t d : descendants) {
+		const RankName &name = labels[d].front();
+		if (!first || name == *first) {
+			first = name;
+		} else if (!second || name == *second) {
+			second = name;
+		} else {
+			return std::nullopt;
+		}
+	}
+	if (!second) {
+		return first;
+	}
+	if (first->rank != second->rank) {
+		return std::nullopt;
+	}
+	const std::string &a = store.NameText(first->rank, first->name);
+	const std::string &b = store.NameText(second->rank, second->name);
+	if (PolyphyleticBase(b) == a) {
+		return second;
+	}
+	if (PolyphyleticBase(a) == b) {
+		return first;
+	}
+	return std::nullopt;
+}
+} // namespace
+
+std::vector<NodeLabel> PromoteCommonNames(std::vector<NodeLabel> labels, const TaxonomyStore &store,
+                                          const TreeIndex &tree) {
+	const uint32_t n = static_cast<uint32_t>(tree.size());
+	// Each node's internal children: those of v are children[offsets[v] .. offsets[v + 1]).
+	std::vector<uint32_t> offsets(n + 1, 0);
+	for (uint32_t v = 0; v < n; v++) {
+		if (v != tree.root() && !tree.is_tip(v)) {
+			offsets[tree.parent(v) + 1]++;
+		}
+	}
+	std::partial_sum(offsets.begin(), offsets.end(), offsets.begin());
+	std::vector<uint32_t> children(offsets[n]);
+	std::vector<uint32_t> next(offsets.begin(), offsets.end() - 1);
+	for (uint32_t v = 0; v < n; v++) {
+		if (v != tree.root() && !tree.is_tip(v)) {
+			children[next[tree.parent(v)]++] = v;
+		}
+	}
+
+	// Per node, once visited, one past the deepest rank its path from the root holds, its own label
+	// included; 0 when the path holds none. A name promoted onto a node must be deeper than that.
+	std::vector<uint8_t> path_bound(n, 0);
+	std::vector<uint32_t> stack, descendants;
+	for (const uint32_t v : PreorderNodes(tree)) {
+		size_t bound = v == tree.root() ? 0 : path_bound[tree.parent(v)];
+		if (!labels[v].empty()) {
+			bound = std::max(bound, labels[v].back().rank + 1);
+		}
+		// v's nearest internal descendants with a non-empty label, found below the empty ones.
+		descendants.clear();
+		stack.assign(children.begin() + offsets[v], children.begin() + offsets[v + 1]);
+		while (!stack.empty()) {
+			const uint32_t d = stack.back();
+			stack.pop_back();
+			if (labels[d].empty()) {
+				stack.insert(stack.end(), children.begin() + offsets[d], children.begin() + offsets[d + 1]);
+			} else {
+				descendants.push_back(d);
+			}
+		}
+		for (bool more = !descendants.empty(); more;) {
+			const auto name = AgreedName(descendants, labels, store);
+			if (!name || name->rank < bound) {
+				break;
+			}
+			labels[v].push_back(*name);
+			bound = name->rank + 1;
+			for (const uint32_t d : descendants) {
+				labels[d].erase(labels[d].begin());
+				more = more && labels[d].size() > 1;
+			}
+		}
+		path_bound[v] = static_cast<uint8_t>(bound);
+	}
+	return labels;
+}
+
+std::string FormatLabel(const NodeLabel &label, const TaxonomyStore &store) {
+	std::string out;
+	for (const auto &[rank, name] : label) {
+		if (!out.empty()) {
+			out += "; ";
+		}
+		out += kLineageRanks[rank].letter;
+		out += "__";
+		out += store.NameText(rank, name);
+	}
+	return out;
+}
+
+DecorateResult Decorate(const CladeCountIndex &index, const TaxonomyStore &store, uint32_t min_count) {
+	auto assignment = AssignNames(index, min_count);
+	auto backfill = BackfillNames(assignment, store, index.Tree());
+	auto labels = PromoteCommonNames(std::move(backfill.labels), store, index.Tree());
+	return {std::move(assignment), std::move(labels), std::move(backfill.inverted)};
+}
+
+namespace {
+std::string_view TrimSpace(std::string_view text) {
+	while (!text.empty() && IsLineageSpace(text.front())) {
+		text.remove_prefix(1);
+	}
+	while (!text.empty() && IsLineageSpace(text.back())) {
+		text.remove_suffix(1);
+	}
+	return text;
+}
+} // namespace
+
+std::vector<LabelPart> ParseNodeLabel(std::string_view label) {
+	std::vector<LabelPart> parts;
+	if (label.empty()) {
+		return parts;
+	}
+	auto fail = [&](std::string_view component, const std::string &why) {
+		throw std::invalid_argument("ParseNodeLabel: label \"" + std::string(label) + "\": component \"" +
+		                            std::string(component) + "\" " + why);
+	};
+	// Each rank's component, once the label gives the rank.
+	std::array<std::string_view, kRanks> component_at {};
+	std::array<bool, kRanks> seen {};
+	// The shallowest component with an empty name: no name at its rank, unless a deeper rank is
+	// named, which makes it a gap.
+	std::string_view empty_component;
+	size_t empty_rank = kRanks;
+	for (size_t start = 0;;) {
+		const size_t end = std::min(label.find(';', start), label.size());
+		const std::string_view component = TrimSpace(label.substr(start, end - start));
+		if (component.empty()) {
+			fail(component, "is empty");
+		}
+		if (component.size() < 3 || component.substr(1, 2) != "__") {
+			fail(component, "is not a rank letter, two underscores and a name");
+		}
+		const char letter = component[0] == 'k' ? 'd' : component[0];
+		const auto rank = static_cast<size_t>(std::find_if(kLineageRanks.begin(), kLineageRanks.end(),
+		                                                   [&](const LineageRank &r) { return r.letter == letter; }) -
+		                                      kLineageRanks.begin());
+		if (rank == kRanks) {
+			std::string letters;
+			for (const auto &r : kLineageRanks) {
+				letters += r.letter;
+			}
+			fail(component, "has an unknown rank letter; the letters are " + letters + ", and k for the domain");
+		}
+		const std::string_view name = component.substr(3);
+		if (!name.empty() && IsLineageSpace(name.front())) {
+			fail(component, "has a name that starts with whitespace");
+		}
+		if (StartsWithRankPrefix(name)) {
+			fail(component, "has a name that starts with a rank prefix of its own");
+		}
+		if (seen[rank]) {
+			fail(component, "gives a rank the label already has");
+		}
+		seen[rank] = true;
+		component_at[rank] = component;
+		if (name.empty()) {
+			if (rank < empty_rank) {
+				empty_rank = rank;
+				empty_component = component;
+			}
+		} else {
+			parts.push_back({rank, std::string(name)});
+		}
+		if (end == label.size()) {
+			break;
+		}
+		start = end + 1;
+	}
+	std::sort(parts.begin(), parts.end(), [](const LabelPart &a, const LabelPart &b) { return a.rank < b.rank; });
+	if (!parts.empty() && parts.back().rank > empty_rank) {
+		fail(empty_component, "has an empty name, but the label names a deeper rank: a gap");
+	}
+	for (size_t i = 1; i < parts.size(); i++) {
+		if (parts[i].rank != parts[i - 1].rank + 1) {
+			fail(component_at[parts[i].rank], std::string("has no ") + kLineageRanks[parts[i - 1].rank + 1].column +
+			                                      " above it in the label: a gap");
+		}
+	}
+	return parts;
+}
+
+EmittedLineages EmitLineages(const TreeIndex &tree, const std::vector<std::vector<LabelPart>> &labels) {
+	const uint32_t n = static_cast<uint32_t>(tree.size());
+	if (labels.size() != n) {
+		throw std::invalid_argument("EmitLineages: " + std::to_string(labels.size()) + " labels for a tree of " +
+		                            std::to_string(n) + " nodes");
+	}
+	constexpr uint32_t kNone = EmittedLineages::kNone;
+	EmittedLineages out;
+	// Each tip's position in `tips`, which lists them by ascending node.
+	std::vector<uint32_t> tip_position(n, kNone);
+	for (uint32_t v = 0; v < n; v++) {
+		if (tree.is_tip(v)) {
+			tip_position[v] = static_cast<uint32_t>(out.tips.size());
+			out.tips.push_back(v);
+		}
+	}
+	out.holders.resize(out.tips.size());
+
+	// The holder of each rank on the path from the root to the node being visited. Each internal
+	// node on that path is on `path`, with the length `set` had when it was entered; the ranks it
+	// set are set's entries after that, cleared again when the walk leaves its subtree.
+	std::array<uint32_t, kRanks> holder;
+	holder.fill(kNone);
+	std::vector<std::pair<uint32_t, size_t>> path;
+	std::vector<size_t> set;
+	for (const uint32_t v : PreorderNodes(tree)) {
+		while (!path.empty() && !tree.is_ancestor_or_self(path.back().first, v)) {
+			for (size_t i = path.back().second; i < set.size(); i++) {
+				holder[set[i]] = kNone;
+			}
+			set.resize(path.back().second);
+			path.pop_back();
+		}
+		if (tree.is_tip(v)) {
+			out.holders[tip_position[v]] = holder;
+			continue;
+		}
+		path.push_back({v, set.size()});
+		uint8_t ranks_seen = 0;
+		for (const auto &part : labels[v]) {
+			if (part.rank >= kRanks) {
+				throw std::invalid_argument("EmitLineages: the label of node " + std::to_string(v) + " holds rank " +
+				                            std::to_string(part.rank) + ", past the last");
+			}
+			if (ranks_seen & (1u << part.rank)) {
+				throw std::invalid_argument("EmitLineages: the label of node " + std::to_string(v) + " holds the " +
+				                            kLineageRanks[part.rank].column + " rank twice");
+			}
+			ranks_seen |= uint8_t(1u << part.rank);
+			if (holder[part.rank] == kNone) {
+				holder[part.rank] = v;
+				set.push_back(part.rank);
+			} else {
+				out.repeats.push_back({v, part.rank, holder[part.rank]});
+			}
+		}
+	}
+	std::sort(out.repeats.begin(), out.repeats.end(), [](const RankRepeat &a, const RankRepeat &b) {
+		return std::tie(a.node, a.rank) < std::tie(b.node, b.rank);
+	});
+	return out;
 }
 
 } // namespace miint

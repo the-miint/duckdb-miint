@@ -9,6 +9,7 @@
 #include "duckdb/function/copy_function.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/planner/binder.hpp"
 #include <sstream>
 
 namespace duckdb {
@@ -27,7 +28,6 @@ struct FastqCopyBindData : public SequenceCopyBindData {
 		result->include_comment = include_comment;
 		result->compression = compression;
 		result->compression_level = compression_level;
-		result->flush_size = flush_size;
 		result->file_path = file_path;
 		result->has_r2_columns = has_r2_columns;
 		result->split_output = split_output;
@@ -45,8 +45,7 @@ struct FastqCopyBindData : public SequenceCopyBindData {
 		       include_comment == other.include_comment && qual_offset == other.qual_offset &&
 		       compression == other.compression && compression_level == other.compression_level &&
 		       file_path == other.file_path && has_r2_columns == other.has_r2_columns &&
-		       split_output == other.split_output && flush_size == other.flush_size && names == other.names &&
-		       read_id_type == other.read_id_type;
+		       split_output == other.split_output && names == other.names && read_id_type == other.read_id_type;
 	}
 };
 
@@ -76,7 +75,7 @@ static unique_ptr<FunctionData> FastqCopyBind(ClientContext &context, CopyFuncti
 	}
 
 	// read_id may be VARCHAR, BIGINT, or UUID (mirrors COPY FORMAT SAM). Validate at
-	// bind so a bad type is a clean BinderError, not a fatal INTERNAL error at sink.
+	// bind so a bad type is a clean BinderError, not a fatal internal error when writing.
 	if (!IsAllowedIdType(sql_types[result->indices.read_id_idx])) {
 		throw BinderException("Column 'read_id' must be %s", AllowedIdTypeList());
 	}
@@ -103,8 +102,8 @@ static unique_ptr<FunctionData> FastqCopyBind(ClientContext &context, CopyFuncti
 	result->id_as_sequence_index = common_params.id_as_sequence_index;
 	result->include_comment = common_params.include_comment;
 	result->compression = common_params.compression;
+	AddGzipFileExtension(input, result->compression);
 	result->compression_level = common_params.compression_level;
-	result->flush_size = common_params.flush_size;
 
 	// {ORIENTATION} in the path => split R1/R2 files; otherwise a single (optionally interleaved) file.
 	ResolveOutputMode(result->file_path, result->interleave, result->split_output);
@@ -112,10 +111,10 @@ static unique_ptr<FunctionData> FastqCopyBind(ClientContext &context, CopyFuncti
 	// Validate sequence_index parameter
 	ValidateSequenceIndexParameter(result->id_as_sequence_index, has_sequence_index);
 
-	// Same rationale as the read_id check above, for every other column the sink reads with
+	// Same rationale as the read_id check above, for every other column the writer reads with
 	// a typed accessor. Without this, an INTEGER[] qual1 (what [40 for _ in range(n)]
-	// yields) or a non-VARCHAR sequence1 reaches the sink and aborts with a fatal INTERNAL
-	// error that invalidates the database (issue #191). Must run after the options are
+	// yields) or a non-VARCHAR sequence1 reaches the writer and aborts with a fatal internal
+	// error that invalidates the database. Must run after the options are
 	// parsed: comment and sequence_index are only read when their option is on, and a
 	// present-but-unread column of the wrong type is harmless.
 	ValidateSequenceColumnTypes(result->indices, sql_types, /*validate_quals=*/true,
@@ -146,219 +145,6 @@ static unique_ptr<GlobalFunctionData> FastqCopyInitializeGlobal(ClientContext &c
 }
 
 //===--------------------------------------------------------------------===//
-// Local State (use shared implementation)
-//===--------------------------------------------------------------------===//
-using FastqCopyLocalState = SequenceCopyLocalState;
-
-static unique_ptr<LocalFunctionData> FastqCopyInitializeLocal(ExecutionContext &context, FunctionData &bind_data) {
-	auto &fdata = bind_data.Cast<FastqCopyBindData>();
-	return SequenceCopyInitializeLocal(context, fdata);
-}
-
-//===--------------------------------------------------------------------===//
-// Sink
-//===--------------------------------------------------------------------===//
-
-static void FastqCopySink(ExecutionContext &context, FunctionData &bind_data, GlobalFunctionData &gstate_p,
-                          LocalFunctionData &lstate_p, DataChunk &input) {
-	auto &fdata = bind_data.Cast<FastqCopyBindData>();
-	auto &gstate = gstate_p.Cast<FastqCopyGlobalState>();
-	auto &lstate = lstate_p.Cast<FastqCopyLocalState>();
-
-	// Use pre-computed column indices from bind data
-	auto &indices = fdata.indices;
-
-	// Process each row
-	UnifiedVectorFormat read_id_data, sequence_index_data, comment_data;
-	UnifiedVectorFormat seq1_data, seq2_data, qual1_data, qual2_data;
-
-	// read_id is dispatched per-row on its bind-captured type (VARCHAR / BIGINT /
-	// UUID) via ResolveSequenceRecordId -- do NOT read it as string_t here, that
-	// is exactly the crash a BIGINT read_id triggered (#145).
-	input.data[indices.read_id_idx].ToUnifiedFormat(read_id_data);
-
-	if (fdata.id_as_sequence_index) {
-		input.data[indices.sequence_index_idx].ToUnifiedFormat(sequence_index_data);
-	}
-
-	if (fdata.include_comment && indices.comment_idx != DConstants::INVALID_INDEX) {
-		input.data[indices.comment_idx].ToUnifiedFormat(comment_data);
-	}
-
-	input.data[indices.sequence1_idx].ToUnifiedFormat(seq1_data);
-	auto seq1_strings = UnifiedVectorFormat::GetData<string_t>(seq1_data);
-
-	input.data[indices.qual1_idx].ToUnifiedFormat(qual1_data);
-
-	// The schema may carry R2 columns even for single-end data (read_fastx always emits them as
-	// NULL). Whether a given row is paired is decided per-row below from R2 NULL-ness.
-	bool has_r2 = fdata.has_r2_columns;
-	if (has_r2) {
-		input.data[indices.sequence2_idx].ToUnifiedFormat(seq2_data);
-		input.data[indices.qual2_idx].ToUnifiedFormat(qual2_data);
-	}
-
-	// Get references to local buffers
-	auto &stream_r1 = *lstate.writer_state_r1->stream;
-	MemoryStream *stream_r2 = fdata.split_output ? lstate.writer_state_r2->stream.get() : nullptr;
-
-	// Build all records into local buffer(s) - NO LOCK.
-	// Hot-path rule: never call string_t::GetString() on sequence/quality fields -- it
-	// makes a heap copy per record. Use GetData()/GetSize() and write directly to the
-	// MemoryStream. The encoder reuses an internal quality-encoding buffer across
-	// records so the ASCII-offset encoding doesn't allocate per row.
-	string id_buf; // reused when id_as_sequence_index is true
-	FastqEncoder encoder(fdata.qual_offset);
-	for (idx_t row = 0; row < input.size(); row++) {
-		auto row_idx = read_id_data.sel->get_index(row);
-
-		// Validate required fields are not NULL
-		if (!read_id_data.validity.RowIsValid(row_idx)) {
-			throw InvalidInputException("NULL value in read_id column (row %llu)", row);
-		}
-
-		// Get ID
-		const char *id_ptr;
-		idx_t id_size;
-		if (fdata.id_as_sequence_index) {
-			auto seq_idx_data = UnifiedVectorFormat::GetData<int64_t>(sequence_index_data);
-			auto seq_idx_row = sequence_index_data.sel->get_index(row);
-			id_buf = to_string(seq_idx_data[seq_idx_row]);
-			id_ptr = id_buf.data();
-			id_size = id_buf.size();
-		} else {
-			ResolveSequenceRecordId(read_id_data, row, fdata.read_id_type, id_buf, id_ptr, id_size);
-		}
-
-		// Get comment (may be absent or NULL)
-		const char *comment_ptr = nullptr;
-		idx_t comment_size = 0;
-		if (fdata.include_comment && indices.comment_idx != DConstants::INVALID_INDEX) {
-			auto comment_strings = UnifiedVectorFormat::GetData<string_t>(comment_data);
-			auto comment_row = comment_data.sel->get_index(row);
-			if (comment_data.validity.RowIsValid(comment_row)) {
-				comment_ptr = comment_strings[comment_row].GetData();
-				comment_size = comment_strings[comment_row].GetSize();
-			}
-		}
-
-		// Get R1 data
-		auto seq1_row = seq1_data.sel->get_index(row);
-		if (!seq1_data.validity.RowIsValid(seq1_row)) {
-			throw InvalidInputException("NULL value in sequence1 column (row %llu)", row);
-		}
-		const char *seq1_ptr = seq1_strings[seq1_row].GetData();
-		idx_t seq1_size = seq1_strings[seq1_row].GetSize();
-
-		auto qual1_row = qual1_data.sel->get_index(row);
-		if (!qual1_data.validity.RowIsValid(qual1_row)) {
-			throw InvalidInputException("NULL value in qual1 column (row %llu)", row);
-		}
-		auto &qual1_list = ListVector::GetChildMutable(input.data[indices.qual1_idx]);
-		auto qual1_list_data = FlatVector::GetData<uint8_t>(qual1_list);
-		auto qual1_entries = UnifiedVectorFormat::GetData<list_entry_t>(qual1_data);
-		idx_t qual1_length = qual1_entries[qual1_row].length;
-		const uint8_t *qual1_ptr = qual1_list_data + qual1_entries[qual1_row].offset;
-
-		// Validate quality score length matches sequence length
-		if (qual1_length != seq1_size) {
-			throw InvalidInputException(
-			    "Quality score length (%llu) does not match sequence length (%llu) for row %llu", qual1_length,
-			    seq1_size, row);
-		}
-
-		// Write R1 record to local buffer. The sink wraps WriteData so the
-		// encoder remains DuckDB-free (its unit tests link against the
-		// header alone).
-		auto sink_r1 = [&stream_r1](const char *data, std::size_t size) {
-			stream_r1.WriteData(const_data_ptr_cast(data), size);
-		};
-		encoder.Encode(sink_r1, id_ptr, id_size, comment_ptr, comment_size, seq1_ptr, seq1_size, qual1_ptr,
-		               qual1_length);
-		lstate.writer_state_r1->written_anything = true;
-
-		// Handle R2. A record is paired iff sequence2 AND qual2 are both non-NULL; both NULL means
-		// a single-end record. Exactly one NULL is a malformed FASTQ record.
-		if (has_r2) {
-			auto seq2_row = seq2_data.sel->get_index(row);
-			auto qual2_row = qual2_data.sel->get_index(row);
-			bool seq2_valid = seq2_data.validity.RowIsValid(seq2_row);
-			bool qual2_valid = qual2_data.validity.RowIsValid(qual2_row);
-
-			if (seq2_valid != qual2_valid) {
-				throw InvalidInputException(
-				    "Row %llu: sequence2 and qual2 must both be set (paired-end) or both be NULL (single-end)", row);
-			}
-
-			if (seq2_valid) {
-				lstate.saw_paired = true;
-
-				auto seq2_strings = UnifiedVectorFormat::GetData<string_t>(seq2_data);
-				const char *seq2_ptr = seq2_strings[seq2_row].GetData();
-				idx_t seq2_size = seq2_strings[seq2_row].GetSize();
-
-				auto &qual2_list = ListVector::GetChildMutable(input.data[indices.qual2_idx]);
-				auto qual2_list_data = FlatVector::GetData<uint8_t>(qual2_list);
-				auto qual2_entries = UnifiedVectorFormat::GetData<list_entry_t>(qual2_data);
-				idx_t qual2_length = qual2_entries[qual2_row].length;
-				const uint8_t *qual2_ptr = qual2_list_data + qual2_entries[qual2_row].offset;
-
-				// Validate quality score length matches sequence length
-				if (qual2_length != seq2_size) {
-					throw InvalidInputException(
-					    "Quality score length (%llu) does not match sequence length (%llu) for row %llu (R2)",
-					    qual2_length, seq2_size, row);
-				}
-
-				if (fdata.split_output) {
-					// Write R2 to the separate R2 buffer (file created lazily on first flush).
-					auto sink_r2 = [stream_r2](const char *data, std::size_t size) {
-						stream_r2->WriteData(const_data_ptr_cast(data), size);
-					};
-					encoder.Encode(sink_r2, id_ptr, id_size, comment_ptr, comment_size, seq2_ptr, seq2_size, qual2_ptr,
-					               qual2_length);
-					lstate.writer_state_r2->written_anything = true;
-				} else if (fdata.interleave) {
-					// Write R2 interleaved into the same buffer as R1.
-					encoder.Encode(sink_r1, id_ptr, id_size, comment_ptr, comment_size, seq2_ptr, seq2_size, qual2_ptr,
-					               qual2_length);
-				} else {
-					// Single-file output but this record is paired and there is nowhere to put R2.
-					throw InvalidInputException(
-					    "Row %llu has paired-end data (sequence2 is set) but the output is a single file. Use the "
-					    "{ORIENTATION} placeholder in the output path to write split R1/R2 files, or set "
-					    "INTERLEAVE=true to interleave R1/R2 into one file.",
-					    row);
-				}
-			} else {
-				lstate.saw_single = true;
-			}
-		}
-
-		// Flush per-record once the threshold is crossed, not per-chunk. Keeps the local
-		// buffer bounded even when individual records are very large (e.g. long-read
-		// FASTQ), so we never hand gzip more than flush_size + one_record at a time.
-		if (lstate.writer_state_r1->stream->GetPosition() >= lstate.writer_state_r1->flush_size) {
-			FlushFormatBuffer(*lstate.writer_state_r1, *gstate.file_r1, gstate.lock);
-		}
-		if (stream_r2 && lstate.writer_state_r2->stream->GetPosition() >= lstate.writer_state_r2->flush_size) {
-			FlushR2Buffer(*lstate.writer_state_r2, gstate);
-		}
-	}
-}
-
-//===--------------------------------------------------------------------===//
-// Combine (use shared implementation)
-//===--------------------------------------------------------------------===//
-static void FastqCopyCombine(ExecutionContext &context, FunctionData &bind_data, GlobalFunctionData &gstate_p,
-                             LocalFunctionData &lstate_p) {
-	auto &fdata = bind_data.Cast<FastqCopyBindData>();
-	auto &gstate = gstate_p.Cast<FastqCopyGlobalState>();
-	auto &lstate = lstate_p.Cast<FastqCopyLocalState>();
-	SequenceCopyCombine(fdata, gstate, lstate);
-}
-
-//===--------------------------------------------------------------------===//
 // Finalize (use shared implementation)
 //===--------------------------------------------------------------------===//
 static void FastqCopyFinalize(ClientContext &context, FunctionData &bind_data, GlobalFunctionData &gstate_p) {
@@ -367,27 +153,207 @@ static void FastqCopyFinalize(ClientContext &context, FunctionData &bind_data, G
 }
 
 //===--------------------------------------------------------------------===//
+// Batch API (SequencePrepareBatch / SequenceFlushBatch)
+//===--------------------------------------------------------------------===//
+struct FastqRecord {
+	const char *id;
+	idx_t id_size;
+	const char *comment;
+	idx_t comment_size;
+	const char *seq;
+	idx_t seq_size;
+	const uint8_t *qual;
+	idx_t qual_size;
+	// For a quality error, which Write and Check find: the record's row and whether it is the mate.
+	const SequenceChunkReader *reader;
+	idx_t row;
+	bool r2;
+};
+
+// The FORMAT of SequencePrepareBatch for FASTQ: a row's R1 record, then its R2 record when sequence2 and qual2 are set.
+class FastqBatchFormat {
+public:
+	using Record = FastqRecord;
+
+	explicit FastqBatchFormat(const FastqCopyBindData &fdata_p) : fdata(fdata_p), encoder(fdata_p.qual_offset) {
+	}
+
+	template <class EMIT>
+	void Visit(DataChunk &input, SequenceBatchData &batch, EMIT &&emit) {
+		auto &indices = fdata.indices;
+		SequenceChunkReader reader(fdata, input);
+		QualColumn qual1, qual2;
+		qual1.Init(input.data[indices.qual1_idx]);
+		if (fdata.has_r2_columns) {
+			qual2.Init(input.data[indices.qual2_idx]);
+		}
+
+		for (idx_t row = 0; row < input.size(); row++) {
+			FastqRecord record;
+			reader.Header(row, record.id, record.id_size, record.comment, record.comment_size);
+			const auto &seq1 = reader.Sequence1(row);
+			auto qual1_row = qual1.data.sel->get_index(row);
+			if (!qual1.data.validity.RowIsValid(qual1_row)) {
+				reader.ThrowNull("qual1", row);
+			}
+			SetRead(record, seq1, qual1, qual1_row, reader, row, false);
+			emit(SequenceStream::R1, record);
+
+			// A record is paired iff sequence2 and qual2 are both non-NULL; exactly one NULL is malformed.
+			const bool paired = reader.HasSequence2(row);
+			if (fdata.has_r2_columns) {
+				auto qual2_row = qual2.data.sel->get_index(row);
+				if (paired != qual2.data.validity.RowIsValid(qual2_row)) {
+					throw InvalidInputException(
+					    "read_id '%s': sequence2 and qual2 must both be set (paired-end) or both be NULL (single-end)",
+					    reader.ReadId(row));
+				}
+				if (paired) {
+					SetRead(record, reader.Sequence2(row), qual2, qual2_row, reader, row, true);
+				}
+			}
+			SequenceStream r2_stream;
+			if (!reader.RouteR2(row, paired, batch, r2_stream)) {
+				continue;
+			}
+			emit(r2_stream, record);
+		}
+	}
+
+	// What FastqEncoder::Encode writes: "@" id [" " comment] "\n" sequence "\n+\n" qualities "\n".
+	idx_t Size(const FastqRecord &record) const {
+		return 1 + record.id_size + (record.comment_size > 0 ? 1 + record.comment_size : 0) + 1 + record.seq_size + 3 +
+		       record.qual_size + 1;
+	}
+
+	void Write(MemoryStream &stream, const FastqRecord &record) {
+		// The sink wraps WriteData so the encoder remains DuckDB-free (its unit tests link against the header alone).
+		Encode(record,
+		       [&stream](const char *data, std::size_t size) { stream.WriteData(const_data_ptr_cast(data), size); });
+	}
+
+	// For a batch formatted only when it is written: raises now, while the batch is prepared, the error Write would.
+	void Check(const FastqRecord &record) {
+		Encode(record, [](const char *, std::size_t) {});
+	}
+
+private:
+	// A UTINYINT[] quality column of one chunk.
+	struct QualColumn {
+		UnifiedVectorFormat data;
+		const uint8_t *scores = nullptr;
+		const ValidityMask *score_validity = nullptr;
+		// Whether any score in the chunk is NULL, found 64 scores at a time; only then are a read's scores checked.
+		bool has_null_score = false;
+
+		void Init(Vector &quals) {
+			quals.ToUnifiedFormat(data);
+			auto &child = ListVector::GetChildMutable(quals);
+			scores = FlatVector::GetData<uint8_t>(child);
+			score_validity = &FlatVector::Validity(child);
+			has_null_score = !score_validity->CheckAllValid(ListVector::GetListSize(quals));
+		}
+	};
+
+	// The encoder refuses a score that would encode past '~'; the error then names the record.
+	void Encode(const FastqRecord &record, const FastqEncoder::Sink &sink) {
+		try {
+			encoder.Encode(sink, record.id, record.id_size, record.comment, record.comment_size, record.seq,
+			               record.seq_size, record.qual, record.qual_size);
+		} catch (const Exception &) {
+			throw; // DuckDB's own, such as a full stream: not about the data
+		} catch (const std::runtime_error &e) {
+			throw InvalidInputException("%s for read_id '%s'%s", e.what(), record.reader->ReadId(record.row),
+			                            record.r2 ? " (R2)" : "");
+		}
+	}
+
+	// Points the record at a read's sequence (a string_t in the vector, which must outlive the record) and its
+	// qualities (one row of a UTINYINT[] column), and checks them: one score per base and no NULL score. Errors name
+	// the row's read_id, and R2 for the mate.
+	void SetRead(FastqRecord &record, const string_t &seq, const QualColumn &quals, idx_t qual_row,
+	             const SequenceChunkReader &reader, idx_t row, bool r2) const {
+		auto &entry = UnifiedVectorFormat::GetData<list_entry_t>(quals.data)[qual_row];
+		record.seq = seq.GetData();
+		record.seq_size = seq.GetSize();
+		record.qual = quals.scores + entry.offset;
+		record.qual_size = entry.length;
+		record.reader = &reader;
+		record.row = row;
+		record.r2 = r2;
+		if (record.qual_size != record.seq_size) {
+			throw InvalidInputException(
+			    "Quality score length (%llu) does not match sequence length (%llu) for read_id '%s'%s",
+			    record.qual_size, record.seq_size, reader.ReadId(row), r2 ? " (R2)" : "");
+		}
+		if (quals.has_null_score) {
+			for (idx_t k = 0; k < entry.length; k++) {
+				if (!quals.score_validity->RowIsValid(entry.offset + k)) {
+					throw InvalidInputException("NULL quality score in %s (read_id '%s')", r2 ? "qual2" : "qual1",
+					                            reader.ReadId(row));
+				}
+			}
+		}
+	}
+
+	const FastqCopyBindData &fdata;
+	FastqEncoder encoder; // reuses its quality buffer across records
+};
+
+// Reads only the bind data: see SequencePrepareBatch.
+static unique_ptr<PreparedBatchData> FastqPrepareBatch(ClientContext &context, FunctionData &bind_data,
+                                                       GlobalFunctionData &, unique_ptr<ColumnDataCollection> rows) {
+	FastqBatchFormat format(bind_data.Cast<FastqCopyBindData>());
+	return SequencePrepareBatch(context, format, std::move(rows));
+}
+
+static void FastqFlushBatch(ClientContext &context, FunctionData &bind_data, GlobalFunctionData &gstate,
+                            PreparedBatchData &batch) {
+	auto &fdata = bind_data.Cast<FastqCopyBindData>();
+	FastqBatchFormat format(fdata);
+	SequenceFlushBatch(context, gstate.Cast<FastqCopyGlobalState>(), batch.Cast<SequenceBatchData>(), format);
+}
+
+//===--------------------------------------------------------------------===//
 // Register Function
 //===--------------------------------------------------------------------===//
+static constexpr const char *FASTQ_WRITER_FORMAT = "_miint_fastq";
+
 static void FastqCopyOptions(ClientContext &context, CopyOptionsInput &input) {
 	DeclareSequenceCopyOptions(input);
 	DeclareCopyOption(input, "qual_offset", LogicalType::BIGINT);
 }
 
+static BoundStatement FastqCopyPlan(Binder &binder, CopyStatement &stmt) {
+	return SequenceCopyPlan(binder, stmt, FASTQ_WRITER_FORMAT);
+}
+
+// FORMAT FASTQ: the options and the plan callback, which rebinds as the writer below (see SequenceCopyPlan).
 CopyFunction CopyFastqFunction::GetFunction() {
 	CopyFunction func("fastq");
 	func.copy_options = FastqCopyOptions;
+	func.plan = FastqCopyPlan;
+	func.extension = "fastq";
+	return func;
+}
+
+// FORMAT _miint_fastq: the writer. Named directly, it writes without the default batch cap.
+static CopyFunction GetWriterFunction() {
+	CopyFunction func(FASTQ_WRITER_FORMAT);
+	func.copy_options = FastqCopyOptions;
 	func.copy_to_bind = FastqCopyBind;
-	func.copy_to_initialize_local = FastqCopyInitializeLocal;
 	func.copy_to_initialize_global = FastqCopyInitializeGlobal;
-	func.copy_to_sink = FastqCopySink;
-	func.copy_to_combine = FastqCopyCombine;
 	func.copy_to_finalize = FastqCopyFinalize;
+	func.execution_mode = SequenceCopyExecutionMode;
+	func.prepare_batch = FastqPrepareBatch;
+	func.flush_batch = FastqFlushBatch;
+	func.extension = "fastq";
 	return func;
 }
 
 void CopyFastqFunction::Register(ExtensionLoader &loader) {
 	loader.RegisterFunction(GetFunction());
+	loader.RegisterFunction(GetWriterFunction());
 }
 
 } // namespace duckdb

@@ -1,0 +1,73 @@
+# name: test/sql/read_fastx_empty_record_quals.test
+# description: A zero-length FASTQ record has no bases and no quality scores: read_fastx gives it an empty qual1 (or qual2), whatever its place in the file or in a chunk, and the records read with it keep their own scores. FASTA has no qualities at all: qual1 is NULL, as it is for every record of a FASTA file.
+# group: [sql]
+
+require miint
+
+# r0 and r2049 are empty. A chunk holds 2,048 records, so in a file of r1 to r2100 the second chunk starts with r2049.
+statement ok
+CREATE TABLE recs AS
+SELECT *, list_transform(range(length(sequence1)), lambda j: ((i + j) % 41)::UTINYINT) AS qual1,
+       list_transform(range(length(sequence2)), lambda j: ((i * 3 + j) % 41)::UTINYINT) AS qual2
+FROM (SELECT i, 'r' || i AS read_id,
+             CASE WHEN i IN (0, 2049) THEN '' ELSE left(repeat('ACGT', 10), 10 + i % 20) END AS sequence1,
+             CASE WHEN i = 1 THEN '' ELSE left(repeat('TTGCA', 8), 12 + i % 25) END AS sequence2
+      FROM range(0, 2101) r(i));
+
+# The file's first record is empty.
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM recs WHERE i < 100 ORDER BY i) TO '{TEST_DIR}/e_first.fastq' (FORMAT FASTQ);
+
+query III
+SELECT count(*), count(*) FILTER (WHERE qual1 IS NULL), count(*) FILTER (WHERE len(qual1) <> length(sequence1))
+FROM read_fastx('{TEST_DIR}/e_first.fastq');
+----
+100	0	0
+
+query I
+SELECT qual1 FROM read_fastx('{TEST_DIR}/e_first.fastq') WHERE read_id = 'r0';
+----
+[]
+
+# The first record of a later chunk is empty.
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM recs WHERE i >= 1 ORDER BY i) TO '{TEST_DIR}/e_later.fastq' (FORMAT FASTQ);
+
+query III
+SELECT count(*), count(*) FILTER (WHERE qual1 IS NULL), count(*) FILTER (WHERE len(qual1) <> length(sequence1))
+FROM read_fastx('{TEST_DIR}/e_later.fastq');
+----
+2100	0	0
+
+# Paired files whose R2 file starts with an empty record.
+statement ok
+COPY (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM recs WHERE i BETWEEN 1 AND 2048 ORDER BY i)
+TO '{TEST_DIR}/e_pair_{ORIENTATION}.fastq' (FORMAT FASTQ);
+
+query III
+SELECT count(*), count(*) FILTER (WHERE qual1 IS NULL OR qual2 IS NULL),
+       count(*) FILTER (WHERE len(qual2) <> length(sequence2))
+FROM read_fastx('{TEST_DIR}/e_pair_R1.fastq', sequence2 = '{TEST_DIR}/e_pair_R2.fastq');
+----
+2048	0	0
+
+# Every record empty: still FASTQ, so each has an empty qual1.
+statement ok
+COPY (SELECT read_id, '' AS sequence1, []::UTINYINT[] AS qual1 FROM recs WHERE i < 3 ORDER BY i)
+TO '{TEST_DIR}/e_all.fastq' (FORMAT FASTQ);
+
+query II
+SELECT read_id, qual1 FROM read_fastx('{TEST_DIR}/e_all.fastq') ORDER BY sequence_index;
+----
+r0	[]
+r1	[]
+r2	[]
+
+# FASTA, starting with an empty record: no qualities.
+statement ok
+COPY (SELECT read_id, sequence1 FROM recs WHERE i < 100 ORDER BY i) TO '{TEST_DIR}/e_first.fasta' (FORMAT FASTA);
+
+query II
+SELECT count(*), count(*) FILTER (WHERE qual1 IS NULL) FROM read_fastx('{TEST_DIR}/e_first.fasta');
+----
+100	100

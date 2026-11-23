@@ -1026,8 +1026,8 @@ void NewickTree::insert_fully_resolved(const std::vector<Placement> &placements)
 // Modification
 // ============================================================================
 
-NewickTree NewickTree::shear(const std::unordered_set<std::string> &keep_names, bool collapse,
-                             bool ignore_missing) const {
+NewickTree NewickTree::shear(const std::unordered_set<std::string> &keep_names, bool collapse, bool ignore_missing,
+                             std::vector<uint32_t> *source) const {
 	const uint32_t n = static_cast<uint32_t>(nodes_.size());
 
 	// Map tip name -> tip node indices (only leaves; internal labels do not
@@ -1096,12 +1096,18 @@ NewickTree NewickTree::shear(const std::unordered_set<std::string> &keep_names, 
 	NewickTree result;
 	std::vector<uint32_t> remap(n, NO_PARENT); // original index -> new index
 	std::vector<uint32_t> parents_old;         // per new node: parent's original index (NO_PARENT for root)
+	if (source) {
+		source->clear();
+	}
 
 	auto emit = [&](uint32_t orig, double branch_length, uint32_t parent_orig) {
 		// add_node copies the name once (shear is const, so the source cannot be
 		// moved from); the old path copied it twice.
 		remap[orig] = result.add_node(nodes_[orig].name, branch_length, nodes_[orig].edge_id);
 		parents_old.push_back(parent_orig);
+		if (source) {
+			source->push_back(orig);
+		}
 	};
 
 	if (!collapse) {
