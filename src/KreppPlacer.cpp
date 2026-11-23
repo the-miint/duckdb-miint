@@ -492,7 +492,7 @@ SharedKreppIndex::SharedKreppIndex(const std::string &index_dir, const std::stri
 		// only diagnostic is commented out (phytree.cpp:519-525). Every skipped
 		// leaf leaves eff_nchildren at 0, and collect_placements then rejects
 		// every candidate on the `get_nchildren() != get_eff_nchildren()` test
-		// (query.cpp:339). A backbone whose labels do not match the index is
+		// (query.cpp:393). A backbone whose labels do not match the index is
 		// therefore not an error anywhere in krepp: it is zero rows, no warning,
 		// indistinguishable from "nothing placed". Count the overlap ourselves.
 		impl_->backbone->reset_traversal();
@@ -554,6 +554,11 @@ struct KreppPlacer::Impl {
 	// reuse across batches is sound and why the QSeq exists at all.
 	qseq_sptr_t qs;
 	std::shared_ptr<IBatch> batch;
+	// One pair per placer, reset per query in place(). A fresh IMers allocates
+	// and zeroes a visit array of nsubsets x 4 bytes on its first k-mer
+	// (ext/krepp/src/query.cpp:687-689); reset_query keeps that array.
+	imers_sptr_t imers_or;
+	imers_sptr_t imers_rc;
 };
 
 KreppPlacer::KreppPlacer(std::shared_ptr<SharedKreppIndex> index, const KreppConfig &config) : impl_(new Impl()) {
@@ -568,6 +573,8 @@ KreppPlacer::KreppPlacer(std::shared_ptr<SharedKreppIndex> index, const KreppCon
 	                                        impl_->config.chisq, std::numeric_limits<double>::quiet_NaN(),
 	                                        impl_->config.tau, !impl_->config.filter, impl_->config.multi,
 	                                        /*summarize=*/false, /*p_value=*/false);
+	impl_->imers_or = std::make_shared<IMers>(impl_->shared->impl_->index, 0, impl_->config.hdist_th);
+	impl_->imers_rc = std::make_shared<IMers>(impl_->shared->impl_->index, 0, impl_->config.hdist_th);
 }
 
 KreppPlacer::~KreppPlacer() = default;
@@ -650,15 +657,15 @@ size_t KreppPlacer::place(const std::vector<KreppQuery> &queries, std::vector<Kr
 		const std::string &sequence = *sequences[i];
 		const uint64_t length = sequence.size();
 
-		// Fresh per query. place_sequences builds the two IMers once per batch and
-		// resets them per query, but that reset is private to IBatch. summarize_matches
-		// resets the rest of IBatch's per-query state (nd_closest, mi_closest,
-		// node_to_minfo), which is what makes reusing one IBatch correct.
-		imers_sptr_t imers_or = std::make_shared<IMers>(impl_->shared->impl_->index, length, impl_->config.hdist_th);
-		imers_sptr_t imers_rc = std::make_shared<IMers>(impl_->shared->impl_->index, length, impl_->config.hdist_th);
+		// The same per-query reset krepp's own loop does (IBatch::scan_query,
+		// ext/krepp/src/query.cpp:211-212). summarize_matches resets the rest of
+		// IBatch's per-query state (nd_closest, mi_closest, node_to_minfo), which is
+		// what makes reusing one IBatch correct.
+		impl_->imers_or->reset_query(length);
+		impl_->imers_rc->reset_query(length);
 
-		batch.search_mers(sequence.data(), length, imers_or, imers_rc);
-		batch.summarize_matches(imers_or, imers_rc);
+		batch.search_mers(sequence.data(), length, impl_->imers_or, impl_->imers_rc);
+		batch.summarize_matches(impl_->imers_or, impl_->imers_rc);
 		if (!batch.collect_placements(placements)) {
 			continue;
 		}
