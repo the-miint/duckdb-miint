@@ -77,7 +77,7 @@ Minimap2's PAF tags have typed columns. An absent tag is `NULL`. Minimap2 writes
 
 The reader converts `NM:i:3` to the integer `tag_nm = 3`. For tags without a dedicated column, it validates the type letter against the value and stores only the text value. For example, `zz:i:7` becomes `tags['zz'] = '7'`. Cast map values when you need numbers.
 
-Float tags (`f`) accept `nan`, `inf`, and `infinity` in any case with an optional sign, as in `read_alignments`. Values outside the finite `DOUBLE` range overflow to infinity. The reader also accepts untyped `key:value` fields. When a key has a dedicated column, the reader converts the value to that column's type.
+Float tags (`f`) accept `nan`, `inf`, and `infinity` in any case with an optional sign. Values outside the finite `DOUBLE` range overflow to infinity. The reader also accepts untyped `key:value` fields. When a key has a dedicated column, the reader converts the value to that column's type.
 
 #### PAF paths, compression, and parallel reads
 
@@ -89,7 +89,7 @@ A malformed record fails the scan. The error identifies the file, line, and defe
 
 - fewer than 12 fields, or a blank line
 - an empty query or target name
-- a fractional, negative, or non-numeric value in an integer field, or a mapping quality above 255
+- a fractional, negative, or non-numeric value in one of the first 12 fields that requires an integer, or a mapping quality above 255
 - an interval that runs backwards or past its sequence's length
 - a strand other than `+` or `-`, except `*` on an unmapped record
 - `*` as only one of strand and target name, or an unmapped record with a non-zero query or target start or end
