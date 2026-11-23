@@ -209,33 +209,26 @@ SELECT count(*) FROM place_krepp(
 ----
 0
 
-# RNA and DNA input place the same reads, in the same number of rows.
+# RNA and DNA input return the same rows, in every column.
 query I
 WITH rna AS (
-    SELECT DISTINCT fragment
-    FROM place_krepp(query_table='toy_reads_rna', index_path='{MIINT_KREPP_TOY_INDEX}')
+    SELECT * FROM place_krepp(query_table='toy_reads_rna', index_path='{MIINT_KREPP_TOY_INDEX}')
 ), dna AS (
-    SELECT DISTINCT fragment
-    FROM place_krepp(query_table='toy_reads', index_path='{MIINT_KREPP_TOY_INDEX}')
+    SELECT * FROM place_krepp(query_table='toy_reads', index_path='{MIINT_KREPP_TOY_INDEX}')
 )
-SELECT (SELECT count(*) FROM (SELECT * FROM rna EXCEPT SELECT * FROM dna))
-     + (SELECT count(*) FROM (SELECT * FROM dna EXCEPT SELECT * FROM rna));
+SELECT (SELECT count(*) FROM (SELECT * FROM rna EXCEPT ALL SELECT * FROM dna))
+     + (SELECT count(*) FROM (SELECT * FROM dna EXCEPT ALL SELECT * FROM rna));
 ----
 0
 
 query I
-SELECT (SELECT count(*) FROM place_krepp(query_table='toy_reads_rna',
-                                         index_path='{MIINT_KREPP_TOY_INDEX}'))
-     = (SELECT count(*) FROM place_krepp(query_table='toy_reads',
-                                         index_path='{MIINT_KREPP_TOY_INDEX}'));
+SELECT count(*) > 0 FROM place_krepp(query_table='toy_reads_rna', index_path='{MIINT_KREPP_TOY_INDEX}');
 ----
 true
 
 # Two calls return the same rows in every column, like_weight_ratio included,
-# with multi on and off: krepp breaks ties and orders its sums by node, not by
-# hash-map order (ext/krepp/src/query.cpp:172-179, :353-361, :409-412, :432-438).
-# Before krepp v0.12.2, like_weight_ratio differed in 28 to 102 of 404 rows
-# between two calls on this index.
+# with multi on and off (the krepp code behind it is listed in
+# docs/internals/embedded-tools.md).
 query I
 SELECT count(*) FROM (
     (SELECT * FROM place_krepp(query_table='toy_reads', index_path='{MIINT_KREPP_TOY_INDEX}')
@@ -540,7 +533,7 @@ true
 # A larger chisq cutoff admits more candidate edges. Strict `>`, not `>=`: with
 # chisq hardcoded inside KreppPlacer both sides would be the same query and
 # `>=` would hold trivially, which is the mutation this is meant to catch.
-# Measured on this index: chisq 0.001/2.706/10.0/100.0 give 403/403/508/869 rows.
+# Measured on this index: chisq 0.001/2.706/10.0/100.0 give 264/403/508/869 rows.
 query I
 SELECT (SELECT count(*) FROM place_krepp(query_table='toy_reads',
             index_path='{MIINT_KREPP_TOY_INDEX}', chisq=10.0))
@@ -745,20 +738,20 @@ SELECT count(*) > 0 FROM place_krepp(query_table='toy_reads',
 ----
 true
 
-# Same placements, not merely a similar number of them.
+# Same rows in every column, not merely a similar number of them.
 query II
 SELECT
   (SELECT count(*) FROM (
-     SELECT fragment, edge_num FROM place_krepp(query_table='toy_reads',
+     SELECT * FROM place_krepp(query_table='toy_reads',
          index_path='{MIINT_KREPP_TOY_INDEX}')
-     EXCEPT
-     SELECT fragment, edge_num FROM place_krepp(query_table='toy_reads',
+     EXCEPT ALL
+     SELECT * FROM place_krepp(query_table='toy_reads',
          index_path='{MIINT_KREPP_TOY_INDEX}', newick_path='ext/krepp/test/tree_toy.nwk'))),
   (SELECT count(*) FROM (
-     SELECT fragment, edge_num FROM place_krepp(query_table='toy_reads',
+     SELECT * FROM place_krepp(query_table='toy_reads',
          index_path='{MIINT_KREPP_TOY_INDEX}', newick_path='ext/krepp/test/tree_toy.nwk')
-     EXCEPT
-     SELECT fragment, edge_num FROM place_krepp(query_table='toy_reads',
+     EXCEPT ALL
+     SELECT * FROM place_krepp(query_table='toy_reads',
          index_path='{MIINT_KREPP_TOY_INDEX}')));
 ----
 0	0

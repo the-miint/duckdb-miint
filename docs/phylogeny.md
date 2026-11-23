@@ -494,13 +494,11 @@ Requires an index built beforehand, either by [`krepp_index_create`](#build-a-kr
   - Do not change, rewrite or truncate an index's files while a call is using them.
   - Do not place against an index on a network filesystem. Copy it to local disk first.
 
-**Reproducibility:** repeated calls on the same reads and index return the same rows, identical in every column, `like_weight_ratio` included, with `multi` on or off, on one thread or eight. Since v0.12.2, krepp breaks ties between equally scored candidates by node and sums candidate scores in node order, rather than in the order of hash maps keyed by node pointer. Measured on krepp v0.12.3 (macOS arm64):
+**Reproducibility:** repeated calls on the same reads and index return the same rows, identical in every column, `like_weight_ratio` included, with `multi` on or off, on one thread or eight. krepp breaks ties between equally scored candidates by node and sums candidate scores in node order; the code sites are listed under "Placement output is reproducible" in [`docs/internals/embedded-tools.md`](internals/embedded-tools.md). Measured on krepp v0.12.3 (macOS arm64):
 - The toy index that `run_tests.sh` builds with krepp's CLI: 5 processes, each placing twice with `multi` on and twice with it off. All 10 `multi` calls returned the same 403 rows, and all 10 `multi=false` calls the same 92.
-- An index built with `krepp_index_create` from 1,000 tips of the Greengenes2 2024.09 backbone (959 marker-length sequences of about 1.5 kb and 41 genomes), placing 20,000 reads of 150 bp. With `multi=false`, 3 runs on one thread and 2 on eight placed all 19,998 placed reads on the same edge, and on the same edge as krepp's own CLI. Two `multi` runs returned the same 330,863 rows.
+- An index built with `krepp_index_create` from 1,000 tips of the Greengenes2 2024.09 backbone (959 marker-length sequences of about 1.5 kb and 41 genomes), placing 20,000 reads of 150 bp. With `multi=false`, 3 runs on one thread and 2 on eight returned the same 19,998 rows in every column, with each read on the same edge as krepp's own CLI. With `multi` on, runs on one thread and on eight returned the same 330,863 rows in every column.
 
-Before v0.12.2 neither held. On that index, 2,400 to 2,700 of the 19,998 reads changed edge between two `multi=false` runs, all of them reads from the 1.5 kb sequences, and `like_weight_ratio` differed between any two calls.
-
-A fixed tie-break makes the answer consistent, not more accurate. A read that matches several references equally well is placed on the same one every time, the one krepp's ordering picks: with `multi=false`, the candidate with the larger clade, then the lower `d_llh`, then the lower edge number (`ext/krepp/src/query.cpp:432-438`).
+A fixed tie-break makes the answer consistent, not more accurate. A read that matches several references equally well is placed on the same one every time, the one krepp's ordering picks: with `multi=false`, the candidate with the larger clade, then the lower `d_llh`, then the lower edge number.
 
 **Examples:**
 ```sql

@@ -23,7 +23,7 @@ require-env MIINT_KREPP_TOY_REFS
 # The index is built here from krepp's toy references rather than taken from
 # MIINT_KREPP_TOY_INDEX, which needs a krepp CLI build.
 #
-# Since krepp v0.12.2 two calls with identical arguments return identical rows
+# Two calls with identical arguments return identical rows
 # (docs/phylogeny.md, "Reproducibility"), so every batching returns exactly the
 # baseline's rows, like_weight_ratio included. The narrower checks before that
 # one say which way a mismatch went: a read lost or placed twice at a batch

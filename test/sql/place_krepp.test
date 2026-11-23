@@ -11,12 +11,10 @@ require-env KREPP_AVAILABLE
 # letting krepp's error_exit take the whole process down. None of it needs an
 # index to exist.
 #
-# Since krepp v0.12.2, placement rows are identical from one call to the next,
-# like_weight_ratio included and with multi on or off: multi=false keeps the
-# first of equivalent candidates in edge-number order
-# (ext/krepp/src/query.cpp:432-438). See Reproducibility under place_krepp in
-# docs/phylogeny.md. When comparing against krepp's CLI, use `krepp place`, not
-# `krepp dist`: dist goes through report_distances, a different code path.
+# Placement rows are identical from one call to the next, like_weight_ratio
+# included and with multi on or off, so cases may assert on any column. See
+# Reproducibility under place_krepp in docs/phylogeny.md, and
+# docs/internals/embedded-tools.md for the krepp code behind it.
 #
 # NOT covered here: the end-to-end pipe -> krepp -> jplace -> rows path, which
 # needs a built index. See test/sql/place_krepp_toy.test.
