@@ -408,6 +408,7 @@ list(
   src/taxdump_archive.cpp
   src/taxdump_parser.cpp
   src/taxonomy_lineage.cpp
+  src/taxonomy_violations.cpp
   src/TaxonomyDecorator.cpp
   src/TaxonomyStore.cpp
   src/tree_ancestors.cpp

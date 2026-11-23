@@ -158,6 +158,19 @@ Currently used by `align_minimap2` + `save_minimap2_index` (both sides), `copy_s
 
 ## Adding New Functionality
 
+### Documenting a new public function
+
+Author the function reference in `src/reference/<sql_function_name>.md`. The generator uses that fragment to update the task page under `docs/` and to create the catalog metadata DuckDB displays in `.manual`. Check in the generated Markdown so GitHub and the publisher can render the page directly.
+
+1. Put a runnable SQL example first. For readers with a registered suffix, show the direct-file query first and use an explicit function call to demonstrate options. Document supported input types, defaults, and output columns where applicable. Put longer behavior notes under descriptive headings.
+2. In the appropriate `docs/` page, add `<!-- BEGIN REFERENCE: <sql_function_name> -->` and `<!-- END REFERENCE: <sql_function_name> -->` on separate lines where the section belongs. Put the heading in the source fragment and write relative links from the destination page. When moving an existing section, keep its heading and anchor.
+3. In the fragment, put `<!-- manual:description -->` before a one-line summary and `<!-- manual:example -->` before each SQL fence to show in the shell. Add one `<!-- manual:url /reading/#section-anchor -->` with the published section path and rendered heading anchor. The generator prepends `DOCUMENTATION_ROOT` from `scripts/generate-reference.py`. See `src/reference/read_fastx.md` for a worked example.
+4. Run `uv run --no-project python scripts/generate-reference.py` from the repository root. Commit the source fragment, the regenerated section in `docs/`, and `src/include/miint_function_reference.hpp` if it changed. Make later reference edits in the source fragment. CI runs the generator with `--check` to catch stale output.
+5. For native functions, include `miint_function_reference.hpp` and use the appropriate `Create*FunctionInfo` registration overload. Append `::miint::reference::<sql_function_name>()` to `info.descriptions` before handing it to the loader, preserving the registration's existing behavior. For SQL macros, pass the generated function to the shared `register_macro` helper in `src/include/miint_macros.hpp`. For `COPY` formats, use a fragment without manual markers, as in `src/reference/copy_fasta.md`. DuckDB's `.manual` covers catalog functions and macros.
+6. Rebuild, load MIINT, and try `.manual <sql_function_name>` in the DuckDB CLI. Run the examples with fixtures and verify that the published URL matches the rendered site's anchor. Check optional functions on a build that includes the feature.
+
+DuckDB renders signatures from the catalog. The website reference should spell out details the shell signature leaves implicit, such as named-option defaults and table output columns. Use a short description and a small set of examples in the shell.
+
 ### Adding a new table function
 1. Header in `src/include/` with TableFunction class
 2. Implement `Bind()`, `InitGlobal()`, `Execute()` in `src/`

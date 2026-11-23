@@ -9,7 +9,7 @@ MIINT provides integration with NCBI's GenBank and RefSeq.
 - [Read metadata](#read-metadata) - Fetch record metadata from GenBank and RefSeq by accession.
 - [Read sequences](#read-sequences) - Fetch sequence data from GenBank and RefSeq by accession.
 - [Read annotations](#read-annotations) - Fetch annotation data from GenBank and RefSeq by accession.
-- [Taxonomy](#taxonomy) - Obtain and use the NCBI taxonomy: the full tree (bulk/offline), online lineage lookups, offline lineage collapse, and parsing prefixed lineage strings.
+- [Taxonomy](#taxonomy) - Obtain and use the NCBI taxonomy: the full tree (bulk/offline), online lineage lookups, offline lineage collapse, parsing prefixed lineage strings, and checking a taxonomy.
     - [Read the taxonomy tree (`read_ncbi_taxdump`)](#read-the-taxonomy-tree-read_ncbi_taxdump) - Bulk/offline: download + cache the taxonomy tree.
     - [Remap retired taxids (`read_ncbi_taxdump_merged`)](#remap-retired-taxids-read_ncbi_taxdump_merged) - The retired→current taxid map.
     - [Read every name class (`read_ncbi_taxdump_names`)](#read-every-name-class-read_ncbi_taxdump_names) - All of `names.dmp`, including `genbank common name`.
@@ -17,6 +17,7 @@ MIINT provides integration with NCBI's GenBank and RefSeq.
     - [Look up lineages online (`read_ncbi_lineage`)](#look-up-lineages-online-read_ncbi_lineage) - Online/rate-limited: resolve a handful of taxids via E-utilities.
     - [Collapse the tree to lineages (`taxonomy_lineage`)](#collapse-the-tree-to-lineages-taxonomy_lineage) - Offline: rank-collapse a taxdump tree, identical schema to `read_ncbi_lineage`.
     - [Parse lineage strings (`parse_lineage`)](#parse-lineage-strings-parse_lineage) - Turn a `d__…; p__…` lineage string (GTDB, Greengenes2, tax2tree) into the shared schema's rank columns.
+    - [Check a taxonomy (`taxonomy_violations`)](#check-a-taxonomy-taxonomy_violations) - Every problem in a taxonomy (`feature_id` and the shared schema's rank columns), as rows: bad ids and values, repeated ids, gaps, and names under more than one parent.
     - [Map an NCBI rank to its column (`lineage_rank`)](#map-an-ncbi-rank-to-its-column-lineage_rank) - The shared schema's column an NCBI rank collapses into, so `superkingdom` and `domain` look up alike.
     - [Split GTDB labels (`gtdb_label`, `gtdb_species_label`)](#split-gtdb-labels-gtdb_label-gtdb_species_label) - A GTDB name's base and the suffix GTDB gives the parts of a split taxon (`Bacillota_A`), to find split and polyphyletic taxa.
     - [Read GTDB's genome metadata (`read_gtdb_metadata`, `read_gtdb_qc_failed`)](#read-gtdbs-genome-metadata-read_gtdb_metadata-read_gtdb_qc_failed) - Download and cache a GTDB release's genome metadata and its list of genomes that failed GTDB's quality checks, or read the files; link an NCBI species to its type strain's genome.
@@ -661,7 +662,7 @@ the struct into columns.
 - An empty name (`p__`) is NULL, and a lineage with fewer than eight fields leaves the deeper ranks NULL. `d__A;p__;c__;o__;f__;g__;s__` gives domain `A` and seven NULLs.
 - Lineages without rank prefixes are not supported: raw SILVA, and the QIIME releases of SILVA up to 132, whose `D_0__`, `D_1__`, ... prefixes name a depth rather than a rank.
 - A `lineage` written by `taxonomy_lineage` or `read_ncbi_lineage` parses back into the columns it was written from, provided no name contains `;`, starts or ends with whitespace, or itself starts with a rank prefix such as `p__`. NCBI has a few names containing `;`, such as the species `Rhodococcus sp. SJ-2;3`; each splits into an extra field that fails its prefix check, so `parse_lineage` errors on those lineages.
-- `parse_lineage` does not reject gaps: `d__A; p__; c__C` returns phylum NULL and class `C`. Consumers that need gap-free lineages check that themselves.
+- `parse_lineage` does not reject gaps: `d__A; p__; c__C` returns phylum NULL and class `C`. Consumers that need gap-free lineages check that themselves: [`taxonomy_violations`](#check-a-taxonomy-taxonomy_violations) lists the gaps, and a taxonomy's other problems.
 
 **Errors** quote the lineage and name the field:
 
@@ -689,6 +690,85 @@ WHERE NOT is_tip AND name <> '';
 SELECT feature_id, lineage
 FROM raw_taxonomy
 WHERE lineage IS NOT NULL AND TRY(parse_lineage(lineage)) IS NULL;
+```
+
+### Check a taxonomy (`taxonomy_violations`)
+
+Lists every problem in a taxonomy, a `feature_id` and the
+[shared lineage schema](#look-up-lineages-online-read_ncbi_lineage)'s eight rank columns, one
+row each, without raising an error for any of them. Use it to see whether a taxonomy is
+consistent before a tool relies on it: one lineage per id, no NULL rank above a set one, and
+every name under one parent. It also suits a pipeline that builds taxonomies and keeps their
+problems, since every problem comes back, each with the `feature_id` of the row at fault.
+
+```sql
+-- tax2tree's input, (id, lineage) lines with no header, as in Greengenes2's backbone taxonomy.
+-- A QIIME 2 taxonomy.tsv has a header instead: read it as parse_lineage's example does.
+CREATE VIEW tx AS
+SELECT column0 AS feature_id, unnest(parse_lineage(column1))
+FROM read_csv('taxonomy.tsv', delim = '\t', header = false);
+
+SELECT kind, count(*) FROM taxonomy_violations('tx') GROUP BY kind;
+```
+
+**Parameters:**
+
+- `taxonomy` (VARCHAR): the name of a table or view with `feature_id` and the shared lineage schema's eight rank columns (`domain`, `phylum`, `class`, `"order"`, `family`, `genus`, `species`, `strain`), in any order and any case. `feature_id` is VARCHAR, BIGINT or UUID; the rank columns are VARCHAR, NULL at a rank the lineage does not name. Other columns are ignored, so [`taxonomy_lineage`](#collapse-the-tree-to-lineages-taxonomy_lineage) output can be checked as it is once its `taxid` is renamed `feature_id`. [`parse_lineage`](#parse-lineage-strings-parse_lineage) turns lineage strings into these columns, as the examples do. A CTE cannot be named: use a view or a TEMP table (see [passing relations by name](table_of_contents.md#passing-relations-by-name)).
+
+**Returns:** one row per problem, in no particular order:
+
+- `kind` (VARCHAR): the problem, from the table below.
+- `feature_id` (the input's type): the id of the row at fault.
+- `rank` (VARCHAR): the rank column the problem is in, such as `genus`: a column name, as [`lineage_rank`](#map-an-ncbi-rank-to-its-column-lineage_rank) returns, not an NCBI rank.
+- `name` (VARCHAR): the value at fault, as given.
+- `parent` (VARCHAR): for `multiple_parents`, this row's value one rank up, as given; NULL when that rank is NULL.
+- `detail` (VARCHAR): why an id or value is invalid.
+
+A column a kind does not use is NULL.
+
+| `kind` | One row per | `rank` | `name` | `parent` | `detail` |
+|---|---|---|---|---|---|
+| `invalid_id` | row whose `feature_id` is NULL or `''` | | | | `is NULL`, `is empty` |
+| `invalid_value` | value that is not a bare name | its column | the value | | `is empty`, `starts or ends with whitespace`, `starts with a rank prefix such as 'p__'`, `contains ';'` |
+| `duplicate_id` | row whose `feature_id` is on more than one row | | | | |
+| `gap` | row with a NULL rank above a set one | the first NULL rank | | | |
+| `multiple_parents` | row that puts a name under one of its several parents | the name's rank | the name | the parent | |
+
+**Rules:**
+
+- A name is taken together with its rank and compared whole: `Bacillus` and `Bacillus_A` are two names, and so are a family and a genus both called `X`. Its parent is the value one rank up, so a species' parent is its genus; a domain has none.
+- A NULL rank counts as a parent. A genus under a NULL family in one row and a named family in another is under two parents, and the first row has a gap too. An empty value, `''`, is not a NULL rank: it is an `invalid_value`, a parent of its own (distinct from NULL), and no gap.
+- Names are taken as given: nothing is trimmed, nothing is cut at a placeholder such as `uncultured` or `Incertae Sedis`, and no row is left out. So an invalid value is a name of its own in the parent check: `' fA'` is not `fA`, and fixing it can remove a `multiple_parents` row as well as its `invalid_value` row.
+- Each row of a repeated id is reported, and each still takes part in the parent check. To check parents across files that may share ids, but ids within each file, run it on the union for `multiple_parents` and on each file for the rest (last example).
+- Trailing NULL ranks are not gaps: a lineage may stop at any rank, or be NULL throughout.
+- Ids and names compare byte for byte, whatever the columns' collation, as tax2tree and the files it reads compare them: under `COLLATE NOCASE`, `Bacillus` and `bacillus` are still two names, and `a` and `A` two ids.
+- To count how many rows carry a repeated id, or put a name under a parent, group the rows: `count(*)`.
+
+**Errors**, raised when the statement is bound, before any row is read (so `EXPLAIN` and `PREPARE` raise them too):
+
+- a NULL relation name, a relation that does not exist, or a CTE ([passing relations by name](table_of_contents.md#passing-relations-by-name))
+- a missing `feature_id` or rank column; a misspelled rank column is reported as missing, since other columns are ignored
+- a `feature_id` that is not VARCHAR, BIGINT or UUID, or a rank column that is not VARCHAR
+
+Raised at execution instead, so `EXPLAIN` and `PREPARE` do not catch it: a column read with a type other than the one the statement was bound with, such as a view over a file that was rewritten after `PREPARE`. Run or prepare the statement again.
+
+**Examples:**
+```sql
+-- Each name under more than one parent, with each parent and how many rows put it there
+SELECT rank, name, parent, count(*) AS n_rows
+FROM taxonomy_violations('tx')
+WHERE kind = 'multiple_parents'
+GROUP BY ALL
+ORDER BY rank, name, parent;
+
+-- Two files that may share ids: parents over both, everything else per file
+CREATE VIEW both_files AS SELECT * FROM primary_tx UNION ALL SELECT * FROM secondary_tx;
+
+SELECT * FROM taxonomy_violations('both_files') WHERE kind = 'multiple_parents';
+
+SELECT 'primary' AS file, * FROM taxonomy_violations('primary_tx') WHERE kind <> 'multiple_parents'
+UNION ALL
+SELECT 'secondary', * FROM taxonomy_violations('secondary_tx') WHERE kind <> 'multiple_parents';
 ```
 
 ### Map an NCBI rank to its column (`lineage_rank`)

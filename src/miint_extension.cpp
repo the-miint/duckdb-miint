@@ -49,6 +49,7 @@
 #include <read_gtdb.hpp>
 #include <read_ncbi_lineage.hpp>
 #include <parse_lineage.hpp>
+#include <taxonomy_violations.hpp>
 #include <lineage_rank.hpp>
 #include <gtdb_label.hpp>
 #include <blast_search.hpp>
@@ -445,6 +446,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	ReadGtdbFunctions::Register(loader);
 	ReadNCBILineageTableFunction::Register(loader);
 	ParseLineageFunction::Register(loader);
+	TaxonomyViolationsTableFunction::Register(loader);
 	LineageRankFunction::Register(loader);
 	GtdbLabelFunctions::Register(loader);
 	BlastSearchTableFunction::Register(loader);

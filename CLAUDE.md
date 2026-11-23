@@ -179,3 +179,5 @@ Developer-facing deep dives live under `docs/internals/`:
 
 User-facing API reference (parameters, return types, examples) is organized by task under `docs/` — start from the index at [`docs/table_of_contents.md`](docs/table_of_contents.md) (e.g. `docs/reading.md`, `docs/writing.md`, `docs/alignment_*.md`, `docs/qc.md`, `docs/diversity.md`, `docs/insdc_ena.md`, `docs/utilities.md`).
 
+When adding a public function, macro, or COPY format, follow the [function reference guide](docs/internals/architecture.md#documenting-a-new-public-function).
+

@@ -9,6 +9,8 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace miint {
@@ -202,5 +204,152 @@ private:
 // postorder, children visited in ascending index as TreeIndex visits them. Throws
 // std::invalid_argument when min_count is 0.
 NameAssignment AssignNames(const CladeCountIndex &index, uint32_t min_count);
+
+// A name on a node at a rank (a kLineageRanks index).
+struct RankName {
+	size_t rank;
+	NameId name;
+
+	bool operator==(const RankName &) const = default;
+};
+
+// A node's label: its names by ascending rank, at most one per rank.
+using NodeLabel = std::vector<RankName>;
+
+// A node whose preliminary name is at a shallower rank than its nearest named ancestor's
+// (tax2tree's levels < 0). tax2tree empties such a node's label, losing a name AssignNames
+// placed, unless the name is a domain, which it never compares; here the node keeps its
+// preliminary name, and this records that the ranks were inverted, at the domain too.
+struct InvertedBackfill {
+	uint32_t node;
+	size_t rank;
+	NameId name;
+	uint32_t ancestor;
+	size_t ancestor_rank;
+
+	bool operator==(const InvertedBackfill &) const = default;
+};
+
+struct Backfill {
+	// One label per node of the tree.
+	std::vector<NodeLabel> labels;
+	// By ascending node.
+	std::vector<InvertedBackfill> inverted;
+};
+
+// Each node's label after tax2tree's set_preliminary_name_and_rank and backfill_names_gap. An
+// internal node keeps its preliminary name (NameAssignment::Preliminary), preceded by the
+// names the hierarchy (TaxonomyStore::Parent) gives it at the ranks between that name's rank
+// and the preliminary rank of its nearest named ancestor, the nearest ancestor with a
+// preliminary name. The node's other assigned names are dropped; where the fill reaches their
+// ranks, the hierarchy's names stand in their place.
+//   - Tips, and internal nodes with no preliminary name, get an empty label.
+//   - With no named ancestor, the root included, the fill reaches rank 0. tax2tree skips such
+//     a node and keeps its name alone, so the shallower names AssignNames placed on it are lost:
+//     a root named down to the phylum leaves every lineage without a domain.
+//   - With the ancestor's rank equal to the node's or one above it, there is no gap to fill.
+//   - With the ancestor's rank deeper than the node's, the node keeps its preliminary name
+//     alone and `inverted` records it. tax2tree empties the label.
+// `assignment` must come from AssignNames over an index built on `tree` and `store`.
+Backfill BackfillNames(const NameAssignment &assignment, const TaxonomyStore &store, const TreeIndex &tree);
+
+// A name without its polyphyletic suffix, a trailing underscore and one or more capital letters:
+// "Bacillus_A" and "Bacillus_AB" give "Bacillus". A name without one is returned whole, as is a
+// name that is nothing but one ("_A"). Digits and lower-case letters are no suffix, so "Foo_1",
+// as tax2tree's make_names_unique numbers a name it finds on several nodes, "Foo_A1" and
+// "Candidatus_Foo" are returned whole. This is the suffix tax2tree's promotion looks for, but
+// anchored at the end of the name; tax2tree's pattern is anchored only at the start, so it finds
+// a suffix in "Foo_A1" and "Candidatus_Foo".
+std::string_view PolyphyleticBase(std::string_view name);
+
+// tax2tree's commonname_promotion over the labels BackfillNames gave a tree's nodes. In preorder,
+// each internal node finds its nearest descendants with a non-empty label, searching below the
+// empty ones, and takes their first names. While those agree, it appends the name to its own
+// label and removes it from each of theirs, stopping after the round that leaves one of them with
+// one name or none, so a descendant's last name can be taken. With one such descendant, agreement
+// is trivial, so a name moves up to the topmost node whose only labeled descendant holds it.
+//   - Two names agree when they are equal, or when, at one rank, one is the other's
+//     PolyphyleticBase, and the suffixed one is promoted. tax2tree matches by substring, so Baci
+//     and Bacillus_A agree there.
+//   - A name no deeper than every rank the node's path from the root holds, its own label
+//     included, stops the node's promotion before it is appended: a promoted name says the node is
+//     that taxon, which must fit below what the node's lineage already says it is, and a node with
+//     an empty label says what its ancestors say. Such a name can only come from an inverted-rank
+//     node, so an inverted name stays on the node it was placed on, and an inverted-rank node takes
+//     no name at a rank its path holds above it. tax2tree appends the name, which moves an inverted
+//     name up, or gives a label two names at one rank or a shallower name after deeper ones.
+// Labels stay by ascending rank. `labels` must come from BackfillNames over `tree` and `store`.
+std::vector<NodeLabel> PromoteCommonNames(std::vector<NodeLabel> labels, const TaxonomyStore &store,
+                                          const TreeIndex &tree);
+
+// A label as text: its names in rank order, each after its rank's letter and two underscores
+// ("d__Bacteria", "s__Escherichia coli"), joined by "; ". An empty label gives "".
+std::string FormatLabel(const NodeLabel &label, const TaxonomyStore &store);
+
+// Decoration: AssignNames, then BackfillNames, then PromoteCommonNames.
+struct DecorateResult {
+	NameAssignment assignment;
+	// One label per node, after promotion.
+	std::vector<NodeLabel> labels;
+	// The inversions BackfillNames recorded.
+	std::vector<InvertedBackfill> inverted;
+};
+
+// Throws std::invalid_argument when min_count is 0.
+DecorateResult Decorate(const CladeCountIndex &index, const TaxonomyStore &store, uint32_t min_count);
+
+// A name of a label read from text, at a rank (a kLineageRanks index).
+struct LabelPart {
+	size_t rank;
+	std::string name;
+
+	bool operator==(const LabelPart &) const = default;
+};
+
+// A label read from text, as FormatLabel writes it or another tool did. Its components are
+// separated by ';' and trimmed of whitespace (IsLineageSpace), and each is a rank letter
+// (dpcofgst, or k for the domain), two underscores and a name. The ranks a label names are
+// contiguous, as decoration fills every rank between a node's name and its named ancestor's; a
+// component with an empty name ("s__") gives no name at its rank, below every named one. The parts
+// come by ascending rank; an empty label has none. Throws std::invalid_argument, naming the label
+// and the component, for an empty component, one not of that form, an unknown letter, a name that
+// starts with whitespace ("f__ A") or with a rank prefix of its own ("c__c__A"), and a rank given
+// twice; then, once every component is read, for a gap: an empty name above a named rank
+// ("p__B; c__; o__D") or a rank left out between two named ones ("p__B; o__D"). Unlike
+// ParseLineageString, which reads a whole lineage, the components may come in any order (tax2tree
+// can put a shallower name after a deeper one), either k or d names the domain, and an empty name
+// above a named rank is a gap, not a missing rank.
+std::vector<LabelPart> ParseNodeLabel(std::string_view label);
+
+// A rank that a node's label holds and a label above it on its path already holds; the tips
+// below get the ancestor's name at that rank.
+struct RankRepeat {
+	uint32_t node;
+	size_t rank;
+	// The shallowest node above `node` whose label holds `rank`.
+	uint32_t ancestor;
+
+	bool operator==(const RankRepeat &) const = default;
+};
+
+// Each tip's lineage from the labels on its path (tax2tree's pull_consensus_strings), given as
+// the nodes whose labels supply each rank, so names are not copied once per tip.
+struct EmittedLineages {
+	static constexpr uint32_t kNone = UINT32_MAX;
+	// The tips, by ascending node.
+	std::vector<uint32_t> tips;
+	// Per tip, per rank: the shallowest node on the path from the root to the tip whose label
+	// holds the rank, since tax2tree, writing from the tip up, lets the shallower name win; kNone
+	// where no label on the path holds it.
+	std::vector<std::array<uint32_t, kLineageRanks.size()>> holders;
+	// By ascending node, then rank.
+	std::vector<RankRepeat> repeats;
+};
+
+// `labels` has one entry per node of `tree`, each with at most one part per rank, as
+// ParseNodeLabel gives them. A tip's label is ignored, its name being its id. Throws
+// std::invalid_argument when `labels` and `tree` differ in size, or when an internal node's label
+// holds a rank twice or a rank past the last.
+EmittedLineages EmitLineages(const TreeIndex &tree, const std::vector<std::vector<LabelPart>> &labels);
 
 } // namespace miint
