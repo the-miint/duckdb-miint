@@ -2,10 +2,12 @@
 #include "copy_format_common.hpp" // ResolveSequenceRecordId, SequenceCopyPlan, RecordPrepareBatch/RecordFlushBatch
 #include "copy_option_parsing.hpp"
 #include "htslib_raii.hpp"
+#include "QualScore.hpp"       // MAX_PHRED_QUALITY
 #include "id_column_utils.hpp" // IsAllowedIdType, AllowedIdTypeList
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/numeric_utils.hpp"
+#include "duckdb/common/operator/cast_operators.hpp" // TryCast
 #include "duckdb/common/types.hpp"
 #include "duckdb/function/copy_function.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
@@ -267,8 +269,7 @@ static unique_ptr<GlobalFunctionData> UBAMCopyInitializeGlobal(ClientContext &co
 		throw IOException("Failed to open file for writing: " + file_path);
 	}
 
-	// BGZF blocks are compressed on a worker pool, and written in order whatever the pool's size, so the bytes are
-	// those one thread writes.
+	// BGZF blocks are compressed on a worker pool, which does not change the bytes (embedded-tools.md, htslib).
 	auto n_threads = NumericCast<int>(TaskScheduler::GetScheduler(context).NumberOfThreads());
 	if (n_threads > 1) {
 		hts_set_threads(gstate->sam_file.get(), n_threads);
@@ -299,10 +300,6 @@ static unique_ptr<GlobalFunctionData> UBAMCopyInitializeGlobal(ClientContext &co
 //===--------------------------------------------------------------------===//
 // Record Encoder
 //===--------------------------------------------------------------------===//
-// The highest quality score SAM text can show: Phred+33 runs to '~'. A first score of 255 would mark a BAM record as
-// having no scores at all.
-static constexpr uint8_t SAM_MAX_QUALITY = 93;
-
 // The ENCODER RecordPrepareBatch and RecordFlushBatch take (copy_format_common.hpp). It reads a row and raises its data
 // errors, then builds it into a bam1_t and stores it (StoreBAMRecord), which the flush writes (WriteBAMRecord).
 // Made for one prepare_batch or flush_batch call, so one thread uses it. It reads only bind data.
@@ -338,6 +335,8 @@ private:
 	// row's read_id as FORMAT FASTQ's errors do.
 	void Read(idx_t row);
 	int32_t TagValue(idx_t t, idx_t idx) const;
+	template <class T>
+	int32_t WideTagValue(idx_t t, idx_t idx) const;
 
 	string ReadId() const {
 		return string(id_ptr, id_size);
@@ -360,13 +359,25 @@ private:
 	vector<bool> tag_present; // a NULL is no tag
 };
 
+// A cell of an integer type with values past int32's range.
+template <class T>
+int32_t UBAMRecordEncoder::WideTagValue(idx_t t, idx_t idx) const {
+	auto v = UnifiedVectorFormat::GetData<T>(tag_data[t])[idx];
+	int32_t result;
+	if (TryCast::Operation(v, result, false)) {
+		return result;
+	}
+	auto &tag = fdata.tags[t];
+	throw InvalidInputException(
+	    "Column '%s' (tag '%s') is %s for read '%s', outside the 32-bit signed range of a SAM integer tag",
+	    fdata.names[tag.col_idx], tag.tag, std::to_string(v), ReadId());
+}
+
 // A tag cell as a SAM integer tag's 32-bit signed value; one outside that range is an error rather than a value cut to
 // 32 bits.
 int32_t UBAMRecordEncoder::TagValue(idx_t t, idx_t idx) const {
-	auto &tag = fdata.tags[t];
 	auto &fmt = tag_data[t];
-	string value;
-	switch (tag.type.id()) {
+	switch (fdata.tags[t].type.id()) {
 	case LogicalTypeId::TINYINT:
 		return UnifiedVectorFormat::GetData<int8_t>(fmt)[idx];
 	case LogicalTypeId::SMALLINT:
@@ -377,48 +388,23 @@ int32_t UBAMRecordEncoder::TagValue(idx_t t, idx_t idx) const {
 		return UnifiedVectorFormat::GetData<uint8_t>(fmt)[idx];
 	case LogicalTypeId::USMALLINT:
 		return UnifiedVectorFormat::GetData<uint16_t>(fmt)[idx];
-	case LogicalTypeId::BIGINT: {
-		auto v = UnifiedVectorFormat::GetData<int64_t>(fmt)[idx];
-		if (v >= NumericLimits<int32_t>::Minimum() && v <= NumericLimits<int32_t>::Maximum()) {
-			return static_cast<int32_t>(v);
-		}
-		value = std::to_string(v);
-		break;
-	}
-	case LogicalTypeId::UINTEGER: {
-		auto v = UnifiedVectorFormat::GetData<uint32_t>(fmt)[idx];
-		if (v <= static_cast<uint32_t>(NumericLimits<int32_t>::Maximum())) {
-			return static_cast<int32_t>(v);
-		}
-		value = std::to_string(v);
-		break;
-	}
-	case LogicalTypeId::UBIGINT: {
-		auto v = UnifiedVectorFormat::GetData<uint64_t>(fmt)[idx];
-		if (v <= static_cast<uint64_t>(NumericLimits<int32_t>::Maximum())) {
-			return static_cast<int32_t>(v);
-		}
-		value = std::to_string(v);
-		break;
-	}
+	case LogicalTypeId::BIGINT:
+		return WideTagValue<int64_t>(t, idx);
+	case LogicalTypeId::UINTEGER:
+		return WideTagValue<uint32_t>(t, idx);
+	case LogicalTypeId::UBIGINT:
+		return WideTagValue<uint64_t>(t, idx);
 	default:
-		throw InternalException("UBAM tag: unsupported integer type '%s'", tag.type.ToString());
+		throw InternalException("UBAM tag: unsupported integer type '%s'", fdata.tags[t].type.ToString());
 	}
-	throw InvalidInputException(
-	    "Column '%s' (tag '%s') is %s for read '%s', outside the 32-bit signed range of a SAM integer tag",
-	    fdata.names[tag.col_idx], tag.tag, value, ReadId());
 }
 
 void UBAMRecordEncoder::Read(idx_t row) {
-	// read_id -> QNAME (verbatim; opaque). NULL is an error: a record needs a name.
+	// read_id -> QNAME, unchanged. NULL is an error: a record needs a name.
 	if (!read_id_data.validity.RowIsValid(read_id_data.sel->get_index(row))) {
 		throw InvalidInputException("NULL value in read_id column");
 	}
 	ResolveSequenceRecordId(read_id_data, row, fdata.read_id_type, id_buf, id_ptr, id_size);
-	if (id_size == 0) {
-		// bam_set1 would write it as '*'
-		throw InvalidInputException("Column 'read_id' is empty, and a BAM record cannot hold an empty name");
-	}
 	CheckBAMReadName(id_ptr, id_size);
 
 	auto seq_row = seq1_data.sel->get_index(row);
@@ -445,11 +431,13 @@ void UBAMRecordEncoder::Read(idx_t row) {
 	for (idx_t k = 0; k < seq_size; k++) {
 		max_score = MaxValue(max_score, qual_ptr[k]);
 	}
-	if (max_score > SAM_MAX_QUALITY) {
-		auto first = *std::find_if(qual_ptr, qual_ptr + seq_size, [](uint8_t q) { return q > SAM_MAX_QUALITY; });
+	// Past what SAM text can show; a first score of 255 would also mark the BAM record as having no scores at all.
+	if (max_score > miint::MAX_PHRED_QUALITY) {
+		auto first =
+		    *std::find_if(qual_ptr, qual_ptr + seq_size, [](uint8_t q) { return q > miint::MAX_PHRED_QUALITY; });
 		throw InvalidInputException(
 		    "Column 'qual1' has a quality score of %d for read '%s', past %d, the highest SAM text can show",
-		    static_cast<int64_t>(first), ReadId(), static_cast<int64_t>(SAM_MAX_QUALITY));
+		    static_cast<int64_t>(first), ReadId(), static_cast<int64_t>(miint::MAX_PHRED_QUALITY));
 	}
 
 	for (idx_t t = 0; t < fdata.tags.size(); t++) {
@@ -523,12 +511,7 @@ static void UBAMCopyFlushBatch(ClientContext &context, FunctionData &bind_data, 
 static void UBAMCopyFinalize(ClientContext &context, FunctionData &bind_data, GlobalFunctionData &gstate_p) {
 	auto &gstate = gstate_p.Cast<UBAMCopyGlobalState>();
 	lock_guard<mutex> glock(gstate.lock);
-	// htslib holds the end of the file until it closes it: the last BGZF block, BAM's end-of-file marker, and a write
-	// that failed on its own threads. So a failed close fails the COPY.
-	errno = 0;
-	if (sam_close(gstate.sam_file.release()) < 0) {
-		ThrowCopyWriteFailed("UBAM", gstate.file_path, "sam_close");
-	}
+	CloseSAMCopyFile(gstate.sam_file.release(), "UBAM", gstate.file_path);
 }
 
 //===--------------------------------------------------------------------===//

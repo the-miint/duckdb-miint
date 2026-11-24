@@ -1,6 +1,6 @@
-// COPY FORMAT SAM/BAM/UBAM when a write fails, as on a full disk. htslib holds the end of the file until it is closed
-// (the last BGZF block and BAM's end-of-file marker, or plain SAM's buffered text), so a failed close must fail the
-// COPY and leave no file: a writer that dropped sam_close's result would report success over a truncated file.
+// COPY FORMAT SAM/BAM/UBAM when a write fails, as on a full disk. A failed close must fail the COPY and leave no file
+// (why htslib reports a failure there: docs/internals/embedded-tools.md, htslib): a writer that dropped sam_close's
+// result would report success over a truncated file.
 //
 // The failure is made with a file-size limit (RLIMIT_FSIZE, with SIGXFSZ ignored, so a write past it fails with
 // EFBIG), as test_CopyBiomWriteFailure.cpp does. Set here, in the process, the limit can sit one byte under the size

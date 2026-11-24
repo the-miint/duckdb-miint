@@ -557,7 +557,7 @@ void SequenceFlushBatch(ClientContext &context, SequenceCopyGlobalState &gstate,
 }
 
 //===--------------------------------------------------------------------===//
-// Record Writers on DuckDB's Batch API (SAM, BAM, UBAM)
+// One-Stream Record Writers on DuckDB's Batch API
 //===--------------------------------------------------------------------===//
 // These writers write one stream of records, each built from one row. A record's size is known only once it is
 // built, so a batch's records are kept as they are built, up to SEQUENCE_DEFER_FORMAT_BYTES; the rows after that are
@@ -631,8 +631,12 @@ struct RecordBatchData : public PreparedBatchData {
 // more.
 constexpr idx_t BAM_MAX_READ_NAME_BYTES = 254;
 
-// Refuses a read name longer than a BAM record holds, naming the read. htslib's bam_set1 refuses it without saying why.
+// Refuses a read name a BAM record cannot hold as given: an empty one, which htslib's bam_set1 writes as '*', and one
+// longer than BAM_MAX_READ_NAME_BYTES, which it refuses without saying why (this names the read).
 inline void CheckBAMReadName(const char *name, idx_t size) {
+	if (size == 0) {
+		throw InvalidInputException("Column 'read_id' is empty, and a BAM record cannot hold an empty name");
+	}
 	if (size > BAM_MAX_READ_NAME_BYTES) {
 		throw InvalidInputException(
 		    "Column 'read_id' is %llu bytes for read '%s', past %llu, the longest a BAM record holds", size,
@@ -650,6 +654,11 @@ void StoreBAMRecord(const bam1_t &record, RecordBuffer &out);
 // `file_path`. Caller holds the file's lock.
 void WriteBAMRecord(htsFile *fp, const sam_hdr_t *header, const_data_ptr_t data, idx_t size, const char *format,
                     const string &file_path);
+
+// Closes a SAM, BAM or UBAM file the COPY wrote, which the caller has released, and fails the COPY when the close
+// fails, naming `format` and `file_path` (why a writer checks sam_close: embedded-tools.md, htslib). Caller holds the
+// file's lock.
+void CloseSAMCopyFile(htsFile *fp, const char *format, const string &file_path);
 
 // What a writer supplies, ENCODER:
 //   SetChunk(chunk)      the chunk the next rows are in

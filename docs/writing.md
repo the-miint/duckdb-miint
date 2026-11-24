@@ -7,12 +7,12 @@ COPY (SELECT * FROM 'some_file.fastq')
 TO 'some_other_file.fasta' (FORMAT FASTA);
 ```
 
-**FASTQ, FASTA, SAM, BAM and UBAM records come out in no fixed order unless the query has an `ORDER BY`.** Their records are a set (a SAM or BAM file is sorted only when its records are), so these five formats write on all of DuckDB's threads by default, and the order can change from run to run. This is not what DuckDB's own formats do: CSV and Parquet keep the order rows come in. To write records in an order, sort them with `ORDER BY`; to keep the order they come in without sorting, such as the input file's own order, add `PRESERVE_ORDER true`. Each format's "Threads, order and memory" has the details.
+**FASTQ, FASTA, SAM, BAM and UBAM records come out in no fixed order unless the query has an `ORDER BY`.** Their records are a set (a SAM or BAM file is sorted only when its records are), so these formats write on all of DuckDB's threads by default, and the order can change from run to run. This is not what DuckDB's own formats do: CSV and Parquet keep the order rows come in. To write records in an order, sort them with `ORDER BY`; to keep the order they come in without sorting, such as the input file's own order, add `PRESERVE_ORDER true`. Each format's "Threads, order and memory" has the details.
 
 Options follow DuckDB's rules for COPY options in every format here, as they do for CSV and Parquet:
 
 - A boolean option given alone means true: `(FORMAT FASTQ, INTERLEAVE)` is `INTERLEAVE true`.
-- An option the format does not have is refused, and the error may suggest options with similar names. The names of DuckDB's own COPY options, such as `OVERWRITE`, are not refused as unknown; DuckDB handles them, and refuses those a format cannot support, such as `FILE_SIZE_BYTES`, or `ROW_GROUPS_PER_FILE`, which in FASTQ, FASTA, SAM, BAM and UBAM would drop an `ORDER BY`.
+- An option the format does not have is refused, and the error may suggest options with similar names. The names of DuckDB's own COPY options, such as `OVERWRITE`, are not refused as unknown; DuckDB handles them, and refuses those a format cannot support, such as `FILE_SIZE_BYTES`, or `ROW_GROUPS_PER_FILE`, which in the record formats above would drop an `ORDER BY`.
 - Other values are cast to the option's type, so `COMPRESSION_LEVEL '3'` is level 3 and `COMPRESSION_LEVEL 1.6` is level 2. An option with no value or a NULL value is refused.
 
 `COMPRESSION` takes the same values in the text formats, FASTQ, FASTA, NEWICK and SAM, in any case: `'gzip'` or `'gz'`, and `'none'` or `'uncompressed'`. Without it, a path ending in `.gz` is written as gzip. zstd (`'zstd'`, or a `.zst` path) is refused. BIOM's `COMPRESSION` takes the same values but sets HDF5's compression inside the file, and BAM's takes only gzip; see [BIOM](#biom) and [SAM / BAM](#sam-and-bam).
@@ -253,7 +253,7 @@ The mapped case is refused rather than written because htslib cannot represent i
 
 `read_alignments` / `read_sam` return `''` for a record whose on-disk CIGAR is `*`, so both spellings occur naturally and `COPY (SELECT * FROM read_alignments(...))` round-trips unmapped reads unchanged. One consequence worth knowing: a **mapped** record with no CIGAR — which older BAM files can contain, since `bam_read1` accepts `n_cigar == 0` without the rewrite `sam_parse1` applies — was previously copied through and is now rejected. Set `0x4` on such records, or filter them.
 
-BAM stores POS, PNEXT and TLEN in 32 bits, so a record past that range (or with a CIGAR of more than 65,535 operations spanning 2^28 bases or more) cannot be written as BAM and is refused with an error naming the column, its value and the read, such as `Column 'position' is 2147483649 for read 'r5', past 2147483648, the largest a BAM record holds (SAM text holds it)`; SAM text writes it. A `read_id` longer than 254 bytes is refused in SAM and BAM alike, as for [UBAM](#ubam). A `SEQUENCE_DATA` read whose qualities do not match its bases is refused as FORMAT FASTQ words it, with the table named.
+BAM stores POS, PNEXT and TLEN in 32 bits, so a record past that range (or with a CIGAR of more than 65,535 operations spanning 2^28 bases or more) cannot be written as BAM and is refused with an error naming the column, its value and the read, such as `Column 'position' is 2147483649 for read 'r5', past 2147483648, the largest a BAM record holds (SAM text holds it)`; SAM text writes it. A `read_id` that is empty (htslib would write it as `*`) or longer than 254 bytes is refused in SAM and BAM alike, as for [UBAM](#ubam). A `SEQUENCE_DATA` read whose qualities do not match its bases is refused as FORMAT FASTQ words it, with the table named.
 
 A data error fails the COPY. The writer raises it before it writes any of the batch the record is in, but earlier batches may be written by then; DuckDB then removes the file the COPY created (each of them, with `PARTITION_BY` or `PER_THREAD_OUTPUT`), and a file that was already there keeps its old contents. A failed write, as on a full disk, does the same, with an error naming the format and the file, such as `COPY FORMAT BAM: cannot write 'out.bam': sam_close failed: File too large` (the end of a file is written when it is closed). Over an existing file, DuckDB writes to a temporary file beside it, `tmp_out.bam`, and the error names that.
 
@@ -430,13 +430,13 @@ TO 'output.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table', SEQUENCE_DATA 'seque
 
 Write query results to an **unaligned reads BAM** (uBAM): reads with SEQ/QUAL and no reference alignment. This is the BAM counterpart of `FORMAT FASTQ` — it takes the same `read_id`/`sequence1`/`qual1` columns — and exists for tools that require a BAM (rather than FASTQ) input for unaligned reads, e.g. PacBio's `lima`, which selects CCS-vs-CLR demultiplexing from the input **format**.
 
-Every record is written unmapped (`FLAG=4`), with no `@SQ` header and no reference table. `read_id` is written **verbatim** as the record name (QNAME) — the writer makes no assumption about its contents. Output is always BAM (block-gzip).
+Every record is written unmapped (`FLAG=4`), with no `@SQ` header and no reference table. `read_id` is the record name (QNAME), written unchanged: the writer makes no assumption about its contents, but refuses an empty one and one longer than 254 bytes, which a BAM record cannot hold. Output is always BAM (block-gzip).
 
 **Required columns:**
 
 | Column | Type | Description |
 | --- | --- | --- |
-| `read_id` | VARCHAR, BIGINT, or UUID | Record name (QNAME), written verbatim. `BIGINT`/`UUID` are stringified as for FASTQ. |
+| `read_id` | VARCHAR, BIGINT, or UUID | Record name (QNAME), written unchanged; empty or longer than 254 bytes is an error. `BIGINT`/`UUID` are stringified as for FASTQ. |
 | `sequence1` | VARCHAR | Read sequence. |
 | `qual1` | UTINYINT[] | Phred quality scores, raw values 0–93 (no ASCII offset) — exactly what `read_fastx` / `read_sequences_sam` emit. Must be the same length as `sequence1`; a score past 93 is refused. |
 

@@ -557,6 +557,13 @@ void WriteBAMRecord(htsFile *fp, const sam_hdr_t *header, const_data_ptr_t data,
 	}
 }
 
+void CloseSAMCopyFile(htsFile *fp, const char *format, const string &file_path) {
+	errno = 0;
+	if (sam_close(fp) < 0) {
+		ThrowCopyWriteFailed(format, file_path, "sam_close");
+	}
+}
+
 string SequenceChunkReader::ReadId(idx_t row) const {
 	string buf;
 	const char *ptr;

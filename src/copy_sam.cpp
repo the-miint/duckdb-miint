@@ -482,9 +482,9 @@ static unique_ptr<GlobalFunctionData> SAMCopyInitializeGlobal(ClientContext &con
 		throw IOException("Failed to open file for writing: " + file_path);
 	}
 
-	// BAM and gzip SAM compress their BGZF blocks on a worker pool. BGZF writes the blocks in order whatever the
-	// pool's size, so the bytes are those one thread writes. Only compression: hts_set_threads on a SAM file would
-	// start htslib's SAM formatting pool instead, for records this writer has already formatted.
+	// BAM and gzip SAM compress their BGZF blocks on a worker pool, which does not change the bytes. bgzf_mt, because
+	// hts_set_threads on SAM would also start a pool formatting records this writer has formatted (embedded-tools.md,
+	// htslib).
 	bool compressed_output = fdata.format == SAMOutputFormat::BAM || fdata.use_gzip;
 	if (compressed_output) {
 		auto n_threads = NumericCast<int>(TaskScheduler::GetScheduler(context).NumberOfThreads());
@@ -1126,12 +1126,7 @@ static void SAMCopyFinalize(ClientContext &context, FunctionData &bind_data, Glo
 	auto &fdata = bind_data.Cast<SAMCopyBindData>();
 	auto &gstate = gstate_p.Cast<SAMCopyGlobalState>();
 	lock_guard<mutex> glock(gstate.lock);
-	// htslib holds the end of the file until it closes it: the last BGZF block and BAM's end-of-file marker, plain
-	// SAM's buffered text, and a write that failed on its own threads. So a failed close fails the COPY.
-	errno = 0;
-	if (sam_close(gstate.sam_file.release()) < 0) {
-		ThrowCopyWriteFailed(SAMFormatName(fdata.format), gstate.file_path, "sam_close");
-	}
+	CloseSAMCopyFile(gstate.sam_file.release(), SAMFormatName(fdata.format), gstate.file_path);
 }
 
 //===--------------------------------------------------------------------===//

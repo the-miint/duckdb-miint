@@ -103,7 +103,7 @@ COPY tree1 TO '{TEST_DIR}/unknown.nwk' (FORMAT NEWICK, BOGUS 1);
 ----
 Unrecognized option "bogus"
 
-# DuckDB's own options that FASTQ, FASTA, SAM, BAM and UBAM do not support are refused with DuckDB's messages, naming
+# DuckDB's own options that the formats SequenceCopyPlan plans do not support are refused with DuckDB's messages, naming
 # the format as the statement does, not the writer it binds (FORMAT FASTA binds _miint_fasta). File rotation among them:
 # DuckDB writes a rotating COPY on all threads, which would drop an ORDER BY.
 statement error

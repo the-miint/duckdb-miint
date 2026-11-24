@@ -3,6 +3,7 @@
 #include "sra_codecs.hpp"
 #include "sra_column.hpp"
 #include "sra_name.hpp"
+#include "QualScore.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -475,7 +476,6 @@ void SpotReader::ReadLayout(int64_t row_id, Spot &out) {
 
 namespace {
 constexpr uint8_t READ_TYPE_BIOLOGICAL = 1;
-constexpr uint8_t MAX_PRINTED_QUALITY = 93; // fasterq-dump prints every q >= 93 as '~'
 
 void Emit(const Spot &spot, uint32_t read_number, uint32_t destination, size_t start, size_t len,
           std::vector<SraRead> &out) {
@@ -487,8 +487,9 @@ void Emit(const Spot &spot, uint32_t read_number, uint32_t destination, size_t s
 	r.name = spot.name;
 	r.bases = spot.bases.substr(start, len);
 	r.quality.resize(len);
+	// fasterq-dump prints every score from MAX_PHRED_QUALITY up as '~'.
 	for (size_t i = 0; i < len; i++) {
-		r.quality[i] = std::min(spot.quality[start + i], MAX_PRINTED_QUALITY);
+		r.quality[i] = std::min(spot.quality[start + i], MAX_PHRED_QUALITY);
 	}
 	out.push_back(std::move(r));
 }
