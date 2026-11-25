@@ -96,15 +96,15 @@ Unrecognized option "bogus"
 statement error
 COPY (SELECT read_id, sequence1, qual1 FROM fq) TO '{TEST_DIR}/unknown_ubam.bam' (FORMAT UBAM, BOGUS 1);
 ----
-Unrecognized option "bogus"
+Unrecognized option "bogus" for UBAM
 
 statement error
 COPY tree1 TO '{TEST_DIR}/unknown.nwk' (FORMAT NEWICK, BOGUS 1);
 ----
 Unrecognized option "bogus"
 
-# DuckDB's own options that FASTQ, FASTA, SAM and BAM do not support are refused with DuckDB's messages, naming the
-# format as the statement does, not the writer it binds (FORMAT FASTA binds _miint_fasta). File rotation among them:
+# DuckDB's own options that the formats SequenceCopyPlan plans do not support are refused with DuckDB's messages, naming
+# the format as the statement does, not the writer it binds (FORMAT FASTA binds _miint_fasta). File rotation among them:
 # DuckDB writes a rotating COPY on all threads, which would drop an ORDER BY.
 statement error
 COPY (SELECT read_id, sequence1, qual1 FROM fq) TO '{TEST_DIR}/rotate_fq' (FORMAT FASTQ, ROW_GROUPS_PER_FILE 2);
@@ -127,6 +127,11 @@ COPY sam_test TO '{TEST_DIR}/rotate_bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_tab
 Can't use file rotation (e.g., ROW_GROUPS_PER_FILE) with FORMAT "bam"
 
 statement error
+COPY (SELECT read_id, sequence1, qual1 FROM fq) TO '{TEST_DIR}/rotate_ubam' (FORMAT UBAM, ROW_GROUPS_PER_FILE 2);
+----
+Can't use file rotation (e.g., ROW_GROUPS_PER_FILE) with FORMAT "ubam"
+
+statement error
 COPY (SELECT read_id, sequence1, qual1 FROM fq) TO '{TEST_DIR}/size.fq' (FORMAT FASTQ, FILE_SIZE_BYTES '1MB');
 ----
 FILE_SIZE_BYTES not implemented for "fastq"
@@ -147,6 +152,11 @@ COPY sam_test TO '{TEST_DIR}/size.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_table
 FILE_SIZE_BYTES not implemented for "bam"
 
 statement error
+COPY (SELECT read_id, sequence1, qual1 FROM fq) TO '{TEST_DIR}/size_ubam.bam' (FORMAT UBAM, FILE_SIZE_BYTES '1MB');
+----
+FILE_SIZE_BYTES not implemented for "ubam"
+
+statement error
 COPY (SELECT read_id, sequence1, qual1 FROM fq) TO '{TEST_DIR}/stats.fq' (FORMAT FASTQ, RETURN_STATS true);
 ----
 RETURN_STATS is not supported for the "FASTQ" copy format
@@ -165,6 +175,11 @@ statement error
 COPY sam_test TO '{TEST_DIR}/stats.bam' (FORMAT bam, REFERENCE_LENGTHS 'ref_table', RETURN_STATS true);
 ----
 RETURN_STATS is not supported for the "bam" copy format
+
+statement error
+COPY (SELECT read_id, sequence1, qual1 FROM fq) TO '{TEST_DIR}/stats_ubam.bam' (FORMAT ubam, RETURN_STATS true);
+----
+RETURN_STATS is not supported for the "ubam" copy format
 
 # RETURN_STATS false asks for nothing the formats lack.
 statement ok

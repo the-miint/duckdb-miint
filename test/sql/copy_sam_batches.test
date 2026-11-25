@@ -314,6 +314,66 @@ WHERE split_part(line, E'\t', 1) IN ('r7', 'r8') ORDER BY split_part(line, E'\t'
 2147483649	3
 0	458752
 
+# --- A read name past 254 bytes is a data error, in BAM and SAM alike ---
+# A BAM record holds a read name of up to 254 bytes, and SAM text no more; both formats build a BAM record. r2999, in
+# the second chunk, has a 255-byte name.
+
+statement ok
+CREATE TABLE long_name AS
+SELECT * EXCLUDE (i) REPLACE (CASE WHEN i = 2999 THEN 'long_' || repeat('x', 250) ELSE read_id END AS read_id)
+FROM aln WHERE i < 3000;
+
+statement error
+COPY long_name TO '{TEST_DIR}/err_name.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens');
+----
+<REGEX>:.*Column 'read_id' is 255 bytes for read 'long_x{250}', past 254, the longest a BAM record holds.*
+
+statement error
+COPY long_name TO '{TEST_DIR}/err_name.sam' (FORMAT SAM, INCLUDE_HEADER false);
+----
+<REGEX>:.*Column 'read_id' is 255 bytes for read 'long_x{250}', past 254, the longest a BAM record holds.*
+
+statement ok
+COPY (SELECT * EXCLUDE (i) REPLACE ('long_' || repeat('x', 249) AS read_id) FROM aln WHERE i = 0)
+TO '{TEST_DIR}/name254.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens');
+
+query I
+SELECT length(read_id) FROM read_alignments('{TEST_DIR}/name254.bam');
+----
+254
+
+# An empty name is refused too, as FORMAT UBAM refuses it: htslib would write it as '*', which reads back as a read
+# named '*'.
+statement ok
+CREATE TABLE empty_name AS
+SELECT * EXCLUDE (i) REPLACE (CASE WHEN i = 2999 THEN '' ELSE read_id END AS read_id) FROM aln WHERE i < 3000;
+
+statement error
+COPY empty_name TO '{TEST_DIR}/err_empty_name.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens');
+----
+Column 'read_id' is empty, and a BAM record cannot hold an empty name
+
+statement error
+COPY empty_name TO '{TEST_DIR}/err_empty_name.sam' (FORMAT SAM, INCLUDE_HEADER false);
+----
+Column 'read_id' is empty, and a BAM record cannot hold an empty name
+
+# --- A SEQUENCE_DATA read whose qualities do not match its bases is a data error ---
+# Worded as FORMAT FASTQ's, with the table named. r2999's qual1 has 3 scores for its 20 bases.
+
+statement ok
+CREATE TABLE seq_bad AS
+SELECT read_id, 'ACGTACGTACGTACGTACGT' AS sequence1, 'ACGTACGTACGTACGTACGT' AS sequence2,
+       CASE WHEN i = 2999 THEN [30, 30, 30]::UTINYINT[] ELSE list_transform(range(20), lambda j: 30::UTINYINT) END AS qual1,
+       list_transform(range(20), lambda j: 30::UTINYINT) AS qual2
+FROM aln WHERE i < 3000;
+
+statement error
+COPY (SELECT * EXCLUDE (i) FROM aln WHERE i < 3000)
+TO '{TEST_DIR}/err_seq.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'seq_bad');
+----
+Quality score length (3) does not match sequence length (20) for read_id 'r2999' in the SEQUENCE_DATA table
+
 # --- A failed COPY leaves no file it created, and a file it would have replaced as it was ---
 # How DuckDB does this: docs/internals/duckdb-engine-notes.md, "A failed COPY leaves no output". Each COPY below
 # fails after DuckDB has logged a batch written, so a partial write is what gets undone; r2999's tag is outside the
@@ -506,6 +566,25 @@ SELECT count(*), bool_and(ends_with(file, '.bam')),
 FROM glob('{TEST_DIR}/partitioned_bam/*/*');
 ----
 2	true	40960
+
+# EXPORT DATABASE names each table's file from the format the statement names, not the writer it binds.
+statement ok
+ATTACH ':memory:' AS export_src;
+
+statement ok
+CREATE TABLE export_src.aln AS SELECT * EXCLUDE (i) FROM aln WHERE i < 100;
+
+statement ok
+EXPORT DATABASE export_src TO '{TEST_DIR}/exported_sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens');
+
+statement ok
+EXPORT DATABASE export_src TO '{TEST_DIR}/exported_bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens');
+
+query II
+SELECT (SELECT count(*) FROM read_alignments('{TEST_DIR}/exported_sam/aln.sam')),
+       (SELECT count(*) FROM read_alignments('{TEST_DIR}/exported_bam/aln.bam'));
+----
+100	100
 
 # A FILE_EXTENSION that already ends in .gz is kept as given, not made .gz.gz.
 statement ok

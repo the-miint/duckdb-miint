@@ -1,6 +1,6 @@
-// COPY FORMAT SAM/BAM when a write fails, as on a full disk. htslib holds the end of the file until it is closed (the
-// last BGZF block and BAM's end-of-file marker, or plain SAM's buffered text), so a failed close must fail the COPY
-// and leave no file: a writer that dropped sam_close's result would report success over a truncated file.
+// COPY FORMAT SAM/BAM/UBAM when a write fails, as on a full disk. A failed close must fail the COPY and leave no file
+// (why htslib reports a failure there: docs/internals/embedded-tools.md, htslib): a writer that dropped sam_close's
+// result would report success over a truncated file.
 //
 // The failure is made with a file-size limit (RLIMIT_FSIZE, with SIGXFSZ ignored, so a write past it fails with
 // EFBIG), as test_CopyBiomWriteFailure.cpp does. Set here, in the process, the limit can sit one byte under the size
@@ -47,17 +47,19 @@ private:
 	void (*saved_handler)(int) = SIG_DFL;
 };
 
-// One output format: the COPY options and the name its errors give.
+// One output format: the table it writes, the COPY options and the name its errors give.
 struct Output {
 	std::string name;      // as error messages name the format
 	std::string extension; // of the target file
+	std::string table;     // holding the columns the format writes
 	std::string options;
 };
 
 const Output OUTPUTS[] = {
-    {"BAM", ".bam", "FORMAT BAM, REFERENCE_LENGTHS 'ref_lens'"},
-    {"SAM", ".sam.gz", "FORMAT SAM, COMPRESSION gzip, REFERENCE_LENGTHS 'ref_lens'"},
-    {"SAM", ".sam", "FORMAT SAM, REFERENCE_LENGTHS 'ref_lens'"},
+    {"BAM", ".bam", "aln", "FORMAT BAM, REFERENCE_LENGTHS 'ref_lens'"},
+    {"SAM", ".sam.gz", "aln", "FORMAT SAM, COMPRESSION gzip, REFERENCE_LENGTHS 'ref_lens'"},
+    {"SAM", ".sam", "aln", "FORMAT SAM, REFERENCE_LENGTHS 'ref_lens'"},
+    {"UBAM", ".bam", "reads", "FORMAT UBAM"},
 };
 
 struct SamWriteFixture {
@@ -75,7 +77,12 @@ struct SamWriteFixture {
 		      "CREATE TABLE aln AS SELECT 'r' || i AS read_id, (CASE WHEN i % 2 = 0 THEN 16 ELSE 0 END)::USMALLINT "
 		      "AS flags, 'ref' || (i % 4) AS reference, (1 + i % 900000)::BIGINT AS position, 60::UTINYINT AS "
 		      "mapq, '50M' AS cigar, '*' AS mate_reference, 0::BIGINT AS mate_position, 0::BIGINT AS "
-		      "template_length, (i % 100)::BIGINT AS tag_as FROM range(20000) t(i)"}) {
+		      "template_length, (i % 100)::BIGINT AS tag_as FROM range(20000) t(i)",
+		      // Reads that compress little, so that the uBAM, like the others, is many times 64 KiB.
+		      "CREATE TABLE reads AS SELECT 'r' || i AS read_id, left(translate(md5(i::VARCHAR), "
+		      "'0123456789abcdef', 'ACGTACGTACGTACGT') || translate(md5((i + 1)::VARCHAR), '0123456789abcdef', "
+		      "'ACGTACGTACGTACGT'), 50) AS sequence1, list_transform(range(50), lambda j: ((i * 7 + j * 13) % "
+		      "41)::UTINYINT) AS qual1 FROM range(20000) t(i)"}) {
 			auto created = con.Query(sql);
 			INFO(created->GetError());
 			REQUIRE_FALSE(created->HasError());
@@ -95,7 +102,7 @@ struct SamWriteFixture {
 	// The limit, if any, is lifted before this returns, so Catch's own output is never limited.
 	unique_ptr<QueryResult> Copy(const std::filesystem::path &target, const Output &output,
 	                             rlim_t limit = RLIM_INFINITY) {
-		auto sql = "COPY aln TO '" + target.string() + "' (" + output.options + ")";
+		auto sql = "COPY " + output.table + " TO '" + target.string() + "' (" + output.options + ")";
 		if (limit == RLIM_INFINITY) {
 			return con.Query(sql);
 		}
@@ -120,7 +127,7 @@ std::string ReadFile(const std::filesystem::path &path) {
 
 } // namespace
 
-TEST_CASE("COPY FORMAT SAM/BAM reports a write that fails when the file closes", "[copy_sam]") {
+TEST_CASE("COPY FORMAT SAM/BAM/UBAM reports a write that fails when the file closes", "[copy_sam]") {
 	SamWriteFixture fixture;
 	// One thread, and several: with several, BGZF blocks are compressed and written on htslib's own threads, which
 	// hold a failed write until the file is closed.
@@ -142,13 +149,13 @@ TEST_CASE("COPY FORMAT SAM/BAM reports a write that fails when the file closes",
 	}
 }
 
-TEST_CASE("COPY FORMAT SAM/BAM reports a write that fails partway", "[copy_sam]") {
+TEST_CASE("COPY FORMAT SAM/BAM/UBAM reports a write that fails partway", "[copy_sam]") {
 	SamWriteFixture fixture;
 	for (int threads : {1, 4}) {
 		fixture.SetThreads(threads);
 		for (const auto &output : OUTPUTS) {
 			// 64 KiB holds the header and a little of the records.
-			auto target = fixture.dir / ("partway_t" + std::to_string(threads) + output.extension);
+			auto target = fixture.dir / ("partway_" + output.name + "_t" + std::to_string(threads) + output.extension);
 			INFO(output.options << " at threads=" << threads);
 			fixture.RequireWriteRefused(fixture.Copy(target, output, 64 * 1024), target, output);
 		}
@@ -165,11 +172,11 @@ TEST_CASE("COPY FORMAT SAM/BAM reports a write that fails partway", "[copy_sam]"
 	REQUIRE(chunk->GetValue(0, 0).GetValue<int64_t>() == 20000);
 }
 
-TEST_CASE("COPY FORMAT SAM/BAM over an existing file: a failed write leaves the file as it was", "[copy_sam]") {
+TEST_CASE("COPY FORMAT SAM/BAM/UBAM over an existing file: a failed write leaves the file as it was", "[copy_sam]") {
 	SamWriteFixture fixture;
 	for (const auto &output : OUTPUTS) {
 		INFO(output.options);
-		auto target = fixture.dir / ("existing" + output.extension);
+		auto target = fixture.dir / ("existing_" + output.name + output.extension);
 		auto written = fixture.Copy(target, output);
 		INFO(written->GetError());
 		REQUIRE_FALSE(written->HasError());
@@ -177,7 +184,7 @@ TEST_CASE("COPY FORMAT SAM/BAM over an existing file: a failed write leaves the 
 
 		// DuckDB writes over an existing file through tmp_<name>, so the error names that file
 		// (docs/internals/duckdb-engine-notes.md, "A failed COPY leaves no output").
-		auto tmp = fixture.dir / ("tmp_existing" + output.extension);
+		auto tmp = fixture.dir / ("tmp_existing_" + output.name + output.extension);
 		auto result = fixture.Copy(target, output, 64 * 1024);
 		REQUIRE(result->HasError());
 		REQUIRE_THAT(result->GetError(),

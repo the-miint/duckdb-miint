@@ -1,0 +1,189 @@
+# name: test/sql/copy_ubam_parallel.test
+# description: COPY FORMAT UBAM on 8 threads from a source that can be scanned in parallel. With PRESERVE_ORDER true, records are written in input order, the same file as at threads=1, and with an ORDER BY (and no option) in its order. With neither, order is not kept (the default), but the file holds exactly the records the order-kept COPY writes: from a Parquet file, into partitioned output, and from read_fastx over several files.
+# group: [sql]
+
+require miint
+
+require parquet
+
+statement ok
+SET threads=8;
+
+# 20,000 reads, read from a Parquet file of 10 row groups so that the scan feeding the COPY can run on several threads,
+# as it does when order is off.
+statement ok
+CREATE TABLE src AS
+SELECT i, i % 4 AS bucket, 'r' || i AS read_id,
+       left(repeat(translate(md5(i::VARCHAR), '0123456789abcdef', 'ACGTACGTACGTACGT'), 2), 20 + i % 40) AS sequence1,
+       list_transform(range(20 + i % 40), lambda j: ((i + j) % 41)::UTINYINT) AS qual1
+FROM range(0, 20000) r(i);
+
+statement ok
+COPY src TO '{TEST_DIR}/src.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 2048);
+
+query I
+SELECT count(DISTINCT row_group_id) FROM parquet_metadata('{TEST_DIR}/src.parquet');
+----
+10
+
+statement ok
+CREATE VIEW p AS SELECT read_id, sequence1, qual1 FROM read_parquet('{TEST_DIR}/src.parquet');
+
+# --- PRESERVE_ORDER true: records are written in input order ---
+# read_sequences_sam numbers records from 1 in file order, and record k must be source row k - 1. With order kept the
+# COPY runs on one thread; were the batches written as they were finished, they would come out of order.
+
+statement ok
+COPY p TO '{TEST_DIR}/kept.bam' (FORMAT UBAM, PRESERVE_ORDER true);
+
+query II
+SELECT count(*), count(*) FILTER (WHERE read_id <> 'r' || (sequence_index - 1)) FROM read_sequences_sam('{TEST_DIR}/kept.bam');
+----
+20000	0
+
+# A Parquet file's order is fixed, so the file is the same at any thread count (docs/writing.md, uBAM, "Threads, order
+# and memory").
+statement ok
+SET threads=1;
+
+statement ok
+COPY p TO '{TEST_DIR}/kept_t1.bam' (FORMAT UBAM, PRESERVE_ORDER true);
+
+statement ok
+SET threads=8;
+
+query I
+SELECT count(DISTINCT md5(content)) FROM read_blob(['{TEST_DIR}/kept.bam', '{TEST_DIR}/kept_t1.bam']);
+----
+1
+
+# --- An ORDER BY keeps its order, with no option ---
+# Record k must be the k-th row in the ORDER BY's order, which is not the input's. Too few rows come out of DuckDB's
+# sort in order even to a COPY that keeps none (docs/internals/architecture.md, "Tests to copy"), so this sorts 200,000
+# reads, read from a Parquet file of 10 row groups (checked below): enough that a COPY that dropped the ORDER BY (as
+# PRESERVE_ORDER false does) writes them out of order. zmw stands for a ZMW number, which ccs needs a ZMW's subreads
+# grouped by.
+
+statement ok
+CREATE TABLE many AS
+SELECT 'm' || i AS read_id, (i * 7919) % 50000 AS zmw, 'ACGTACGTACGTACGTACGT' AS sequence1,
+       list_transform(range(20), lambda j: 30::UTINYINT) AS qual1
+FROM range(0, 200000) r(i);
+
+statement ok
+COPY many TO '{TEST_DIR}/many.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 20480);
+
+query I
+SELECT count(DISTINCT row_group_id) FROM parquet_metadata('{TEST_DIR}/many.parquet');
+----
+10
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM read_parquet('{TEST_DIR}/many.parquet') ORDER BY zmw, read_id)
+TO '{TEST_DIR}/sorted.bam' (FORMAT UBAM);
+
+query II
+SELECT count(*), count(*) FILTER (WHERE b.read_id <> s.read_id)
+FROM read_sequences_sam('{TEST_DIR}/sorted.bam') b
+JOIN (SELECT read_id, row_number() OVER (ORDER BY zmw, read_id) AS k FROM many) s ON b.sequence_index = s.k;
+----
+200000	0
+
+# No two rows tie on this ORDER BY (read_id is unique), so the file is the same at any thread count. Rows that tie can
+# come out of DuckDB's sort in either order.
+statement ok
+SET threads=1;
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM read_parquet('{TEST_DIR}/many.parquet') ORDER BY zmw, read_id)
+TO '{TEST_DIR}/sorted_t1.bam' (FORMAT UBAM);
+
+statement ok
+SET threads=8;
+
+query I
+SELECT count(DISTINCT md5(content)) FROM read_blob(['{TEST_DIR}/sorted.bam', '{TEST_DIR}/sorted_t1.bam']);
+----
+1
+
+# Each check below counts what is in one output and not in the other, duplicates included, both ways: 0 when the two
+# hold the same records the same number of times, SEQ and QUAL included.
+
+statement ok
+CREATE MACRO ubam_records(path) AS TABLE SELECT read_id, sequence1, qual1 FROM read_sequences_sam(path);
+
+# --- Order off ---
+
+statement ok
+COPY p TO '{TEST_DIR}/off.bam' (FORMAT UBAM, PRESERVE_ORDER false);
+
+query II
+SELECT (SELECT count(*) FROM read_sequences_sam('{TEST_DIR}/off.bam')),
+       (SELECT count(*) FROM ((FROM ubam_records('{TEST_DIR}/off.bam') EXCEPT ALL FROM ubam_records('{TEST_DIR}/kept.bam'))
+                              UNION ALL
+                              (FROM ubam_records('{TEST_DIR}/kept.bam') EXCEPT ALL FROM ubam_records('{TEST_DIR}/off.bam'))));
+----
+20000	0
+
+# The default is order off: the same records.
+statement ok
+COPY p TO '{TEST_DIR}/default.bam' (FORMAT UBAM);
+
+query II
+SELECT (SELECT count(*) FROM read_sequences_sam('{TEST_DIR}/default.bam')),
+       (SELECT count(*) FROM ((FROM ubam_records('{TEST_DIR}/default.bam') EXCEPT ALL FROM ubam_records('{TEST_DIR}/kept.bam'))
+                              UNION ALL
+                              (FROM ubam_records('{TEST_DIR}/kept.bam') EXCEPT ALL FROM ubam_records('{TEST_DIR}/default.bam'))));
+----
+20000	0
+
+# --- PARTITION_BY: one file per bucket, each complete ---
+# Batches for different files are prepared concurrently and are handed one file's global state, so a prepare that read
+# anything file-specific would put records in the wrong file. Order is off for every partitioned COPY.
+
+statement ok
+COPY (SELECT bucket, read_id, sequence1, qual1 FROM read_parquet('{TEST_DIR}/src.parquet'))
+TO '{TEST_DIR}/part' (FORMAT UBAM, PARTITION_BY (bucket));
+
+query III
+SELECT count(DISTINCT filepath), count(*),
+       count(*) FILTER (WHERE regexp_extract(filepath, 'bucket=([0-9]+)', 1)::BIGINT <> substr(read_id, 2)::BIGINT % 4)
+FROM read_sequences_sam('{TEST_DIR}/part/*/*', include_filepath := true);
+----
+4	20000	0
+
+query I
+SELECT count(*) FROM ((FROM ubam_records('{TEST_DIR}/part/*/*') EXCEPT ALL FROM ubam_records('{TEST_DIR}/kept.bam'))
+                      UNION ALL
+                      (FROM ubam_records('{TEST_DIR}/kept.bam') EXCEPT ALL FROM ubam_records('{TEST_DIR}/part/*/*')));
+----
+0
+
+# --- read_fastx over several files ---
+# The conversion uBAM is for: FASTQ files to one uBAM. The same reads in four FASTQ files, read back with read_fastx,
+# give the order-kept file's records.
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM src WHERE bucket = 0) TO '{TEST_DIR}/part0.fastq' (FORMAT FASTQ);
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM src WHERE bucket = 1) TO '{TEST_DIR}/part1.fastq' (FORMAT FASTQ);
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM src WHERE bucket = 2) TO '{TEST_DIR}/part2.fastq' (FORMAT FASTQ);
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM src WHERE bucket = 3) TO '{TEST_DIR}/part3.fastq' (FORMAT FASTQ);
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1
+      FROM read_fastx(['{TEST_DIR}/part0.fastq', '{TEST_DIR}/part1.fastq', '{TEST_DIR}/part2.fastq', '{TEST_DIR}/part3.fastq']))
+TO '{TEST_DIR}/from_fastx.bam' (FORMAT UBAM);
+
+query II
+SELECT (SELECT count(*) FROM read_sequences_sam('{TEST_DIR}/from_fastx.bam')),
+       (SELECT count(*) FROM ((FROM ubam_records('{TEST_DIR}/from_fastx.bam') EXCEPT ALL FROM ubam_records('{TEST_DIR}/kept.bam'))
+                              UNION ALL
+                              (FROM ubam_records('{TEST_DIR}/kept.bam') EXCEPT ALL FROM ubam_records('{TEST_DIR}/from_fastx.bam'))));
+----
+20000	0

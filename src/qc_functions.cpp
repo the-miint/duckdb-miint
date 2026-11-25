@@ -35,9 +35,7 @@ static void QcVersionFunction(DataChunk &args, ExpressionState &state, Vector &r
 // Shared types and helpers for all trim_* scalars
 // ---------------------------------------------------------------------------
 
-// Phred quality scores top out at 93 (the highest value representable in the
-// ASCII-33 FASTQ encoding). Used at validation boundaries.
-static constexpr int32_t MAX_PHRED_QUALITY = 93;
+using miint::MAX_PHRED_QUALITY; // the validation boundary for a quality parameter
 
 static constexpr int32_t DEFAULT_QUAL_WINDOW = 4;
 static constexpr int32_t DEFAULT_QUAL_MEAN = 20;

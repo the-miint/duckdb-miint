@@ -489,6 +489,25 @@ SELECT count(*) >= 1, bool_and(ends_with(file, '.fastq')) FROM glob('{TEST_DIR}/
 ----
 true	true
 
+# EXPORT DATABASE names each table's file from the format the statement names, not the writer it binds.
+statement ok
+ATTACH ':memory:' AS export_src;
+
+statement ok
+CREATE TABLE export_src.reads AS SELECT read_id, sequence1, qual1 FROM short_reads LIMIT 100;
+
+statement ok
+EXPORT DATABASE export_src TO '{TEST_DIR}/exported_fasta' (FORMAT FASTA);
+
+statement ok
+EXPORT DATABASE export_src TO '{TEST_DIR}/exported_fastq' (FORMAT FASTQ);
+
+query II
+SELECT (SELECT count(*) FROM read_fastx('{TEST_DIR}/exported_fasta/reads.fasta')),
+       (SELECT count(*) FROM read_fastx('{TEST_DIR}/exported_fastq/reads.fastq'));
+----
+100	100
+
 # With gzip output the files end in .gz too, as DuckDB's CSV writer names its own; the content is gzip either way.
 statement ok
 COPY (SELECT read_id, sequence1 FROM short_reads) TO '{TEST_DIR}/per_thread_fasta_gz' (FORMAT FASTA, PER_THREAD_OUTPUT true, COMPRESSION gzip);

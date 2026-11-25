@@ -403,7 +403,7 @@ public:
 				// SORTED BY NAME, not the map's iteration order. A reference's index in the @SQ list IS
 				// its TID, and a BAM is coordinate-sorted by TID rather than by reference name -- so
 				// emitting @SQ in unordered_map hash order meant no ORDER BY the caller could write
-				// produced a coordinate-sorted file, and htslib consumers rejected the output (#173).
+				// produced a coordinate-sorted file, and htslib consumers rejected the output.
 				// Name order is deterministic regardless of scan parallelism and makes the natural
 				// `ORDER BY reference, position` correct.
 				read->reference_lengths =
@@ -452,14 +452,6 @@ struct SAMCopyGlobalState : public GlobalFunctionData {
 	shared_ptr<const SAMCopyRelations> relations;
 };
 
-// A failed write or close, naming the format, the file and the call. Callers clear errno before the call, so a reason
-// is given only when the call set one; a write on htslib's own threads sets none on this one.
-[[noreturn]] static void ThrowWriteFailed(const SAMCopyBindData &fdata, const string &file_path, const char *call) {
-	const string reason = errno != 0 ? string(": ") + std::strerror(errno) : string();
-	throw IOException("COPY FORMAT %s: cannot write '%s': %s failed%s", SAMFormatName(fdata.format), file_path, call,
-	                  reason);
-}
-
 static unique_ptr<GlobalFunctionData> SAMCopyInitializeGlobal(ClientContext &context, FunctionData &bind_data,
                                                               const string &file_path) {
 	auto &fdata = bind_data.Cast<SAMCopyBindData>();
@@ -490,9 +482,9 @@ static unique_ptr<GlobalFunctionData> SAMCopyInitializeGlobal(ClientContext &con
 		throw IOException("Failed to open file for writing: " + file_path);
 	}
 
-	// BAM and gzip SAM compress their BGZF blocks on a worker pool. BGZF writes the blocks in order whatever the
-	// pool's size, so the bytes are those one thread writes. Only compression: hts_set_threads on a SAM file would
-	// start htslib's SAM formatting pool instead, for records this writer has already formatted.
+	// BAM and gzip SAM compress their BGZF blocks on a worker pool, which does not change the bytes. bgzf_mt, because
+	// hts_set_threads on SAM would also start a pool formatting records this writer has formatted (embedded-tools.md,
+	// htslib).
 	bool compressed_output = fdata.format == SAMOutputFormat::BAM || fdata.use_gzip;
 	if (compressed_output) {
 		auto n_threads = NumericCast<int>(TaskScheduler::GetScheduler(context).NumberOfThreads());
@@ -522,7 +514,7 @@ static unique_ptr<GlobalFunctionData> SAMCopyInitializeGlobal(ClientContext &con
 		}
 		errno = 0;
 		if (sam_hdr_write(gstate->sam_file.get(), gstate->header.get()) < 0) {
-			ThrowWriteFailed(fdata, file_path, "sam_hdr_write");
+			ThrowCopyWriteFailed(SAMFormatName(fdata.format), file_path, "sam_hdr_write");
 		}
 	}
 
@@ -540,7 +532,7 @@ static bool ParseCIGAR(const string &cigar_str, std::vector<uint32_t> &cigar_buf
 	// "*" and "" are the two spellings of "no CIGAR": the SAM sentinel, and what
 	// read_alignments/read_sam return for a record with zero CIGAR operations. Both parse to an
 	// empty buffer. Whether a record is ALLOWED to have no CIGAR depends on its unmapped flag,
-	// which the caller checks -- see the BAM_FUNMAP check in SAMRecordEncoder::Build (#197).
+	// which the caller checks -- see the BAM_FUNMAP check in SAMRecordEncoder::Build.
 	if (cigar_str == "*" || cigar_str.empty()) {
 		return true;
 	}
@@ -596,9 +588,10 @@ static void PrepareSeqQual(const SequenceDataMap &seq_data, const std::string &r
 
 	// Validate sequence and quality lengths match (when quality is present)
 	if (!raw_qual.empty() && raw_qual.size() != raw_seq.size()) {
-		throw InvalidInputException("Sequence and quality lengths differ for read '%s' %s (seq=%llu, qual=%llu)",
-		                            read_id, is_read2 ? "R2" : "R1", static_cast<uint64_t>(raw_seq.size()),
-		                            static_cast<uint64_t>(raw_qual.size()));
+		throw InvalidInputException("Quality score length (%llu) does not match sequence length (%llu) for read_id "
+		                            "'%s'%s in the SEQUENCE_DATA table",
+		                            static_cast<uint64_t>(raw_qual.size()), static_cast<uint64_t>(raw_seq.size()),
+		                            read_id, is_read2 ? " (R2)" : "");
 	}
 
 	// Determine hard clipping from CIGAR
@@ -655,28 +648,19 @@ static void PrepareSeqQual(const SequenceDataMap &seq_data, const std::string &r
 //===--------------------------------------------------------------------===//
 // Identifier-column dispatch (read_id, reference, mate_reference)
 //===--------------------------------------------------------------------===//
-// Returns the SAM textual representation of an identifier-column cell.
-// - NULL → the SAM '*' sentinel, for every accepted type. VARCHAR used to be
-//   exempt and fell through to string_t::GetString() on an invalid slot, which
-//   emitted an EMPTY field: invalid SAM, and a BAM htslib refuses to read at
-//   all -- every record silently lost while the COPY reported success (#197).
-// - BIGINT: decimal stringification. UUID: canonical 36-char lowercase form.
-// - VARCHAR: bytes verbatim.
+// Returns the SAM textual representation of an identifier-column cell: the SAM '*' sentinel for a NULL, of every
+// accepted type (reading an invalid slot gave an empty field: invalid SAM, and a BAM htslib refuses to read at all);
+// otherwise the text the sequence writers give it (ResolveSequenceRecordId): BIGINT in decimal, UUID in its canonical
+// 36-character lowercase form, VARCHAR verbatim.
 static inline string ExtractSamIdField(const UnifiedVectorFormat &fmt, idx_t row_idx, const LogicalType &id_type) {
-	auto idx = fmt.sel->get_index(row_idx);
-	if (!fmt.validity.RowIsValid(idx)) {
+	if (!fmt.validity.RowIsValid(fmt.sel->get_index(row_idx))) {
 		return "*";
 	}
-	if (id_type.id() == LogicalTypeId::BIGINT) {
-		auto data = UnifiedVectorFormat::GetData<int64_t>(fmt);
-		return miint::FormatIdFromInt64(data[idx]);
-	}
-	if (id_type.id() == LogicalTypeId::UUID) {
-		auto data = UnifiedVectorFormat::GetData<hugeint_t>(fmt);
-		return UUID::ToString(data[idx]);
-	}
-	auto data = UnifiedVectorFormat::GetData<string_t>(fmt);
-	return data[idx].GetString();
+	string buf;
+	const char *ptr;
+	idx_t size;
+	ResolveSequenceRecordId(fmt, row_idx, id_type, buf, ptr, size);
+	return ptr == buf.data() ? std::move(buf) : string(ptr, size);
 }
 
 //===--------------------------------------------------------------------===//
@@ -795,8 +779,8 @@ private:
 
 // The ENCODER RecordPrepareBatch and RecordFlushBatch take (copy_format_common.hpp). It builds a row into a bam1_t
 // (every check the row must pass, SEQ and QUAL from SEQUENCE_DATA, the TIDs and the tags), then stores it as a record:
-// for SAM, its sam_format1 line and '\n'; for BAM, its bam1_t's core, then its data, which WriteSAMRecord hands
-// sam_write1 in place. Made for one prepare_batch or flush_batch call, so one thread uses it. It reads only the global
+// for SAM, its sam_format1 line and '\n'; for BAM, as StoreBAMRecord stores it, which WriteSAMRecord writes in
+// place. Made for one prepare_batch or flush_batch call, so one thread uses it. It reads only the global
 // state's header and relations (see SAMCopyGlobalState).
 class SAMRecordEncoder {
 public:
@@ -878,7 +862,7 @@ private:
 // headerless SAM, which names references only by name.
 //
 // Headered output has written its @SQ lines, so a reference not among them cannot be written: SAM read it back as
-// '*', BAM dropped the record outright, neither with any error (#198). Supplying REFERENCE_LENGTHS asserts the table
+// '*', BAM dropped the record outright, neither with any error. Supplying REFERENCE_LENGTHS asserts the table
 // is the complete reference set, so a gap is a caller error.
 int32_t SAMRecordEncoder::ReferenceTID(const string &reference, const char *column) {
 	if (reference == "*") {
@@ -974,6 +958,7 @@ void SAMRecordEncoder::Build(idx_t i) {
 	auto cigar_idx = cigar_data.sel->get_index(i);
 
 	read_id = ExtractSamIdField(read_id_data, i, fdata.read_id_type);
+	CheckBAMReadName(read_id.data(), read_id.size());
 
 	// flags must be present: it is what tells us whether the record even claims to be aligned,
 	// so every leniency below depends on it. A NULL here has no defensible reading.
@@ -986,7 +971,7 @@ void SAMRecordEncoder::Build(idx_t i) {
 	// "absent" is 0 -- unambiguous, with no alignment that could be silently discarded. So a
 	// NULL is tolerated there and rejected on a mapped record. This is what lets
 	// align_minimap2's include_unmapped output be written straight out; those rows carry NULL
-	// position/mapq/cigar by design (#185).
+	// position/mapq/cigar by design.
 	int64_t position = RequiredScalar(position_ptr, position_data, i, "position", read_id, row_unmapped);
 	uint8_t mapq = RequiredScalar(mapq_ptr, mapq_data, i, "mapq", read_id, row_unmapped);
 
@@ -1016,7 +1001,7 @@ void SAMRecordEncoder::Build(idx_t i) {
 	// A record that claims to be mapped must carry a CIGAR. samtools accepts this on read but
 	// silently rewrites the record as unmapped ("mapped query must have a CIGAR; treated as
 	// unmapped"), so writing one degrades the alignment with nothing in the SQL layer to show
-	// for it. Rewriting the caller's flags would be worse than refusing, so fail loud (#197).
+	// for it. Rewriting the caller's flags would be worse than refusing, so fail loud.
 	// Unmapped records legitimately have no CIGAR -- that is the read_alignments round trip.
 	if (cigar_buffer.empty() && (flags & BAM_FUNMAP) == 0) {
 		throw InvalidInputException("Mapped read '%s' has no CIGAR (flags=%d): set the unmapped flag (0x4) or "
@@ -1074,15 +1059,10 @@ void SAMRecordEncoder::Build(idx_t i) {
 	}
 }
 
-// A BAM record's data starts on an 8-byte boundary, as a record does in a RecordBuffer
-static_assert(sizeof(bam1_core_t) % 8 == 0, "a BAM record's data must start 8-byte aligned in a RecordBuffer");
-
 void SAMRecordEncoder::Encode(idx_t row, RecordBuffer &out) {
 	Build(row);
 	if (fdata.format == SAMOutputFormat::BAM) {
-		auto data = out.Reserve(sizeof(bam1_core_t) + record->l_data);
-		memcpy(data, &record->core, sizeof(bam1_core_t));
-		memcpy(data + sizeof(bam1_core_t), record->data, record->l_data);
+		StoreBAMRecord(*record, out);
 		return;
 	}
 	// Headered output's header, or this encoder's own references for headerless SAM
@@ -1105,31 +1085,25 @@ static unique_ptr<PreparedBatchData> SAMCopyPrepareBatch(ClientContext &context,
 	return RecordPrepareBatch(context, encoder, std::move(rows));
 }
 
-// Writes one record as the matching sam_write1 call would: BAM through sam_write1 itself (htslib has no call that
-// serializes a bam1_t to bytes, and bam_write1 ends a BGZF block before a record that does not fit, so the records are
-// written one by one); SAM text as unthreaded sam_write1 writes a line, ending a gzip block before a line that does not
-// fit. So the bytes are those of writing each record with sam_write1, whatever the batches. Caller holds gstate.lock.
+// Writes one record as the matching sam_write1 call would: BAM through WriteBAMRecord; SAM text as unthreaded
+// sam_write1 writes a line, ending a gzip block before a line that does not fit. So the bytes are those of writing each
+// record with sam_write1, whatever the batches. Caller holds gstate.lock.
 static void WriteSAMRecord(const SAMCopyBindData &fdata, SAMCopyGlobalState &gstate, const_data_ptr_t data,
                            idx_t size) {
 	auto fp = gstate.sam_file.get();
-	errno = 0;
 	if (fdata.format == SAMOutputFormat::BAM) {
-		bam1_t record {};
-		memcpy(&record.core, data, sizeof(bam1_core_t));
-		record.data = const_cast<uint8_t *>(data + sizeof(bam1_core_t));
-		record.l_data = NumericCast<int>(size - sizeof(bam1_core_t));
-		record.m_data = NumericCast<uint32_t>(record.l_data);
-		if (sam_write1(fp, gstate.header.get(), &record) < 0) {
-			ThrowWriteFailed(fdata, gstate.file_path, "sam_write1");
-		}
-	} else if (fdata.use_gzip) {
+		WriteBAMRecord(fp, gstate.header.get(), data, size, SAMFormatName(fdata.format), gstate.file_path);
+		return;
+	}
+	errno = 0;
+	if (fdata.use_gzip) {
 		auto bgzf = fp->fp.bgzf;
 		if (bgzf_flush_try(bgzf, NumericCast<ssize_t>(size)) < 0 ||
 		    bgzf_write(bgzf, data, size) != NumericCast<ssize_t>(size)) {
-			ThrowWriteFailed(fdata, gstate.file_path, "bgzf_write");
+			ThrowCopyWriteFailed(SAMFormatName(fdata.format), gstate.file_path, "bgzf_write");
 		}
 	} else if (hwrite(fp->fp.hfile, data, size) != NumericCast<ssize_t>(size)) {
-		ThrowWriteFailed(fdata, gstate.file_path, "hwrite");
+		ThrowCopyWriteFailed(SAMFormatName(fdata.format), gstate.file_path, "hwrite");
 	}
 }
 
@@ -1152,12 +1126,7 @@ static void SAMCopyFinalize(ClientContext &context, FunctionData &bind_data, Glo
 	auto &fdata = bind_data.Cast<SAMCopyBindData>();
 	auto &gstate = gstate_p.Cast<SAMCopyGlobalState>();
 	lock_guard<mutex> glock(gstate.lock);
-	// htslib holds the end of the file until it closes it: the last BGZF block and BAM's end-of-file marker, plain
-	// SAM's buffered text, and a write that failed on its own threads. So a failed close fails the COPY.
-	errno = 0;
-	if (sam_close(gstate.sam_file.release()) < 0) {
-		ThrowWriteFailed(fdata, gstate.file_path, "sam_close");
-	}
+	CloseSAMCopyFile(gstate.sam_file.release(), SAMFormatName(fdata.format), gstate.file_path);
 }
 
 //===--------------------------------------------------------------------===//

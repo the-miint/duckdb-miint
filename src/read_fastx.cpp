@@ -2,7 +2,6 @@
 #include "SequenceRecord.hpp"
 #include "remote_file_helper.hpp"
 #include "table_function_common.hpp"
-#include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -119,26 +118,7 @@ unique_ptr<FunctionData> ReadFastxTableFunction::Bind(ClientContext &context, Ta
 		qual_offset = static_cast<uint8_t>(offset_value);
 	}
 
-	// Default byte budget: 64 MiB. Large enough that typical short-read workflows
-	// always fill STANDARD_VECTOR_SIZE (~600 KB per chunk) without being capped, but
-	// small enough to prevent multi-GB chunks when reading large sequences
-	// (e.g. bacterial genomes at ~5 MB/record would otherwise blow past RAM at 2048x).
-	// A chunk is also a batch index's batch, which order-keeping sinks hold whole
-	// (docs/internals/duckdb-engine-notes.md, "Output order costs threads and memory").
-	uint64_t max_batch_bytes = 64ULL * 1024 * 1024;
-	auto mbb_param = input.named_parameters.find("max_batch_bytes");
-	if (mbb_param != input.named_parameters.end() && !mbb_param->second.IsNull()) {
-		std::string raw = mbb_param->second.ToString();
-		idx_t parsed = 0;
-		std::string err = StringUtil::TryParseFormattedBytes(raw, parsed);
-		if (!err.empty()) {
-			throw InvalidInputException("max_batch_bytes: %s", err);
-		}
-		if (parsed == 0) {
-			throw InvalidInputException("max_batch_bytes must be greater than 0");
-		}
-		max_batch_bytes = static_cast<uint64_t>(parsed);
-	}
+	uint64_t max_batch_bytes = ParseMaxBatchBytesParameter(input.named_parameters);
 
 	bool allow_empty = false;
 	auto empty_param = input.named_parameters.find("allow_empty");

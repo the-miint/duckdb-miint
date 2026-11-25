@@ -41,8 +41,11 @@ unique_ptr<FunctionData> ReadSequencesSamTableFunction::Bind(ClientContext &cont
 	RequireLocalFilesExist(fs, file_paths);
 
 	bool include_filepath = ParseIncludeFilepathParameter(input.named_parameters);
+	uint64_t max_batch_bytes = ParseMaxBatchBytesParameter(input.named_parameters);
 
-	auto data = duckdb::make_uniq<Data>(file_paths, include_filepath, uses_stdin);
+	ScanBatchIndex::KeepForSeveralFiles(input.table_function, file_paths.size());
+
+	auto data = duckdb::make_uniq<Data>(file_paths, include_filepath, uses_stdin, max_batch_bytes);
 	for (auto &name : data->names) {
 		names.emplace_back(name);
 	}
@@ -99,6 +102,7 @@ void ReadSequencesSamTableFunction::Execute(ClientContext &context, TableFunctio
 			local_state.current_file_idx = global_state.next_file_idx;
 			global_state.next_file_idx++;
 			local_state.has_file = true;
+			local_state.file_chunks = 0;
 		}
 
 		auto &reader = *global_state.readers[local_state.current_file_idx];
@@ -106,10 +110,16 @@ void ReadSequencesSamTableFunction::Execute(ClientContext &context, TableFunctio
 
 		qual_scratch.clear();
 		count = 0;
-		while (count < STANDARD_VECTOR_SIZE) {
-			const bam1_t *aln = reader.read_raw();
+		idx_t chunk_bytes = 0;
+		while (count < STANDARD_VECTOR_SIZE && chunk_bytes < bind_data.max_batch_bytes) {
+			// The read the last chunk held back comes first.
+			const bam1_t *aln = local_state.held_read;
+			local_state.held_read = nullptr;
 			if (!aln) {
-				break; // end of this file
+				aln = reader.read_raw();
+				if (!aln) {
+					break; // end of this file
+				}
 			}
 
 			const int seq_len = aln->core.l_qseq;
@@ -123,8 +133,20 @@ void ReadSequencesSamTableFunction::Execute(ClientContext &context, TableFunctio
 				                         std::string(reinterpret_cast<const char *>(aln->data)));
 			}
 
+			// The bytes max_batch_bytes counts: the read's name, bases and qualities. A read that would take the chunk
+			// past the limit waits for the next chunk, unless it would be the chunk's only read.
+			const char *qname = bam_get_qname(aln);
+			const idx_t qname_size = std::strlen(qname);
+			const uint8_t *qual = bam_get_qual(aln);
+			const bool has_qual = seq_len > 0 && qual[0] != 0xFF;
+			const idx_t read_bytes = qname_size + static_cast<idx_t>(seq_len) * (has_qual ? 2 : 1);
+			if (count > 0 && chunk_bytes + read_bytes > bind_data.max_batch_bytes) {
+				local_state.held_read = aln;
+				break;
+			}
+
 			// read_id: copy QNAME once into the vector's string heap.
-			read_id_data[count] = StringVector::AddString(output.data[1], reinterpret_cast<const char *>(aln->data));
+			read_id_data[count] = StringVector::AddString(output.data[1], qname, qname_size);
 
 			// sequence1: decode 4-bit nucleotides straight into the vector buffer (one pass).
 			string_t seq_str = StringVector::EmptyString(output.data[3], seq_len);
@@ -138,15 +160,15 @@ void ReadSequencesSamTableFunction::Execute(ClientContext &context, TableFunctio
 
 			// qual1: raw Phred scores copied straight across (no +33/-33 round trip).
 			// Absent quality (first byte 0xFF) or empty sequence -> NULL list.
-			const uint8_t *qual = bam_get_qual(aln);
 			qual1_entries[count].offset = qual_scratch.size();
-			if (seq_len > 0 && qual[0] != 0xFF) {
+			if (has_qual) {
 				qual_scratch.insert(qual_scratch.end(), qual, qual + seq_len);
 				qual1_entries[count].length = static_cast<uint64_t>(seq_len);
 			} else {
 				qual1_entries[count].length = 0;
 			}
 
+			chunk_bytes += read_bytes;
 			count++;
 		}
 
@@ -157,6 +179,10 @@ void ReadSequencesSamTableFunction::Execute(ClientContext &context, TableFunctio
 		}
 		break;
 	}
+
+	// Files are claimed in increasing order, and a chunk never spans two, as ScanBatchIndex requires.
+	local_state.batch_index =
+	    ScanBatchIndex::Index(local_state.current_file_idx, local_state.file_chunks++, global_state.batch_stride);
 
 	// Finalize qual1 child with a single bulk copy of the accumulated raw Phred bytes.
 	ListVector::Reserve(qual1_vector, qual_scratch.size());
@@ -196,9 +222,16 @@ void ReadSequencesSamTableFunction::Execute(ClientContext &context, TableFunctio
 	output.SetChildCardinality(count);
 }
 
+OperatorPartitionData ReadSequencesSamTableFunction::GetPartitionData(ClientContext &context,
+                                                                      TableFunctionGetPartitionInput &input) {
+	return ScanBatchIndex::PartitionData(input, input.local_state->Cast<LocalState>().batch_index);
+}
+
 TableFunction ReadSequencesSamTableFunction::GetFunction() {
 	auto tf = TableFunction("read_sequences_sam", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
 	AddNamedParameter(tf, "include_filepath", LogicalType::BOOLEAN);
+	AddNamedParameter(tf, "max_batch_bytes", LogicalType::VARCHAR);
+	tf.get_partition_data = GetPartitionData;
 	return tf;
 }
 

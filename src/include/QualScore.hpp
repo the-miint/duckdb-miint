@@ -8,6 +8,9 @@
 #include <utility>
 
 namespace miint {
+//! The highest Phred score Phred+33 text can show: 33 + 93 is '~', the last printable ASCII character.
+constexpr uint8_t MAX_PHRED_QUALITY = 93;
+
 //! Object to represent Qual store data independent of offset
 class QualScore {
 private:
@@ -57,13 +60,13 @@ public:
 		unsigned char bad = 0;
 		for (size_t i = 0; i < n; i++) {
 			const int val = static_cast<int>(src[i]) - offset;
-			bad |= (val < 0) | (val > 93);
+			bad |= (val < 0) | (val > MAX_PHRED_QUALITY);
 			dest[i] = static_cast<uint8_t>(val);
 		}
 		if (bad) {
 			for (size_t i = 0; i < n; i++) {
 				const int val = static_cast<int>(src[i]) - offset;
-				if (val < 0 || val > 93) {
+				if (val < 0 || val > MAX_PHRED_QUALITY) {
 					throw std::runtime_error("Stored quality character out of range: " + std::string(1, src[i]));
 				}
 			}
@@ -77,7 +80,7 @@ public:
 		out.reserve(qual_.size());
 		for (char c : qual_) {
 			int val = static_cast<int>(c) - offset;
-			if (val < 0 || val > 93) {
+			if (val < 0 || val > MAX_PHRED_QUALITY) {
 				throw std::runtime_error("Stored quality character out of range: " + std::string(1, c));
 			}
 			out.push_back(static_cast<uint8_t>(val));

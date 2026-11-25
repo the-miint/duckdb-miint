@@ -1,0 +1,271 @@
+# name: test/sql/copy_ubam_batches.test
+# description: COPY FORMAT UBAM hands its records to the writer in batches. The default cap (ROW_GROUP_SIZE 64 and ROW_GROUP_SIZE_BYTES '8MB', each added when the statement gives none) gathers small chunks and bounds a batch of long reads, and a user's own values win. A batch whose records pass 64 MiB is built again as it is written, and gives the same bytes as small batches; its data errors are raised before anything is written. A COPY that fails after a batch is written leaves no file it created, and a file it would have replaced as it was. The hidden registration _miint_ubam writes what UBAM writes, without the cap. Files DuckDB names itself end in .bam, and a .bam path with no FORMAT is still aligned BAM.
+# group: [sql]
+
+require miint
+
+statement ok
+SET threads=8;
+
+# DuckDB logs one FlushBatch entry per batch it hands a COPY writer, with the batch's row count, its size as DuckDB
+# measures it (the input rows, not the records written), and why it was flushed.
+statement ok
+CALL enable_logging('PhysicalOperator', storage = 'memory');
+
+statement ok
+CREATE MACRO batches(name) AS TABLE
+SELECT info.rows::BIGINT AS rows, info.size::BIGINT AS size, info.reason AS reason
+FROM duckdb_logs_parsed('PhysicalOperator')
+WHERE class = 'PhysicalCopyToFile' AND event = 'FlushBatch' AND parse_filename(info.file) = name;
+
+# A COPY whose batches are counted exactly, or whose bytes are compared with another's, says PRESERVE_ORDER true: uBAM
+# keeps no order by default, and on all threads a source scanned as several tasks would split the rows into other
+# batches, in another order.
+
+# Short reads. Filtered on i % 128 = 0, a table scan yields chunks of 16 rows (320 rows in 20 chunks).
+statement ok
+CREATE TABLE reads AS
+SELECT i, 'r' || i AS read_id,
+       left(translate(md5(i::VARCHAR), '0123456789abcdef', 'ACGTACGTACGTACGT'), 24) AS sequence1,
+       list_transform(range(24), lambda j: ((i + j) % 41)::UTINYINT) AS qual1,
+       (i * 7)::BIGINT AS zmw
+FROM range(0, 40960) r(i);
+
+# 48 reads of 1 Mb in one chunk. DuckDB measures each row at about 2 MB (the sequence and its qualities), 96 MB in all;
+# each record is about 1.5 MB (BAM packs two bases to a byte), 72 MB in all.
+statement ok
+CREATE TABLE huge AS
+SELECT i, 'H' || i AS read_id,
+       repeat(translate(md5(i::VARCHAR), '0123456789abcdef', 'ACGTACGTACGTACGT'), 31250) AS sequence1,
+       list_transform(range(1000000), lambda j: ((i + j) % 41)::UTINYINT) AS qual1
+FROM range(1, 49) r(i);
+
+statement ok
+CREATE VIEW huge_in AS SELECT read_id, sequence1, qual1 FROM huge;
+
+# --- The default row cap gathers small chunks ---
+# Without it, every 16-row chunk is a batch; with it, a batch is flushed once it holds 64 rows.
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM reads WHERE i % 128 = 0) TO '{TEST_DIR}/small_default.bam' (FORMAT UBAM, PRESERVE_ORDER true);
+
+query IIII
+SELECT count(*), sum(rows), min(rows), max(rows) FROM batches('small_default.bam');
+----
+5	320	64	64
+
+# The format name in any case.
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM reads WHERE i % 128 = 0) TO '{TEST_DIR}/small_lower.bam' (FORMAT ubam, PRESERVE_ORDER true);
+
+query IIII
+SELECT count(*), sum(rows), min(rows), max(rows) FROM batches('small_lower.bam');
+----
+5	320	64	64
+
+# --- The default byte cap bounds a batch of long reads ---
+# Without it, all 96 MB is one batch. With it, a batch ends with the row that reaches 8 MB: 4 rows of 2 MB, every batch
+# under 9 MB before its last row (as in copy_fastx_batches.test).
+
+statement ok
+COPY huge_in TO '{TEST_DIR}/hu_prepared.bam' (FORMAT UBAM, PRESERVE_ORDER true);
+
+query IIII
+SELECT count(*) > 1, sum(rows), max(rows), bool_and(size - size // rows < 9000000) FROM batches('hu_prepared.bam');
+----
+true	48	4	true
+
+# --- A user's own values win ---
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM reads WHERE i % 128 = 0)
+TO '{TEST_DIR}/small_rows1000.bam' (FORMAT UBAM, ROW_GROUP_SIZE 1000, PRESERVE_ORDER true);
+
+query II
+SELECT count(*), sum(rows) FROM batches('small_rows1000.bam');
+----
+1	320
+
+# --- A batch whose records pass 64 MiB gives the same bytes ---
+# Under ROW_GROUP_SIZE 1000 and ROW_GROUP_SIZE_BYTES '1GB' the 48 reads are one batch, whose 72 MB of records pass the
+# 64 MiB above which a batch's records are not kept but built again as they are written: about the first 44 are kept,
+# the rest deferred. hu_prepared.bam, above, took batches of 4 reads, whose records were all kept, and is the oracle.
+
+statement ok
+COPY huge_in TO '{TEST_DIR}/hu_deferred.bam' (FORMAT UBAM, ROW_GROUP_SIZE 1000, ROW_GROUP_SIZE_BYTES '1GB', PRESERVE_ORDER true);
+
+query II
+SELECT count(*), bool_and(size > 67108864) FROM batches('hu_deferred.bam');
+----
+1	true
+
+query I
+SELECT (SELECT md5(content) FROM read_blob('{TEST_DIR}/hu_deferred.bam'))
+     = (SELECT md5(content) FROM read_blob('{TEST_DIR}/hu_prepared.bam'));
+----
+true
+
+# And the records are the reads, in order.
+query II
+SELECT count(*), count(*) FILTER (WHERE b.sequence1 = h.sequence1 AND b.qual1 = h.qual1)
+FROM read_sequences_sam('{TEST_DIR}/hu_deferred.bam') b JOIN huge h ON b.read_id = h.read_id AND b.sequence_index = h.i;
+----
+48	48
+
+# --- A data error in a batch over 64 MiB is raised before anything is written ---
+# The error is in the last read, past the records the writer keeps; the rows after them are still checked while the
+# batch is prepared. DuckDB logs a FlushBatch before it hands the writer a batch to write, so none means the error came
+# from preparing it. One read has one score too few; another has a NULL score.
+
+statement error
+COPY (SELECT read_id, sequence1, CASE WHEN read_id = 'H48' THEN qual1[2:] ELSE qual1 END AS qual1 FROM huge)
+TO '{TEST_DIR}/err_deferred_len.bam' (FORMAT UBAM, ROW_GROUP_SIZE 1000, ROW_GROUP_SIZE_BYTES '1GB');
+----
+Quality score length (999999) does not match sequence length (1000000) for read_id 'H48'
+
+query I
+SELECT count(*) FROM batches('err_deferred_len.bam');
+----
+0
+
+statement error
+COPY (SELECT read_id, sequence1, CASE WHEN read_id = 'H48' THEN list_prepend(NULL, qual1[2:]) ELSE qual1 END AS qual1
+      FROM huge)
+TO '{TEST_DIR}/err_deferred_null.bam' (FORMAT UBAM, ROW_GROUP_SIZE 1000, ROW_GROUP_SIZE_BYTES '1GB');
+----
+NULL quality score in qual1 (read_id 'H48')
+
+query I
+SELECT count(*) FROM batches('err_deferred_null.bam');
+----
+0
+
+# --- A failed COPY leaves no file it created, and a file it would have replaced as it was ---
+# As for SAM and BAM (copy_sam_batches.test); how DuckDB does this: docs/internals/duckdb-engine-notes.md, "A failed
+# COPY leaves no output". Each COPY below fails after DuckDB has logged a batch written, so a partial write is what gets
+# undone; r2999's zmw is outside the 32-bit range of its tag. Unpartitioned, the table scan's first chunk of 2,048 rows
+# is a batch of its own (DuckDB cuts a chunk only at the byte cap), written before the batch holding r2999 fails.
+# Partitioned, DuckDB writes the bucket without r2999 (1,500 rows, one batch), then fails on the other.
+
+statement ok
+CREATE TABLE bad_last AS
+SELECT read_id, sequence1, qual1, CASE WHEN i = 2999 THEN 3000000000 ELSE zmw END::BIGINT AS zmw, i % 2 AS bucket
+FROM reads WHERE i < 3000;
+
+statement ok
+COPY (SELECT * EXCLUDE (bucket) FROM bad_last WHERE read_id <> 'r2999') TO '{TEST_DIR}/existing.bam' (FORMAT UBAM, TAGS {zm: 'zmw'});
+
+statement ok
+CREATE TABLE existing_before AS SELECT md5(content) AS digest FROM read_blob('{TEST_DIR}/existing.bam');
+
+statement error
+COPY (SELECT * EXCLUDE (bucket) FROM bad_last) TO '{TEST_DIR}/existing.bam' (FORMAT UBAM, TAGS {zm: 'zmw'}, PRESERVE_ORDER true);
+----
+Column 'zmw' (tag 'zm') is 3000000000 for read 'r2999'
+
+query III
+SELECT (SELECT count(*) FROM batches('tmp_existing.bam')),
+       (SELECT md5(content) FROM read_blob('{TEST_DIR}/existing.bam')) = (SELECT digest FROM existing_before),
+       (SELECT count(*) FROM glob('{TEST_DIR}/tmp_existing.bam'));
+----
+1	true	0
+
+statement error
+COPY bad_last TO '{TEST_DIR}/failed_parts' (FORMAT UBAM, TAGS {zm: 'zmw'}, PARTITION_BY (bucket));
+----
+Column 'zmw' (tag 'zm') is 3000000000 for read 'r2999'
+
+query II
+SELECT (SELECT count(*) FROM duckdb_logs_parsed('PhysicalOperator')
+        WHERE class = 'PhysicalCopyToFile' AND event = 'FlushBatch' AND info.file LIKE '%failed\_parts%' ESCAPE '\') > 0,
+       (SELECT count(*) FROM glob('{TEST_DIR}/failed_parts/**'));
+----
+true	0
+
+# --- The hidden registration ---
+# FORMAT UBAM binds as _miint_ubam with the default cap added, and passes READ_GROUP, TAGS and COMPRESSION_LEVEL on.
+# Naming the hidden one directly writes the same bytes, without the cap.
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1, zmw FROM reads WHERE i < 3000)
+TO '{TEST_DIR}/public.bam' (FORMAT UBAM, COMPRESSION_LEVEL 1, READ_GROUP {ID: 'qiita', PL: 'PACBIO'}, TAGS {zm: 'zmw'}, PRESERVE_ORDER true);
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1, zmw FROM reads WHERE i < 3000)
+TO '{TEST_DIR}/hidden.bam' (FORMAT _miint_ubam, COMPRESSION_LEVEL 1, READ_GROUP {ID: 'qiita', PL: 'PACBIO'}, TAGS {zm: 'zmw'});
+
+query I
+SELECT (SELECT md5(content) FROM read_blob('{TEST_DIR}/hidden.bam')) = (SELECT md5(content) FROM read_blob('{TEST_DIR}/public.bam'));
+----
+true
+
+statement ok
+COPY huge_in TO '{TEST_DIR}/hu_hidden.bam' (FORMAT _miint_ubam);
+
+query II
+SELECT count(*), sum(rows) FROM batches('hu_hidden.bam');
+----
+1	48
+
+# --- Files DuckDB names itself ---
+# They end in .bam: a uBAM is a BAM file.
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM reads) TO '{TEST_DIR}/per_thread_ubam' (FORMAT UBAM, PER_THREAD_OUTPUT true);
+
+query III
+SELECT count(*) >= 1, bool_and(ends_with(file, '.bam')),
+       (SELECT count(*) FROM read_sequences_sam('{TEST_DIR}/per_thread_ubam/*'))
+FROM glob('{TEST_DIR}/per_thread_ubam/*');
+----
+true	true	40960
+
+statement ok
+COPY (SELECT i % 2 AS bucket, read_id, sequence1, qual1 FROM reads)
+TO '{TEST_DIR}/partitioned_ubam' (FORMAT UBAM, PARTITION_BY (bucket));
+
+query III
+SELECT count(*), bool_and(ends_with(file, '.bam')),
+       (SELECT count(*) FROM read_sequences_sam('{TEST_DIR}/partitioned_ubam/*/*'))
+FROM glob('{TEST_DIR}/partitioned_ubam/*/*');
+----
+2	true	40960
+
+# EXPORT DATABASE names each table's file from the format the statement names (UBAM), not the writer it binds.
+statement ok
+ATTACH ':memory:' AS export_src;
+
+statement ok
+CREATE TABLE export_src.ccs AS SELECT read_id, sequence1, qual1 FROM reads WHERE i < 100;
+
+statement ok
+EXPORT DATABASE export_src TO '{TEST_DIR}/exported' (FORMAT UBAM);
+
+query II
+SELECT count(*), (SELECT count(*) FROM read_sequences_sam('{TEST_DIR}/exported/ccs.bam'))
+FROM glob('{TEST_DIR}/exported/ccs.bam');
+----
+1	100
+
+# --- A .bam path with no FORMAT is aligned BAM ---
+# DuckDB takes a missing FORMAT from the path's extension, so .bam binds FORMAT BAM, never UBAM, though both write
+# .bam files: reads alone are refused for lacking BAM's columns.
+
+statement error
+COPY (SELECT read_id, sequence1, qual1 FROM reads) TO '{TEST_DIR}/reads_no_format.bam';
+----
+requires 'flags' column
+
+statement ok
+CREATE TABLE ref_lens AS SELECT 'ref0' AS name, 1000::BIGINT AS length;
+
+statement ok
+COPY (SELECT read_id, 0::USMALLINT AS flags, 'ref0' AS reference, 1::BIGINT AS position, 60::UTINYINT AS mapq, '24M' AS cigar,
+             '*' AS mate_reference, 0::BIGINT AS mate_position, 0::BIGINT AS template_length
+      FROM reads WHERE i < 100)
+TO '{TEST_DIR}/aln_no_format.bam' (REFERENCE_LENGTHS 'ref_lens');
+
+query II
+SELECT count(*), count(*) FILTER (WHERE reference = 'ref0' AND cigar = '24M') FROM read_alignments('{TEST_DIR}/aln_no_format.bam');
+----
+100	100

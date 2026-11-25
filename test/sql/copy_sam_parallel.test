@@ -71,6 +71,34 @@ COPY p TO '{TEST_DIR}/kept_nohdr.sam' (FORMAT SAM, INCLUDE_HEADER false, PRESERV
 statement ok
 COPY p TO '{TEST_DIR}/kept_gz.sam.gz' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', PRESERVE_ORDER true);
 
+# A Parquet file's order is fixed, so each file is the same at any thread count (docs/writing.md, SAM and BAM,
+# "Threads, order and memory"), BAM and gzip SAM included, whose BGZF blocks are compressed on a pool sized to threads.
+statement ok
+SET threads=1;
+
+statement ok
+COPY p TO '{TEST_DIR}/kept_t1.bam' (FORMAT BAM, REFERENCE_LENGTHS 'ref_lens', SEQUENCE_DATA 'seqs', PRESERVE_ORDER true);
+
+statement ok
+COPY p TO '{TEST_DIR}/kept_t1.sam' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', PRESERVE_ORDER true);
+
+statement ok
+COPY p TO '{TEST_DIR}/kept_nohdr_t1.sam' (FORMAT SAM, INCLUDE_HEADER false, PRESERVE_ORDER true);
+
+statement ok
+COPY p TO '{TEST_DIR}/kept_gz_t1.sam.gz' (FORMAT SAM, REFERENCE_LENGTHS 'ref_lens', PRESERVE_ORDER true);
+
+statement ok
+SET threads=8;
+
+query IIII
+SELECT (SELECT count(DISTINCT md5(content)) FROM read_blob(['{TEST_DIR}/kept.bam', '{TEST_DIR}/kept_t1.bam'])),
+       (SELECT count(DISTINCT md5(content)) FROM read_blob(['{TEST_DIR}/kept.sam', '{TEST_DIR}/kept_t1.sam'])),
+       (SELECT count(DISTINCT md5(content)) FROM read_blob(['{TEST_DIR}/kept_nohdr.sam', '{TEST_DIR}/kept_nohdr_t1.sam'])),
+       (SELECT count(DISTINCT md5(content)) FROM read_blob(['{TEST_DIR}/kept_gz.sam.gz', '{TEST_DIR}/kept_gz_t1.sam.gz']));
+----
+1	1	1	1
+
 # --- An ORDER BY keeps its order, with no option ---
 # Record k must be the k-th row in the ORDER BY's order, which is not the input's. Too few rows come out of DuckDB's
 # sort in order even to a COPY that keeps none (docs/internals/architecture.md, "Tests to copy"), so this sorts 200,000

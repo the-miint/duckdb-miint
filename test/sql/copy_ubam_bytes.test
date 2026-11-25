@@ -1,0 +1,171 @@
+# name: test/sql/copy_ubam_bytes.test
+# description: COPY FORMAT UBAM with insertion order kept writes the same bytes as at commit 5f72d70b. Each output's md5 is pinned to that commit's output, at threads=1 and threads=8, for every option that shapes the bytes. Output at the default compression level differs between deflate libraries, so it is checked by content against the same query's level-0 output.
+# group: [sql]
+
+require miint
+
+# Inputs are derived from md5 and arithmetic only, so they are the same on every platform and DuckDB version (hash()
+# is not). 5,000 reads span several chunks, of 1 to 300 bases, about one in 16 of them N; qualities run 0 to 93.
+# The tag columns cover every integer type TAGS accepts, with negative values, NULLs (written as no tag) and the ends
+# of int32, the range of a BAM 'i' tag.
+statement ok
+CREATE TABLE reads AS
+SELECT i,
+       'm64011_190830_220126/' || i || '/ccs' AS read_id,
+       left(repeat(translate(md5(i::VARCHAR), '0123456789abcdef', 'ACGTACGTACGTACGN'), n // 32 + 1), n) AS sequence1,
+       list_transform(range(n), lambda j: ((i * 7 + j * 13) % 94)::UTINYINT) AS qual1,
+       CASE WHEN i % 10 = 0 THEN NULL ELSE i * 7919 END::BIGINT AS zmw,
+       (i % 256)::UTINYINT AS passes,
+       (i % 256 - 128)::TINYINT AS t_tiny,
+       CASE WHEN i % 7 = 0 THEN NULL ELSE (i * 31) % 65536 - 32768 END::SMALLINT AS t_small,
+       (i % 65536)::USMALLINT AS t_usmall,
+       CASE WHEN i = 1 THEN -2147483648 WHEN i = 2 THEN 2147483647
+            ELSE (i * 104729) % 2000000 - 1000000 END::INTEGER AS t_int,
+       CASE WHEN i = 3 THEN 2147483647 ELSE i * 3 END::UINTEGER AS t_uint,
+       CASE WHEN i = 4 THEN 2147483647 WHEN i % 3 = 0 THEN NULL ELSE i * 5 END::UBIGINT AS t_ubig,
+       CASE WHEN i = 5 THEN -2147483648 WHEN i = 6 THEN 2147483647 ELSE -i END::BIGINT AS t_big
+FROM (SELECT i, 1 + (i * 37) % 300 AS n FROM range(1, 5001) r(i));
+
+statement ok
+CREATE VIEW ubam_in AS SELECT read_id, sequence1, qual1, zmw, passes, t_tiny, t_small, t_usmall, t_int, t_uint, t_ubig, t_big
+FROM reads;
+
+# Reads of every size against a BGZF block (65,280 bytes). A uBAM record holds about 1.5 bytes per base, so 30-31 kb
+# reads make records of 45-47 KB, and 70-76 kb reads make records of 105-114 KB, which cross a block.
+statement ok
+CREATE TABLE long_reads AS
+SELECT 'L' || i AS read_id,
+       left(repeat(translate(md5(i::VARCHAR), '0123456789abcdef', 'ACGTACGTACGTACGT'), n // 32 + 1), n) AS sequence1,
+       list_transform(range(n), lambda j: ((i + j * 7) % 41)::UTINYINT) AS qual1,
+       (i * 1000)::INTEGER AS zmw
+FROM (SELECT i, CASE i % 4 WHEN 0 THEN 50 + i WHEN 1 THEN 30000 + i * 17 WHEN 2 THEN 70000 + i * 101 ELSE 120 + i END AS n
+      FROM range(1, 61) r(i));
+
+# With order kept, a level-0 file's records are the input's, every one of them, in order.
+statement ok
+COPY ubam_in TO '{TEST_DIR}/ubam_check.bam' (FORMAT UBAM, COMPRESSION_LEVEL 0, PRESERVE_ORDER true);
+
+query I
+SELECT count(*) FROM (SELECT sequence_index, read_id, sequence1, qual1 FROM read_sequences_sam('{TEST_DIR}/ubam_check.bam')
+                      EXCEPT ALL
+                      SELECT i, read_id, sequence1, qual1 FROM reads);
+----
+0
+
+query I
+SELECT count(*) FROM read_sequences_sam('{TEST_DIR}/ubam_check.bam');
+----
+5000
+
+foreach threads 1 8
+
+statement ok
+SET threads={threads};
+
+# Every COPY below that writes records says PRESERVE_ORDER true: uBAM keeps no order by default, and these bytes are
+# the order-kept ones. The empty outputs need none.
+
+# Files named ub<threads>_* have md5s pinned below; files named ubx<threads>_* are at the default compression level
+# and are checked by content.
+
+statement ok
+COPY ubam_in TO '{TEST_DIR}/ub{threads}_min.bam' (FORMAT UBAM, COMPRESSION_LEVEL 0, PRESERVE_ORDER true);
+
+statement ok
+COPY ubam_in TO '{TEST_DIR}/ub{threads}_lower.bam' (FORMAT ubam, COMPRESSION_LEVEL 0, PRESERVE_ORDER true);
+
+# @RG field names are upper-cased; values may hold spaces, '=' and ';'.
+statement ok
+COPY ubam_in TO '{TEST_DIR}/ub{threads}_rg.bam'
+(FORMAT UBAM, COMPRESSION_LEVEL 0, PRESERVE_ORDER true,
+ READ_GROUP {ID: 'qiita', PL: 'PACBIO', DS: 'READTYPE=CCS;BINDINGKIT=101-894-200', SM: 'sample 1'});
+
+# One tag per integer type. Tag names are verbatim: a quoted key keeps its upper case.
+statement ok
+COPY ubam_in TO '{TEST_DIR}/ub{threads}_tags.bam'
+(FORMAT UBAM, COMPRESSION_LEVEL 0, PRESERVE_ORDER true,
+ TAGS {zm: 'zmw', np: 'passes', "XT": 't_tiny', xs: 't_small', "XU": 't_usmall', xi: 't_int', "YU": 't_uint',
+       xb: 't_ubig', "YB": 't_big'});
+
+statement ok
+COPY ubam_in TO '{TEST_DIR}/ub{threads}_rg_tags.bam'
+(FORMAT UBAM, COMPRESSION_LEVEL 0, PRESERVE_ORDER true, READ_GROUP {ID: 'qiita', PL: 'PACBIO', DS: 'READTYPE=CCS'},
+ TAGS {zm: 'zmw', np: 'passes', xs: 't_small'});
+
+statement ok
+COPY (SELECT i AS read_id, sequence1, qual1 FROM reads)
+TO '{TEST_DIR}/ub{threads}_bigint.bam' (FORMAT UBAM, COMPRESSION_LEVEL 0, PRESERVE_ORDER true);
+
+statement ok
+COPY (SELECT md5(i::VARCHAR)::UUID AS read_id, sequence1, qual1 FROM reads)
+TO '{TEST_DIR}/ub{threads}_uuid.bam' (FORMAT UBAM, COMPRESSION_LEVEL 0, PRESERVE_ORDER true);
+
+statement ok
+COPY long_reads TO '{TEST_DIR}/ub{threads}_long.bam'
+(FORMAT UBAM, COMPRESSION_LEVEL 0, PRESERVE_ORDER true, READ_GROUP {ID: 'qiita'}, TAGS {zm: 'zmw'});
+
+# An empty input writes the header alone.
+statement ok
+COPY (FROM ubam_in WHERE false) TO '{TEST_DIR}/ub{threads}_empty.bam' (FORMAT UBAM, COMPRESSION_LEVEL 0);
+
+statement ok
+COPY (FROM ubam_in WHERE false) TO '{TEST_DIR}/ub{threads}_empty_rg.bam'
+(FORMAT UBAM, COMPRESSION_LEVEL 0, READ_GROUP {ID: 'qiita', PL: 'PACBIO', DS: 'READTYPE=CCS'});
+
+statement ok
+COPY ubam_in TO '{TEST_DIR}/ubx{threads}_rg_tags.bam'
+(FORMAT UBAM, PRESERVE_ORDER true, READ_GROUP {ID: 'qiita', PL: 'PACBIO', DS: 'READTYPE=CCS'},
+ TAGS {zm: 'zmw', np: 'passes', xs: 't_small'});
+
+statement ok
+COPY long_reads TO '{TEST_DIR}/ubx{threads}_long.bam'
+(FORMAT UBAM, PRESERVE_ORDER true, READ_GROUP {ID: 'qiita'}, TAGS {zm: 'zmw'});
+
+# Pinned to 5f72d70b's output at threads=1. Level-0 BGZF is the same on every platform: htslib writes stored blocks
+# itself, with zlib's and libdeflate's builds alike. The record order, the @RG line and the tags are in these bytes;
+# miint's readers expose neither of the last two, so these bytes are what pin them. lower matches min.
+query II
+SELECT replace(parse_filename(filename), 'ub{threads}_', '') AS f, md5(content)
+FROM read_blob('{TEST_DIR}/ub{threads}_*') ORDER BY f;
+----
+bigint.bam	408a2867e63545ad8ef6500dc1d492cd
+empty.bam	73599bcd970623c849ba3b83896d8c38
+empty_rg.bam	7ea74e8f330a3ad9089e67bbf1e255f8
+long.bam	8c871bd53b8b405e07d8d818f8ffc1c6
+lower.bam	65c2da60aac84ad04debb31332eee9f7
+min.bam	65c2da60aac84ad04debb31332eee9f7
+rg.bam	e4f7c1c98db747a72a4689eae1fcdbeb
+rg_tags.bam	6a7968a5d6b1c723bc2a76ecc2c1c84b
+tags.bam	6411b97e3eaa866f0e0f5cca74a2d8f3
+uuid.bam	4c69aa7c25e32e7f5ca0e770661cb77a
+
+# A file at the default level holds level 0's records, each at the same index in the file.
+query I
+SELECT count(*) FROM read_sequences_sam('{TEST_DIR}/ubx{threads}_rg_tags.bam');
+----
+5000
+
+query I
+SELECT count(*) FROM (SELECT sequence_index, read_id, sequence1, qual1
+                      FROM read_sequences_sam('{TEST_DIR}/ubx{threads}_rg_tags.bam')
+                      EXCEPT ALL
+                      SELECT sequence_index, read_id, sequence1, qual1
+                      FROM read_sequences_sam('{TEST_DIR}/ub{threads}_rg_tags.bam'));
+----
+0
+
+query I
+SELECT count(*) FROM read_sequences_sam('{TEST_DIR}/ubx{threads}_long.bam');
+----
+60
+
+query I
+SELECT count(*) FROM (SELECT sequence_index, read_id, sequence1, qual1
+                      FROM read_sequences_sam('{TEST_DIR}/ubx{threads}_long.bam')
+                      EXCEPT ALL
+                      SELECT sequence_index, read_id, sequence1, qual1
+                      FROM read_sequences_sam('{TEST_DIR}/ub{threads}_long.bam'));
+----
+0
+
+endloop

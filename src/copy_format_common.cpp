@@ -13,7 +13,9 @@
 #include "duckdb/planner/operator/logical_cteref.hpp"
 
 #include <htslib-1.22.1/htslib/bgzf.h>
+#include <htslib-1.22.1/htslib/sam.h>
 #include <cerrno>
+#include <cstring>
 
 namespace duckdb {
 
@@ -527,6 +529,39 @@ void RecordBuffer::Clear() {
 	blocks.clear();
 	records.clear();
 	size = 0;
+}
+
+[[noreturn]] void ThrowCopyWriteFailed(const char *format, const string &file_path, const char *call) {
+	const string reason = errno != 0 ? string(": ") + std::strerror(errno) : string();
+	throw IOException("COPY FORMAT %s: cannot write '%s': %s failed%s", format, file_path, call, reason);
+}
+
+static_assert(sizeof(bam1_core_t) % 8 == 0, "a BAM record's data must start 8-byte aligned in a RecordBuffer");
+
+void StoreBAMRecord(const bam1_t &record, RecordBuffer &out) {
+	auto data = out.Reserve(sizeof(bam1_core_t) + record.l_data);
+	memcpy(data, &record.core, sizeof(bam1_core_t));
+	memcpy(data + sizeof(bam1_core_t), record.data, record.l_data);
+}
+
+void WriteBAMRecord(htsFile *fp, const sam_hdr_t *header, const_data_ptr_t data, idx_t size, const char *format,
+                    const string &file_path) {
+	bam1_t record {};
+	memcpy(&record.core, data, sizeof(bam1_core_t));
+	record.data = const_cast<uint8_t *>(data + sizeof(bam1_core_t));
+	record.l_data = NumericCast<int>(size - sizeof(bam1_core_t));
+	record.m_data = NumericCast<uint32_t>(record.l_data);
+	errno = 0;
+	if (sam_write1(fp, header, &record) < 0) {
+		ThrowCopyWriteFailed(format, file_path, "sam_write1");
+	}
+}
+
+void CloseSAMCopyFile(htsFile *fp, const char *format, const string &file_path) {
+	errno = 0;
+	if (sam_close(fp) < 0) {
+		ThrowCopyWriteFailed(format, file_path, "sam_close");
+	}
 }
 
 string SequenceChunkReader::ReadId(idx_t row) const {

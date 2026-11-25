@@ -54,6 +54,26 @@ SELECT count(*), count(*) FILTER (WHERE read_id <> 'r' || (sequence_index - 1)) 
 ----
 20000	0
 
+# A Parquet file's order is fixed, so the files are the same at any thread count (docs/writing.md, FASTQ, "Threads,
+# order and memory").
+statement ok
+SET threads=1;
+
+statement ok
+COPY (SELECT read_id, sequence1 FROM p) TO '{TEST_DIR}/kept_t1.fasta' (FORMAT FASTA, PRESERVE_ORDER true);
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM p) TO '{TEST_DIR}/kept_t1.fastq' (FORMAT FASTQ, PRESERVE_ORDER true);
+
+statement ok
+SET threads=8;
+
+query II
+SELECT (SELECT count(DISTINCT md5(content)) FROM read_blob(['{TEST_DIR}/kept.fasta', '{TEST_DIR}/kept_t1.fasta'])),
+       (SELECT count(DISTINCT md5(content)) FROM read_blob(['{TEST_DIR}/kept.fastq', '{TEST_DIR}/kept_t1.fastq']));
+----
+1	1
+
 # --- An ORDER BY keeps its order, with no option ---
 # Record k must be the k-th row in the ORDER BY's order, which is not the input's (the sequences are md5-derived).
 # Too few rows come out of DuckDB's sort in order even to a COPY that keeps none (docs/internals/architecture.md,

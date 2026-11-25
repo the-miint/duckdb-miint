@@ -10,6 +10,7 @@ A reader expands each path it is given as DuckDB's own readers do: a `file:` URI
 - [FASTA / FASTQ](#fasta-and-fastq) - FASTA and FASTQ sequence files.
 - [SAM / BAM](#sam-and-bam) - SAM and BAM alignment files.
     - [`read_alignment_header(path)`](#read_alignment_headerpath) - A header's `@SQ` lines as `(tid, reference, length)`.
+    - [`read_sequences_sam(filename)`](#read_sequences_samfilename) - The reads of SAM, BAM and uBAM files, in `read_fastx`'s schema.
 - [PAF](#paf) - PAF pairwise alignment files, as written by minimap2 and other long-read tools.
 - [GFA](#gfa) - GFA 1 assembly graphs.
     - [`read_gfa_segments(filename)`](#read_gfa_segmentsfilename) - A graph's segments as typed columns.
@@ -219,7 +220,7 @@ HAVING AVG(q) >= 30;
 
 Reading SAM/BAM alignment files occurs through the `read_alignments` table function. Header information is optional. SEQ and QUAL fields are by default not included. 
 
-Sequence data can be read from SAM/BAM into a `read_fastx` compatible schema using `read_sequences_sam`. 
+Sequence data can be read from SAM/BAM into a `read_fastx` compatible schema using [`read_sequences_sam`](#read_sequences_samfilename). 
 
 **Basic example:**
 
@@ -357,6 +358,47 @@ SELECT COUNT(*) = 0 AS header_is_name_sorted FROM (
   FROM read_alignment_header('sorted.bam')
 ) WHERE tid != expected_tid;
 ```
+
+#### `read_sequences_sam(filename)`
+
+Read the reads of SAM, BAM and uBAM files in [`read_fastx`'s schema](#output-columns), so they can be combined
+with FASTQ reads by `UNION ALL` or written by `COPY ... (FORMAT FASTQ)`. It reads the uBAM files
+`COPY ... (FORMAT UBAM)` writes ([Writing](writing.md#ubam)). Alignment fields, tags and read groups are not returned.
+
+```sql
+SELECT read_id, sequence1, qual1 FROM read_sequences_sam('reads.bam');
+
+SELECT * FROM read_sequences_sam('runs/*.bam', include_filepath = true);
+```
+
+**Parameters:**
+
+| Parameter | Type | Default | Purpose |
+| --- | --- | --- | --- |
+| `filename` | `VARCHAR` or `VARCHAR[]` | Required | Path, glob, or list of paths, as `read_alignments` takes them. `-` or `/dev/stdin` reads standard input, as the only path. |
+| `include_filepath` | `BOOLEAN` | `false` | Include the source path. |
+| `max_batch_bytes` | `VARCHAR` | `'64MiB'` | Set the soft limit on the bytes of the records produced at a time, a positive formatted byte size such as `'256MiB'`. |
+
+**Output columns:** those of `read_fastx`. `sequence_index` counts from 1 in each file, `read_id` is the record's
+QNAME, `sequence1` its SEQ, and `qual1` its raw Phred scores, or `NULL` for a record whose QUAL is `*`. `comment`,
+`sequence2` and `qual2` are always `NULL`.
+
+**Behavior:**
+
+- Returns every record, whatever its flags. A secondary or supplementary record whose SEQ is `*` has an empty
+  `sequence1` and a `NULL` `qual1`; a primary or unmapped one fails the scan.
+- Returns SEQ and QUAL as stored. For a reverse-strand alignment (flag 0x10) that is the reverse complement of the
+  read as sequenced, with its qualities reversed; a hard-clipped alignment holds only part of the read; and each
+  record of a pair is a row of its own, with `sequence2` `NULL`.
+- Rows come out in groups of up to 2,048 records. A group closes early once the bytes of its read IDs, sequences and
+  qualities reach `max_batch_bytes`, and a record that would take it past the limit waits for the next group, so only
+  a group of one record passes the limit. This bounds memory for long reads and assemblies stored as uBAM.
+- Reads files in parallel, one thread per file, up to DuckDB's `threads` setting. stdin is read on one thread. A
+  single file, other than stdin, is read with an htslib pool of one thread fewer than `threads`, at most four, and
+  none when `threads` is below 3.
+- Output order, and the memory it costs to keep it while reading several files, are as for `read_fastx`
+  ([Memory and parallel reads](#memory-and-parallel-reads)). Which `COPY` formats keep that order is in
+  [Writing](writing.md).
 
 ### PAF
 

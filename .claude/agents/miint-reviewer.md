@@ -143,6 +143,7 @@ Only rules whose trigger appears in the diff can fire.
 | A MAP or key-value column holding a format's optional fields; a parser of typed fields | R2 |
 | A `switch` or comparison on a format's code letters; a hand-written character-class, case or number helper | R6 |
 | Two structurally similar code paths; a repeated literal or error message; a helper in a feature-named file | R6, R8 |
+| A new data error in one of several writers that build the same record, or a change to the check helper they share | R6 |
 | A reader of a binary format: header offsets, record sizes, bit masks or shifts, version or type checks | R6 |
 | A table function's `Bind` declaring its output columns or expanding a path argument | R6 |
 | A vector or map filled in a loop, or sized from a count read from input | R3 |
@@ -281,6 +282,7 @@ When two similar code paths solve the same problem differently, factor out the s
 
 - **Existing primitives first.** PR-level check 1 owns the procedure. A hand-rolled reverse complement, interval merge, COO builder, id codec or format writer beside an existing one is the finding, in tests as in `src/`.
 - **A copy-pasted sibling is parameterized**, not maintained twice. Same for near-duplicate blocks in one file and an error message or constant repeated across sites.
+- **A data check added to one of several writers of the same record goes in the check they share**, so every format refuses the same values. A value one format now refuses while a sibling still writes it, silently changed by the library underneath, is the finding; where the formats must differ, a comment says why.
 - **A binary format's layout is named, not spelled out.** Header and record offsets, field sizes, bit masks and shifts, version numbers, tags and type codes in a reader are named constants or enums, with the layout described where they are defined, even when used once; byte-to-bit and width conversions use `sizeof` and one shared bits-per-byte constant. One enum or constant style throughout the reader, and a constant two files need is shared, not defined twice.
 - **Reader boilerplate comes from `table_function_common.hpp`.** A reader's shared columns, path-argument expansion and file-exists check use the helpers there, not a copy of them.
 - **Elsewhere, a literal with format meaning is named when it recurs.** A record's marker byte, a record or tag type letter, or a field separator compared at several sites becomes a named constant or enum, so each comparison says what it tests; error messages and comments keep the literal.
