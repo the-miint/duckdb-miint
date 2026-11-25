@@ -6,17 +6,23 @@
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/types.hpp" // ListType, LogicalTypeId (column type validation)
 #include "duckdb/parallel/task_scheduler.hpp"
+#include "duckdb/parser/statement/copy_statement.hpp"
+#include "duckdb/planner/binder.hpp"
+#include "duckdb/planner/operator/logical_copy_to_file.hpp"
+#include "duckdb/planner/operator/logical_cte.hpp"
+#include "duckdb/planner/operator/logical_cteref.hpp"
 
 #include <htslib-1.22.1/htslib/bgzf.h>
+#include <htslib-1.22.1/htslib/sam.h>
 #include <cerrno>
+#include <cstring>
 
 namespace duckdb {
 
 //===--------------------------------------------------------------------===//
 // FormatWriterState Implementation
 //===--------------------------------------------------------------------===//
-FormatWriterState::FormatWriterState(ClientContext &context, idx_t flush_size_p)
-    : flush_size(flush_size_p), written_anything(false) {
+FormatWriterState::FormatWriterState(ClientContext &context, idx_t flush_size_p) : flush_size(flush_size_p) {
 	stream = make_uniq<MemoryStream>();
 }
 
@@ -26,22 +32,20 @@ FormatWriterState::~FormatWriterState() {
 
 void FormatWriterState::Reset() {
 	stream->Rewind();
-	written_anything = false;
 }
 
 //===--------------------------------------------------------------------===//
 // Format Writer Helper Functions
 //===--------------------------------------------------------------------===//
-// Write the accumulated local buffer to the file in <= 1 GiB slices, then reset the buffer.
-// Caller must hold the global lock. This guards every CopyFileHandle::Write backend, not just one:
-// the remote-gzip fallback goes through DuckDB's MiniZStreamWrapper, which casts the write size to
-// unsigned int and throws "Information loss on integer cast" on a single >4 GiB write; chunking
-// keeps that (and any 32-bit limit in the bgzf/BufferedFileWriter backends) safe regardless of how
-// much the local MemoryStream accumulated.
-static void WriteBufferToFile(CopyFileHandle &file, FormatWriterState &local_state) {
+// Write a buffer's contents to the file in <= 1 GiB slices. Caller must hold the global lock. This
+// guards every CopyFileHandle::Write backend, not just one: the remote-gzip fallback goes through
+// DuckDB's MiniZStreamWrapper, which casts the write size to unsigned int and throws "Information
+// loss on integer cast" on a single >4 GiB write; chunking keeps that (and any 32-bit limit in the
+// bgzf/BufferedFileWriter backends) safe regardless of how much the MemoryStream accumulated.
+static void WriteStreamInSlices(CopyFileHandle &file, MemoryStream &stream) {
 	constexpr idx_t MAX_WRITE_CHUNK = 1ULL * 1024 * 1024 * 1024; // 1 GiB
-	const_data_ptr_t data = local_state.stream->GetData();
-	idx_t remaining = local_state.stream->GetPosition();
+	const_data_ptr_t data = stream.GetData();
+	idx_t remaining = stream.GetPosition();
 	idx_t offset = 0;
 	while (remaining > 0) {
 		idx_t to_write = remaining < MAX_WRITE_CHUNK ? remaining : MAX_WRITE_CHUNK;
@@ -49,33 +53,23 @@ static void WriteBufferToFile(CopyFileHandle &file, FormatWriterState &local_sta
 		offset += to_write;
 		remaining -= to_write;
 	}
-
-	// Reset local buffer
-	local_state.Reset();
 }
 
-void FlushFormatBuffer(FormatWriterState &local_state, CopyFileHandle &file, mutex &lock) {
-	if (!local_state.written_anything) {
-		return;
-	}
-
-	lock_guard<mutex> glock(lock);
-	WriteBufferToFile(file, local_state);
-}
-
-void FlushR2Buffer(FormatWriterState &local_state, SequenceCopyGlobalState &gstate) {
-	if (!local_state.written_anything) {
-		return;
-	}
-
-	lock_guard<mutex> glock(gstate.lock);
+// The R2 file, created on the first R2 write across all threads. This is what keeps an all-single-end
+// dataset from producing an empty R2 file in split mode. Caller must hold the global lock.
+static CopyFileHandle &GetR2File(SequenceCopyGlobalState &gstate) {
 	if (!gstate.file_r2) {
-		// First non-NULL R2 record across all threads -> create the R2 file now. This is what
-		// keeps an all-single-end dataset from producing an empty R2 file in split mode.
 		gstate.file_r2 = make_uniq<CopyFileHandle>(*gstate.fs, gstate.r2_path, gstate.compression,
 		                                           gstate.compression_threads, gstate.compression_level);
 	}
-	WriteBufferToFile(*gstate.file_r2, local_state);
+	return *gstate.file_r2;
+}
+
+void WriteSequenceStream(SequenceCopyGlobalState &gstate, SequenceStream stream, MemoryStream &data) {
+	if (data.GetPosition() == 0) {
+		return;
+	}
+	WriteStreamInSlices(stream == SequenceStream::R1 ? *gstate.file_r1 : GetR2File(gstate), data);
 }
 
 //===--------------------------------------------------------------------===//
@@ -278,6 +272,12 @@ void DeclareSequenceCopyOptions(CopyOptionsInput &input) {
 	DeclareCompressionLevelCopyOption(input);
 }
 
+void AddGzipFileExtension(CopyFunctionBindInput &input, FileCompressionType compression) {
+	if (compression == FileCompressionType::GZIP && !IsFileCompressed(input.file_extension, compression)) {
+		input.file_extension += CompressionExtensionFromType(compression);
+	}
+}
+
 int GzipCompressionLevel(const vector<Value> &values, FileCompressionType compression, const string &file_path) {
 	const int level = CopyOptionCompressionLevel(values);
 	if (compression != FileCompressionType::GZIP) {
@@ -389,40 +389,12 @@ unique_ptr<GlobalFunctionData> SequenceCopyInitializeGlobal(ClientContext &conte
 	                                            gstate->compression_level);
 
 	if (fdata.split_output) {
-		// R2 file is created lazily on the first non-NULL R2 record (see FlushR2Buffer), so a
+		// R2 file is created lazily on the first non-NULL R2 record (see GetR2File), so a
 		// single-end dataset written with {ORIENTATION} never produces an empty R2 file.
 		gstate->r2_path = SubstituteOrientation(file_path, "R2");
 	}
 
 	return gstate;
-}
-
-unique_ptr<LocalFunctionData> SequenceCopyInitializeLocal(ExecutionContext &context,
-                                                          const SequenceCopyBindData &fdata) {
-	auto lstate = make_uniq<SequenceCopyLocalState>();
-
-	lstate->writer_state_r1 = make_uniq<FormatWriterState>(context.client, fdata.flush_size);
-
-	if (fdata.split_output) {
-		lstate->writer_state_r2 = make_uniq<FormatWriterState>(context.client, fdata.flush_size);
-	}
-
-	return lstate;
-}
-
-void SequenceCopyCombine(const SequenceCopyBindData &fdata, SequenceCopyGlobalState &gstate,
-                         SequenceCopyLocalState &lstate) {
-	// Flush any remaining data in local buffers
-	FlushFormatBuffer(*lstate.writer_state_r1, *gstate.file_r1, gstate.lock);
-
-	if (fdata.split_output) {
-		FlushR2Buffer(*lstate.writer_state_r2, gstate);
-	}
-
-	// Publish this thread's single/paired observations for the cross-thread consistency check.
-	lock_guard<mutex> glock(gstate.lock);
-	gstate.saw_paired |= lstate.saw_paired;
-	gstate.saw_single |= lstate.saw_single;
 }
 
 void SequenceCopyFinalize(SequenceCopyGlobalState &gstate) {
@@ -442,6 +414,162 @@ void SequenceCopyFinalize(SequenceCopyGlobalState &gstate) {
 	if (gstate.file_r2) {
 		gstate.file_r2->Close();
 	}
+}
+
+//===--------------------------------------------------------------------===//
+// Sequence Copy on DuckDB's Batch API
+//===--------------------------------------------------------------------===//
+CopyFunctionExecutionMode SequenceCopyExecutionMode(bool preserve_insertion_order, bool supports_batch_index) {
+	return preserve_insertion_order ? CopyFunctionExecutionMode::REGULAR_COPY_TO_FILE
+	                                : CopyFunctionExecutionMode::PARALLEL_COPY_TO_FILE;
+}
+
+// Whether an ORDER BY sorts the rows a query's plan returns, as bound: before the optimizer, which makes an ORDER BY
+// with a LIMIT a top-N. Order passes up through projections, filters and limits, and from a CTE to the query that
+// reads it. A join, an aggregate or a subquery in an expression (which binds as a join) orders none of the rows.
+static bool SortsResult(const LogicalOperator &op, vector<reference<const LogicalCTE>> &ctes) {
+	switch (op.type) {
+	case LogicalOperatorType::LOGICAL_ORDER_BY:
+		return true;
+	case LogicalOperatorType::LOGICAL_PROJECTION:
+	case LogicalOperatorType::LOGICAL_FILTER:
+	case LogicalOperatorType::LOGICAL_LIMIT:
+		return SortsResult(*op.children[0], ctes);
+	case LogicalOperatorType::LOGICAL_MATERIALIZED_CTE: {
+		// The CTE's definition, then the query that reads it.
+		ctes.push_back(op.Cast<LogicalCTE>());
+		return SortsResult(*op.children[1], ctes);
+	}
+	case LogicalOperatorType::LOGICAL_CTE_REF: {
+		const auto cte_index = op.Cast<LogicalCTERef>().cte_index;
+		for (auto &cte : ctes) {
+			if (cte.get().table_index == cte_index) {
+				return SortsResult(*cte.get().children[0], ctes);
+			}
+		}
+		return false;
+	}
+	default:
+		return false;
+	}
+}
+
+BoundStatement SequenceCopyPlan(Binder &binder, CopyStatement &stmt, const string &writer_format) {
+	auto &info = *stmt.info;
+	// DuckDB checks its own options against the writer it binds, so its errors for the ones these formats cannot take
+	// would name the writer (_miint_fasta). They are refused here, with DuckDB's messages, under the format the
+	// statement names. File rotation is among them: DuckDB writes a rotating COPY on all threads, which drops an
+	// ORDER BY. Option names are identifiers, which compare case-insensitively.
+	const auto &format = info.format;
+	if (info.options.find("file_size_bytes") != info.options.end()) {
+		throw BinderException("FILE_SIZE_BYTES not implemented for \"%s\"", StringUtil::Lower(format));
+	}
+	if (info.options.find("row_groups_per_file") != info.options.end()) {
+		throw NotImplementedException("Can't use file rotation (e.g., ROW_GROUPS_PER_FILE) with FORMAT \"%s\"",
+		                              StringUtil::Lower(format));
+	}
+	auto stats = info.options.find("return_stats");
+	if (stats != info.options.end() &&
+	    (stats->second.empty() || stats->second[0].CastAs(binder.context, LogicalType::BOOLEAN).GetValue<bool>())) {
+		throw NotImplementedException("RETURN_STATS is not supported for the \"%s\" copy format", format);
+	}
+	if (info.options.find("row_group_size") == info.options.end()) {
+		info.options["row_group_size"] = {Value::UBIGINT(SEQUENCE_DEFAULT_BATCH_ROWS)};
+	}
+	if (info.options.find("row_group_size_bytes") == info.options.end()) {
+		info.options["row_group_size_bytes"] = {Value(SEQUENCE_DEFAULT_BATCH_BYTES)};
+	}
+	info.format = writer_format;
+	auto result = binder.Bind(stmt);
+	// A sequence file's records are a set unless the query sorts them, so order is kept only for an ORDER BY that sorts
+	// the rows the COPY writes, or PRESERVE_ORDER true, not by default as DuckDB does. Such an ORDER BY reaches the
+	// COPY, and DuckDB keeps its order.
+	auto &copy = result.plan->Cast<LogicalCopyToFile>();
+	vector<reference<const LogicalCTE>> ctes;
+	if (copy.preserve_order == PreserveOrderType::AUTOMATIC && !SortsResult(*copy.children[0], ctes)) {
+		copy.preserve_order = PreserveOrderType::DONT_PRESERVE_ORDER;
+	}
+	return result;
+}
+
+//===--------------------------------------------------------------------===//
+// Record Writers on DuckDB's Batch API
+//===--------------------------------------------------------------------===//
+// Records are gathered into blocks of this size; a larger record gets a block of its own.
+static constexpr idx_t RECORD_BLOCK_SIZE = DEFAULT_COPY_FLUSH_SIZE;
+
+data_ptr_t RecordBuffer::Reserve(idx_t record_size) {
+	idx_t offset = blocks.empty() ? 0 : AlignValue(blocks.back().used);
+	if (blocks.empty() || offset + record_size > blocks.back().data.GetSize()) {
+		blocks.push_back(Block {allocator.Allocate(MaxValue(RECORD_BLOCK_SIZE, record_size)), 0});
+		offset = 0;
+	}
+	auto &block = blocks.back();
+	block.used = offset + record_size;
+	records.push_back(Record {blocks.size() - 1, offset, record_size});
+	size += record_size;
+	return block.data.get() + offset;
+}
+
+void RecordBuffer::PopBack() {
+	D_ASSERT(!records.empty());
+	const auto record = records.back();
+	records.pop_back();
+	size -= record.size;
+	// The last record is in the last block. A block it starts held nothing else, and is freed: it may be a record's
+	// own block, of any size.
+	if (record.offset == 0) {
+		blocks.pop_back();
+	} else {
+		blocks.back().used = record.offset;
+	}
+}
+
+void RecordBuffer::Clear() {
+	blocks.clear();
+	records.clear();
+	size = 0;
+}
+
+[[noreturn]] void ThrowCopyWriteFailed(const char *format, const string &file_path, const char *call) {
+	const string reason = errno != 0 ? string(": ") + std::strerror(errno) : string();
+	throw IOException("COPY FORMAT %s: cannot write '%s': %s failed%s", format, file_path, call, reason);
+}
+
+static_assert(sizeof(bam1_core_t) % 8 == 0, "a BAM record's data must start 8-byte aligned in a RecordBuffer");
+
+void StoreBAMRecord(const bam1_t &record, RecordBuffer &out) {
+	auto data = out.Reserve(sizeof(bam1_core_t) + record.l_data);
+	memcpy(data, &record.core, sizeof(bam1_core_t));
+	memcpy(data + sizeof(bam1_core_t), record.data, record.l_data);
+}
+
+void WriteBAMRecord(htsFile *fp, const sam_hdr_t *header, const_data_ptr_t data, idx_t size, const char *format,
+                    const string &file_path) {
+	bam1_t record {};
+	memcpy(&record.core, data, sizeof(bam1_core_t));
+	record.data = const_cast<uint8_t *>(data + sizeof(bam1_core_t));
+	record.l_data = NumericCast<int>(size - sizeof(bam1_core_t));
+	record.m_data = NumericCast<uint32_t>(record.l_data);
+	errno = 0;
+	if (sam_write1(fp, header, &record) < 0) {
+		ThrowCopyWriteFailed(format, file_path, "sam_write1");
+	}
+}
+
+void CloseSAMCopyFile(htsFile *fp, const char *format, const string &file_path) {
+	errno = 0;
+	if (sam_close(fp) < 0) {
+		ThrowCopyWriteFailed(format, file_path, "sam_close");
+	}
+}
+
+string SequenceChunkReader::ReadId(idx_t row) const {
+	string buf;
+	const char *ptr;
+	idx_t size;
+	ResolveSequenceRecordId(read_id_data, row, fdata.read_id_type, buf, ptr, size);
+	return string(ptr, size);
 }
 
 } // namespace duckdb

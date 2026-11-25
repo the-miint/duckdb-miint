@@ -245,6 +245,9 @@ public:
 	// 3. Sorts each group by distal_length descending
 	// 4. For each edge, creates a chain of new internal nodes with fragments
 	//
+	// Existing nodes keep their index and the nodes it creates are appended after them, so data a
+	// caller holds per node index stays with its node.
+	//
 	// Throws if edge_id not found or distal_length exceeds edge length
 	void insert_fully_resolved(const std::vector<Placement> &placements);
 
@@ -271,8 +274,11 @@ public:
 	// false, throws std::runtime_error listing the missing names; otherwise the
 	// missing names are skipped. Throws std::runtime_error if no tip matches.
 	//
-	// The returned tree's node indices are reassigned 0-based (as with build()).
-	NewickTree shear(const std::unordered_set<std::string> &keep_names, bool collapse, bool ignore_missing) const;
+	// The returned tree's node indices are reassigned 0-based (as with build()). When `source` is
+	// given, it receives, for each node of the returned tree, the index in this tree of the node it
+	// came from (no node twice), so a caller can carry per-node data the tree does not hold.
+	NewickTree shear(const std::unordered_set<std::string> &keep_names, bool collapse, bool ignore_missing,
+	                 std::vector<uint32_t> *source = nullptr) const;
 
 	// ========================================================================
 	// Resolution (make multifurcations bifurcating)
@@ -290,7 +296,8 @@ public:
 	// Nodes with two or fewer children are left untouched, including
 	// single-child unifurcations (this resolves polytomies only; use shear() to
 	// collapse unifurcations). The returned tree's node indices are reassigned
-	// 0-based (original nodes keep their index; new nodes follow).
+	// 0-based (original nodes keep their index; new nodes follow), so data a
+	// caller holds per node index stays with its node.
 	NewickTree resolve_multifurcations() const;
 
 	// ========================================================================

@@ -1,0 +1,542 @@
+# name: test/sql/copy_fastx_batches.test
+# description: COPY FORMAT FASTA/FASTQ hand their records to the writer in batches. The default cap (ROW_GROUP_SIZE 64 and ROW_GROUP_SIZE_BYTES '8MB', each added when the statement gives none) bounds a batch of long records and gathers small chunks, and a user's own values win. Batches over 64 MiB, formatted as they are written, give the same bytes as small ones. Data errors name the record's read_id. Reads short enough to be stored inline are written correctly. The hidden registrations _miint_fasta and _miint_fastq write what FASTA and FASTQ write, without the cap. Files DuckDB names itself end in the format's extension.
+# group: [sql]
+
+require miint
+
+statement ok
+SET threads=8;
+
+# DuckDB logs one FlushBatch entry per batch it hands a COPY writer, with the batch's row count, its size as DuckDB
+# measures it, and why it was flushed (BATCH_SIZE: rows reached ROW_GROUP_SIZE, or no cap at all; BATCH_SIZE_BYTES;
+# FORCED_FLUSH: the end of the input).
+statement ok
+CALL enable_logging('PhysicalOperator', storage = 'memory');
+
+statement ok
+CREATE MACRO batches(name) AS TABLE
+SELECT info.rows::BIGINT AS rows, info.size::BIGINT AS size, info.reason AS reason
+FROM duckdb_logs_parsed('PhysicalOperator')
+WHERE class = 'PhysicalCopyToFile' AND event = 'FlushBatch' AND parse_filename(info.file) = name;
+
+# A COPY whose batches are counted exactly, or whose bytes are compared with another's, says PRESERVE_ORDER true:
+# these formats keep no order by default, and on all threads a source scanned as several tasks would split the rows
+# into other batches, in another order.
+
+# A gzipped file's text. read_text does not decompress, so it is rebuilt from the lines read_csv decompresses, which is
+# exact for these files: LF line endings, no empty line, a newline at the end. (The same macro as prodigal_fasta.test.)
+statement ok
+CREATE MACRO ref_text(path) AS (
+    SELECT string_agg(line, E'\n' ORDER BY i) || E'\n'
+    FROM (SELECT row_number() OVER () AS i, line
+          FROM read_csv(path, columns = {'line': 'VARCHAR'}, delim = E'\x1f', quote = '', escape = '',
+                        header = false, auto_detect = false)));
+
+# Short reads. Filtered on i % 128 = 0, a table scan yields chunks of 16 rows (320 rows in 20 chunks).
+statement ok
+CREATE TABLE short_reads AS
+SELECT i, 'r' || i AS read_id,
+       left(translate(md5(i::VARCHAR), '0123456789abcdef', 'ACGTACGTACGTACGT'), 24) AS sequence1,
+       list_transform(range(24), lambda j: ((i + j) % 41)::UTINYINT) AS qual1
+FROM range(0, 40960) r(i);
+
+# 2 Mb records in one chunk: 50 FASTA records of about 2 MB each, 25 FASTQ records of about 4 MB each (sequence and
+# qualities); 100 MB either way.
+statement ok
+CREATE TABLE big_reads AS
+SELECT i, 'b' || i AS read_id,
+       repeat(translate(md5(i::VARCHAR), '0123456789abcdef', 'ACGTACGTACGTACGT'), 62500) AS sequence1
+FROM range(1, 51) r(i);
+
+statement ok
+CREATE TABLE big_fastq AS
+SELECT read_id, sequence1, list_transform(range(length(sequence1)), lambda j: ((i + j) % 41)::UTINYINT) AS qual1
+FROM big_reads WHERE i <= 25;
+
+# --- The default byte cap bounds a batch of long records ---
+# Without it, all 100 MB is one batch. With it, a batch ends with the record that reaches 8 MB, except that DuckDB
+# leaves the rest of a chunk whole unless the batch reaches 9/8 of the cap before the chunk's last record
+# (CopyBatchSlicer::Slice): before its last record, every batch is under 9 MB. That makes FASTA batches of 4 records (2 MB each) and FASTQ batches of 2 (4 MB
+# each), the last FASTQ batch holding the 3 that end the chunk. (Under a 64 MB cap they reach 62-64 MB.)
+
+statement ok
+COPY (SELECT read_id, sequence1 FROM big_reads) TO '{TEST_DIR}/big_default.fasta' (FORMAT FASTA);
+
+query IIII
+SELECT count(*) > 1, sum(rows), max(rows), bool_and(size - size // rows < 9000000) FROM batches('big_default.fasta');
+----
+true	50	4	true
+
+statement ok
+COPY big_fastq TO '{TEST_DIR}/big_default.fastq' (FORMAT FASTQ);
+
+query IIII
+SELECT count(*) > 1, sum(rows), max(rows), bool_and(size - size // rows < 9000000) FROM batches('big_default.fastq');
+----
+true	25	3	true
+
+# A .fasta path without FORMAT gets the cap too: DuckDB picks FASTA from the extension before binding.
+statement ok
+COPY (SELECT read_id, sequence1 FROM big_reads) TO '{TEST_DIR}/big_no_format.fasta';
+
+query IIII
+SELECT count(*) > 1, sum(rows), max(rows), bool_and(size - size // rows < 9000000) FROM batches('big_no_format.fasta');
+----
+true	50	4	true
+
+# --- The default row cap gathers small chunks ---
+# With neither cap, every chunk is a batch of its own; with the byte cap alone, the 320 rows are one batch. With the
+# row cap, a batch is flushed once it holds 64 rows: four chunks of 16. (The row cap never cuts a chunk, so a batch
+# can pass 64 rows; four chunks of 16 make exactly 64.)
+
+statement ok
+COPY (SELECT read_id, sequence1 FROM short_reads WHERE i % 128 = 0) TO '{TEST_DIR}/small_default.fasta' (FORMAT FASTA, PRESERVE_ORDER true);
+
+query IIII
+SELECT count(*), sum(rows), min(rows), max(rows) FROM batches('small_default.fasta');
+----
+5	320	64	64
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM short_reads WHERE i % 128 = 0)
+TO '{TEST_DIR}/small_default.fastq' (FORMAT FASTQ, PRESERVE_ORDER true);
+
+query IIII
+SELECT count(*), sum(rows), min(rows), max(rows) FROM batches('small_default.fastq');
+----
+5	320	64	64
+
+# --- A user's own values win ---
+# ROW_GROUP_SIZE 1000 keeps all 320 rows in one batch, where the default makes batches of 64.
+
+statement ok
+COPY (SELECT read_id, sequence1 FROM short_reads WHERE i % 128 = 0)
+TO '{TEST_DIR}/small_rows1000.fasta' (FORMAT FASTA, ROW_GROUP_SIZE 1000, PRESERVE_ORDER true);
+
+query II
+SELECT count(*), sum(rows) FROM batches('small_rows1000.fasta');
+----
+1	320
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM short_reads WHERE i % 128 = 0)
+TO '{TEST_DIR}/small_rows1000.fastq' (FORMAT FASTQ, ROW_GROUP_SIZE 1000, PRESERVE_ORDER true);
+
+query II
+SELECT count(*), sum(rows) FROM batches('small_rows1000.fastq');
+----
+1	320
+
+# ROW_GROUP_SIZE_BYTES '1GB' keeps all 100 MB in one batch, where the default cuts it at 8 MB. (The default row cap
+# that is still added does not cut it either: the 50 rows are one chunk, under 64 rows.)
+statement ok
+COPY (SELECT read_id, sequence1 FROM big_reads) TO '{TEST_DIR}/big_bytes1gb.fasta' (FORMAT FASTA, ROW_GROUP_SIZE_BYTES '1GB');
+
+query II
+SELECT count(*), sum(rows) FROM batches('big_bytes1gb.fasta');
+----
+1	50
+
+# --- Batches over 64 MiB give the same bytes ---
+# A batch whose text would pass 64 MiB is formatted as it is written, in flush_batch, rather than into one buffer in
+# prepare_batch. Pairs of 1 Mb mates, 36 for FASTA and the first 18 for FASTQ: under ROW_GROUP_SIZE 1000 and
+# ROW_GROUP_SIZE_BYTES '1GB' each COPY below is one batch of 72 MB of text, just over the threshold; under the default
+# cap the same query takes 8 MB batches, formatted in prepare_batch, and is the oracle.
+
+statement ok
+CREATE TABLE huge_pairs AS
+SELECT *,
+       list_transform(range(length(sequence1)), lambda j: ((i + j) % 41)::UTINYINT) AS qual1,
+       list_transform(range(length(sequence2)), lambda j: ((i * 3 + j) % 41)::UTINYINT) AS qual2
+FROM (SELECT i, 'P' || i AS read_id,
+             repeat(translate(md5(i::VARCHAR), '0123456789abcdef', 'ACGTACGTACGTACGT'), 31250) AS sequence1,
+             repeat(translate(md5(i::VARCHAR || '/2'), '0123456789abcdef', 'ACGTACGTACGTACGT'), 31250) AS sequence2
+      FROM range(1, 37) r(i));
+
+statement ok
+COPY (SELECT read_id, sequence1, sequence2 FROM huge_pairs)
+TO '{TEST_DIR}/hp_deferred.{ORIENTATION}.fasta' (FORMAT FASTA, ROW_GROUP_SIZE 1000, ROW_GROUP_SIZE_BYTES '1GB', PRESERVE_ORDER true);
+
+statement ok
+COPY (SELECT read_id, sequence1, sequence2 FROM huge_pairs) TO '{TEST_DIR}/hp_prepared.{ORIENTATION}.fasta' (FORMAT FASTA, PRESERVE_ORDER true);
+
+statement ok
+COPY (SELECT read_id, sequence1, sequence2 FROM huge_pairs)
+TO '{TEST_DIR}/hp_deferred_il.fasta' (FORMAT FASTA, INTERLEAVE true, ROW_GROUP_SIZE 1000, ROW_GROUP_SIZE_BYTES '1GB', PRESERVE_ORDER true);
+
+statement ok
+COPY (SELECT read_id, sequence1, sequence2 FROM huge_pairs) TO '{TEST_DIR}/hp_prepared_il.fasta' (FORMAT FASTA, INTERLEAVE true, PRESERVE_ORDER true);
+
+statement ok
+COPY (SELECT read_id, sequence1, sequence2 FROM huge_pairs)
+TO '{TEST_DIR}/hp_deferred_il.fasta.gz' (FORMAT FASTA, INTERLEAVE true, ROW_GROUP_SIZE 1000, ROW_GROUP_SIZE_BYTES '1GB', PRESERVE_ORDER true);
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM huge_pairs WHERE i <= 18)
+TO '{TEST_DIR}/hp_deferred.{ORIENTATION}.fastq' (FORMAT FASTQ, ROW_GROUP_SIZE 1000, ROW_GROUP_SIZE_BYTES '1GB', PRESERVE_ORDER true);
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM huge_pairs WHERE i <= 18) TO '{TEST_DIR}/hp_prepared.{ORIENTATION}.fastq' (FORMAT FASTQ, PRESERVE_ORDER true);
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM huge_pairs WHERE i <= 18)
+TO '{TEST_DIR}/hp_deferred_il.fastq' (FORMAT FASTQ, INTERLEAVE true, ROW_GROUP_SIZE 1000, ROW_GROUP_SIZE_BYTES '1GB', PRESERVE_ORDER true);
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM huge_pairs WHERE i <= 18) TO '{TEST_DIR}/hp_prepared_il.fastq' (FORMAT FASTQ, INTERLEAVE true, PRESERVE_ORDER true);
+
+# Each deferred COPY was one batch of more than 64 MiB; the oracle's were not.
+query III
+SELECT parse_filename(info.file) AS f, count(*), bool_and(info.size::BIGINT > 67108864)
+FROM duckdb_logs_parsed('PhysicalOperator')
+WHERE class = 'PhysicalCopyToFile' AND event = 'FlushBatch' AND parse_filename(info.file) LIKE 'hp_deferred%'
+GROUP BY f ORDER BY f;
+----
+hp_deferred.{ORIENTATION}.fasta	1	true
+hp_deferred.{ORIENTATION}.fastq	1	true
+hp_deferred_il.fasta	1	true
+hp_deferred_il.fasta.gz	1	true
+hp_deferred_il.fastq	1	true
+
+query II
+SELECT count(*) > 6, bool_and(info.size::BIGINT < 67108864)
+FROM duckdb_logs_parsed('PhysicalOperator')
+WHERE class = 'PhysicalCopyToFile' AND event = 'FlushBatch' AND parse_filename(info.file) LIKE 'hp_prepared%';
+----
+true	true
+
+# Each file's md5 is taken as it is read, so the join holds digests, not file contents.
+query I
+WITH deferred AS (
+    SELECT replace(parse_filename(filename), 'hp_deferred', '') AS output, md5(content) AS digest
+    FROM read_text(['{TEST_DIR}/hp_deferred*.fasta', '{TEST_DIR}/hp_deferred*.fastq'])),
+prepared AS (
+    SELECT replace(parse_filename(filename), 'hp_prepared', '') AS output, md5(content) AS digest
+    FROM read_text(['{TEST_DIR}/hp_prepared*.fasta', '{TEST_DIR}/hp_prepared*.fastq']))
+SELECT output FROM deferred JOIN prepared USING (output, digest)
+ORDER BY output;
+----
+.R1.fasta
+.R1.fastq
+.R2.fasta
+.R2.fastq
+_il.fasta
+_il.fastq
+
+query I
+SELECT md5(ref_text('{TEST_DIR}/hp_deferred_il.fasta.gz')) = (SELECT md5(content) FROM read_text('{TEST_DIR}/hp_prepared_il.fasta'));
+----
+true
+
+# With order off, the deferred batch writes every pair once, the R1 and R2 files in step.
+statement ok
+COPY (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM huge_pairs WHERE i <= 18)
+TO '{TEST_DIR}/hp_off.{ORIENTATION}.fastq' (FORMAT FASTQ, PRESERVE_ORDER false, ROW_GROUP_SIZE 1000, ROW_GROUP_SIZE_BYTES '1GB');
+
+query I
+SELECT count(*) FROM (
+    (SELECT read_id, sequence1, qual1, sequence2, qual2
+     FROM read_fastx('{TEST_DIR}/hp_off.R1.fastq', sequence2 = '{TEST_DIR}/hp_off.R2.fastq')
+     EXCEPT ALL SELECT read_id, sequence1, qual1, sequence2, qual2 FROM huge_pairs WHERE i <= 18)
+    UNION ALL
+    (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM huge_pairs WHERE i <= 18
+     EXCEPT ALL SELECT read_id, sequence1, qual1, sequence2, qual2
+                FROM read_fastx('{TEST_DIR}/hp_off.R1.fastq', sequence2 = '{TEST_DIR}/hp_off.R2.fastq')));
+----
+0
+
+# --- Paired and single-end records in different batches ---
+# Each batch carries whether it saw paired and single-end rows, and the file's state gathers them, so a COPY whose
+# batches disagree fails at the end. The table scan yields a chunk of 2,048 paired rows, then one of 952 single-end
+# rows, and ROW_GROUP_SIZE 1 makes each chunk a batch.
+
+statement ok
+CREATE TABLE mixed AS
+SELECT i, 'm' || i AS read_id, 'ACGT' AS sequence1, CASE WHEN i < 2048 THEN 'GG' END AS sequence2
+FROM range(0, 3000) r(i);
+
+statement error
+COPY (SELECT read_id, sequence1, sequence2 FROM mixed) TO '{TEST_DIR}/mixed_kept.fasta' (FORMAT FASTA, INTERLEAVE true, ROW_GROUP_SIZE 1);
+----
+Inconsistent paired-end data
+
+query I
+SELECT count(*) FROM batches('mixed_kept.fasta');
+----
+2
+
+statement error
+COPY (SELECT read_id, sequence1, sequence2 FROM mixed)
+TO '{TEST_DIR}/mixed_off.fasta' (FORMAT FASTA, INTERLEAVE true, ROW_GROUP_SIZE 1, PRESERVE_ORDER false);
+----
+Inconsistent paired-end data
+
+# --- Data errors name the record's read_id ---
+# The name is the read_id column's value, whatever the type of that column: a row's index in its chunk is not
+# something a user can map back to a record.
+
+statement error
+COPY (FROM (VALUES ('ok1', 'ACGT'), ('bad', NULL), ('ok2', 'GG')) v(read_id, sequence1)) TO '{TEST_DIR}/err1.fasta' (FORMAT FASTA);
+----
+read_id 'bad'
+
+statement error
+COPY (FROM (VALUES (1::BIGINT, 'ACGT'), (2::BIGINT, NULL)) v(read_id, sequence1)) TO '{TEST_DIR}/err_bigint.fasta' (FORMAT FASTA);
+----
+read_id '2'
+
+statement error
+COPY (FROM (VALUES ('00000000-0000-0000-0000-000000000001'::UUID, 'ACGT'), ('00000000-0000-0000-0000-000000000002'::UUID, NULL))
+           v(read_id, sequence1))
+TO '{TEST_DIR}/err_uuid.fasta' (FORMAT FASTA);
+----
+read_id '00000000-0000-0000-0000-000000000002'
+
+# A NULL read_id has no value to name.
+statement error
+COPY (FROM (VALUES ('ok1', 'ACGT'), (NULL, 'GG')) v(read_id, sequence1)) TO '{TEST_DIR}/err_null_id.fasta' (FORMAT FASTA);
+----
+NULL value in read_id column
+
+# With ID_AS_SEQUENCE_INDEX the id written is sequence_index, so a NULL there is an error too.
+statement error
+COPY (FROM (VALUES (1::BIGINT, 'ok1', 'ACGT'), (NULL, 'bad', 'GG')) v(sequence_index, read_id, sequence1))
+TO '{TEST_DIR}/err_seqindex.fasta' (FORMAT FASTA, ID_AS_SEQUENCE_INDEX true);
+----
+NULL value in sequence_index column (read_id 'bad')
+
+statement error
+COPY (FROM (VALUES (1::BIGINT, 'ok1', 'AC', [30, 30]::UTINYINT[]), (NULL, 'bad', 'GG', [30, 30]::UTINYINT[]))
+           v(sequence_index, read_id, sequence1, qual1))
+TO '{TEST_DIR}/err_seqindex.fastq' (FORMAT FASTQ, ID_AS_SEQUENCE_INDEX true);
+----
+NULL value in sequence_index column (read_id 'bad')
+
+# A paired record with nowhere to put R2 (single-file output). The first record is single-end, so the COPY gets as far
+# as the second row before failing.
+statement error
+COPY (FROM (VALUES ('ok1', 'ACGT', NULL), ('bad', 'AC', 'GG')) v(read_id, sequence1, sequence2))
+TO '{TEST_DIR}/err2.fasta' (FORMAT FASTA);
+----
+read_id 'bad'
+
+statement error
+COPY (FROM (VALUES ('ok1', 'ACGT', [30, 30, 30, 30]::UTINYINT[]), ('bad', NULL, [30]::UTINYINT[])) v(read_id, sequence1, qual1))
+TO '{TEST_DIR}/err1.fastq' (FORMAT FASTQ);
+----
+read_id 'bad'
+
+statement error
+COPY (FROM (VALUES ('ok1', 'ACGT', [30, 30, 30, 30]::UTINYINT[]), ('bad', 'AC', NULL)) v(read_id, sequence1, qual1))
+TO '{TEST_DIR}/err2.fastq' (FORMAT FASTQ);
+----
+read_id 'bad'
+
+statement error
+COPY (FROM (VALUES ('ok1', 'ACGT', [30, 30, 30, 30]::UTINYINT[]), ('bad', 'ACG', [30, 30]::UTINYINT[])) v(read_id, sequence1, qual1))
+TO '{TEST_DIR}/err3.fastq' (FORMAT FASTQ);
+----
+read_id 'bad'
+
+# R2's quality length.
+statement error
+COPY (FROM (VALUES ('ok1', 'AC', [30, 30]::UTINYINT[], 'GG', [30, 30]::UTINYINT[]),
+                   ('bad', 'AC', [30, 30]::UTINYINT[], 'GGG', [30]::UTINYINT[]))
+           v(read_id, sequence1, qual1, sequence2, qual2))
+TO '{TEST_DIR}/err4.fastq' (FORMAT FASTQ, INTERLEAVE true);
+----
+read_id 'bad'
+
+# A paired record with nowhere to put R2.
+statement error
+COPY (FROM (VALUES ('ok1', 'AC', [30, 30]::UTINYINT[], NULL, NULL),
+                   ('bad', 'AC', [30, 30]::UTINYINT[], 'GG', [30, 30]::UTINYINT[]))
+           v(read_id, sequence1, qual1, sequence2, qual2))
+TO '{TEST_DIR}/err5.fastq' (FORMAT FASTQ);
+----
+read_id 'bad'
+
+# sequence2 without qual2.
+statement error
+COPY (FROM (VALUES ('ok1', 'AC', [30, 30]::UTINYINT[], 'GG', [30, 30]::UTINYINT[]),
+                   ('bad', 'AC', [30, 30]::UTINYINT[], 'GG', NULL))
+           v(read_id, sequence1, qual1, sequence2, qual2))
+TO '{TEST_DIR}/err6.fastq' (FORMAT FASTQ, INTERLEAVE true);
+----
+read_id 'bad'
+
+# A NULL inside a quality list has no score to write.
+statement error
+COPY (FROM (VALUES ('ok1', 'AC', [30, 30]::UTINYINT[]), ('bad', 'AC', [30, NULL]::UTINYINT[])) v(read_id, sequence1, qual1))
+TO '{TEST_DIR}/err_null_qual1.fastq' (FORMAT FASTQ);
+----
+NULL quality score in qual1 (read_id 'bad')
+
+statement error
+COPY (FROM (VALUES ('ok1', 'AC', [30, 30]::UTINYINT[], 'GG', [30, 30]::UTINYINT[]),
+                   ('bad', 'AC', [30, 30]::UTINYINT[], 'GG', [NULL, 30]::UTINYINT[]))
+           v(read_id, sequence1, qual1, sequence2, qual2))
+TO '{TEST_DIR}/err_null_qual2.fastq' (FORMAT FASTQ, INTERLEAVE true);
+----
+NULL quality score in qual2 (read_id 'bad')
+
+# A score that would encode past '~' (126): 100 + 33.
+statement error
+COPY (FROM (VALUES ('ok1', 'AC', [30, 30]::UTINYINT[]), ('bad', 'AC', [30, 100]::UTINYINT[])) v(read_id, sequence1, qual1))
+TO '{TEST_DIR}/err_overflow.fastq' (FORMAT FASTQ);
+----
+<REGEX>:.*Quality score overflow: 100 \+ 33 = 133 exceeds valid ASCII range \(max 126\) for read_id 'bad'\s*
+
+statement error
+COPY (FROM (VALUES ('ok1', 'AC', [30, 30]::UTINYINT[], 'GG', [30, 30]::UTINYINT[]),
+                   ('bad', 'AC', [30, 30]::UTINYINT[], 'GG', [30, 100]::UTINYINT[]))
+           v(read_id, sequence1, qual1, sequence2, qual2))
+TO '{TEST_DIR}/err_overflow_r2.fastq' (FORMAT FASTQ, INTERLEAVE true);
+----
+Quality score overflow: 100 + 33 = 133 exceeds valid ASCII range (max 126) for read_id 'bad' (R2)
+
+# The same in a batch over 64 MiB, which is formatted only when it is written: the error is still raised while the
+# batch is prepared, with the others, and names the record.
+statement ok
+CREATE TABLE big_fastq_overflow AS
+SELECT read_id, sequence1, CASE WHEN read_id = 'b25' THEN list_concat([100]::UTINYINT[], qual1[2:]) ELSE qual1 END AS qual1
+FROM big_fastq;
+
+statement error
+COPY big_fastq_overflow TO '{TEST_DIR}/err_overflow_deferred.fastq' (FORMAT FASTQ, ROW_GROUP_SIZE 1000, ROW_GROUP_SIZE_BYTES '1GB');
+----
+read_id 'b25'
+
+# DuckDB logs a FlushBatch before it calls flush_batch, so none here means the error came from prepare_batch.
+query I
+SELECT count(*) FROM batches('err_overflow_deferred.fastq');
+----
+0
+
+# --- Reads of up to 12 bases ---
+# DuckDB stores a string of up to 12 bytes inside the string_t itself rather than on its heap, so the writer must
+# point at the string_t in the vector, not at a copy of it. The file must equal the text built here in SQL. (It catches
+# a pointer to a copy only where the copy's bytes have since been overwritten, which a release build does not ensure.)
+
+statement ok
+CREATE TABLE tiny AS
+SELECT i, 't' || i AS read_id,
+       left(translate(md5(i::VARCHAR), '0123456789abcdef', 'ACGTACGTACGTACGT'), 1 + i % 12) AS sequence1,
+       list_transform(range(1 + i % 12), lambda j: ((i + j) % 41)::UTINYINT) AS qual1,
+       left(translate(md5(i::VARCHAR || '/2'), '0123456789abcdef', 'ACGTACGTACGTACGT'), 1 + (i * 7) % 12) AS sequence2,
+       list_transform(range(1 + (i * 7) % 12), lambda j: ((i * 3 + j) % 41)::UTINYINT) AS qual2
+FROM range(0, 5000) r(i);
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1, sequence2, qual2 FROM tiny) TO '{TEST_DIR}/tiny.fastq' (FORMAT FASTQ, INTERLEAVE true, PRESERVE_ORDER true);
+
+query I
+SELECT (SELECT content FROM read_text('{TEST_DIR}/tiny.fastq')) = (
+    SELECT string_agg('@' || read_id || E'\n' || sequence1 || E'\n+\n'
+                      || array_to_string(list_transform(qual1, lambda q: chr(q + 33)), '') || E'\n'
+                      || '@' || read_id || E'\n' || sequence2 || E'\n+\n'
+                      || array_to_string(list_transform(qual2, lambda q: chr(q + 33)), '') || E'\n', '' ORDER BY i)
+    FROM tiny);
+----
+true
+
+# --- The hidden registrations ---
+# FORMAT FASTA/FASTQ bind as _miint_fasta/_miint_fastq with the default cap added. Naming the hidden ones directly
+# writes the same bytes, without the cap.
+
+statement ok
+COPY (SELECT read_id, sequence1 FROM short_reads WHERE i < 3000) TO '{TEST_DIR}/public.fasta' (FORMAT FASTA, LINE_WIDTH 10, PRESERVE_ORDER true);
+
+statement ok
+COPY (SELECT read_id, sequence1 FROM short_reads WHERE i < 3000) TO '{TEST_DIR}/hidden.fasta' (FORMAT _miint_fasta, LINE_WIDTH 10);
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM short_reads WHERE i < 3000) TO '{TEST_DIR}/public.fastq' (FORMAT FASTQ, QUAL_OFFSET 64, PRESERVE_ORDER true);
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM short_reads WHERE i < 3000)
+TO '{TEST_DIR}/hidden.fastq' (FORMAT _miint_fastq, QUAL_OFFSET 64);
+
+query II
+SELECT (SELECT md5(content) FROM read_text('{TEST_DIR}/hidden.fasta')) = (SELECT md5(content) FROM read_text('{TEST_DIR}/public.fasta')),
+       (SELECT md5(content) FROM read_text('{TEST_DIR}/hidden.fastq')) = (SELECT md5(content) FROM read_text('{TEST_DIR}/public.fastq'));
+----
+true	true
+
+statement ok
+COPY (SELECT read_id, sequence1 FROM big_reads) TO '{TEST_DIR}/big_hidden.fasta' (FORMAT _miint_fasta);
+
+query II
+SELECT count(*), sum(rows) FROM batches('big_hidden.fasta');
+----
+1	50
+
+# --- Files DuckDB names itself end in the format's extension ---
+
+statement ok
+COPY (SELECT read_id, sequence1 FROM short_reads) TO '{TEST_DIR}/per_thread_fasta' (FORMAT FASTA, PER_THREAD_OUTPUT true);
+
+query II
+SELECT count(*) >= 1, bool_and(ends_with(file, '.fasta')) FROM glob('{TEST_DIR}/per_thread_fasta/*');
+----
+true	true
+
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM short_reads) TO '{TEST_DIR}/per_thread_fastq' (FORMAT FASTQ, PER_THREAD_OUTPUT true);
+
+query II
+SELECT count(*) >= 1, bool_and(ends_with(file, '.fastq')) FROM glob('{TEST_DIR}/per_thread_fastq/*');
+----
+true	true
+
+# EXPORT DATABASE names each table's file from the format the statement names, not the writer it binds.
+statement ok
+ATTACH ':memory:' AS export_src;
+
+statement ok
+CREATE TABLE export_src.reads AS SELECT read_id, sequence1, qual1 FROM short_reads LIMIT 100;
+
+statement ok
+EXPORT DATABASE export_src TO '{TEST_DIR}/exported_fasta' (FORMAT FASTA);
+
+statement ok
+EXPORT DATABASE export_src TO '{TEST_DIR}/exported_fastq' (FORMAT FASTQ);
+
+query II
+SELECT (SELECT count(*) FROM read_fastx('{TEST_DIR}/exported_fasta/reads.fasta')),
+       (SELECT count(*) FROM read_fastx('{TEST_DIR}/exported_fastq/reads.fastq'));
+----
+100	100
+
+# With gzip output the files end in .gz too, as DuckDB's CSV writer names its own; the content is gzip either way.
+statement ok
+COPY (SELECT read_id, sequence1 FROM short_reads) TO '{TEST_DIR}/per_thread_fasta_gz' (FORMAT FASTA, PER_THREAD_OUTPUT true, COMPRESSION gzip);
+
+query III
+SELECT count(*) >= 1, bool_and(ends_with(file, '.fasta.gz')),
+       (SELECT count(*) FROM read_fastx('{TEST_DIR}/per_thread_fasta_gz/*'))
+FROM glob('{TEST_DIR}/per_thread_fasta_gz/*');
+----
+true	true	40960
+
+statement ok
+COPY (SELECT i % 2 AS bucket, read_id, sequence1, qual1 FROM short_reads)
+TO '{TEST_DIR}/partitioned_fastq_gz' (FORMAT FASTQ, PARTITION_BY (bucket), COMPRESSION gzip);
+
+query III
+SELECT count(*), bool_and(ends_with(file, '.fastq.gz')),
+       (SELECT count(*) FROM read_fastx('{TEST_DIR}/partitioned_fastq_gz/*/*'))
+FROM glob('{TEST_DIR}/partitioned_fastq_gz/*/*');
+----
+2	true	40960
+
+# A FILE_EXTENSION that already ends in .gz is kept as given, not made .gz.gz.
+statement ok
+COPY (SELECT read_id, sequence1, qual1 FROM short_reads)
+TO '{TEST_DIR}/per_thread_fastq_gz_ext' (FORMAT FASTQ, PER_THREAD_OUTPUT true, COMPRESSION gzip, FILE_EXTENSION 'fq.gz');
+
+query II
+SELECT count(*) >= 1, bool_and(ends_with(file, '.fq.gz') AND NOT ends_with(file, '.gz.gz'))
+FROM glob('{TEST_DIR}/per_thread_fastq_gz_ext/*');
+----
+true	true

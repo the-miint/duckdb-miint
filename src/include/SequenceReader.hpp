@@ -95,6 +95,13 @@ public:
 	// Defaults to SIZE_MAX, preserving the row-only behavior for existing callers.
 	SequenceRecordBatch read(const int n, const size_t max_bytes = SIZE_MAX);
 
+	// Whether sequence1 (`segment` 0) or sequence2 (1) is FASTQ: its first header starts with '@'.
+	// A FASTQ record with no bases has an empty quality, as a FASTA record does, so a record's
+	// quality cannot tell the formats apart.
+	bool IsFastq(int segment) const {
+		return segment == 0 ? state1_.fastq : state2_.fastq;
+	}
+
 	// Test seam: the largest number of records materialized by any single underlying stream
 	// poll over this reader's lifetime, by read() or by a read-ahead. Lets tests assert that
 	// large records do not trigger oversized prefetches (see dynamic poll sizing in
@@ -134,6 +141,9 @@ private:
 		// Nothing parsed yet. Text before the first header is skipped for FASTA, which can open
 		// with ';' comments, and is an error for FASTQ.
 		bool at_start = true;
+		// The first header is '@'. Set by the first parse, which the constructor runs, so before
+		// any read-ahead thread touches this state.
+		bool fastq = false;
 	};
 
 	enum class ParseResult { RECORD, END, MALFORMED };

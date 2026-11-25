@@ -116,6 +116,8 @@ make format-fix                    # auto-fix differences
 
 Note: black ships breaking style changes between major versions — pinning to `24.*` is required, not optional.
 
+`make format-check` does not check files under `cmake/`; CI's separate `cmake-format (cmake/)` job does, with cmake-format 0.6.13. See `docs/internals/build-system.md` ("Format `cmake/` yourself").
+
 ## Testing
 
 If a test produces an **incorrect expected value**: DO NOT change the expected value without permission.
@@ -178,4 +180,6 @@ Developer-facing deep dives live under `docs/internals/`:
 - **[`docs/internals/releasing.md`](docs/internals/releasing.md)** — version numbers, release branches, how a release is tagged and reaches community-extensions (`scripts/release-community-extension.sh`).
 
 User-facing API reference (parameters, return types, examples) is organized by task under `docs/` — start from the index at [`docs/table_of_contents.md`](docs/table_of_contents.md) (e.g. `docs/reading.md`, `docs/writing.md`, `docs/alignment_*.md`, `docs/qc.md`, `docs/diversity.md`, `docs/insdc_ena.md`, `docs/utilities.md`).
+
+When adding a public function, macro, or COPY format, follow the [function reference guide](docs/internals/architecture.md#documenting-a-new-public-function).
 

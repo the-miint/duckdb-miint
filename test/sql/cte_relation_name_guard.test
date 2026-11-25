@@ -595,6 +595,11 @@ WITH c AS (SELECT 1 AS x) SELECT * FROM shear_tree('nope', 'c');
 shear_tree: 'c' is a common table expression
 
 statement error
+WITH c AS (SELECT 1 AS x) SELECT * FROM taxonomy_violations('c');
+----
+taxonomy_violations: 'c' is a common table expression
+
+statement error
 WITH c AS (SELECT 1 AS x) SELECT * FROM tree_ancestors('c');
 ----
 tree_ancestors: 'c' is a common table expression

@@ -38,8 +38,8 @@ SELECT * FROM shear_tree('ref_tree', 'keep');
 
 **Parameters:**
 
-- `tree_table` (VARCHAR): Name of a table or view containing tree data in [`read_newick`](reading.md#newick) schema (`node_index`, `parent_index`, `name`, `branch_length`, `edge_id`).
-- `tips_table` (VARCHAR): Name of a table or view with a `name` (VARCHAR) column listing the tip names to keep. Passing the tips as a table (rather than a list literal) keeps the call practical when the kept set is large. Duplicate and `NULL` names are ignored.
+- `tree_table` (VARCHAR): Name of a table or view containing tree data in [`read_newick`](reading.md#newick) schema (`node_index`, `parent_index`, `name`, `branch_length`, `edge_id`), with `name` VARCHAR, BIGINT or UUID and an optional `label` (VARCHAR) column (see "Tree tables" under [Newick](reading.md#newick)).
+- `tips_table` (VARCHAR): Name of a table or view with a `name` column listing the tip names to keep. Passing the tips as a table (rather than a list literal) keeps the call practical when the kept set is large. Duplicate and `NULL` names are ignored. Tips are matched to the tree's names by their text, so `name` may have any type, whatever the tree's: BIGINT tips `1, 2` match a VARCHAR tree's `'1', '2'`, with no cast.
 - `collapse` (BOOLEAN, default `true`): How to treat internal nodes left with a single child after pruning.
     - `true` — standard phylogenetic shear: remove single-descendant ancestors and **sum their branch lengths onto the surviving descendant edge**, so tip-to-tip distances are preserved. The lowest common ancestor (LCA) of the kept tips becomes the new root; nodes above it are dropped.
     - `false` — preserve every internal node that lies on a path to a kept tip, with original parent links and branch lengths unchanged (unifurcations retained).
@@ -47,15 +47,16 @@ SELECT * FROM shear_tree('ref_tree', 'keep');
 
 **Output schema:** Same as [`read_newick`](reading.md#newick) (without filepath), reindexed 0-based:
 
-- `node_index` (BIGINT), `name` (VARCHAR), `branch_length` (DOUBLE, nullable), `edge_id` (BIGINT, nullable), `parent_index` (BIGINT, nullable, NULL for root), `is_tip` (BOOLEAN).
+- `node_index` (BIGINT), `name` (the tree's type: VARCHAR, BIGINT or UUID), `branch_length` (DOUBLE, nullable), `edge_id` (BIGINT, nullable), `parent_index` (BIGINT, nullable, NULL for root), `is_tip` (BOOLEAN), and `label` (VARCHAR, nullable) last when the tree has one.
 
 The kept nodes keep their relative `node_index` order, so a tree in `read_newick`'s postorder numbering (see [Newick](reading.md#newick), "Node numbering") is sheared into a tree in postorder numbering.
 
-The schema is `UNION ALL`-compatible with `read_newick` and can be written straight back out with `COPY ... (FORMAT NEWICK)`.
+For a VARCHAR tree without `label`, the schema is `UNION ALL`-compatible with `read_newick`. The result can be written straight back out with `COPY ... (FORMAT NEWICK)`, which writes a node's `label` where it has no `name` and refuses a node with both.
 
 **Behavior / semantics:**
 
-- Only **tip** names are matched — an internal-node label in `tips_table` is treated as missing.
+- Only **tip** names are matched — an internal node's name in `tips_table` is treated as missing.
+- Every kept node keeps its `name` and `label`. A node that `collapse := true` removes takes its label with it, as it does its name; `collapse := false` keeps every label on the kept paths. An unnamed node's `name` is `''` in a VARCHAR tree and NULL in a BIGINT or UUID tree.
 - Branch-length summation (collapse mode) treats an unspecified length (NaN → `NULL`) as `0`, but a collapsed chain that is *entirely* unspecified stays `NULL`, so topology-only trees (cladograms) round-trip as cladograms.
 - A collapsed edge keeps the surviving (lower) node's `edge_id`; the `edge_id`s of merged intermediate nodes are dropped.
 - The new root has no incoming edge, so its `branch_length` is `NULL`.
@@ -81,6 +82,7 @@ COPY (
 
 - `tree_table` or `tips_table` does not exist.
 - `tree_table` missing required `node_index` / `parent_index` columns; `tips_table` missing required `name` column.
+- The tree's `name` is not VARCHAR, BIGINT or UUID, or its `label` is not VARCHAR; or either has changed type since the query was planned (a view under a prepared statement), when the tree is read.
 - A requested tip is not a tip in the tree and `ignore_missing := false`.
 - No requested tip matches any tip in the tree.
 
@@ -111,14 +113,14 @@ Resolve every multifurcation (a node with more than two children — a "polytomy
 
 **Parameters:**
 
-- `tree_table` (VARCHAR): Name of a table or view containing tree data in [`read_newick`](reading.md#newick) schema (requires `node_index` and `parent_index`; `name`, `branch_length`, `edge_id` optional).
+- `tree_table` (VARCHAR): Name of a table or view containing tree data in [`read_newick`](reading.md#newick) schema (requires `node_index` and `parent_index`; `name`, `branch_length`, `edge_id` optional), with `name` VARCHAR, BIGINT or UUID and an optional `label` (VARCHAR) column (see "Tree tables" under [Newick](reading.md#newick)).
 
-**Output schema:** Same as [`read_newick`](reading.md#newick) (without filepath), reindexed 0-based: `node_index`, `name`, `branch_length`, `edge_id`, `parent_index`, `is_tip`. The schema is `UNION ALL`-compatible with `read_newick`, can be written back out with `COPY ... (FORMAT NEWICK)`, and feeds directly into `phylo_independent_contrasts`. Original nodes keep their relative order and the new connector nodes are numbered after all of them, so when anything was resolved the output is **not** in `read_newick`'s postorder numbering.
+**Output schema:** Same as [`read_newick`](reading.md#newick) (without filepath), reindexed 0-based: `node_index`, `name` (in the tree's type), `branch_length`, `edge_id`, `parent_index`, `is_tip`, and `label` last when the tree has one. For a VARCHAR tree without `label`, the schema is `UNION ALL`-compatible with `read_newick`. The result can be written back out with `COPY ... (FORMAT NEWICK)` (which writes a node's `label` where it has no `name` and refuses a node with both) and feeds directly into `phylo_independent_contrasts`. Original nodes keep their relative order and the new connector nodes are numbered after all of them, so when anything was resolved the output is **not** in `read_newick`'s postorder numbering.
 
 **Behavior / semantics:**
 
 - A node with `m ≥ 3` children `c0, c1, …, c(m-1)` (in `node_index` order) is resolved into a **deterministic left-comb**: the node keeps `c0` and a new internal node `N1`; `N1` keeps `c1` and `N2`; … ; `N(m-2)` keeps `c(m-2)` and `c(m-1)`. This inserts `m-2` new internal nodes.
-- New connector nodes are **unnamed**, have **branch length `0`**, and no `edge_id`. Because the connectors are zero-length, the original edge lengths and all root-to-tip distances are unchanged.
+- New connector nodes are **unnamed** (`''` in a VARCHAR tree, NULL in a BIGINT or UUID tree), have **branch length `0`**, no `edge_id` and no `label`. Because the connectors are zero-length, the original edge lengths and all root-to-tip distances are unchanged. Every original node keeps its `name` and `label`.
 - Nodes with two or fewer children are left untouched. **Single-child unifurcations are not collapsed** — that is a different operation; use [`shear_tree`](#shear-subset-to-tips) with `collapse := true` for that.
 - A multifurcating root is resolved as well.
 - Child order follows `node_index` (the canonical order `read_newick` assigns, encoding the original Newick left-to-right order); the reader sorts input rows by `node_index`, so the result is reproducible regardless of how the tree relation is physically stored.
@@ -148,6 +150,7 @@ COPY (
 
 - `tree_table` does not exist.
 - `tree_table` missing required `node_index` / `parent_index` columns.
+- The tree's `name` is not VARCHAR, BIGINT or UUID, or its `label` is not VARCHAR; or either has changed type since the query was planned (a view under a prepared statement), when the tree is read.
 
 ### Nearest target tip
 
@@ -484,10 +487,10 @@ Requires an index built beforehand, either by [`krepp_index_create`](#build-a-kr
   Write the tree on one line, with no comments, no support values, and a single trailing newline.
 
   **One known limitation.** miint reads a `{N}` decoration only where the jplace specification puts it — after the branch length, `(A:1{0},B:1{1}):0{2};`. krepp additionally accepts it straight after the closing parenthesis, `((A:1,B:1){1}:1);`. A backbone in that second form is rejected here even though krepp would read it. The fix is to widen miint's Newick parser, which is shared with [`read_newick`](reading.md) and every other phylogeny function, so it is not this function's to make.
-- `hdist_th` (UINTEGER, default 4): Maximum Hamming distance for a *k*-mer to count as a match. Must not exceed the index's *k*, and is rejected at bind time above 31 (the largest *k* krepp will build) and at scan start above the index's actual *k*. krepp itself imposes no upper bound and reads past the end of an internal table when one is exceeded — at `hdist_th = 4294967295` that was measured to crash the process.
+- `hdist_th` (UINTEGER, default 4): Maximum Hamming distance for a *k*-mer to count as a match. Must not exceed the index's *k*, and is rejected at bind time above 31 (the largest *k* krepp will build) and at scan start above the index's actual *k*. krepp's library path, which `place_krepp` uses, imposes no upper bound and reads past the end of an internal table when one is exceeded — at `hdist_th = 4294967295` that was measured to crash the process.
 - `tau` (UINTEGER, default 2): Hamming distance threshold for the placement filter. Must not exceed `hdist_th`, and is rejected at bind time if it does. krepp's CLI refuses the same combination; the library path this function uses would instead read past the end of a `hdist_th + 1` element histogram.
 - `chisq` (DOUBLE, default 2.706): Chi-square cutoff for distinguishing candidate edges. Must be positive, and is rejected at bind time if it is not (krepp's CLI applies the same constraint); a non-positive cutoff discards every candidate and returns nothing. The default is the 90th percentile of the chi-square distribution with 1 degree of freedom, i.e. a significance level of 0.10. (krepp's own help text calls this "alpha = 90%"; alpha conventionally names the significance level, so read it as the percentile.)
-- `multi` (BOOLEAN, default true): Report every candidate edge rather than only the best one. `multi=false` is markedly less reproducible than the default — see **Reproducibility** below.
+- `multi` (BOOLEAN, default true): Report every candidate edge rather than only the best one. How `multi=false` chooses between equally scored candidates is under **Reproducibility** below.
 - `filter` (BOOLEAN, default true): Drop placements without enough *k*-mer support.
 - `batch_size` (BIGINT, default 2048, the DuckDB vector size): Queries per unit of work. Each thread places one batch at a time, so a call whose queries fit in fewer batches than there are threads leaves the rest idle. Lower it for a few thousand long queries, such as assembled contigs. Must be at least 1. It changes how the work is split, not the placements. A batch, and its placements, are held in memory while it is placed, so a `batch_size` near the relation's row count holds the whole relation at once.
 - `batch_bases` (BIGINT, default none): Also cap each batch at this many bases of `sequence1`: a query that would take a batch past the limit starts the next one, and a query longer than the limit is a batch of its own. Where query lengths vary widely, a row count alone can put most of the bases in a few batches; this caps them without shrinking batches of short reads. Must be at least 1. When both are given, a batch closes at whichever limit it reaches first.
@@ -503,8 +506,8 @@ Requires an index built beforehand, either by [`krepp_index_create`](#build-a-kr
 - `edge_num` (BIGINT): Edge of the backbone tree the placement sits on
 - `likelihood` (DOUBLE): Log likelihood of the placement
 - `like_weight_ratio` (DOUBLE): Likelihood weight ratio. Sums to 1 across one fragment's rows **with `multi` on**; with `multi=false` the single row keeps its share of a total computed over all the candidates that were discarded, so it is below 1 whenever there was more than one. It is a distribution over the candidate edges of one read, so aggregate it per `fragment` (or per `edge_num` across reads) — a bare `sum(like_weight_ratio)` over the whole table is not a meaningful quantity.
-- `distal_length` (DOUBLE): Distance from the distal (child) end of the edge to the attachment point, always within the edge. With `t` the edge's branch length (0 if it has none), `d_c` the read's Jukes-Cantor distance to the edge's child node, and `d_p` its distance to the parent node: `t·d_c/d_p`, clamped strictly inside the edge (or 0 when `t` is 0), when `d_p` is finite and positive; otherwise `min(t/2, d_c)` (krepp's `make_placement`, `ext/krepp/src/query.cpp:218-242`). krepp has a finite `d_p` when it estimated a distance for the parent node, which does not require the parent's own edge to be among the output rows; with a single matched node it has none. So `distal_length` depends only on `t`, `d_c` and `d_p`: reads on one edge get the same value when those agree, and also whenever they land on the clamp next to the parent end (`d_c` ≥ `d_p`), on the fallback with `d_c` ≥ `t/2`, or on an edge whose length is 0 or missing.
-- `pendant_length` (DOUBLE): Length of the branch joining the read to the attachment point, never negative: `max(0, min(d_c − distal, d_p − t + distal))` in the first case above, `max(0, d_c − distal)` in the second.
+- `distal_length` (DOUBLE): Distance from the distal (child) end of the edge to the attachment point, always within the edge. With `b` the edge's branch length (0 if it has none), `d_x` the read's Jukes-Cantor distance to the edge's child node, and `d_y` its distance to the parent node: `b·d_x/(d_x + d_y)`, or `b/2` when both distances are 0 (krepp's `compute_branch_lengths`, `ext/krepp/src/query.hpp`). krepp has a finite `d_y` when it estimated a distance for the parent node, which does not require the parent's own edge to be among the output rows; with a single matched node it has none, and 0.33 is used in its place. So `distal_length` depends only on `b`, `d_x` and `d_y`: reads on one edge get the same value when those agree, and on an edge whose length is 0 or missing it is 0.
+- `pendant_length` (DOUBLE): Length of the branch joining the read to the attachment point, never negative: `max(d_x − distal, d_y − (b − distal))` when krepp has `d_y`, `d_x − distal` when it does not. When that comes out negative, krepp uses instead the read's smallest Jukes-Cantor distance to a matched leaf below the edge, or 0 if there is none.
 - `distance` (DOUBLE): krepp's estimated distance to the placement. Not part of jplace; `read_jplace` has no equivalent column.
 
 **Behavior:**
@@ -514,29 +517,15 @@ Requires an index built beforehand, either by [`krepp_index_create`](#build-a-kr
 - Sequences shorter than the index's *k* are skipped, with one warning per `place_krepp` call — not one per skipped sequence (see [`miint_warnings`](utilities.md)). A sequence containing anything outside the IUPAC nucleotide alphabet raises rather than being silently dropped.
 - RNA input is accepted: `U`/`u` are rewritten to `T`/`t` before krepp sees them, because krepp treats uracil as an ambiguous base and an untouched RNA read would place nothing.
 - Reads are placed on all of DuckDB's threads, and rows come out in no fixed order. Add an `ORDER BY` when the order matters.
-- The index is loaded once **per call** and shared across that call's threads; indexes routinely run to tens of gigabytes. Two `place_krepp` calls in one statement load two copies concurrently, so a query that compares several parameter settings side by side multiplies the memory accordingly.
+- The index is loaded once **per call** and shared across that call's threads; indexes routinely run to tens of gigabytes. Its k-mer table, offset array and record file are memory-mapped rather than read into memory, krepp's default since v0.11.1, which miint keeps: pages come from the files as placement touches them, and two `place_krepp` calls map the same files instead of each reading a copy. With the earlier pin each call read its own copy, and a process placing 100 sequences against a 186 GiB index was killed at a 160 GB memory limit in 5 of 5 runs. The tree and the rest of the index are still built per call. Concurrent calls on the same index have run within the memory of one mapped copy. Two rules follow from the mapping:
+  - Do not change, rewrite or truncate an index's files while a call is using them.
+  - Do not place against an index on a network filesystem. Copy it to local disk first.
 
-**Reproducibility:** krepp's output is not bit-reproducible, and neither is this function. krepp accumulates and normalizes placements through hash maps keyed by tree-node *pointer*, so iteration order moves with the heap layout. What that costs you, measured on the toy index:
+**Reproducibility:** repeated calls on the same reads and index return the same rows, identical in every column, `like_weight_ratio` included, with `multi` on or off, on one thread or eight. How krepp achieves this, with the code sites, is under "Placement output is reproducible" in [`docs/internals/embedded-tools.md`](internals/embedded-tools.md). Measured on krepp v0.12.3 (macOS arm64):
+- The toy index that `run_tests.sh` builds with krepp's CLI: 5 processes, each placing twice with `multi` on and twice with it off. All 10 `multi` calls returned the same 403 rows, and all 10 `multi=false` calls the same 92.
+- An index built with `krepp_index_create` from 1,000 tips of the Greengenes2 2024.09 backbone (959 marker-length sequences of about 1.5 kb and 41 genomes), placing 20,000 reads of 150 bp. With `multi=false`, 3 runs on one thread and 2 on eight returned the same 19,998 rows in every column, with each read on the same edge as krepp's own CLI. With `multi` on, runs on one thread and on eight returned the same 330,863 rows in every column.
 
-The unit that matters is the **index load**, not the process: each `place_krepp` call loads its own copy in `InitGlobal`, so two calls in one session are already in different regimes. Everything below was re-measured on krepp v0.10.0 (`31205033`) against the toy index that `run_tests.sh` builds with krepp's CLI, except the CI-build runs described after the table, which used an index built with `krepp_index_create`. Every figure is an observation on its index rather than a bound.
-
-krepp v0.9.1 added a de-duplication pass to its k-mer match accumulation, described upstream as a consistent tie break. Measured on v0.9.1, it did not make the output reproducible; the figures were essentially unchanged from v0.9.0.
-
-| Quantity | Reproducible? |
-|---|---|
-| Which reads place at all (`fragment` set) | Stable in every run measured — 5 separate processes (92 fragments), and in the CI-build runs described below (93 fragments) |
-| The total row count | Stable in the 5 processes above (404 rows). **Not in the CI-build runs below:** 385 or 386 rows from calls with identical arguments |
-| `likelihood`, `distance`, `distal_length`, `pendant_length` | Bit-identical across repeated calls, and across 5 separate processes; in the CI-build runs below, bit-identical on every `(fragment, edge_num)` that both calls return |
-| Which candidate edges appear (the `(fragment, edge_num)` set) | Identical across repeated calls above. **Not in the CI-build runs below:** one edge comes and goes |
-| `like_weight_ratio` | **No.** Three processes were each asked for the same placements twice; the two answers differed in 59, 55 and 73 of 404 rows respectively, by up to 2.5e-4 absolute. Per-fragment sums still come to 1 (measured max deviation 2.2e-16; the test pins 1e-9). |
-| Which candidate edges appear, with `multi` on | Identical across two loads in one process, across 5 separate processes, and across 6 runs of krepp's own CLI |
-| Which single edge is chosen, with `multi=false` | **No.** Over 6 runs of `krepp place --no-multi`, 1 of 92 fragments alternated between two edges. |
-
-The CI-build runs used the x86_64 Linux (Ubuntu 24.04) build that CI produces, at the same krepp commit (`31205033`), against an index built with `krepp_index_create` from the same toy references and tree (`k=27, w=35, h=11`) rather than the CLI-built index above. A macOS build that built its index the same way, with `krepp_index_create` and the same arguments, placed 92 reads in 404 rows, matching the figures above, so the 93 here is not explained by building the index with `krepp_index_create` instead of the CLI. Over 5 processes of 6 calls each, with and without `batch_size`/`batch_bases`, one candidate edge (fragment `||61435-6176`, edge 38) appeared in some calls and not in others, including two calls with identical arguments, so the row count moved between 385 and 386. Three things held in every call: the same reads placed, no `(fragment, edge_num)` appeared twice, and `likelihood`, `distance`, `distal_length` and `pendant_length` were bit-identical on every edge two calls shared. `like_weight_ratio` and `multi=false` were not re-measured in these runs. Compare placements across calls per read, not row for row.
-
-The `multi=false` case is worth understanding rather than just avoiding: krepp ranks candidates with a non-stable `std::sort` over a vector built by iterating a hash map keyed by tree-node *pointer*, then takes the last element. Equal-ranking candidates therefore land in an order that moves with the heap. The observed rate is low, but which read it hits is not something you can predict or pin.
-
-If you need one deterministic row per read, leave `multi` on and pick with SQL (`ORDER BY like_weight_ratio DESC`, tie-broken on `edge_num`) rather than using `multi=false`. If you need reproducible `like_weight_ratio` values, round them — do not compare them for equality across runs.
+A fixed tie-break makes the answer consistent, not more accurate. A read that matches several references equally well is placed on the same one every time, the one krepp's ordering picks: with `multi=false`, the candidate with the larger clade, then the lower `d_llh`, then the lower edge number.
 
 **Examples:**
 ```sql
@@ -546,8 +535,9 @@ SELECT read_id, sequence1 FROM read_fastx('queries.fq');
 
 SELECT * FROM place_krepp(query_table='reads', index_path='index_toy');
 
--- One row per read, chosen deterministically. Prefer this over multi=false,
--- which lets krepp break score ties on hash-map iteration order.
+-- One row per read: the highest like_weight_ratio, ties to the lower edge.
+-- multi=false also returns one row per read, but by krepp's own ranking
+-- (see Reproducibility above).
 SELECT DISTINCT ON (fragment) fragment, edge_num, like_weight_ratio
 FROM place_krepp(query_table='reads', index_path='index_toy')
 ORDER BY fragment, like_weight_ratio DESC, edge_num;
@@ -568,7 +558,7 @@ FROM place_krepp(query_table='reads', index_path='index_toy');
 SELECT * FROM tree_resolve_placement('ref_tree', 'placements');
 ```
 
-**Availability:** built when `MIINT_ENABLE_KREPP` is on, which excludes WASM and Windows. Check with `SELECT * FROM miint_versions() WHERE library = 'krepp';`, which reports the `git describe --tags --dirty --always` output that the build records for the submodule: `v0.9.1-11-g3120503` for the current pin when the checkout has the v0.9.1 tag and the commits from it to the pin, `3120503` when it lacks either, and `-dirty` appended when the submodule has local changes. krepp's own version string for this pin is v0.10.0; upstream has no tag after v0.9.1. That string is the `krepp-version` row, and it is what an index records as `krepp version:` in each partial's `metadata*.txt`, so a caller loading a prebuilt index can compare the two before placing:
+**Availability:** built when `MIINT_ENABLE_KREPP` is on, which excludes WASM and Windows. Check with `SELECT * FROM miint_versions() WHERE library = 'krepp';`, which reports the `git describe --tags --dirty --always` output that the build records for the submodule: `v0.12.3` for the current pin, which is that tag, `e6de5de` when the checkout lacks the tag, and `-dirty` appended when the submodule has local changes. krepp's own version string for this pin is also v0.12.3. That string is the `krepp-version` row, and it is what an index records as `krepp version:` in each partial's `metadata*.txt`, so a caller loading a prebuilt index can compare the two before placing:
 
 ```sql
 SELECT regexp_extract(content, '(?m)^krepp version: ([^\r\n]*)', 1) AS index_version,
@@ -580,7 +570,7 @@ A mismatch means the index was written by a different krepp. A match is not proo
 
 ### Build a krepp index
 
-Build the index [`place_krepp`](#phylogenetic-placement-krepp) reads, from relations already in the database. The same linked krepp writes it and reads it, so the writer's version and the reader's version cannot drift apart — which matters more here than it sounds: an index written by a different krepp is *misread* rather than rejected (v0.9.0 swapped the recursion branches in `Node::generate_tree`), and as of 2026-09-10 bioconda's newest krepp is 0.9.1, older than the untagged v0.10.0 (`31205033`) this links.
+Build the index [`place_krepp`](#phylogenetic-placement-krepp) reads, from relations already in the database. The same linked krepp writes it and reads it, so the writer's version and the reader's version cannot drift apart — which matters more here than it sounds: an index written by a different krepp is *misread* rather than rejected (v0.9.0 swapped the recursion branches in `Node::generate_tree`), and as of 2026-11-23 bioconda's newest krepp is 0.12.1, older than the v0.12.3 (`e6de5de`) this links.
 
 **Function signature**:
 
@@ -599,15 +589,15 @@ Build the index [`place_krepp`](#phylogenetic-placement-krepp) reads, from relat
 - `k` (INTEGER, default 29): *k*-mer length. krepp requires 19 ≤ *k* ≤ 31.
 - `w` (INTEGER, default *k* + 6): Minimizer window. Must be at least *k*.
 - `h` (INTEGER, default *k* − 16): Number of LSH positions. krepp requires 9 ≤ *h* ≤ 15, and *h* ≥ *k* − 16.
-- `m` (INTEGER, default 4), `r` (INTEGER, default 1), `frac` (BOOLEAN, default true): Partitioning of the *k*-mer space, exactly as krepp's `--m`, `--r` and `--frac`. These decide the index's filename suffix (`-m4r1-frac`).
+- `m` (INTEGER, default 4), `r` (INTEGER, default 1), `frac` (BOOLEAN, default true): Partitioning of the *k*-mer space, exactly as krepp's `--m`, `--r` and `--frac`. `m` must be at least 1 and `r` less than `m`. These decide the index's filename suffix (`-m4r1-frac`).
 
-  **`r` means different things depending on `frac`, and only one of them partitions.** With `frac := false`, a *k*-mer is indexed when `LSH(x) mod m == r`, so each `r` is a disjoint slice. With `frac := true` — the default, matching krepp's own — the test is `LSH(x) mod m <= r` (`ext/krepp/src/rqseq.cpp:133`), making `r` a cumulative **threshold**: `r := 2` contains everything `r := 1` contains and more, and the partial is registered under every residue from 0 to `r` (`ext/krepp/src/index.cpp:146-148`). Measured on the 25-genome corpus in `ext/krepp/test` at `m := 4` and the default `k`, `total_num_kmers` runs 8,675,085 / 13,491,823 / 17,366,632 for `r` = 1 / 2 / 3 — `r := 3` already spans the whole space. krepp refuses to load two `frac := true` partials that differ in `r` (`LSHF::check_compatible`, `ext/krepp/src/lshf.cpp:163-170`), so a `frac := true` index is a single partial: `krepp_index_create` refuses to add a second one to an `output_path`, and `place_krepp` refuses a directory holding two.
+  **`r` means different things depending on `frac`, and only one of them partitions.** With `frac := false`, a *k*-mer is indexed when `LSH(x) mod m == r`, so each `r` is a disjoint slice. With `frac := true` — the default, matching krepp's own — the test is `LSH(x) mod m <= r` (`ext/krepp/src/rqseq.cpp:126`), making `r` a cumulative **threshold**: `r := 2` contains everything `r := 1` contains and more, and the partial is registered under every residue from 0 to `r` (`ext/krepp/src/index.cpp:211-219`). Measured on the 25-genome corpus in `ext/krepp/test` at `m := 4` and the default `k`, `total_num_kmers` runs 8,675,085 / 13,491,823 / 17,366,632 for `r` = 1 / 2 / 3 — `r := 3` already spans the whole space. krepp refuses to load two `frac := true` partials that differ in `r` (`LSHF::check_compatible`, `ext/krepp/src/lshf.cpp:161-168`), so a `frac := true` index is a single partial: `krepp_index_create` refuses to add a second one to an `output_path`, and `place_krepp` refuses a directory holding two.
 
   Use `frac := true` to **downsample** a single index (`m := 32, r := 16` keeps roughly half the *k*-mers), and `frac := false` to **split one build across jobs**. Only the second indexes a corpus too large for one pass.
 - `sdust_t` (INTEGER, default 0), `sdust_w` (INTEGER, default 0): SDUST low-complexity masking threshold and window. Both 0 disables masking; krepp warns that enabling it makes its subsampling model slightly inaccurate.
 - `threads` (INTEGER, default 1, maximum 256): Threads krepp spreads the build over. Available only when the extension was built with an OpenMP runtime present — `SELECT * FROM miint_versions() WHERE library = 'krepp-openmp'` returns a row when it was. On a build without one, `threads := 1` is accepted and anything larger is **refused rather than clamped**, because a thread count that is quietly ignored is indistinguishable from a slow machine. The 256 ceiling is a guard rail, not a tuning limit: krepp passes the value to `omp_set_num_threads` unclamped, and when the runtime cannot create that many threads it aborts the process rather than failing the call.
 
-  Which files a threaded build changes: krepp merges each node's children in whatever order their tasks finish, so the colour arrays (`cmer`'s subset column, and `crecord`) differ between a serial and a threaded build. The *k*-mers indexed and the bucket each lands in do not — `inc-m4r1-frac` was byte-identical across 1 and 4 threads, and `total_num_kmers` was unchanged. Note that no two builds are byte-identical across *every* file regardless of thread count, because `metadata-*.txt` records a build timestamp. Placement output is not a clean comparison in either direction — `place_krepp` is not reproducible run to run even single-threaded, for reasons that predate this parameter and are unrelated to it; the variation observed was confined to `like_weight_ratio`, with `edge_num` and the distances stable.
+  Which files a threaded build changes: krepp merges each node's children in whatever order their tasks finish, so the colour arrays (`cmer`'s subset column, and `crecord`) differ between a serial and a threaded build. The *k*-mers indexed and the bucket each lands in do not — `inc-m4r1-frac` was byte-identical across 1 and 4 threads, and `total_num_kmers` was unchanged. Note that no two builds are byte-identical across *every* file regardless of thread count, because `metadata-*.txt` records a build timestamp. Whether `place_krepp` returns the same rows from a serial and a threaded build of the same references has not been measured.
 
   Scaling is sublinear and flattens early. Measured through `krepp_index_create` on a ten-core Apple M1 Max over the 25-genome corpus in `ext/krepp/test`, one run per point: about 10.1 s at one thread, 5.0 s at four, 4.6 s at eight.
 
@@ -653,7 +643,7 @@ SELECT * FROM place_krepp(query_table := 'reads', index_path := 'my_index');
 - **krepp writes progress to stderr** — one line per tree node — which appears in the terminal rather than in the query result.
 - **The index depends on the order rows arrive in.** krepp's k-mer extraction for one reference is sensitive to the order of the records inside that reference's FASTA, and those records are written in the order `sequence_table` yields them — which SQL does not guarantee without an `ORDER BY`. Measured on a two-reference fixture, the same three rows grouped by `read_id` produce a k-mer table 8 bytes (one k-mer) larger than the same rows interleaved. The indexes are equally valid; they are not byte-identical. Add an `ORDER BY` to `sequence_table` if you need a reproducible artifact.
 - The function materialises one FASTA per reference in a temporary directory (under `$TMPDIR`) and hands krepp a `name -> path` map, because that is the only shape krepp's builder accepts *with* a guide tree: handed a single FASTA it switches to per-sequence mode, where each record is its own reference and a guide tree is refused outright. The temporary directory is removed when the call finishes, successfully or not. One file is open at a time, so the descriptor cost does not grow with the reference count; rows sharing a `read_id` that are not adjacent cost an extra open apiece, so grouping them pays.
-- **Reference sequences are held to the IUPAC nucleotide alphabet** (`ACGTURYKMSWBDHVN`, either case) — the same rule [`place_krepp`](#phylogenetic-placement-krepp) applies to queries, for two reasons rather than one. A byte above 127 indexes past the end of krepp's 128-entry nucleotide table. And a newline followed by `>` inside a sequence would open a *second* FASTA record in that reference's file, which krepp neither rejects nor notices: it folds every record in a reference's file into the same tree leaf, so the reference would silently carry k-mers from content no row claimed. Offending rows raise, naming the byte and its offset.
+- **Reference sequences are held to the IUPAC nucleotide alphabet** (`ACGTURYKMSWBDHVN`, either case) — the same rule [`place_krepp`](#phylogenetic-placement-krepp) applies to queries, for two reasons rather than one. A byte above 127 is read as N by krepp (its nucleotide table maps every byte from 0x80 up to N), so it would be indexed as an ambiguous base rather than reported. And a newline followed by `>` inside a sequence would open a *second* FASTA record in that reference's file, which krepp neither rejects nor notices: it folds every record in a reference's file into the same tree leaf, so the reference would silently carry k-mers from content no row claimed. Offending rows raise, naming the byte and its offset.
 - **A non-NULL `sequence2` raises.** A krepp reference is a single sequence; handed a paired-end relation, indexing only `sequence1` would build a plausible index from half the data and report `status = 'ok'`. The column may exist as long as every value is NULL — the same contract the aligners' subject tables use.
 - Fatal errors inside krepp — an out-of-range `k`, a malformed tree, an unreadable input — are reported as SQL errors carrying krepp's own message. Without that, krepp's `error_exit` is a `std::exit` that would take the DuckDB process down with no error at all.
 
@@ -669,17 +659,20 @@ Resolve phylogenetic placements into a reference tree, returning a fully resolve
 
 **Parameters:**
 
-- `tree_table` (VARCHAR): Name of a table or view containing tree data in `read_newick` schema (requires `node_index` and `parent_index` columns; `name`, `branch_length`, `edge_id` are optional)
-- `placements_table` (VARCHAR): Name of a table or view containing placement data: `fragment_id` (VARCHAR, BIGINT or UUID, as a `read_id`, so `place_krepp`'s `fragment` of any id type can be used; the placed tip is named with its text), `edge_id` (BIGINT, INTEGER, UBIGINT or UINTEGER), and `like_weight_ratio`, `distal_length` and `pendant_length` (each DOUBLE or FLOAT)
+- `tree_table` (VARCHAR): Name of a table or view containing tree data in `read_newick` schema (requires `node_index` and `parent_index` columns; `name`, `branch_length`, `edge_id` are optional), with `name` VARCHAR, BIGINT or UUID and an optional `label` (VARCHAR) column (see "Tree tables" under [Newick](reading.md#newick))
+- `placements_table` (VARCHAR): Name of a table or view containing placement data: `fragment_id`, `edge_id` (BIGINT, INTEGER, UBIGINT or UINTEGER), and `like_weight_ratio`, `distal_length` and `pendant_length` (each DOUBLE or FLOAT). A fragment's id names the tip it becomes, so its type depends on the tree's `name`:
+    - a VARCHAR tree takes a `fragment_id` of VARCHAR, BIGINT or UUID, as a `read_id`, so `place_krepp`'s `fragment` of any id type can be used; the placed tip is named with its text;
+    - a BIGINT or UUID tree takes a `fragment_id` of its own type.
 
 **Output schema:** Same as [`read_newick`](reading.md#newick) (without filepath):
 
 - `node_index` (BIGINT): 0-based index of node in resolved tree. Original nodes keep their relative order and the nodes created for placements are numbered after all of them, so the output is **not** in `read_newick`'s postorder numbering.
-- `name` (VARCHAR): Node label (placed fragments use their fragment_id as name)
+- `name` (the tree's type: VARCHAR, BIGINT or UUID): Node name (placed fragments use their fragment_id as name; the internal node a placement creates is unnamed: `''` in a VARCHAR tree, NULL in a BIGINT or UUID tree)
 - `branch_length` (DOUBLE, nullable): Branch length
 - `edge_id` (BIGINT, nullable): Edge identifier (NULL for newly created nodes)
 - `parent_index` (BIGINT, nullable): Parent node's node_index (NULL for root)
 - `is_tip` (BOOLEAN): Whether node is a tip/leaf
+- `label` (VARCHAR, nullable), last, when the tree has one: each original node keeps its label; the nodes a placement creates have none
 
 **Behavior:**
 
@@ -690,7 +683,7 @@ Resolve phylogenetic placements into a reference tree, returning a fully resolve
 - Multiple placements on the same edge are sorted by `distal_length` and inserted as a chain
 - Preserves original tip-to-tip distances in the tree
 - Works with both tables and views for either parameter
-- Schema is UNION ALL-compatible with `read_newick`
+- For a VARCHAR tree without `label`, the schema is UNION ALL-compatible with `read_newick`
 
 **Reproducibility:** The resolved tree is a function of the placement rows, not
 of the order they arrive in or of how they hash. Two things secure that.
@@ -758,6 +751,8 @@ WHERE is_tip = true;
 
 - Tree table or placements table does not exist
 - Tree table missing required `node_index` or `parent_index` columns
+- The tree's `name` is not VARCHAR, BIGINT or UUID, or its `label` is not VARCHAR; or either has changed type since the query was planned (a view under a prepared statement), when the tree is read
+- On a BIGINT or UUID tree, a `fragment_id` of another type, when the query is planned and again when the placements are read
 - Placements table missing required columns (`fragment_id`, `edge_id`, `like_weight_ratio`, `distal_length`, `pendant_length`), or a column of another type than listed above, when the query is planned and again when the placements are read
 - Placement references an `edge_id` not present in the tree
 - `distal_length` exceeds the edge's branch length

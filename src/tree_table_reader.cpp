@@ -1,5 +1,8 @@
 #include "tree_table_reader.hpp"
 #include "catalog_utils.hpp"
+#include "id_column_utils.hpp"
+#include "read_newick.hpp"
+#include "tree_function_utils.hpp"
 #include "miint_streaming_query.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/main/connection.hpp"
@@ -12,9 +15,7 @@
 
 namespace duckdb {
 
-void ValidateTreeTableSchema(ClientContext &context, const std::string &table_name) {
-	auto info = GetTableOrViewColumns(context, table_name, "Tree table");
-
+static void CheckTreeColumns(const TableOrViewColumns &info, const std::string &table_name) {
 	// node_index and parent_index are required; name/branch_length/edge_id are
 	// optional (ReadTreeTable substitutes NULL when they are absent).
 	for (const char *required : {"node_index", "parent_index"}) {
@@ -24,7 +25,17 @@ void ValidateTreeTableSchema(ClientContext &context, const std::string &table_na
 	}
 }
 
-std::vector<miint::NodeInput> ReadTreeTable(ClientContext &context, const std::string &table_name) {
+void ValidateTreeTableSchema(ClientContext &context, const std::string &table_name) {
+	CheckTreeColumns(GetTableOrViewColumns(context, table_name, "Tree table"), table_name);
+}
+
+// The rows of a tree table, in node_index order. Without `columns`, names are cast to VARCHAR, as
+// ReadTreeTable reads them; with them (BindTreeOutput's, for the function `fn`), names are read in
+// the bound type and, with `labels`, the VARCHAR `label` column is read too, each checked against
+// bind.
+static std::vector<miint::NodeInput> ReadTreeRows(ClientContext &context, const std::string &table_name, const char *fn,
+                                                  const TreeNameColumns *columns,
+                                                  std::vector<std::optional<std::string>> *labels) {
 	std::vector<miint::NodeInput> result;
 
 	auto conn = MakeReadOnlyHelperConnection(context);
@@ -32,12 +43,20 @@ std::vector<miint::NodeInput> ReadTreeTable(ClientContext &context, const std::s
 	// Optional columns (name, branch_length, edge_id) default to NULL when the
 	// tree table lacks them, so a minimal node_index+parent_index table is
 	// accepted rather than failing mid-read. node_index/parent_index are
-	// guaranteed present by ValidateTreeTableSchema at bind time.
+	// guaranteed present by the bind-time check (ValidateTreeTableSchema or
+	// BindTreeOutput).
 	//
-	// Cast to canonical types so GetData<> always matches the backing store.
-	// DuckDB handles INTEGER->BIGINT, FLOAT->DOUBLE etc. transparently.
+	// The numeric columns are cast to canonical types so GetData<> always
+	// matches the backing store (DuckDB handles INTEGER->BIGINT, FLOAT->DOUBLE
+	// etc. transparently). Names are cast to VARCHAR, or read in their bound
+	// type, which is checked below.
 	auto info = GetTableOrViewColumns(context, table_name, "Tree table");
-	std::string name_proj = HasColumn(info, "name") ? "name::VARCHAR" : "CAST(NULL AS VARCHAR)";
+	const bool has_name = columns ? columns->has_name : HasColumn(info, "name");
+	const LogicalType name_type = columns ? columns->name_type : LogicalType::VARCHAR;
+	std::string name_proj = "CAST(NULL AS VARCHAR)";
+	if (has_name) {
+		name_proj = columns ? "name" : "name::VARCHAR";
+	}
 	std::string bl_proj = HasColumn(info, "branch_length") ? "branch_length::DOUBLE" : "CAST(NULL AS DOUBLE)";
 	std::string edge_proj = HasColumn(info, "edge_id") ? "edge_id::BIGINT" : "CAST(NULL AS BIGINT)";
 
@@ -50,7 +69,8 @@ std::vector<miint::NodeInput> ReadTreeTable(ClientContext &context, const std::s
 	// order), so ordering by it makes order-sensitive consumers
 	// (tree_resolve_multifurcations) reproducible regardless of storage.
 	std::string query = "SELECT node_index::BIGINT, parent_index::BIGINT, " + name_proj + ", " + bl_proj + ", " +
-	                    edge_proj + " FROM " + SQLIdentifier::ToString(table_name) + " ORDER BY node_index";
+	                    edge_proj + (labels ? ", label" : "") + " FROM " + SQLIdentifier::ToString(table_name) +
+	                    " ORDER BY node_index";
 
 	auto query_result = conn.Query(query);
 
@@ -60,6 +80,22 @@ std::vector<miint::NodeInput> ReadTreeTable(ClientContext &context, const std::s
 
 	auto &materialized = *query_result;
 
+	// Bind fixed the output types; a name read uncast, or a label, must still have them.
+	const std::string relation = "tree table '" + table_name + "'";
+	if (columns && columns->has_name) {
+		CheckBoundType(fn, relation, "name", materialized.GetTypes()[2], name_type);
+	}
+	if (labels) {
+		CheckBoundType(fn, relation, "label", materialized.GetTypes()[5], LogicalType::VARCHAR);
+	}
+
+	result.reserve(materialized.RowCount());
+	if (labels) {
+		labels->reserve(materialized.RowCount());
+	}
+
+	std::vector<std::string> names;
+	std::vector<bool> name_nulls;
 	while (true) {
 		auto chunk = materialized.Fetch();
 		if (!chunk || chunk->size() == 0) {
@@ -68,20 +104,21 @@ std::vector<miint::NodeInput> ReadTreeTable(ClientContext &context, const std::s
 
 		auto &node_index_vec = chunk->data[0];
 		auto &parent_index_vec = chunk->data[1];
-		auto &name_vec = chunk->data[2];
 		auto &branch_length_vec = chunk->data[3];
 		auto &edge_id_vec = chunk->data[4];
 
-		UnifiedVectorFormat node_data, parent_data, name_data, bl_data, edge_data;
+		UnifiedVectorFormat node_data, parent_data, bl_data, edge_data, label_data;
 		node_index_vec.ToUnifiedFormat(node_data);
 		parent_index_vec.ToUnifiedFormat(parent_data);
-		name_vec.ToUnifiedFormat(name_data);
 		branch_length_vec.ToUnifiedFormat(bl_data);
 		edge_id_vec.ToUnifiedFormat(edge_data);
+		ExtractIdColumnAsStrings(*chunk, 2, name_type, names, name_nulls);
+		if (labels) {
+			chunk->data[5].ToUnifiedFormat(label_data);
+		}
 
 		auto node_indices = UnifiedVectorFormat::GetData<int64_t>(node_data);
 		auto parent_indices = UnifiedVectorFormat::GetData<int64_t>(parent_data);
-		auto names = UnifiedVectorFormat::GetData<string_t>(name_data);
 		auto branch_lengths = UnifiedVectorFormat::GetData<double>(bl_data);
 		auto edge_ids = UnifiedVectorFormat::GetData<int64_t>(edge_data);
 
@@ -101,10 +138,8 @@ std::vector<miint::NodeInput> ReadTreeTable(ClientContext &context, const std::s
 				node.parent_id = std::nullopt; // Root
 			}
 
-			auto nm_idx = name_data.sel->get_index(i);
-			if (name_data.validity.RowIsValid(nm_idx)) {
-				node.name = names[nm_idx].GetString();
-			}
+			// A NULL name is held as '', as an unnamed node is
+			node.name = std::move(names[i]);
 
 			node.branch_length = std::numeric_limits<double>::quiet_NaN();
 			auto bl_idx = bl_data.sel->get_index(i);
@@ -117,6 +152,15 @@ std::vector<miint::NodeInput> ReadTreeTable(ClientContext &context, const std::s
 				node.edge_id = edge_ids[ei_idx];
 			}
 
+			if (labels) {
+				auto lb_idx = label_data.sel->get_index(i);
+				if (label_data.validity.RowIsValid(lb_idx)) {
+					labels->emplace_back(UnifiedVectorFormat::GetData<string_t>(label_data)[lb_idx].GetString());
+				} else {
+					labels->emplace_back(std::nullopt);
+				}
+			}
+
 			result.push_back(std::move(node));
 		}
 	}
@@ -126,6 +170,98 @@ std::vector<miint::NodeInput> ReadTreeTable(ClientContext &context, const std::s
 	}
 
 	return result;
+}
+
+std::vector<miint::NodeInput> ReadTreeTable(ClientContext &context, const std::string &table_name) {
+	return ReadTreeRows(context, table_name, nullptr, nullptr, nullptr);
+}
+
+// Build a tree from rows read from `table_name`, naming it in the error.
+static miint::NewickTree BuildNewickTree(const std::vector<miint::NodeInput> &rows, const std::string &table_name) {
+	try {
+		return miint::NewickTree::build(rows);
+	} catch (const std::exception &e) {
+		throw InvalidInputException("Failed to build tree from '%s': %s", table_name, e.what());
+	}
+}
+
+TreeNameColumns BindTreeOutput(ClientContext &context, const char *fn, const std::string &table_name,
+                               vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto info = GetTableOrViewColumns(context, table_name, "Tree table");
+	CheckTreeColumns(info, table_name);
+	TreeNameColumns columns;
+	columns.has_name = HasColumn(info, "name");
+	if (columns.has_name) {
+		columns.name_type = TipNameType(fn, table_name, info);
+	}
+	LogicalType label_type;
+	if (FindColumnType(info, "label", label_type)) {
+		if (label_type.id() != LogicalTypeId::VARCHAR) {
+			throw BinderException("%s: tree table '%s' column 'label' must be VARCHAR, got %s", fn, table_name,
+			                      label_type.ToString());
+		}
+		columns.has_label = true;
+	}
+
+	std::vector<std::string> schema_names;
+	std::vector<LogicalType> schema_types;
+	ReadNewickTableFunction::GetSchema(schema_names, schema_types, false);
+	schema_types[1] = columns.name_type;
+	if (columns.has_label) {
+		schema_names.emplace_back("label");
+		schema_types.emplace_back(LogicalType::VARCHAR);
+	}
+	for (const auto &name : schema_names) {
+		names.emplace_back(name);
+	}
+	return_types.insert(return_types.end(), schema_types.begin(), schema_types.end());
+	return columns;
+}
+
+miint::NewickTree BuildTree(ClientContext &context, const char *fn, const std::string &table_name,
+                            const TreeNameColumns &columns, std::vector<std::optional<std::string>> &labels) {
+	labels.clear();
+	// The rows are released on return, before the caller's operation, so they don't add to its peak
+	// memory: an operation that builds a new tree (shear, resolution) holds two trees at once.
+	auto node_inputs = ReadTreeRows(context, table_name, fn, &columns, columns.has_label ? &labels : nullptr);
+	// build() keeps the rows' order, so node i is row i, the row labels[i] came from
+	return BuildNewickTree(node_inputs, table_name);
+}
+
+void TreeOutputState::SetRows(const miint::NewickTree &tree, const std::vector<uint32_t> *source) {
+	rows = ReadNewickTableFunction::TreeToRows(tree);
+	if (labels.empty()) {
+		return;
+	}
+	if (source) {
+		std::vector<std::optional<std::string>> carried;
+		carried.reserve(source->size());
+		for (auto orig : *source) {
+			carried.push_back(std::move(labels[orig]));
+		}
+		labels = std::move(carried);
+	} else {
+		labels.resize(tree.num_nodes());
+	}
+}
+
+void TreeOutputExecute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output) {
+	auto &bind_data = data_p.bind_data->Cast<TreeOutputData>();
+	auto &state = data_p.global_state->Cast<TreeOutputState>();
+
+	if (state.current_row_idx >= state.rows.size()) {
+		output.SetChildCardinality(0);
+		return;
+	}
+
+	size_t rows_to_output = std::min<size_t>(STANDARD_VECTOR_SIZE, state.rows.size() - state.current_row_idx);
+
+	ReadNewickTableFunction::EmitNodeRows(state.rows, state.current_row_idx, rows_to_output, output, 0, false, "",
+	                                      bind_data.tree_columns.name_type,
+	                                      bind_data.tree_columns.has_label ? &state.labels : nullptr);
+
+	state.current_row_idx += rows_to_output;
+	output.SetChildCardinality(rows_to_output);
 }
 
 TreeWithNodeIds BuildTreeAndNodeIds(ClientContext &context, const std::string &table_name) {
@@ -141,11 +277,7 @@ TreeWithNodeIds BuildTreeAndNodeIds(ClientContext &context, const std::string &t
 		out.node_ids.push_back(ni.node_id);
 	}
 
-	try {
-		out.tree = miint::NewickTree::build(node_inputs);
-	} catch (const std::exception &e) {
-		throw InvalidInputException("Failed to build tree from '%s': %s", table_name, e.what());
-	}
+	out.tree = BuildNewickTree(node_inputs, table_name);
 	return out;
 }
 

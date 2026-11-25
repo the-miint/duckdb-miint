@@ -166,8 +166,9 @@ BoundStatement GffCopyPlan(Binder &binder, CopyStatement &stmt) {
 		}
 	}
 
-	// PARTITION_PATH is a parsed option, bound against the partition columns later; the rewrite would pass it on
-	// to the CSV writer unchecked, so it is refused here, as DuckDB refuses it for its own rewritten formats.
+	// PARTITION_PATH is a parsed option, bound against the partition columns later, so the loop above never sees it
+	// and the rewrite would pass it on to the CSV writer unchecked. It is refused, as is every option GFF has not
+	// checked.
 	if (info.parsed_options.find("partition_path") != info.parsed_options.end()) {
 		throw BinderException("COPY FORMAT GFF does not take PARTITION_PATH");
 	}

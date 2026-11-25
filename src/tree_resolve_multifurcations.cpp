@@ -6,9 +6,9 @@
 
 namespace duckdb {
 
-TreeResolveMultifurcationsTableFunction::Data::Data(std::string tree_table) : tree_table_name(std::move(tree_table)) {
-	ReadNewickTableFunction::GetSchema(names, types, false);
-}
+namespace {
+constexpr const char *kFn = "tree_resolve_multifurcations";
+} // namespace
 
 unique_ptr<FunctionData> TreeResolveMultifurcationsTableFunction::Bind(ClientContext &context,
                                                                        TableFunctionBindInput &input,
@@ -18,37 +18,16 @@ unique_ptr<FunctionData> TreeResolveMultifurcationsTableFunction::Bind(ClientCon
 	RejectCTERelationName(input, tree_table_name);
 
 	// Validate schema at bind time for early error detection.
-	ValidateTreeTableSchema(context, tree_table_name);
-
-	auto data = duckdb::make_uniq<Data>(std::move(tree_table_name));
-
-	for (const auto &name : data->names) {
-		names.emplace_back(name);
-	}
-	for (const auto &type : data->types) {
-		return_types.emplace_back(type);
-	}
-
-	return data;
+	auto tree_columns = BindTreeOutput(context, kFn, tree_table_name, return_types, names);
+	return duckdb::make_uniq<Data>(std::move(tree_table_name), std::move(tree_columns));
 }
 
 unique_ptr<GlobalTableFunctionState>
 TreeResolveMultifurcationsTableFunction::InitGlobal(ClientContext &context, TableFunctionInitInput &input) {
 	auto &bind_data = input.bind_data->Cast<Data>();
-	auto gstate = duckdb::make_uniq<GlobalState>();
+	auto gstate = duckdb::make_uniq<TreeOutputState>();
 
-	auto node_inputs = ReadTreeTable(context, bind_data.tree_table_name);
-
-	miint::NewickTree tree;
-	try {
-		tree = miint::NewickTree::build(node_inputs);
-	} catch (const std::exception &e) {
-		throw InvalidInputException("Failed to build tree from '%s': %s", bind_data.tree_table_name, e.what());
-	}
-
-	// Release the NodeInput vector before resolving to trim transient peak
-	// memory (see shear_tree.cpp for the same rationale).
-	node_inputs = {};
+	auto tree = BuildTree(context, kFn, bind_data.tree_table_name, bind_data.tree_columns, gstate->labels);
 
 	miint::NewickTree resolved;
 	try {
@@ -57,32 +36,13 @@ TreeResolveMultifurcationsTableFunction::InitGlobal(ClientContext &context, Tabl
 		throw InvalidInputException("tree_resolve_multifurcations failed: %s", e.what());
 	}
 
-	gstate->rows = ReadNewickTableFunction::TreeToRows(resolved);
-
+	// resolve_multifurcations keeps input node i at index i and appends the connectors
+	gstate->SetRows(resolved);
 	return gstate;
 }
 
-void TreeResolveMultifurcationsTableFunction::Execute(ClientContext &context, TableFunctionInput &data_p,
-                                                      DataChunk &output) {
-	auto &global_state = data_p.global_state->Cast<GlobalState>();
-
-	if (global_state.current_row_idx >= global_state.rows.size()) {
-		output.SetChildCardinality(0);
-		return;
-	}
-
-	size_t rows_to_output =
-	    std::min<size_t>(STANDARD_VECTOR_SIZE, global_state.rows.size() - global_state.current_row_idx);
-
-	ReadNewickTableFunction::EmitNodeRows(global_state.rows, global_state.current_row_idx, rows_to_output, output, 0,
-	                                      false, "");
-
-	global_state.current_row_idx += rows_to_output;
-	output.SetChildCardinality(rows_to_output);
-}
-
 TableFunction TreeResolveMultifurcationsTableFunction::GetFunction() {
-	return TableFunction("tree_resolve_multifurcations", {LogicalType::VARCHAR}, Execute, Bind, InitGlobal);
+	return TableFunction(kFn, {LogicalType::VARCHAR}, TreeOutputExecute, Bind, InitGlobal);
 }
 
 void TreeResolveMultifurcationsTableFunction::Register(ExtensionLoader &loader) {

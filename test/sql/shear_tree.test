@@ -284,3 +284,217 @@ statement error
 SELECT * FROM shear_tree('t', 'bad_tips');
 ----
 name
+
+# =============================================================================
+# Typed names and labels. A tree's `name` keeps its id type (VARCHAR, BIGINT or UUID) through
+# shear_tree, so tip ids come out as they went in; text labels for internal nodes live in an
+# optional `label` VARCHAR column, which is carried through. The tree is the one above: tips
+# A..E are 1..5, internal nodes are unnamed and labeled.
+# =============================================================================
+
+statement ok
+CREATE TABLE tbig AS SELECT * FROM (VALUES
+    (0, 1::BIGINT, 1.0, CAST(NULL AS BIGINT), 2, CAST(NULL AS VARCHAR)),
+    (1, 2,    2.0, NULL, 2, NULL),
+    (2, NULL, 3.0, NULL, 4, 'g__G'),
+    (3, 3,    4.0, NULL, 4, NULL),
+    (4, NULL, 5.0, NULL, 8, 'f__H'),
+    (5, 4,    6.0, NULL, 7, NULL),
+    (6, 5,    7.0, NULL, 7, NULL),
+    (7, NULL, 8.0, NULL, 8, 'f__I'),
+    (8, NULL, NULL, NULL, NULL, 'd__R')
+) AS v(node_index, name, branch_length, edge_id, parent_index, label);
+
+statement ok
+CREATE TABLE tips_big_abc AS SELECT * FROM (VALUES (1::BIGINT), (2), (3)) AS v(name);
+
+query T
+SELECT DISTINCT typeof(name) FROM shear_tree('tbig', 'tips_big_abc');
+----
+BIGINT
+
+# Kept nodes keep their names and labels; a typed tree's unnamed nodes are NULL (a BIGINT has no
+# empty value). The root collapses (one kept child), and its label goes with it.
+query ITT
+SELECT s.name, s.label, p.label AS parent_label
+FROM shear_tree('tbig', 'tips_big_abc') s
+LEFT JOIN shear_tree('tbig', 'tips_big_abc') p ON s.parent_index = p.node_index
+ORDER BY s.branch_length NULLS LAST;
+----
+1	NULL	g__G
+2	NULL	g__G
+NULL	g__G	f__H
+3	NULL	f__H
+NULL	f__H	NULL
+
+# Without collapse every node on the kept paths stays, with its label.
+query T
+SELECT label FROM shear_tree('tbig', 'tips_big_abc', collapse := false) WHERE parent_index IS NULL;
+----
+d__R
+
+statement ok
+CREATE TABLE tuuid AS SELECT node_index,
+    CASE WHEN name IS NOT NULL THEN ('00000000-0000-0000-0000-00000000000' || name)::UUID END AS name,
+    branch_length, edge_id, parent_index, label
+FROM tbig;
+
+statement ok
+CREATE TABLE tips_uuid_abc AS SELECT ('00000000-0000-0000-0000-00000000000' || name)::UUID AS name FROM tips_big_abc;
+
+query TT
+SELECT DISTINCT typeof(name), typeof(label) FROM shear_tree('tuuid', 'tips_uuid_abc');
+----
+UUID	VARCHAR
+
+query T
+SELECT name FROM shear_tree('tuuid', 'tips_uuid_abc') WHERE name IS NOT NULL ORDER BY name;
+----
+00000000-0000-0000-0000-000000000001
+00000000-0000-0000-0000-000000000002
+00000000-0000-0000-0000-000000000003
+
+# A VARCHAR tree keeps writing an unnamed node's name as '' (as read_newick does), and carries
+# its labels.
+statement ok
+CREATE TABLE tvar AS SELECT node_index, name::VARCHAR AS name, branch_length, edge_id, parent_index, label FROM tbig;
+
+query TT
+SELECT name, label FROM shear_tree('tvar', 'tips_big_abc') WHERE NOT is_tip ORDER BY label;
+----
+(empty)	f__H
+(empty)	g__G
+
+# Tips are only matched, never returned, so they match by text whatever their id type: no cast.
+query I
+SELECT count(*) FROM shear_tree('tvar', 'tips_big_abc');
+----
+5
+
+statement ok
+CREATE TABLE tips_text_abc AS SELECT * FROM (VALUES ('1'), ('2'), ('3')) AS v(name);
+
+query I
+SELECT count(*) FROM shear_tree('tbig', 'tips_text_abc');
+----
+5
+
+# Without a `label` column the output is the read_newick schema.
+query TT
+SELECT column_name, column_type FROM (DESCRIBE SELECT * FROM shear_tree('t', 'tips_abc'));
+----
+node_index	BIGINT
+name	VARCHAR
+branch_length	DOUBLE
+edge_id	BIGINT
+parent_index	BIGINT
+is_tip	BOOLEAN
+
+# `label` holds text, and `name` holds an id (VARCHAR, BIGINT or UUID).
+statement ok
+CREATE TABLE tlabel_int AS SELECT node_index, name, branch_length, edge_id, parent_index, 7 AS label FROM t;
+
+statement error
+SELECT * FROM shear_tree('tlabel_int', 'tips_abc');
+----
+'label' must be VARCHAR, got INTEGER
+
+statement ok
+CREATE TABLE tint AS SELECT node_index, name::INTEGER AS name, branch_length, edge_id, parent_index FROM tbig;
+
+statement error
+SELECT * FROM shear_tree('tint', 'tips_big_abc');
+----
+tip names must be VARCHAR, BIGINT, or UUID, but they are INTEGER
+
+# A label is any VARCHAR, a collated one included, as it is at bind; the output's `label` is VARCHAR.
+statement ok
+CREATE TABLE tbig_nocase(node_index BIGINT, name BIGINT, branch_length DOUBLE, edge_id BIGINT, parent_index BIGINT,
+                         label VARCHAR COLLATE NOCASE);
+
+statement ok
+INSERT INTO tbig_nocase SELECT node_index, name, branch_length, edge_id, parent_index, label FROM tbig;
+
+query IT
+SELECT name, label FROM shear_tree('tbig_nocase', 'tips_big_abc') ORDER BY name, label;
+----
+1	NULL
+2	NULL
+3	NULL
+NULL	f__H
+NULL	g__G
+
+# 1500 cherries under one root, more rows than one output batch (STANDARD_VECTOR_SIZE): tips 0..2999,
+# named 100000 + i; cherry k (row 3000 + k, labeled 'c' || k) holds tips 2k and 2k+1; the root (row
+# 4500) is labeled 'root'. node_index is ten times the row, so a label looked up by node_index
+# instead of by row would land on the wrong node.
+statement ok
+CREATE TABLE cherries AS
+SELECT i * 10 AS node_index,
+       CASE WHEN i < 3000 THEN 100000 + i END::BIGINT AS name,
+       1.0::DOUBLE AS branch_length,
+       CAST(NULL AS BIGINT) AS edge_id,
+       (CASE WHEN i < 3000 THEN 3000 + i // 2 WHEN i < 4500 THEN 4500 END * 10)::BIGINT AS parent_index,
+       CASE WHEN i >= 3000 AND i < 4500 THEN 'c' || (i - 3000) WHEN i = 4500 THEN 'root' END AS label
+FROM range(4501) AS r(i);
+
+# Keep both tips of cherries 0..899 and one tip of each later cherry: those cherries collapse and
+# take their labels with them, so output node j is not input node j.
+statement ok
+CREATE TABLE cherry_tips AS SELECT 100000 + i AS name FROM range(3000) AS r(i) WHERE i < 1800 OR i % 2 = 0;
+
+query IIII
+WITH s AS (SELECT * FROM shear_tree('cherries', 'cherry_tips'))
+SELECT count(*), count(label), count(*) FILTER (WHERE is_tip), min(typeof(name)) = 'BIGINT' FROM s;
+----
+3301	901	2400	true
+
+# Each kept tip's parent carries the label of its own cherry, or the root's where its cherry collapsed.
+query I
+WITH s AS (SELECT * FROM shear_tree('cherries', 'cherry_tips'))
+SELECT count(*) FROM s AS t JOIN s AS p ON t.parent_index = p.node_index
+WHERE t.is_tip
+  AND p.label IS DISTINCT FROM CASE WHEN t.name < 101800 THEN 'c' || ((t.name - 100000) // 2) ELSE 'root' END;
+----
+0
+
+# The output types are fixed at bind. A view can change type without a catalog change (one over a
+# file that is rewritten, under a prepared statement), and a name or label read in another type
+# would be misread, so the read checks its own types against the bound ones.
+statement ok
+COPY (SELECT * FROM tbig) TO '{TEST_DIR}/prep_shear_tree.csv';
+
+statement ok
+CREATE VIEW prep_shear_tree AS SELECT * FROM read_csv('{TEST_DIR}/prep_shear_tree.csv');
+
+statement ok
+PREPARE prep_shear AS SELECT name, label FROM shear_tree('prep_shear_tree', 'tips_big_abc') ORDER BY name, label;
+
+query IT
+EXECUTE prep_shear;
+----
+1	NULL
+2	NULL
+3	NULL
+NULL	f__H
+NULL	g__G
+
+statement ok
+COPY (SELECT node_index, CASE WHEN name IS NOT NULL THEN 'x' || name END AS name, branch_length, edge_id,
+             parent_index, label
+      FROM tbig) TO '{TEST_DIR}/prep_shear_tree.csv';
+
+statement error
+EXECUTE prep_shear;
+----
+<REGEX>:.*column 'name' of tree table 'prep_shear_tree' is VARCHAR now but was BIGINT when the statement was bound.*
+
+statement ok
+COPY (SELECT node_index, name, branch_length, edge_id, parent_index,
+             CASE WHEN label IS NOT NULL THEN node_index END AS label
+      FROM tbig) TO '{TEST_DIR}/prep_shear_tree.csv';
+
+statement error
+EXECUTE prep_shear;
+----
+<REGEX>:.*column 'label' of tree table 'prep_shear_tree' is BIGINT now but was VARCHAR when the statement was bound.*

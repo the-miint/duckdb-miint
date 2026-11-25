@@ -2,7 +2,6 @@
 #include "SequenceRecord.hpp"
 #include "remote_file_helper.hpp"
 #include "table_function_common.hpp"
-#include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types.hpp"
 #include "duckdb/common/vector_size.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -10,7 +9,9 @@
 #include "duckdb/storage/statistics/node_statistics.hpp"
 #include "duckdb/common/vector/flat_vector.hpp"
 #include <read_fastx.hpp>
+#include "miint_function_reference.hpp"
 #include "miint_named_parameter.hpp"
+#include "duckdb/parser/parsed_data/create_table_function_info.hpp"
 
 namespace duckdb {
 
@@ -117,30 +118,15 @@ unique_ptr<FunctionData> ReadFastxTableFunction::Bind(ClientContext &context, Ta
 		qual_offset = static_cast<uint8_t>(offset_value);
 	}
 
-	// Default byte budget: 512 MiB. Large enough that typical short-read workflows
-	// always fill STANDARD_VECTOR_SIZE (~600 KB per chunk) without being capped, but
-	// small enough to prevent multi-GB chunks when reading large sequences
-	// (e.g. bacterial genomes at ~5 MB/record would otherwise blow past RAM at 2048x).
-	uint64_t max_batch_bytes = 512ULL * 1024 * 1024;
-	auto mbb_param = input.named_parameters.find("max_batch_bytes");
-	if (mbb_param != input.named_parameters.end() && !mbb_param->second.IsNull()) {
-		std::string raw = mbb_param->second.ToString();
-		idx_t parsed = 0;
-		std::string err = StringUtil::TryParseFormattedBytes(raw, parsed);
-		if (!err.empty()) {
-			throw InvalidInputException("max_batch_bytes: %s", err);
-		}
-		if (parsed == 0) {
-			throw InvalidInputException("max_batch_bytes must be greater than 0");
-		}
-		max_batch_bytes = static_cast<uint64_t>(parsed);
-	}
+	uint64_t max_batch_bytes = ParseMaxBatchBytesParameter(input.named_parameters);
 
 	bool allow_empty = false;
 	auto empty_param = input.named_parameters.find("allow_empty");
 	if (empty_param != input.named_parameters.end() && !empty_param->second.IsNull()) {
 		allow_empty = empty_param->second.GetValue<bool>();
 	}
+
+	ScanBatchIndex::KeepForSeveralFiles(input.table_function, sequence1_paths.size());
 
 	auto data = duckdb::make_uniq<Data>(sequence1_paths, sequence2_paths, include_filepath, uses_stdin, qual_offset,
 	                                    max_batch_bytes, allow_empty);
@@ -196,6 +182,7 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 				local_state.current_file_idx = global_state.next_file_idx;
 				global_state.next_file_idx++;
 				local_state.has_file = true;
+				local_state.file_chunks = 0;
 			} // Lock released before I/O
 
 			// Open reader without holding the lock — safe because this thread
@@ -233,6 +220,11 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 		break;
 	}
 
+	// Files are claimed in increasing order, and a chunk never spans two, as ScanBatchIndex requires.
+	local_state.batch_index =
+	    ScanBatchIndex::Index(local_state.current_file_idx, local_state.file_chunks++, global_state.batch_stride);
+	const auto &reader = *global_state.readers[local_state.current_file_idx];
+
 	// Get sequence indices for this chunk from the current file's counter
 	// No atomic operation needed - this thread has exclusive access to this file
 	start_sequence_index = global_state.file_sequence_counters[local_state.current_file_idx];
@@ -258,15 +250,16 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 		SetResultVectorString(output.data[field_idx++], batch.sequences2);
 	}
 
-	// QUAL1 - null for FASTA (all records in a file are guaranteed same format)
-	if (batch.quals1[0].as_string().empty()) {
+	// QUAL1 - null for FASTA, which has no qualities. Decided by the file's format, not by a
+	// record: a FASTQ record with no bases has an empty quality, and gets an empty list.
+	if (!reader.IsFastq(0)) {
 		SetResultVectorNull(output.data[field_idx++]);
 	} else {
 		SetResultVectorListUInt8(output.data[field_idx++], batch.quals1, bind_data.qual_offset);
 	}
 
 	// QUAL2 - null for unpaired or FASTA
-	if (!batch.is_paired || batch.quals2.empty() || batch.quals2[0].as_string().empty()) {
+	if (!batch.is_paired || !reader.IsFastq(1)) {
 		SetResultVectorNull(output.data[field_idx++]);
 	} else {
 		SetResultVectorListUInt8(output.data[field_idx++], batch.quals2, bind_data.qual_offset);
@@ -277,6 +270,11 @@ void ReadFastxTableFunction::Execute(ClientContext &context, TableFunctionInput 
 	}
 
 	output.SetChildCardinality(batch.size());
+}
+
+OperatorPartitionData ReadFastxTableFunction::GetPartitionData(ClientContext &context,
+                                                               TableFunctionGetPartitionInput &input) {
+	return ScanBatchIndex::PartitionData(input, input.local_state->Cast<LocalState>().batch_index);
 }
 
 // Cardinality estimate so joins stream read_fastx rather than hash it; see
@@ -295,16 +293,21 @@ static unique_ptr<NodeStatistics> ReadFastxCardinality(ClientContext &context, c
 
 TableFunction ReadFastxTableFunction::GetFunction() {
 	auto tf = TableFunction("read_fastx", {LogicalType::ANY}, Execute, Bind, InitGlobal, InitLocal);
+	tf.GetSignature().GetParameter(0).SetName("filename");
 	AddNamedParameter(tf, "sequence2", LogicalType::ANY);
 	AddNamedParameter(tf, "include_filepath", LogicalType::BOOLEAN);
 	AddNamedParameter(tf, "qual_offset", LogicalType::BIGINT);
 	AddNamedParameter(tf, "max_batch_bytes", LogicalType::VARCHAR);
 	AddNamedParameter(tf, "allow_empty", LogicalType::BOOLEAN);
 	tf.cardinality = ReadFastxCardinality;
+	tf.get_partition_data = GetPartitionData;
 	return tf;
 }
 
 void ReadFastxTableFunction::Register(ExtensionLoader &loader) {
-	loader.RegisterFunction(GetFunction());
+	CreateTableFunctionInfo info(GetFunction());
+	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
+	info.descriptions.push_back(::miint::reference::read_fastx());
+	loader.RegisterFunction(std::move(info));
 }
 }; // namespace duckdb

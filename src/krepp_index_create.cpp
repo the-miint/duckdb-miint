@@ -314,19 +314,19 @@ unique_ptr<FunctionData> KreppIndexCreateTableFunction::Bind(ClientContext &cont
 	}
 	data->options.m = ReadUIntParam(input.named_parameters, "m", data->options.m);
 	data->options.r = ReadUIntParam(input.named_parameters, "r", data->options.r);
-	// krepp's CLI bounds -m with CLI::PositiveNumber; the library path this uses
-	// does not, and BaseLSH::validate_configuration checks only w, h and k. So
-	// m = 0 reaches set_nrows(), which computes `hash_size % m` - division by
-	// zero, undefined behaviour whose symptom depends on the CPU. Measured on
-	// arm64 (AArch64 UDIV returns 0 rather than trapping) it does not crash: it
-	// builds an index with zero k-mers at every node and reports status='ok',
-	// which is worse than the SIGFPE the same code would raise on x86_64.
-	// r is deliberately not bounded below - krepp's CLI allows r = 0
-	// (CLI::NonNegativeNumber) and nothing divides by it.
+	// krepp refuses m = 0 and r >= m (LSHF::check_configuration,
+	// ext/krepp/src/lshf.cpp:36-41), but only in IndexMultiple's constructor,
+	// which BuildKreppIndex reaches after every reference has been written out.
+	// Checked here so a bad m or r stops at bind. r is not bounded below - krepp
+	// allows r = 0.
 	if (data->options.m < 1) {
 		throw BinderException("%s: m must be at least 1 (got %u); krepp partitions the LSH space modulo m and "
 		                      "divides by it",
 		                      kCallerName, data->options.m);
+	}
+	if (data->options.r >= data->options.m) {
+		throw BinderException("%s: r must be less than m (got r := %u, m := %u)", kCallerName, data->options.r,
+		                      data->options.m);
 	}
 	data->options.threads = ReadUIntParam(input.named_parameters, "threads", data->options.threads);
 	if (data->options.threads < 1) {
@@ -336,7 +336,7 @@ unique_ptr<FunctionData> KreppIndexCreateTableFunction::Bind(ClientContext &cont
 	// out would take the number, run on one core anyway, and report success -
 	// and the only way to tell would be the wall clock.
 	// Nothing else bounds `threads` from above: set_num_threads does not clamp
-	// (ext/krepp/src/common.cpp:28) and neither does krepp's CLI, so the value
+	// (ext/krepp/src/common.cpp:33-41) and neither does krepp's CLI, so the value
 	// reaches omp_set_num_threads unchanged. libomp does not fail that call when
 	// it cannot create the threads - it calls abort(), taking the whole DuckDB
 	// process down with no SQL error and no chance to catch it:
@@ -377,7 +377,7 @@ unique_ptr<FunctionData> KreppIndexCreateTableFunction::Bind(ClientContext &cont
 
 // The filename suffix krepp will give every file this build writes. The shape
 // itself lives in krepp_detail::PartialSuffix, which mirrors the IndexMultiple
-// constructor (ext/krepp/src/index.cpp:249-251); this only supplies the options.
+// constructor (ext/krepp/src/index.cpp:406-408); this only supplies the options.
 std::string PartialSuffixFor(const miint::KreppIndexOptions &options) {
 	return miint::krepp_detail::PartialSuffix(options.m, options.r, options.frac);
 }
@@ -444,13 +444,13 @@ void CheckOutputPathAcceptsPartial(const KreppIndexCreateTableFunction::Data &da
 	// a partial that is already there.
 	//
 	// Compare the EFFECTIVE values, not the ones the caller typed. Unset w and h
-	// are derived from k (ext/krepp/src/index.cpp:237-238), so what has to agree
+	// are derived from k (ext/krepp/src/index.cpp:395-396), so what has to agree
 	// is what krepp will actually use - the partial on disk may have been built
 	// with an explicit h that a later job leaves unset. Gating these on
 	// has_value() let exactly that through: same k, one partial at h := 10 and
 	// the next with h unset (k - 16), accepted here and then rejected by krepp
 	// at query time, long after the build. w is worse - LSHF::check_compatible
-	// (ext/krepp/src/lshf.cpp:163-170) compares m, h, k, frac, r under
+	// (ext/krepp/src/lshf.cpp:161-168) compares m, h, k, frac, r under
 	// frac := true, and the positions, but never w, so a w mismatch is caught
 	// nowhere downstream and just leaves one index holding two different sets
 	// of minimizers.
@@ -461,7 +461,7 @@ void CheckOutputPathAcceptsPartial(const KreppIndexCreateTableFunction::Data &da
 	int32_t their_k = 0, their_w = 0, their_h = 0;
 	ReadIndexMetadata(data.output_path, existing.begin()->first, their_k, their_w, their_h);
 	// Narrowing to uint8_t before widening mirrors krepp: its k, w and h are all
-	// uint8_t (ext/krepp/src/index.hpp:107-109), so a k below 16 wraps there too
+	// uint8_t (ext/krepp/src/index.hpp:114-116), so a k below 16 wraps there too
 	// and the prediction has to wrap with it.
 	const auto our_w = static_cast<int32_t>(data.options.w.value_or(static_cast<uint8_t>(data.options.k + 6)));
 	const auto our_h = static_cast<int32_t>(data.options.h.value_or(static_cast<uint8_t>(data.options.k - 16)));
@@ -627,8 +627,9 @@ unique_ptr<GlobalTableFunctionState> KreppIndexCreateTableFunction::InitGlobal(C
 					throw InvalidInputException("%s: reference '%s' has an empty sequence1", kCallerName, name);
 				}
 				// The same alphabet place_krepp holds query sequences to, for
-				// two reasons rather than one. A byte above 127 indexes past
-				// the end of krepp's 128-entry nucleotide table. And a newline
+				// two reasons rather than one. krepp reads a byte above 127 as
+				// N, so it would be indexed as an ambiguous base rather than
+				// reported. And a newline
 				// followed by '>' would open a SECOND FASTA record inside this
 				// reference's file - which krepp does not reject or even
 				// notice: DynHT::fill_table loops over every record in the file

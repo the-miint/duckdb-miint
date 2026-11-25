@@ -11,18 +11,10 @@ require-env KREPP_AVAILABLE
 # letting krepp's error_exit take the whole process down. None of it needs an
 # index to exist.
 #
-# A note for whoever adds cases with multi=false. report_placement ranks
-# candidates with a non-stable std::sort over a vector built by iterating a
-# hash map keyed by node pointer, then takes .back() - so equal-ranking
-# candidates swap with the heap layout. Measured on the toy index: over six
-# runs of `krepp place --no-multi`, 1 of 92 fragments alternated between two
-# edges. Use `krepp place`, not `krepp dist`, for any such measurement; dist
-# goes through report_distances and is a different, noisier code path.
-#
-# multi left on (the default) keeps the candidate set stable but NOT the
-# numbers: like_weight_ratio is normalized over that same pointer-keyed
-# iteration order and moves between loads. See the Reproducibility table in
-# docs/phylogeny.md for what is and is not safe to assert.
+# Placement rows are identical from one call to the next, like_weight_ratio
+# included and with multi on or off, so cases may assert on any column. See
+# Reproducibility under place_krepp in docs/phylogeny.md, and
+# docs/internals/embedded-tools.md for the krepp code behind it.
 #
 # NOT covered here: the end-to-end pipe -> krepp -> jplace -> rows path, which
 # needs a built index. See test/sql/place_krepp_toy.test.
@@ -174,8 +166,8 @@ SELECT * FROM place_krepp(query_table='reads', index_path='data/no_such_index', 
 ----
 krepp index directory does not exist
 
-# hdist_th has no upper bound in krepp - its CLI checks only NonNegativeNumber -
-# and the library path is memory-unsafe above k. HDistHistLLH sizes binom_coef_k
+# krepp's CLI bounds hdist_th to [0, 31], but its library path does not, and is
+# memory-unsafe above k. HDistHistLLH sizes binom_coef_k
 # to k + 1 and then reads binom_coef_k[i] for i up to hdist_th, and sizes
 # binom_coef_hnk to hdist_th + 1, which wraps to 0 at UINT32_MAX so the next
 # write is out of bounds. Measured before this check existed: hdist_th=64

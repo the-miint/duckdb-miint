@@ -1,0 +1,23 @@
+name: Generated function reference
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/reference-docs.yml'
+      - 'docs/**'
+      - 'scripts/generate-reference.py'
+      - 'src/include/miint_function_reference.hpp'
+      - 'src/reference/**'
+
+permissions:
+  contents: read
+
+jobs:
+  reference-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python scripts/generate-reference.py --check

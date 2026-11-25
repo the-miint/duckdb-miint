@@ -37,9 +37,9 @@ const std::set<std::string> kIndexFileTypes = {"cmer", "crecord", "inc", "metada
 const std::set<std::string> kWithBackbone = {"cmer", "crecord", "inc", "metadata", "tree"};
 const std::set<std::string> kWithoutBackbone = {"cmer", "crecord", "inc", "metadata", "reflist"};
 
-// IUPAC nucleotide codes, both cases. krepp subscripts a 128-entry table with a
-// plain char, so bytes outside ASCII are not merely unmatched - they index out
-// of range.
+// IUPAC nucleotide codes, both cases. krepp reads every other byte as N
+// (seq_nt4_table, ext/krepp/src/common.cpp:11), so a stray character would be
+// placed as an ambiguous base rather than reported.
 //
 // Groups the files in index_dir by their "-m4r1-frac" style suffix. Mirrors how
 // krepp names the pieces of a partial index.
@@ -179,7 +179,7 @@ void ReadPartialConfig(const std::string &path, const std::string &expect_suffix
 		throw std::runtime_error("krepp metadata " + path + " could not be opened");
 	}
 	// Field order and widths are krepp's, read the same way it reads them
-	// (ext/krepp/src/index.cpp:57-65). Only the first six are needed; nrows and
+	// (ext/krepp/src/index.cpp:127-135). Only the first six are needed; nrows and
 	// the position vectors follow and are left alone.
 	uint8_t k_raw = 0, w_raw = 0, h_raw = 0;
 	uint32_t m_raw = 0, r_raw = 0;
@@ -243,13 +243,13 @@ std::map<std::string, std::set<std::string>> ValidateIndexLayout(const std::stri
 		}
 	}
 	// Several partials of one index are normal, and krepp loads them all
-	// (ext/krepp/src/krepp.cpp:43-77 collects every distinct suffix and calls
+	// (ext/krepp/src/api.cpp:44-93 collects every distinct suffix and calls
 	// load_partial_index on each). Two *different* indexes in one directory are
 	// not: `krepp index` never clears what is already there, so re-indexing with
 	// new parameters leaves both behind. krepp discovers that only inside its
 	// partial loaders (Index::generate_partial_tree, load_partial_tree and
-	// load_partial_index), which report it with error_exit (index.cpp:26, :47,
-	// :86). InstallKreppErrorHandler turns that into an exception rather
+	// load_partial_index), which report it with error_exit (index.cpp:78, :116,
+	// :157). InstallKreppErrorHandler turns that into an exception rather
 	// than a std::exit, so it surfaces as a DuckDB error - but only after the
 	// files have been opened and read. It is decidable here, from the filenames,
 	// before anything opens.
@@ -280,9 +280,9 @@ std::map<std::string, std::set<std::string>> ValidateIndexLayout(const std::stri
 	// k, w and h are in no filename, so two builds that differ in them are
 	// indistinguishable above. That matters in both directions. krepp catches k
 	// and h itself inside LSHF::check_compatible, but only once the files are
-	// open - and it never compares w at all (ext/krepp/src/lshf.cpp:163-170),
-	// using it only in the info text it assembles when metadata .txt is missing
-	// (index.cpp:57-61, :132), so a differing w is
+	// open - and it never compares w across partials (ext/krepp/src/lshf.cpp:161-168),
+	// checking each partial's w only against its own k (LSHF::check_configuration,
+	// index.cpp:137, lshf.cpp:18), so a differing w is
 	// caught nowhere and simply leaves one index holding two different sets of
 	// minimizers. Compare all three here, from the binary metadata krepp itself
 	// reads, before anything is loaded.
@@ -332,7 +332,7 @@ SharedKreppIndex::SharedKreppIndex(const std::string &index_dir, const std::stri
 	// before anything opens and with a message naming the file. Errors in the
 	// *content* of an index - partials built against different trees or with
 	// incompatible hash configurations - reach krepp's error_exit mid-load
-	// (ext/krepp/src/index.cpp:26, :47, :86) and surface as that error.
+	// (ext/krepp/src/index.cpp:78, :116, :157) and surface as that error.
 	const auto partials = krepp_detail::ValidateIndexLayout(index_dir);
 	std::error_code ec;
 
@@ -342,9 +342,9 @@ SharedKreppIndex::SharedKreppIndex(const std::string &index_dir, const std::stri
 	//
 	// Parsing is not enough on its own. krepp's Tree::load rejects two further
 	// shapes, both by error_exit, and both of which miint's parser accepts:
-	//   - a node with exactly one child (phytree.cpp:167-169), which
+	//   - a node with exactly one child (phytree.cpp:171-173), which
 	//     NewickTree deliberately preserves; and
-	//   - two nodes sharing a name (check_unique_labels, phytree.cpp:453-465).
+	//   - two nodes sharing a name (check_unique_labels, phytree.cpp:468-480).
 	//     This one is not exotic. krepp's parser puts the token after ')' into
 	//     Node::name, so an internal node's bootstrap support becomes its name,
 	//     and any tree with the same support value on two clades - which is to
@@ -397,8 +397,8 @@ SharedKreppIndex::SharedKreppIndex(const std::string &index_dir, const std::stri
 		size_t decorated = 0;
 		for (uint32_t node = 0; node < tree.num_nodes(); ++node) {
 			// jplace {N} edge decorations. krepp requires every node decorated or
-			// none (Tree::load, ext/krepp/src/phytree.cpp:446-449) and, since
-			// v0.9.1, that the numbers are unique (:440-443). Both are error_exit.
+			// none (Tree::load, ext/krepp/src/phytree.cpp:461-464) and, since
+			// v0.9.1, that the numbers are unique (:455-458). Both are error_exit.
 			//
 			// Safe to check with miint's parser because the one form it reads -
 			// {N} after the branch length, the jplace spec's own - is a form krepp
@@ -409,12 +409,12 @@ SharedKreppIndex::SharedKreppIndex(const std::string &index_dir, const std::stri
 			if (edge_id.has_value()) {
 				++decorated;
 				// krepp narrows the decoration to uint32 (`static_cast<se_t>(std::atol(...))`,
-				// ext/krepp/src/phytree.cpp:232, with se_t = uint32_t at common.hpp:67) while
+				// ext/krepp/src/phytree.cpp:236, with se_t = uint32_t at common.hpp:69) while
 				// miint's parser reads it as int64. Without this bound {-5} would be reported
 				// back as 4294967291 - breaking the contract that these numbers are echoed
 				// verbatim - and {-1} would collide with {4294967295} inside krepp while
 				// looking distinct to the uniqueness check below, reaching the error_exit at
-				// phytree.cpp:441.
+				// phytree.cpp:456.
 				if (*edge_id < 0 || *edge_id > static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
 					throw miint::InvalidInputException("Backbone tree " + newick_path + " uses edge number " +
 					                                   std::to_string(*edge_id) +
@@ -474,7 +474,7 @@ SharedKreppIndex::SharedKreppIndex(const std::string &index_dir, const std::stri
 
 	if (!newick_path.empty()) {
 		// Collect the index's leaf names BEFORE map_to_qtree, which reassigns the
-		// index tree's root to the backbone's (phytree.cpp:492) and so cannot be
+		// index tree's root to the backbone's (phytree.cpp:511) and so cannot be
 		// traversed for them afterwards.
 		std::set<std::string> index_leaf_names;
 		tree_sptr_t index_tree = impl_->index->get_tree();
@@ -489,10 +489,10 @@ SharedKreppIndex::SharedKreppIndex(const std::string &index_dir, const std::stri
 		impl_->backbone->load(tree_stream);
 
 		// map_to_qtree silently skips backbone leaves absent from the index - its
-		// only diagnostic is commented out (phytree.cpp:500-506). Every skipped
+		// only diagnostic is commented out (phytree.cpp:519-525). Every skipped
 		// leaf leaves eff_nchildren at 0, and collect_placements then rejects
 		// every candidate on the `get_nchildren() != get_eff_nchildren()` test
-		// (query.cpp:292). A backbone whose labels do not match the index is
+		// (query.cpp:393). A backbone whose labels do not match the index is
 		// therefore not an error anywhere in krepp: it is zero rows, no warning,
 		// indistinguishable from "nothing placed". Count the overlap ourselves.
 		impl_->backbone->reset_traversal();
@@ -554,20 +554,27 @@ struct KreppPlacer::Impl {
 	// reuse across batches is sound and why the QSeq exists at all.
 	qseq_sptr_t qs;
 	std::shared_ptr<IBatch> batch;
+	// One pair per placer, reset per query in place(). A fresh IMers allocates
+	// and zeroes a visit array of nsubsets x 4 bytes on its first k-mer
+	// (ext/krepp/src/query.cpp:687-689); reset_query keeps that array.
+	imers_sptr_t imers_or;
+	imers_sptr_t imers_rc;
 };
 
 KreppPlacer::KreppPlacer(std::shared_ptr<SharedKreppIndex> index, const KreppConfig &config) : impl_(new Impl()) {
 	impl_->shared = std::move(index);
 	impl_->config = config;
 	// gzopen of /dev/null is the one error_exit left on a non-index path
-	// (rqseq.cpp:181-183, reached only under EMFILE). Constructing here rather
+	// (rqseq.cpp:168-170, reached only under EMFILE). Constructing here rather
 	// than per batch narrows that window from once per batch per worker to once
 	// per worker, and takes the per-batch HDistHistLLH construction with it.
 	impl_->qs = std::make_shared<QSeq>("/dev/null");
 	impl_->batch = std::make_shared<IBatch>(impl_->shared->impl_->index, impl_->qs, impl_->config.hdist_th,
 	                                        impl_->config.chisq, std::numeric_limits<double>::quiet_NaN(),
 	                                        impl_->config.tau, !impl_->config.filter, impl_->config.multi,
-	                                        /*summarize=*/false);
+	                                        /*summarize=*/false, /*p_value=*/false);
+	impl_->imers_or = std::make_shared<IMers>(impl_->shared->impl_->index, 0, impl_->config.hdist_th);
+	impl_->imers_rc = std::make_shared<IMers>(impl_->shared->impl_->index, 0, impl_->config.hdist_th);
 }
 
 KreppPlacer::~KreppPlacer() = default;
@@ -577,13 +584,13 @@ size_t KreppPlacer::place(const std::vector<KreppQuery> &queries, std::vector<Kr
 		return 0;
 	}
 
-	// krepp indexes a 128-entry table with a plain char (ext/krepp/src/query.cpp,
-	// search_mers), so a byte above 127 is not merely unmatched - it indexes out
-	// of range. Sequences here come from a SQL column rather than a curated
-	// file, so reject rather than let that happen.
+	// krepp reads any byte outside ACGT as N (nt4_of, ext/krepp/src/common.hpp:241),
+	// so a stray character would be searched as an ambiguous base rather than
+	// reported. Sequences here come from a SQL column rather than a curated
+	// file, so reject instead.
 	//
-	// Anything shorter than k cannot place; search_mers computes `len - k + 1`
-	// into an unsigned type, so passing those through would underflow.
+	// Anything shorter than k has no k-mer, so it cannot place; it is skipped
+	// with one warning per call rather than searched for nothing.
 	const uint32_t k = impl_->shared->kmer_length();
 	size_t skipped_short = 0;
 	std::vector<const std::string *> sequences;
@@ -605,7 +612,7 @@ size_t KreppPlacer::place(const std::vector<KreppQuery> &queries, std::vector<Kr
 			++skipped_short;
 			continue;
 		}
-		// krepp maps U and u to the ambiguous code (ext/krepp/src/common.cpp:12-14),
+		// krepp maps U and u to the ambiguous code (ext/krepp/src/common.cpp:13-15),
 		// which breaks the k-mer run at every uracil - an RNA read would pass the
 		// check above and then place nothing, with no way to tell that apart from
 		// "this read does not belong on this tree". The vsearch wrappers normalize
@@ -650,14 +657,15 @@ size_t KreppPlacer::place(const std::vector<KreppQuery> &queries, std::vector<Kr
 		const std::string &sequence = *sequences[i];
 		const uint64_t length = sequence.size();
 
-		// Fresh per query, exactly as place_sequences does. summarize_matches
-		// resets the rest of IBatch's per-query state (nd_closest, mi_closest,
-		// node_to_minfo), which is what makes reusing one IBatch correct.
-		imers_sptr_t imers_or = std::make_shared<IMers>(impl_->shared->impl_->index, length, impl_->config.hdist_th);
-		imers_sptr_t imers_rc = std::make_shared<IMers>(impl_->shared->impl_->index, length, impl_->config.hdist_th);
+		// The same per-query reset krepp's own loop does (IBatch::scan_query,
+		// ext/krepp/src/query.cpp:211-212). summarize_matches resets the rest of
+		// IBatch's per-query state (nd_closest, mi_closest, node_to_minfo), which is
+		// what makes reusing one IBatch correct.
+		impl_->imers_or->reset_query(length);
+		impl_->imers_rc->reset_query(length);
 
-		batch.search_mers(sequence.data(), length, imers_or, imers_rc);
-		batch.summarize_matches(imers_or, imers_rc);
+		batch.search_mers(sequence.data(), length, impl_->imers_or, impl_->imers_rc);
+		batch.summarize_matches(impl_->imers_or, impl_->imers_rc);
 		if (!batch.collect_placements(placements)) {
 			continue;
 		}

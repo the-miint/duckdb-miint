@@ -1,0 +1,52 @@
+# name: test/sql/copy_ubam_tag_checks.test
+# description: COPY FORMAT UBAM writes each TAGS column as a SAM integer tag, which holds a 32-bit signed value. A value outside that range, from any integer type TAGS accepts (a UBIGINT past the 64-bit signed range included), is an error naming the column, the tag, the value and the read. It is a data error, not an internal one, which would invalidate the database.
+# group: [sql]
+
+require miint
+
+statement ok
+CREATE MACRO one_read(id, v) AS TABLE
+SELECT id AS read_id, 'ACGT' AS sequence1, [30, 31, 32, 33]::UTINYINT[] AS qual1, v AS v;
+
+# Both ends of the range are written (copy_ubam_bytes.test pins their bytes).
+statement ok
+COPY (FROM one_read('lo', -2147483648::BIGINT) UNION ALL FROM one_read('hi', 2147483647::BIGINT))
+TO '{TEST_DIR}/tag_ends.bam' (FORMAT UBAM, TAGS {zm: 'v'});
+
+query I
+SELECT count(*) FROM read_sequences_sam('{TEST_DIR}/tag_ends.bam');
+----
+2
+
+# One past either end is an error, rather than a value cut to 32 bits.
+statement error
+COPY (FROM one_read('ok', 2147483647::BIGINT) UNION ALL FROM one_read('bad', 2147483648::BIGINT))
+TO '{TEST_DIR}/tag_over.bam' (FORMAT UBAM, TAGS {zm: 'v'});
+----
+Column 'v' (tag 'zm') is 2147483648 for read 'bad', outside the 32-bit signed range of a SAM integer tag
+
+statement error
+COPY (FROM one_read('ok', -2147483648::BIGINT) UNION ALL FROM one_read('low', -2147483649::BIGINT))
+TO '{TEST_DIR}/tag_under.bam' (FORMAT UBAM, TAGS {zm: 'v'});
+----
+Column 'v' (tag 'zm') is -2147483649 for read 'low', outside the 32-bit signed range of a SAM integer tag
+
+# The unsigned types reach past it too, a UBIGINT past what a 64-bit signed integer holds.
+statement error
+COPY (FROM one_read('big', 2147483648::UINTEGER)) TO '{TEST_DIR}/tag_uint.bam' (FORMAT UBAM, TAGS {np: 'v'});
+----
+Column 'v' (tag 'np') is 2147483648 for read 'big', outside the 32-bit signed range of a SAM integer tag
+
+statement error
+COPY (FROM one_read('huge', 18446744073709551615::UBIGINT)) TO '{TEST_DIR}/tag_ubig.bam' (FORMAT UBAM, TAGS {xb: 'v'});
+----
+Column 'v' (tag 'xb') is 18446744073709551615 for read 'huge', outside the 32-bit signed range of a SAM integer tag
+
+# The read named is the one that holds the value, past the first chunk.
+statement error
+COPY (SELECT 'r' || i AS read_id, 'ACGT' AS sequence1, [30, 31, 32, 33]::UTINYINT[] AS qual1,
+             CASE WHEN i = 2999 THEN 3000000000 ELSE i END::BIGINT AS zmw
+      FROM range(5000) t(i))
+TO '{TEST_DIR}/tag_late.bam' (FORMAT UBAM, TAGS {zm: 'zmw'});
+----
+Column 'zmw' (tag 'zm') is 3000000000 for read 'r2999', outside the 32-bit signed range of a SAM integer tag

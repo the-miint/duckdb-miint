@@ -72,7 +72,7 @@ TEST_CASE("ValidateNewickLexically rejects unquoted whitespace", "[krepp]") {
 	// only when a token is already accumulating; otherwise it folds the
 	// character into the FOLLOWING label (ext/krepp/src/phytree.cpp:141-144), so
 	// "(A:1, B:1)" silently yields a tip named " B" which then fails to match
-	// the index and is dropped without a word (phytree.cpp:488-495). Rejecting
+	// the index and is dropped without a word (phytree.cpp:507-514). Rejecting
 	// covers the quiet corruption as well as the crash.
 	CHECK_THROWS(ValidateNewickLexically("(\n  (A:1,B:1):1,\n  (C:1,D:1):1\n);\n", "t.nwk"));
 	CHECK_THROWS(ValidateNewickLexically("((A:1, B:1):1,(C:1,D:1):1);\n", "t.nwk"));
@@ -115,8 +115,8 @@ namespace {
 // backbone tree. `suffix` is krepp's own: "-m<M>r<R>" (the hash configuration,
 // which every partial of one index shares) followed by a partial id.
 // Writes one complete partial. `metadata<suffix>` is a REAL binary header in
-// krepp's own layout (ext/krepp/src/index.cpp:57-69, written by
-// save_configuration at :410-413), not a stub: ValidateIndexLayout reads k, w
+// krepp's own layout (ext/krepp/src/index.cpp:127-140, written by
+// save_configuration at :567-570), not a stub: ValidateIndexLayout reads k, w
 // and h back out of that file exactly the way krepp does, so a placeholder
 // would fail for the wrong reason.
 void WriteIndexFiles(const std::filesystem::path &dir, uint32_t m, uint32_t r, bool frac, uint8_t k = 25,
@@ -154,7 +154,7 @@ TEST_CASE("ValidateIndexLayout rejects two hash configurations in one directory"
 	// `krepp index` writes into an existing directory without clearing it, so
 	// re-indexing with different -h/-w leaves both file sets behind. krepp loads
 	// every complete group it finds and only notices the mismatch inside its
-	// partial loaders (ext/krepp/src/index.cpp:26, :47, :86), which report it with
+	// partial loaders (ext/krepp/src/index.cpp:78, :116, :157), which report it with
 	// error_exit. The suffix says it first.
 	// frac := false, so m is the only thing separating the two: under frac := true
 	// their different r would reject them on its own.
@@ -175,7 +175,7 @@ TEST_CASE("ValidateIndexLayout accepts several partials of one index", "[krepp]"
 	// being prevented - it would refuse indexes that work.
 	//
 	// These are the real shapes. krepp builds the suffix as "-m<M>r<R>" plus
-	// "-frac" or "-no_frac" (ext/krepp/src/index.cpp:249-251), and one residue
+	// "-frac" or "-no_frac" (ext/krepp/src/index.cpp:406-408), and one residue
 	// per job into a shared directory is how a large index is meant to be
 	// built - with frac := false, the only setting under which krepp loads
 	// several partials together (frac := true is the next test). An earlier
@@ -194,8 +194,8 @@ TEST_CASE("ValidateIndexLayout accepts several partials of one index", "[krepp]"
 
 TEST_CASE("ValidateIndexLayout rejects several frac := true partials", "[krepp]") {
 	// Under frac := true, r is a cumulative threshold rather than a residue
-	// (ext/krepp/src/rqseq.cpp:133), and krepp refuses to load two partials that
-	// differ in it (LSHF::check_compatible, ext/krepp/src/lshf.cpp:163-170), which
+	// (ext/krepp/src/rqseq.cpp:126), and krepp refuses to load two partials that
+	// differ in it (LSHF::check_compatible, ext/krepp/src/lshf.cpp:161-168), which
 	// it reports only once the files are open. Two frac := true partials of one m
 	// are two indexes, and the layout check says so before anything is opened.
 	const std::filesystem::path dir = FreshDir("twofrac");
@@ -210,9 +210,9 @@ TEST_CASE("ValidateIndexLayout rejects several frac := true partials", "[krepp]"
 TEST_CASE("ValidateIndexLayout rejects partials that disagree on w", "[krepp]") {
 	// w gets its own case because this check is the ONLY one anywhere. krepp
 	// compares m, h, k, frac, r under frac := true, and the two position vectors,
-	// and never w (ext/krepp/src/lshf.cpp:163-170), and load_partial_index uses w only
-	// in the info text it assembles when metadata .txt is missing (index.cpp:57-61,
-	// :132). So unlike k and h, a differing w
+	// and never w (ext/krepp/src/lshf.cpp:161-168), and load_partial_index checks each
+	// partial's w only against its own k (LSHF::check_configuration, index.cpp:137).
+	// So unlike k and h, a differing w
 	// produces no error at any later point - just one index quietly holding two
 	// different sets of minimizers, and a placement result that is wrong rather
 	// than absent. Measured on a real pair: 148 rows against 140, with 13
@@ -261,7 +261,7 @@ TEST_CASE("ValidateIndexLayout rejects metadata that contradicts its own filenam
 
 TEST_CASE("PartialSuffix builds the shape krepp writes", "[krepp]") {
 	// The one place the suffix is constructed, mirroring
-	// ext/krepp/src/index.cpp:249-251. PartialHashConfig parses what this emits
+	// ext/krepp/src/index.cpp:406-408. PartialHashConfig parses what this emits
 	// and ReadPartialConfig checks a header against it, so all three move
 	// together or none of them do.
 	CHECK(miint::krepp_detail::PartialSuffix(4, 1, true) == "-m4r1-frac");
@@ -272,7 +272,7 @@ TEST_CASE("PartialSuffix builds the shape krepp writes", "[krepp]") {
 TEST_CASE("PartialHashConfig keeps m and frac and drops a frac := false residue", "[krepp]") {
 	// What must agree across partials, and what may differ. Under frac := false
 	// krepp compares the hash configuration without r (LSHF::check_compatible,
-	// ext/krepp/src/lshf.cpp:163-170); frac := true is the next test.
+	// ext/krepp/src/lshf.cpp:161-168); frac := true is the next test.
 	CHECK(miint::krepp_detail::PartialHashConfig("-m4r1-no_frac") ==
 	      miint::krepp_detail::PartialHashConfig("-m4r2-no_frac"));
 	CHECK(miint::krepp_detail::PartialHashConfig("-m4r1-no_frac") ==
@@ -303,7 +303,7 @@ TEST_CASE("PartialHashConfig keeps m and frac and drops a frac := false residue"
 TEST_CASE("PartialHashConfig keeps the residue of a frac := true partial", "[krepp]") {
 	// What must agree depends on frac. Under frac := false, r says which partial
 	// this is and is dropped. Under frac := true it is a threshold that krepp
-	// compares across partials (ext/krepp/src/lshf.cpp:163-170), so it stays part
+	// compares across partials (ext/krepp/src/lshf.cpp:161-168), so it stays part
 	// of the identity.
 	CHECK(miint::krepp_detail::PartialHashConfig("-m4r1-frac") == "-m4r1-frac");
 	CHECK(miint::krepp_detail::PartialHashConfig("-m4r1-frac") != miint::krepp_detail::PartialHashConfig("-m4r2-frac"));

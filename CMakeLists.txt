@@ -419,6 +419,7 @@ list(
   src/taxdump_archive.cpp
   src/taxdump_parser.cpp
   src/taxonomy_lineage.cpp
+  src/taxonomy_violations.cpp
   src/TaxonomyDecorator.cpp
   src/TaxonomyStore.cpp
   src/tree_ancestors.cpp
@@ -606,6 +607,7 @@ list(
   test/cpp/test_sam_style_tags.cpp
   test/cpp/test_SAMReader.cpp
   test/cpp/test_ScCooBuilder.cpp
+  test/cpp/test_ScanBatchIndex.cpp
   test/cpp/test_SequenceReader.cpp
   test/cpp/test_SFFReader.cpp
   test/cpp/test_ShardProgress.cpp
@@ -739,10 +741,25 @@ if(BUILD_UNITTESTS)
     test/cpp/test_RypeFilterSchedule.cpp
     test/cpp/test_HttpClientCommon.cpp
     test/cpp/test_TaxonomyDecoratorOracle.cpp
-    test/cpp/test_QuerySequenceStreamBatching.cpp)
+    test/cpp/test_QuerySequenceStreamBatching.cpp
+    test/cpp/test_CopySequenceDeferral.cpp
+    test/cpp/test_CopyRecordDeferral.cpp
+    test/cpp/test_CopySequenceOrder.cpp
+    test/cpp/test_ReadFastxBatchIndex.cpp
+    test/cpp/test_ReadSequencesSamBatchIndex.cpp)
+  # They include SequenceReader.hpp and hfile_duckdb.hpp, whose declarations
+  # depend on MIINT_STATIC_BUILD: compiled as the miint they link was, or the
+  # two disagree on the classes.
+  set_source_files_properties(
+    test/cpp/test_ReadFastxBatchIndex.cpp
+    test/cpp/test_ReadSequencesSamBatchIndex.cpp PROPERTIES COMPILE_DEFINITIONS
+                                                            MIINT_STATIC_BUILD)
   target_link_libraries(tests_duckdb Catch2::Catch2WithMain duckdb_static)
   link_extension_libraries(tests_duckdb "")
-  # Sets RLIMIT_FSIZE, so POSIX only
+  # These set RLIMIT_FSIZE, so POSIX only
+  if(UNIX)
+    target_sources(tests_duckdb PRIVATE test/cpp/test_CopySamWriteFailure.cpp)
+  endif()
   if(MIINT_ENABLE_HDF5 AND UNIX)
     target_sources(tests_duckdb PRIVATE test/cpp/test_CopyBiomWriteFailure.cpp)
   endif()

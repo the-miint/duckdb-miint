@@ -13,12 +13,19 @@
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/numeric_utils.hpp"
+#include "duckdb/common/types/hash.hpp"
 #include "duckdb/common/vector_operations/generic_executor.hpp"
 #include "duckdb/function/copy_function.hpp"
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
+#include "duckdb/planner/binder.hpp"
+#include "duckdb/storage/arena_allocator.hpp"
 #include <htslib-1.22.1/htslib/sam.h>
 #include <htslib-1.22.1/htslib/hts.h>
+#include <htslib-1.22.1/htslib/bgzf.h>
+#include <htslib-1.22.1/htslib/hfile.h>
+#include <cerrno>
+#include <cstring>
 #include <map>
 #include <unordered_map>
 #include <unordered_set>
@@ -106,10 +113,33 @@ struct SAMColumnIndices {
 	}
 };
 
+// The tag columns, in the order their tags are appended to a record: the order is in the output's bytes. An integer
+// tag column must be BIGINT and a string one VARCHAR (checked at bind).
+struct SAMTagColumn {
+	const char *column;
+	const char *tag;
+	idx_t SAMColumnIndices::*index;
+	bool integer;
+};
+
+static const SAMTagColumn SAM_TAG_COLUMNS[] = {
+    {"tag_as", "AS", &SAMColumnIndices::tag_as_idx, true},  {"tag_xs", "XS", &SAMColumnIndices::tag_xs_idx, true},
+    {"tag_ys", "YS", &SAMColumnIndices::tag_ys_idx, true},  {"tag_xn", "XN", &SAMColumnIndices::tag_xn_idx, true},
+    {"tag_xm", "XM", &SAMColumnIndices::tag_xm_idx, true},  {"tag_xo", "XO", &SAMColumnIndices::tag_xo_idx, true},
+    {"tag_xg", "XG", &SAMColumnIndices::tag_xg_idx, true},  {"tag_nm", "NM", &SAMColumnIndices::tag_nm_idx, true},
+    {"tag_yt", "YT", &SAMColumnIndices::tag_yt_idx, false}, {"tag_md", "MD", &SAMColumnIndices::tag_md_idx, false},
+    {"tag_sa", "SA", &SAMColumnIndices::tag_sa_idx, false},
+};
+
 //===--------------------------------------------------------------------===//
 // Bind Data
 //===--------------------------------------------------------------------===//
 enum class SAMOutputFormat : uint8_t { SAM = 0, BAM = 1 };
+
+// "SAM" or "BAM", as errors name the format
+static const char *SAMFormatName(SAMOutputFormat format) {
+	return format == SAMOutputFormat::BAM ? "BAM" : "SAM";
+}
 
 struct SAMCopyBindData : public FunctionData {
 	bool include_header = true;
@@ -124,7 +154,7 @@ struct SAMCopyBindData : public FunctionData {
 
 	// Captured types of the three identifier columns. Each may be VARCHAR or
 	// BIGINT (validated at bind). Default-constructed LogicalType is INVALID so
-	// any path that forgets to set them fails loud at the Sink dispatch.
+	// any path that forgets to set them fails loud at the record encoder's dispatch.
 	LogicalType read_id_type;
 	LogicalType reference_type;
 	LogicalType mate_reference_type;
@@ -166,7 +196,7 @@ static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, Copy
 	result->file_path = input.info.file_path;
 	result->names = IdentifiersToStrings(names);
 	result->format = default_format;
-	const char *format_name = default_format == SAMOutputFormat::BAM ? "BAM" : "SAM";
+	const char *format_name = SAMFormatName(default_format);
 	RefuseRemoteCopyTarget(format_name, result->file_path);
 
 	// Detect and cache column indices
@@ -225,7 +255,7 @@ static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, Copy
 		throw BinderException("Column 'mate_reference' must be %s", AllowedIdTypeList());
 	}
 
-	// Capture id-column types for the Sink's per-row dispatch.
+	// Capture id-column types for the record encoder's per-row dispatch.
 	result->read_id_type = sql_types[indices.read_id_idx];
 	result->reference_type = sql_types[indices.reference_idx];
 	result->mate_reference_type = sql_types[indices.mate_reference_idx];
@@ -234,6 +264,15 @@ static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, Copy
 	}
 	if (sql_types[indices.template_length_idx].id() != LogicalTypeId::BIGINT) {
 		throw BinderException("Column 'template_length' must be BIGINT");
+	}
+	// The tag columns are read with typed accessors too: a column of another type would raise an internal error, which
+	// invalidates the database.
+	for (auto &tag : SAM_TAG_COLUMNS) {
+		auto index = indices.*tag.index;
+		auto expected = tag.integer ? LogicalTypeId::BIGINT : LogicalTypeId::VARCHAR;
+		if (index != DConstants::INVALID_INDEX && sql_types[index].id() != expected) {
+			throw BinderException("Column '%s' must be %s", tag.column, tag.integer ? "BIGINT" : "VARCHAR");
+		}
 	}
 
 	// Parse options
@@ -301,6 +340,7 @@ static unique_ptr<FunctionData> SAMCopyBindInternal(ClientContext &context, Copy
 	if (result->format == SAMOutputFormat::SAM) {
 		const auto compression = DetectCompressionType(result->file_path, compression_param);
 		result->use_gzip = compression == FileCompressionType::GZIP;
+		AddGzipFileExtension(input, compression);
 		if (compression_level_values) {
 			result->compression_level = GzipCompressionLevel(*compression_level_values, compression, result->file_path);
 		}
@@ -341,6 +381,8 @@ static unique_ptr<FunctionData> BAMCopyBind(ClientContext &context, CopyFunction
 // again each time it is executed.
 struct SAMCopyRelations {
 	std::vector<std::pair<std::string, uint64_t>> reference_lengths;
+	// Each reference's TID, its index in reference_lengths: the order of the @SQ lines of headered output
+	std::unordered_map<std::string, int32_t> reference_tids;
 	std::optional<SequenceDataMap> sequence_data;
 };
 
@@ -361,11 +403,14 @@ public:
 				// SORTED BY NAME, not the map's iteration order. A reference's index in the @SQ list IS
 				// its TID, and a BAM is coordinate-sorted by TID rather than by reference name -- so
 				// emitting @SQ in unordered_map hash order meant no ORDER BY the caller could write
-				// produced a coordinate-sorted file, and htslib consumers rejected the output (#173).
+				// produced a coordinate-sorted file, and htslib consumers rejected the output.
 				// Name order is deterministic regardless of scan parallelism and makes the natural
 				// `ORDER BY reference, position` correct.
 				read->reference_lengths =
 				    ReadReferenceTableSortedByName(context, fdata.reference_lengths_table.value());
+				for (idx_t tid = 0; tid < read->reference_lengths.size(); tid++) {
+					read->reference_tids.emplace(read->reference_lengths[tid].first, NumericCast<int32_t>(tid));
+				}
 			}
 			if (fdata.sequence_data_table.has_value()) {
 				read->sequence_data = ReadSequenceDataTable(context, fdata.sequence_data_table.value());
@@ -393,12 +438,16 @@ private:
 //===--------------------------------------------------------------------===//
 // Global State
 //===--------------------------------------------------------------------===//
+// One output file. What prepare_batch reads here, the header of headered output and the relations, is the same in every
+// file of the COPY and is not changed after init (architecture.md, "Record writers on DuckDB's batch API",
+// Invariants).
 struct SAMCopyGlobalState : public GlobalFunctionData {
-	mutex write_lock;
+	mutex lock;
+	string file_path;
 	SAMFilePtr sam_file;
+	// Headered output: the @SQ lines of REFERENCE_LENGTHS, written at init and never changed after, so prepare_batch
+	// formats with it on any thread (sam_format1 only reads it). Null for headerless SAM.
 	SAMHeaderPtr header;
-	std::atomic<bool> header_written {false};
-	bool include_header = true;
 	// REFERENCE_LENGTHS and SEQUENCE_DATA as the COPY read them; null without either
 	shared_ptr<const SAMCopyRelations> relations;
 };
@@ -408,7 +457,7 @@ static unique_ptr<GlobalFunctionData> SAMCopyInitializeGlobal(ClientContext &con
 	auto &fdata = bind_data.Cast<SAMCopyBindData>();
 
 	auto gstate = make_uniq<SAMCopyGlobalState>();
-	gstate->include_header = fdata.include_header;
+	gstate->file_path = file_path;
 
 	// Determine write mode based on format and compression
 	string mode;
@@ -433,22 +482,15 @@ static unique_ptr<GlobalFunctionData> SAMCopyInitializeGlobal(ClientContext &con
 		throw IOException("Failed to open file for writing: " + file_path);
 	}
 
-	// Offload bgzf compression to a worker pool for BAM / gzip-SAM output. htslib
-	// writes the compressed blocks in record order regardless of pool size, so the
-	// output is byte-identical to the single-threaded path -- just faster.
-	// Uncompressed SAM ("w") has nothing to compress, so threads add no value.
+	// BAM and gzip SAM compress their BGZF blocks on a worker pool, which does not change the bytes. bgzf_mt, because
+	// hts_set_threads on SAM would also start a pool formatting records this writer has formatted (embedded-tools.md,
+	// htslib).
 	bool compressed_output = fdata.format == SAMOutputFormat::BAM || fdata.use_gzip;
 	if (compressed_output) {
 		auto n_threads = NumericCast<int>(TaskScheduler::GetScheduler(context).NumberOfThreads());
 		if (n_threads > 1) {
-			hts_set_threads(gstate->sam_file.get(), n_threads);
+			bgzf_mt(gstate->sam_file->fp.bgzf, n_threads, 256);
 		}
-	}
-
-	// Create header from reference_lengths if provided, otherwise create empty header
-	gstate->header = SAMHeaderPtr(sam_hdr_init());
-	if (!gstate->header) {
-		throw IOException("Failed to create SAM header");
 	}
 
 	if (fdata.reference_lengths_table.has_value() || fdata.sequence_data_table.has_value()) {
@@ -456,41 +498,27 @@ static unique_ptr<GlobalFunctionData> SAMCopyInitializeGlobal(ClientContext &con
 		                        ->GetOrRead(context, fdata);
 	}
 
-	if (fdata.reference_lengths_table.has_value()) {
-		// Add each reference to header
+	// Headered output (bind requires REFERENCE_LENGTHS for it) writes its header now, so that every batch formats with
+	// the header the file holds, and an empty COPY still writes one.
+	if (fdata.include_header) {
+		D_ASSERT(gstate->relations);
+		gstate->header = SAMHeaderPtr(sam_hdr_init());
+		if (!gstate->header) {
+			throw IOException("Failed to create SAM header");
+		}
 		for (const auto &ref : gstate->relations->reference_lengths) {
 			if (sam_hdr_add_line(gstate->header.get(), "SQ", "SN", ref.first.c_str(), "LN",
 			                     std::to_string(ref.second).c_str(), NULL) < 0) {
 				throw IOException("Failed to add reference to SAM header: %s", ref.first);
 			}
 		}
-	}
-	// If no reference_lengths provided, header remains empty
-	// References will be added dynamically as we encounter them during writing
-
-	return std::move(gstate);
-}
-
-//===--------------------------------------------------------------------===//
-// Local State
-//===--------------------------------------------------------------------===//
-struct SAMCopyLocalState : public LocalFunctionData {
-	BAMRecordPtr record;
-	std::vector<uint32_t> cigar_buffer;
-	size_t cigar_buffer_capacity = 0;
-	std::string seq_buffer;
-	std::vector<uint8_t> qual_buffer;
-
-	SAMCopyLocalState() {
-		record = BAMRecordPtr(bam_init1());
-		if (!record) {
-			throw IOException("Failed to allocate BAM record");
+		errno = 0;
+		if (sam_hdr_write(gstate->sam_file.get(), gstate->header.get()) < 0) {
+			ThrowCopyWriteFailed(SAMFormatName(fdata.format), file_path, "sam_hdr_write");
 		}
 	}
-};
 
-static unique_ptr<LocalFunctionData> SAMCopyInitializeLocal(ExecutionContext &context, FunctionData &bind_data) {
-	return make_uniq<SAMCopyLocalState>();
+	return std::move(gstate);
 }
 
 //===--------------------------------------------------------------------===//
@@ -504,7 +532,7 @@ static bool ParseCIGAR(const string &cigar_str, std::vector<uint32_t> &cigar_buf
 	// "*" and "" are the two spellings of "no CIGAR": the SAM sentinel, and what
 	// read_alignments/read_sam return for a record with zero CIGAR operations. Both parse to an
 	// empty buffer. Whether a record is ALLOWED to have no CIGAR depends on its unmapped flag,
-	// which the caller checks -- see the BAM_FUNMAP check in the Sink (#197).
+	// which the caller checks -- see the BAM_FUNMAP check in SAMRecordEncoder::Build.
 	if (cigar_str == "*" || cigar_str.empty()) {
 		return true;
 	}
@@ -531,83 +559,6 @@ static bool ParseCIGAR(const string &cigar_str, std::vector<uint32_t> &cigar_buf
 	free(cigar_array);
 
 	return true;
-}
-
-// Get reference TID from header, adding it dynamically if not present.
-//
-// allow_dynamic_append must be false whenever an @SQ header has been serialized to the file --
-// i.e. whenever include_header is true, which bind already ties to REFERENCE_LENGTHS being
-// supplied. Appending after sam_hdr_write() mutates only the in-memory header, so the added
-// entry never reaches the output and the record's reference becomes unrepresentable in the file
-// that was actually written: SAM read it back as '*', BAM dropped the record outright, neither
-// with any error (#198). Refusing is right because supplying REFERENCE_LENGTHS asserts the table
-// is the complete reference set, so a gap is a caller error.
-//
-// With include_header false there are no @SQ lines on disk to diverge from and each RNAME is
-// written verbatim from the in-memory header, so the append is lossless -- that is the
-// headerless-SAM case the mechanism exists for, and it stays.
-static int32_t GetReferenceTID(sam_hdr_t *header, const string &reference, bool allow_dynamic_append,
-                               const string &read_id, const char *column) {
-	if (reference == "*") {
-		return -1;
-	}
-	int32_t tid = sam_hdr_name2tid(header, reference.c_str());
-
-	// If reference not in header, add it with a sentinel length (2^31-1)
-	// This allows writing headerless SAM files without pre-defined reference lengths
-	if (tid < 0) {
-		if (!allow_dynamic_append) {
-			throw InvalidInputException(
-			    "Column '%s' is '%s' for read '%s', which is not in the REFERENCE_LENGTHS table. The header has "
-			    "already been written and cannot gain new @SQ lines, so this record could not be represented. "
-			    "REFERENCE_LENGTHS must cover every reference the records use (or use INCLUDE_HEADER=false to write "
-			    "headerless SAM).",
-			    column, reference, read_id);
-		}
-		constexpr const char *SENTINEL_LENGTH = "2147483647"; // 2^31-1, unknown length
-		if (sam_hdr_add_line(header, "SQ", "SN", reference.c_str(), "LN", SENTINEL_LENGTH, NULL) < 0) {
-			throw IOException("Failed to dynamically add reference to SAM header: %s", reference);
-		}
-		// Get the tid after adding
-		tid = sam_hdr_name2tid(header, reference.c_str());
-		if (tid < 0) {
-			throw IOException("Failed to get TID for dynamically added reference: %s", reference);
-		}
-	}
-
-	return tid;
-}
-
-//===--------------------------------------------------------------------===//
-// Tag Helpers
-//===--------------------------------------------------------------------===//
-static inline void AppendIntegerTag(bam1_t *record, const char *tag_name, const int64_t *data_ptr,
-                                    const UnifiedVectorFormat &format, idx_t row_idx, const string &read_id) {
-	if (!data_ptr) {
-		return;
-	}
-	auto data_idx = format.sel->get_index(row_idx);
-	if (format.validity.RowIsValid(data_idx)) {
-		int32_t value = static_cast<int32_t>(data_ptr[data_idx]);
-		if (bam_aux_append(record, tag_name, 'i', sizeof(int32_t), reinterpret_cast<uint8_t *>(&value)) < 0) {
-			throw IOException("Failed to append %s tag to BAM record for read: %s", tag_name, read_id);
-		}
-	}
-}
-
-static inline void AppendStringTag(bam1_t *record, const char *tag_name, const string_t *data_ptr,
-                                   const UnifiedVectorFormat &format, idx_t row_idx, const string &read_id) {
-	if (!data_ptr) {
-		return;
-	}
-	auto data_idx = format.sel->get_index(row_idx);
-	if (format.validity.RowIsValid(data_idx)) {
-		string value = data_ptr[data_idx].GetString();
-		if (bam_aux_append(record, tag_name, 'Z', (int)value.size() + 1,
-		                   reinterpret_cast<const uint8_t *>(value.c_str())) < 0) {
-			throw IOException("Failed to append %s tag to BAM record for read: %s", tag_name, read_id);
-		}
-	}
 }
 
 //===--------------------------------------------------------------------===//
@@ -637,9 +588,10 @@ static void PrepareSeqQual(const SequenceDataMap &seq_data, const std::string &r
 
 	// Validate sequence and quality lengths match (when quality is present)
 	if (!raw_qual.empty() && raw_qual.size() != raw_seq.size()) {
-		throw InvalidInputException("Sequence and quality lengths differ for read '%s' %s (seq=%llu, qual=%llu)",
-		                            read_id, is_read2 ? "R2" : "R1", static_cast<uint64_t>(raw_seq.size()),
-		                            static_cast<uint64_t>(raw_qual.size()));
+		throw InvalidInputException("Quality score length (%llu) does not match sequence length (%llu) for read_id "
+		                            "'%s'%s in the SEQUENCE_DATA table",
+		                            static_cast<uint64_t>(raw_qual.size()), static_cast<uint64_t>(raw_seq.size()),
+		                            read_id, is_read2 ? " (R2)" : "");
 	}
 
 	// Determine hard clipping from CIGAR
@@ -696,28 +648,19 @@ static void PrepareSeqQual(const SequenceDataMap &seq_data, const std::string &r
 //===--------------------------------------------------------------------===//
 // Identifier-column dispatch (read_id, reference, mate_reference)
 //===--------------------------------------------------------------------===//
-// Returns the SAM textual representation of an identifier-column cell.
-// - NULL → the SAM '*' sentinel, for every accepted type. VARCHAR used to be
-//   exempt and fell through to string_t::GetString() on an invalid slot, which
-//   emitted an EMPTY field: invalid SAM, and a BAM htslib refuses to read at
-//   all -- every record silently lost while the COPY reported success (#197).
-// - BIGINT: decimal stringification. UUID: canonical 36-char lowercase form.
-// - VARCHAR: bytes verbatim.
+// Returns the SAM textual representation of an identifier-column cell: the SAM '*' sentinel for a NULL, of every
+// accepted type (reading an invalid slot gave an empty field: invalid SAM, and a BAM htslib refuses to read at all);
+// otherwise the text the sequence writers give it (ResolveSequenceRecordId): BIGINT in decimal, UUID in its canonical
+// 36-character lowercase form, VARCHAR verbatim.
 static inline string ExtractSamIdField(const UnifiedVectorFormat &fmt, idx_t row_idx, const LogicalType &id_type) {
-	auto idx = fmt.sel->get_index(row_idx);
-	if (!fmt.validity.RowIsValid(idx)) {
+	if (!fmt.validity.RowIsValid(fmt.sel->get_index(row_idx))) {
 		return "*";
 	}
-	if (id_type.id() == LogicalTypeId::BIGINT) {
-		auto data = UnifiedVectorFormat::GetData<int64_t>(fmt);
-		return miint::FormatIdFromInt64(data[idx]);
-	}
-	if (id_type.id() == LogicalTypeId::UUID) {
-		auto data = UnifiedVectorFormat::GetData<hugeint_t>(fmt);
-		return UUID::ToString(data[idx]);
-	}
-	auto data = UnifiedVectorFormat::GetData<string_t>(fmt);
-	return data[idx].GetString();
+	string buf;
+	const char *ptr;
+	idx_t size;
+	ResolveSequenceRecordId(fmt, row_idx, id_type, buf, ptr, size);
+	return ptr == buf.data() ? std::move(buf) : string(ptr, size);
 }
 
 //===--------------------------------------------------------------------===//
@@ -746,70 +689,265 @@ static inline T RequiredScalar(const T *data, const UnifiedVectorFormat &fmt, id
 }
 
 //===--------------------------------------------------------------------===//
-// Sink
+// Record Encoder
 //===--------------------------------------------------------------------===//
-static void SAMCopySink(ExecutionContext &context, FunctionData &bind_data, GlobalFunctionData &gstate_p,
-                        LocalFunctionData &lstate_p, DataChunk &input) {
-	auto &fdata = bind_data.Cast<SAMCopyBindData>();
-	auto &gstate = gstate_p.Cast<SAMCopyGlobalState>();
-	auto &lstate = lstate_p.Cast<SAMCopyLocalState>();
 
-	// Use cached column indices from bind data
-	auto &indices = fdata.indices;
+// The references one batch of headerless SAM meets, in the order it meets them, as a header for sam_format1 to name
+// them from. It is never written. Records name their reference and mate reference, and write '=' where the two TIDs are
+// equal, so the bytes do not depend on which TIDs a batch gives. Only the target arrays are filled, as bam_hdr_read
+// fills them: sam_format1 reads nothing else. It is built anew for each batch, which meets up to two references a row,
+// so a reference costs no allocation of its own: its name goes to an arena, and is found again through an
+// open-addressing table of TIDs; the arrays and the table start with room for a chunk's rows and double.
+class BatchReferences {
+public:
+	BatchReferences() : names(Allocator::DefaultAllocator()), slots(INITIAL_SLOTS, EMPTY) {
+		target_names.reserve(INITIAL_SLOTS / 2);
+		target_lengths.reserve(INITIAL_SLOTS / 2);
+		entries.reserve(INITIAL_SLOTS / 2);
+	}
+	BatchReferences(const BatchReferences &) = delete;
+	BatchReferences &operator=(const BatchReferences &) = delete;
 
-	// Extract data from input vectors
+	int32_t TID(const string &name) {
+		const hash_t hash = Hash(name.c_str(), name.size());
+		idx_t slot = hash & (slots.size() - 1);
+		for (; slots[slot] != EMPTY; slot = (slot + 1) & (slots.size() - 1)) {
+			const auto tid = slots[slot];
+			if (entries[tid].hash == hash && entries[tid].size == name.size() &&
+			    memcmp(target_names[tid], name.c_str(), name.size()) == 0) {
+				return tid;
+			}
+		}
+		return Add(name, hash, slot);
+	}
+
+	const sam_hdr_t &Header() const {
+		return header;
+	}
+
+private:
+	// A full chunk's rows, one reference each, at half load
+	static constexpr idx_t INITIAL_SLOTS = 2 * STANDARD_VECTOR_SIZE;
+	static constexpr int32_t EMPTY = -1;
+
+	struct Entry {
+		hash_t hash;
+		idx_t size;
+	};
+
+	// A name the batch has not met, at the empty `slot` its probe ended on. Kept out of TID, which runs twice a row
+	// (reference and mate reference), so that TID stays small where it is inlined.
+	[[gnu::noinline]] int32_t Add(const string &name, hash_t hash, idx_t slot) {
+		const auto tid = NumericCast<int32_t>(target_names.size());
+		auto copy = char_ptr_cast(names.Allocate(name.size() + 1));
+		memcpy(copy, name.c_str(), name.size() + 1);
+		target_names.push_back(copy);
+		target_lengths.push_back(0); // unknown, and never written
+		entries.push_back(Entry {hash, name.size()});
+		slots[slot] = tid;
+		if (2 * target_names.size() > slots.size()) {
+			Grow();
+		}
+		// The vectors may have moved
+		header.n_targets = tid + 1;
+		header.target_name = target_names.data();
+		header.target_len = target_lengths.data();
+		return tid;
+	}
+
+	// Doubles the table, which is never more than half full
+	void Grow() {
+		vector<int32_t> grown(2 * slots.size(), EMPTY);
+		for (idx_t tid = 0; tid < entries.size(); tid++) {
+			idx_t slot = entries[tid].hash & (grown.size() - 1);
+			while (grown[slot] != EMPTY) {
+				slot = (slot + 1) & (grown.size() - 1);
+			}
+			grown[slot] = NumericCast<int32_t>(tid);
+		}
+		slots = std::move(grown);
+	}
+
+	ArenaAllocator names; // each name and the NUL sam_format1 reads it to
+	vector<char *> target_names;
+	vector<uint32_t> target_lengths;
+	vector<Entry> entries; // each TID's name: its hash and length
+	vector<int32_t> slots; // a TID or EMPTY; a power of two in size
+	// Its arrays are the vectors above and its names are in the arena, so it is never passed to sam_hdr_destroy
+	sam_hdr_t header {};
+};
+
+// The ENCODER RecordPrepareBatch and RecordFlushBatch take (copy_format_common.hpp). It builds a row into a bam1_t
+// (every check the row must pass, SEQ and QUAL from SEQUENCE_DATA, the TIDs and the tags), then stores it as a record:
+// for SAM, its sam_format1 line and '\n'; for BAM, as StoreBAMRecord stores it, which WriteSAMRecord writes in
+// place. Made for one prepare_batch or flush_batch call, so one thread uses it. It reads only the global
+// state's header and relations (see SAMCopyGlobalState).
+class SAMRecordEncoder {
+public:
+	SAMRecordEncoder(const SAMCopyBindData &fdata_p, const SAMCopyGlobalState &gstate)
+	    : fdata(fdata_p), relations(gstate.relations.get()), shared_header(gstate.header.get()), record(bam_init1()) {
+		if (!record) {
+			throw IOException("Failed to allocate BAM record");
+		}
+		if (!shared_header) {
+			references = make_uniq<BatchReferences>();
+		}
+		for (auto &column : SAM_TAG_COLUMNS) {
+			auto index = fdata.indices.*column.index;
+			if (index != DConstants::INVALID_INDEX) {
+				tags.push_back(Tag {&column, index, {}});
+			}
+		}
+	}
+
+	SAMRecordEncoder(const SAMRecordEncoder &) = delete;
+	SAMRecordEncoder &operator=(const SAMRecordEncoder &) = delete;
+	~SAMRecordEncoder() {
+		ks_free(&line);
+	}
+
+	void SetChunk(DataChunk &input) {
+		auto &indices = fdata.indices;
+		input.data[indices.read_id_idx].ToUnifiedFormat(read_id_data);
+		input.data[indices.flags_idx].ToUnifiedFormat(flags_data);
+		input.data[indices.reference_idx].ToUnifiedFormat(reference_data);
+		input.data[indices.position_idx].ToUnifiedFormat(position_data);
+		input.data[indices.mapq_idx].ToUnifiedFormat(mapq_data);
+		input.data[indices.cigar_idx].ToUnifiedFormat(cigar_data);
+		input.data[indices.mate_reference_idx].ToUnifiedFormat(mate_reference_data);
+		input.data[indices.mate_position_idx].ToUnifiedFormat(mate_position_data);
+		input.data[indices.template_length_idx].ToUnifiedFormat(template_length_data);
+		for (auto &tag : tags) {
+			input.data[tag.index].ToUnifiedFormat(tag.data);
+		}
+	}
+
+	// Checks row `row` of the chunk and appends its record to `out`
+	void Encode(idx_t row, RecordBuffer &out);
+
+	// Checks row `row` of the chunk, raising every data error Encode would
+	void Check(idx_t row) {
+		Build(row);
+	}
+
+private:
+	// Checks row `i` of the chunk and builds it into `record`. Every data error a row can have is raised here.
+	void Build(idx_t i);
+	int32_t ReferenceTID(const string &reference, const char *column);
+	void AppendTags(idx_t i);
+	void CheckBAMLimits() const;
+
+	struct Tag {
+		const SAMTagColumn *column;
+		idx_t index;
+		UnifiedVectorFormat data;
+	};
+
+	const SAMCopyBindData &fdata;
+	const SAMCopyRelations *relations;
+	const sam_hdr_t *shared_header;
+	unique_ptr<BatchReferences> references; // headerless SAM only
+	BAMRecordPtr record;
+	std::vector<uint32_t> cigar_buffer;
+	std::string seq_buffer;
+	std::vector<uint8_t> qual_buffer;
+	string read_id;
 	UnifiedVectorFormat read_id_data, flags_data, reference_data, position_data, mapq_data;
 	UnifiedVectorFormat cigar_data, mate_reference_data, mate_position_data, template_length_data;
-	UnifiedVectorFormat tag_as_data, tag_xs_data, tag_ys_data, tag_xn_data, tag_xm_data, tag_xo_data, tag_xg_data,
-	    tag_nm_data;
-	UnifiedVectorFormat tag_yt_data, tag_md_data, tag_sa_data;
+	vector<Tag> tags;               // the tag columns the input has, in SAM_TAG_COLUMNS' order
+	kstring_t line = KS_INITIALIZE; // SAM: the record's sam_format1 line
+};
 
-	input.data[indices.read_id_idx].ToUnifiedFormat(read_id_data);
-	input.data[indices.flags_idx].ToUnifiedFormat(flags_data);
-	input.data[indices.reference_idx].ToUnifiedFormat(reference_data);
-	input.data[indices.position_idx].ToUnifiedFormat(position_data);
-	input.data[indices.mapq_idx].ToUnifiedFormat(mapq_data);
-	input.data[indices.cigar_idx].ToUnifiedFormat(cigar_data);
-	input.data[indices.mate_reference_idx].ToUnifiedFormat(mate_reference_data);
-	input.data[indices.mate_position_idx].ToUnifiedFormat(mate_position_data);
-	input.data[indices.template_length_idx].ToUnifiedFormat(template_length_data);
+// A reference's TID: its index in REFERENCE_LENGTHS (sorted by name) for headered output, or this batch's own for
+// headerless SAM, which names references only by name.
+//
+// Headered output has written its @SQ lines, so a reference not among them cannot be written: SAM read it back as
+// '*', BAM dropped the record outright, neither with any error. Supplying REFERENCE_LENGTHS asserts the table
+// is the complete reference set, so a gap is a caller error.
+int32_t SAMRecordEncoder::ReferenceTID(const string &reference, const char *column) {
+	if (reference == "*") {
+		return -1;
+	}
+	if (references) {
+		return references->TID(reference);
+	}
+	auto entry = relations->reference_tids.find(reference);
+	if (entry == relations->reference_tids.end()) {
+		throw InvalidInputException(
+		    "Column '%s' is '%s' for read '%s', which is not in the REFERENCE_LENGTHS table. The header has "
+		    "already been written and cannot gain new @SQ lines, so this record could not be represented. "
+		    "REFERENCE_LENGTHS must cover every reference the records use (or use INCLUDE_HEADER=false to write "
+		    "headerless SAM).",
+		    column, reference, read_id);
+	}
+	return entry->second;
+}
 
-	if (indices.tag_as_idx != DConstants::INVALID_INDEX) {
-		input.data[indices.tag_as_idx].ToUnifiedFormat(tag_as_data);
+// Appends the row's tags, in SAM_TAG_COLUMNS' order; a NULL is no tag. An integer tag is a 32-bit signed value in SAM
+// and BAM alike, so one outside that range is an error rather than a value cut to 32 bits.
+void SAMRecordEncoder::AppendTags(idx_t i) {
+	for (auto &tag : tags) {
+		auto data_idx = tag.data.sel->get_index(i);
+		if (!tag.data.validity.RowIsValid(data_idx)) {
+			continue;
+		}
+		int appended;
+		if (tag.column->integer) {
+			auto value = UnifiedVectorFormat::GetData<int64_t>(tag.data)[data_idx];
+			if (value < NumericLimits<int32_t>::Minimum() || value > NumericLimits<int32_t>::Maximum()) {
+				throw InvalidInputException(
+				    "Column '%s' is %lld for read '%s', outside the 32-bit signed range of a SAM integer tag",
+				    tag.column->column, static_cast<long long>(value), read_id);
+			}
+			auto value32 = static_cast<int32_t>(value);
+			appended = bam_aux_append(record.get(), tag.column->tag, 'i', sizeof(int32_t),
+			                          reinterpret_cast<uint8_t *>(&value32));
+		} else {
+			string value = UnifiedVectorFormat::GetData<string_t>(tag.data)[data_idx].GetString();
+			appended = bam_aux_append(record.get(), tag.column->tag, 'Z', (int)value.size() + 1,
+			                          reinterpret_cast<const uint8_t *>(value.c_str()));
+		}
+		if (appended < 0) {
+			throw IOException("Failed to append %s tag to BAM record for read: %s", tag.column->tag, read_id);
+		}
 	}
-	if (indices.tag_xs_idx != DConstants::INVALID_INDEX) {
-		input.data[indices.tag_xs_idx].ToUnifiedFormat(tag_xs_data);
-	}
-	if (indices.tag_ys_idx != DConstants::INVALID_INDEX) {
-		input.data[indices.tag_ys_idx].ToUnifiedFormat(tag_ys_data);
-	}
-	if (indices.tag_xn_idx != DConstants::INVALID_INDEX) {
-		input.data[indices.tag_xn_idx].ToUnifiedFormat(tag_xn_data);
-	}
-	if (indices.tag_xm_idx != DConstants::INVALID_INDEX) {
-		input.data[indices.tag_xm_idx].ToUnifiedFormat(tag_xm_data);
-	}
-	if (indices.tag_xo_idx != DConstants::INVALID_INDEX) {
-		input.data[indices.tag_xo_idx].ToUnifiedFormat(tag_xo_data);
-	}
-	if (indices.tag_xg_idx != DConstants::INVALID_INDEX) {
-		input.data[indices.tag_xg_idx].ToUnifiedFormat(tag_xg_data);
-	}
-	if (indices.tag_nm_idx != DConstants::INVALID_INDEX) {
-		input.data[indices.tag_nm_idx].ToUnifiedFormat(tag_nm_data);
-	}
-	if (indices.tag_yt_idx != DConstants::INVALID_INDEX) {
-		input.data[indices.tag_yt_idx].ToUnifiedFormat(tag_yt_data);
-	}
-	if (indices.tag_md_idx != DConstants::INVALID_INDEX) {
-		input.data[indices.tag_md_idx].ToUnifiedFormat(tag_md_data);
-	}
-	if (indices.tag_sa_idx != DConstants::INVALID_INDEX) {
-		input.data[indices.tag_sa_idx].ToUnifiedFormat(tag_sa_data);
-	}
+}
 
-	// read_id, reference, mate_reference dispatch on bind-captured types
-	// (VARCHAR or BIGINT) via ExtractSamIdField; no top-level pointer needed.
+// What bam_write1 refuses beyond what bam_set1 does, checked here so that a batch's data errors are raised while it is
+// prepared and flush_batch writes every record it is given: positions and TLEN past 32 bits, and a CIGAR of more than
+// 65535 operations that spans 2^28 reference bases or more.
+void SAMRecordEncoder::CheckBAMLimits() const {
+	const auto &c = record->core;
+	// Positions are held 0-based; the columns, and these errors, are 1-based.
+	const auto check_position = [&](const char *column, hts_pos_t pos) {
+		if (pos > NumericLimits<int32_t>::Maximum()) {
+			throw InvalidInputException(
+			    "Column '%s' is %lld for read '%s', past %lld, the largest a BAM record holds (SAM text holds it)",
+			    column, static_cast<long long>(pos + 1), read_id,
+			    static_cast<long long>(NumericLimits<int32_t>::Maximum()) + 1);
+		}
+	};
+	check_position("position", c.pos);
+	check_position("mate_position", c.mpos);
+	if (c.isize < NumericLimits<int32_t>::Minimum() || c.isize > NumericLimits<int32_t>::Maximum()) {
+		throw InvalidInputException("Column 'template_length' is %lld for read '%s', outside the 32-bit signed range a "
+		                            "BAM record holds (SAM text holds it)",
+		                            static_cast<long long>(c.isize), read_id);
+	}
+	constexpr hts_pos_t LONG_CIGAR_SPAN = 1 << 28;
+	if (c.n_cigar > 0xffff) {
+		const auto span = bam_cigar2rlen(c.n_cigar, bam_get_cigar(record.get()));
+		if (span >= LONG_CIGAR_SPAN) {
+			throw InvalidInputException("Column 'cigar' of read '%s' has %lld operations spanning %lld reference "
+			                            "bases: a BAM record holds more than 65535 only if they span fewer than %lld "
+			                            "(SAM text holds it)",
+			                            read_id, static_cast<long long>(c.n_cigar), static_cast<long long>(span),
+			                            static_cast<long long>(LONG_CIGAR_SPAN));
+		}
+	}
+}
+
+void SAMRecordEncoder::Build(idx_t i) {
 	auto flags_ptr = UnifiedVectorFormat::GetData<uint16_t>(flags_data);
 	auto position_ptr = UnifiedVectorFormat::GetData<int64_t>(position_data);
 	auto mapq_ptr = UnifiedVectorFormat::GetData<uint8_t>(mapq_data);
@@ -817,187 +955,168 @@ static void SAMCopySink(ExecutionContext &context, FunctionData &bind_data, Glob
 	auto mate_position_ptr = UnifiedVectorFormat::GetData<int64_t>(mate_position_data);
 	auto template_length_ptr = UnifiedVectorFormat::GetData<int64_t>(template_length_data);
 
-	auto tag_as_ptr =
-	    indices.tag_as_idx != DConstants::INVALID_INDEX ? UnifiedVectorFormat::GetData<int64_t>(tag_as_data) : nullptr;
-	auto tag_xs_ptr =
-	    indices.tag_xs_idx != DConstants::INVALID_INDEX ? UnifiedVectorFormat::GetData<int64_t>(tag_xs_data) : nullptr;
-	auto tag_ys_ptr =
-	    indices.tag_ys_idx != DConstants::INVALID_INDEX ? UnifiedVectorFormat::GetData<int64_t>(tag_ys_data) : nullptr;
-	auto tag_xn_ptr =
-	    indices.tag_xn_idx != DConstants::INVALID_INDEX ? UnifiedVectorFormat::GetData<int64_t>(tag_xn_data) : nullptr;
-	auto tag_xm_ptr =
-	    indices.tag_xm_idx != DConstants::INVALID_INDEX ? UnifiedVectorFormat::GetData<int64_t>(tag_xm_data) : nullptr;
-	auto tag_xo_ptr =
-	    indices.tag_xo_idx != DConstants::INVALID_INDEX ? UnifiedVectorFormat::GetData<int64_t>(tag_xo_data) : nullptr;
-	auto tag_xg_ptr =
-	    indices.tag_xg_idx != DConstants::INVALID_INDEX ? UnifiedVectorFormat::GetData<int64_t>(tag_xg_data) : nullptr;
-	auto tag_nm_ptr =
-	    indices.tag_nm_idx != DConstants::INVALID_INDEX ? UnifiedVectorFormat::GetData<int64_t>(tag_nm_data) : nullptr;
-	auto tag_yt_ptr =
-	    indices.tag_yt_idx != DConstants::INVALID_INDEX ? UnifiedVectorFormat::GetData<string_t>(tag_yt_data) : nullptr;
-	auto tag_md_ptr =
-	    indices.tag_md_idx != DConstants::INVALID_INDEX ? UnifiedVectorFormat::GetData<string_t>(tag_md_data) : nullptr;
-	auto tag_sa_ptr =
-	    indices.tag_sa_idx != DConstants::INVALID_INDEX ? UnifiedVectorFormat::GetData<string_t>(tag_sa_data) : nullptr;
+	auto cigar_idx = cigar_data.sel->get_index(i);
 
-	// Write header once (first thread to arrive)
-	if (!gstate.header_written.load()) {
-		lock_guard<mutex> glock(gstate.write_lock);
-		if (!gstate.header_written.load()) {
-			if (fdata.include_header) {
-				if (sam_hdr_write(gstate.sam_file.get(), gstate.header.get()) < 0) {
-					throw IOException("Failed to write SAM header");
-				}
-			}
-			gstate.header_written.store(true);
-		}
+	read_id = ExtractSamIdField(read_id_data, i, fdata.read_id_type);
+	CheckBAMReadName(read_id.data(), read_id.size());
+
+	// flags must be present: it is what tells us whether the record even claims to be aligned,
+	// so every leniency below depends on it. A NULL here has no defensible reading.
+	uint16_t flags = RequiredScalar(flags_ptr, flags_data, i, "flags", read_id);
+	const bool row_unmapped = (flags & BAM_FUNMAP) != 0;
+
+	string reference = ExtractSamIdField(reference_data, i, fdata.reference_type);
+
+	// position and mapq are meaningless on an unmapped record, and SAM's own encoding for
+	// "absent" is 0 -- unambiguous, with no alignment that could be silently discarded. So a
+	// NULL is tolerated there and rejected on a mapped record. This is what lets
+	// align_minimap2's include_unmapped output be written straight out; those rows carry NULL
+	// position/mapq/cigar by design.
+	int64_t position = RequiredScalar(position_ptr, position_data, i, "position", read_id, row_unmapped);
+	uint8_t mapq = RequiredScalar(mapq_ptr, mapq_data, i, "mapq", read_id, row_unmapped);
+
+	// Same rule for cigar, with '*' as the sentinel instead of 0. Note this must consult
+	// validity rather than reading the slot: GetString() on an invalid slot is undefined and
+	// observably varies -- "" from a materialized table, garbage from a constant-NULL vector.
+	string cigar_str;
+	if (cigar_data.validity.RowIsValid(cigar_idx)) {
+		cigar_str = cigar_ptr[cigar_idx].GetString();
+	} else if (row_unmapped) {
+		cigar_str = "*";
+	} else {
+		throw InvalidInputException("Column 'cigar' is NULL for read: %s (only an unmapped record, FLAG 0x4, may "
+		                            "omit it -- otherwise supply a CIGAR, or '*' plus the 0x4 flag)",
+		                            read_id);
 	}
 
-	// Process each row
-	for (idx_t i = 0; i < input.size(); i++) {
-		auto cigar_idx = cigar_data.sel->get_index(i);
+	string mate_reference = ExtractSamIdField(mate_reference_data, i, fdata.mate_reference_type);
+	int64_t mate_position = RequiredScalar(mate_position_ptr, mate_position_data, i, "mate_position", read_id);
+	int64_t template_length = RequiredScalar(template_length_ptr, template_length_data, i, "template_length", read_id);
 
-		string read_id = ExtractSamIdField(read_id_data, i, fdata.read_id_type);
+	// Parse CIGAR
+	if (!ParseCIGAR(cigar_str, cigar_buffer)) {
+		throw InvalidInputException("Failed to parse CIGAR string '%s' for read: %s", cigar_str, read_id);
+	}
 
-		// flags must be present: it is what tells us whether the record even claims to be aligned,
-		// so every leniency below depends on it. A NULL here has no defensible reading.
-		uint16_t flags = RequiredScalar(flags_ptr, flags_data, i, "flags", read_id);
-		const bool row_unmapped = (flags & BAM_FUNMAP) != 0;
+	// A record that claims to be mapped must carry a CIGAR. samtools accepts this on read but
+	// silently rewrites the record as unmapped ("mapped query must have a CIGAR; treated as
+	// unmapped"), so writing one degrades the alignment with nothing in the SQL layer to show
+	// for it. Rewriting the caller's flags would be worse than refusing, so fail loud.
+	// Unmapped records legitimately have no CIGAR -- that is the read_alignments round trip.
+	if (cigar_buffer.empty() && (flags & BAM_FUNMAP) == 0) {
+		throw InvalidInputException("Mapped read '%s' has no CIGAR (flags=%d): set the unmapped flag (0x4) or "
+		                            "supply a CIGAR",
+		                            read_id, flags);
+	}
 
-		string reference = ExtractSamIdField(reference_data, i, fdata.reference_type);
+	// Validate position values before casting
+	if (position < 0) {
+		throw InvalidInputException("Invalid position value %lld for read: %s (must be non-negative)", position,
+		                            read_id);
+	}
+	if (position > 0 && (position - 1) > HTS_POS_MAX) {
+		throw InvalidInputException("Position value %lld exceeds maximum allowed position for read: %s", position,
+		                            read_id);
+	}
+	if (mate_position < 0) {
+		throw InvalidInputException("Invalid mate_position value %lld for read: %s (must be non-negative)",
+		                            mate_position, read_id);
+	}
+	if (mate_position > 0 && (mate_position - 1) > HTS_POS_MAX) {
+		throw InvalidInputException("Mate position value %lld exceeds maximum allowed position for read: %s",
+		                            mate_position, read_id);
+	}
 
-		// position and mapq are meaningless on an unmapped record, and SAM's own encoding for
-		// "absent" is 0 -- unambiguous, with no alignment that could be silently discarded. So a
-		// NULL is tolerated there and rejected on a mapped record. This is what lets
-		// align_minimap2's include_unmapped output be written straight out; those rows carry NULL
-		// position/mapq/cigar by design (#185).
-		int64_t position = RequiredScalar(position_ptr, position_data, i, "position", read_id, row_unmapped);
-		uint8_t mapq = RequiredScalar(mapq_ptr, mapq_data, i, "mapq", read_id, row_unmapped);
+	// Prepare SEQ and QUAL
+	size_t l_seq = 0;
+	const char *final_seq = nullptr;
+	const char *final_qual = nullptr;
 
-		// Same rule for cigar, with '*' as the sentinel instead of 0. Note this must consult
-		// validity rather than reading the slot: GetString() on an invalid slot is undefined and
-		// observably varies -- "" from a materialized table, garbage from a constant-NULL vector.
-		string cigar_str;
-		if (cigar_data.validity.RowIsValid(cigar_idx)) {
-			cigar_str = cigar_ptr[cigar_idx].GetString();
-		} else if (row_unmapped) {
-			cigar_str = "*";
-		} else {
-			throw InvalidInputException("Column 'cigar' is NULL for read: %s (only an unmapped record, FLAG 0x4, may "
-			                            "omit it -- otherwise supply a CIGAR, or '*' plus the 0x4 flag)",
-			                            read_id);
-		}
+	if (relations && relations->sequence_data.has_value()) {
+		PrepareSeqQual(relations->sequence_data.value(), read_id, flags, cigar_buffer, seq_buffer, qual_buffer);
+		l_seq = seq_buffer.size();
+		final_seq = seq_buffer.c_str();
+		final_qual = qual_buffer.empty() ? nullptr : reinterpret_cast<const char *>(qual_buffer.data());
+	}
 
-		string mate_reference = ExtractSamIdField(mate_reference_data, i, fdata.mate_reference_type);
-		int64_t mate_position = RequiredScalar(mate_position_ptr, mate_position_data, i, "mate_position", read_id);
-		int64_t template_length =
-		    RequiredScalar(template_length_ptr, template_length_data, i, "template_length", read_id);
+	int32_t tid = ReferenceTID(reference, "reference");
+	// "=" means the same as reference
+	int32_t mtid = mate_reference == "=" ? tid : ReferenceTID(mate_reference, "mate_reference");
 
-		// Parse CIGAR
-		if (!ParseCIGAR(cigar_str, lstate.cigar_buffer)) {
-			throw InvalidInputException("Failed to parse CIGAR string '%s' for read: %s", cigar_str, read_id);
-		}
+	// l_qname is the length WITHOUT null terminator (bam_set1 adds it internally)
+	if (bam_set1(record.get(), read_id.length(), read_id.c_str(), flags, tid,
+	             static_cast<hts_pos_t>(position - 1), // Convert to 0-based
+	             mapq, cigar_buffer.size(), cigar_buffer.data(), mtid,
+	             static_cast<hts_pos_t>(mate_position - 1), // Convert to 0-based
+	             static_cast<hts_pos_t>(template_length), l_seq, final_seq, final_qual, 0) < 0) {
+		throw IOException("Failed to build BAM record for read: " + read_id);
+	}
 
-		// A record that claims to be mapped must carry a CIGAR. samtools accepts this on read but
-		// silently rewrites the record as unmapped ("mapped query must have a CIGAR; treated as
-		// unmapped"), so writing one degrades the alignment with nothing in the SQL layer to show
-		// for it. Rewriting the caller's flags would be worse than refusing, so fail loud (#197).
-		// Unmapped records legitimately have no CIGAR -- that is the read_alignments round trip.
-		if (lstate.cigar_buffer.empty() && (flags & BAM_FUNMAP) == 0) {
-			throw InvalidInputException("Mapped read '%s' has no CIGAR (flags=%d): set the unmapped flag (0x4) or "
-			                            "supply a CIGAR",
-			                            read_id, flags);
-		}
+	AppendTags(i);
 
-		// Validate position values before casting
-		if (position < 0) {
-			throw InvalidInputException("Invalid position value %lld for read: %s (must be non-negative)", position,
-			                            read_id);
-		}
-		if (position > 0 && (position - 1) > HTS_POS_MAX) {
-			throw InvalidInputException("Position value %lld exceeds maximum allowed position for read: %s", position,
-			                            read_id);
-		}
-		if (mate_position < 0) {
-			throw InvalidInputException("Invalid mate_position value %lld for read: %s (must be non-negative)",
-			                            mate_position, read_id);
-		}
-		if (mate_position > 0 && (mate_position - 1) > HTS_POS_MAX) {
-			throw InvalidInputException("Mate position value %lld exceeds maximum allowed position for read: %s",
-			                            mate_position, read_id);
-		}
-
-		// Prepare SEQ and QUAL (thread-local, no lock needed)
-		size_t l_seq = 0;
-		const char *final_seq = nullptr;
-		const char *final_qual = nullptr;
-
-		if (gstate.relations && gstate.relations->sequence_data.has_value()) {
-			PrepareSeqQual(gstate.relations->sequence_data.value(), read_id, flags, lstate.cigar_buffer,
-			               lstate.seq_buffer, lstate.qual_buffer);
-			l_seq = lstate.seq_buffer.size();
-			final_seq = lstate.seq_buffer.c_str();
-			final_qual =
-			    lstate.qual_buffer.empty() ? nullptr : reinterpret_cast<const char *>(lstate.qual_buffer.data());
-		}
-
-		// Lock for TID resolution (may mutate header) + record build + write
-		{
-			lock_guard<mutex> glock(gstate.write_lock);
-
-			// Get reference TIDs. Appending to the header is only safe while none has been
-			// written to the file -- see GetReferenceTID. bind ties include_header to
-			// REFERENCE_LENGTHS being present, so this is exactly "the header on disk is the
-			// reference table".
-			const bool allow_dynamic_append = !fdata.include_header;
-			int32_t tid = GetReferenceTID(gstate.header.get(), reference, allow_dynamic_append, read_id, "reference");
-
-			// Handle mate_reference: "=" means same as reference
-			int32_t mtid;
-			if (mate_reference == "=") {
-				mtid = tid;
-			} else {
-				mtid = GetReferenceTID(gstate.header.get(), mate_reference, allow_dynamic_append, read_id,
-				                       "mate_reference");
-			}
-
-			// Build bam1_t record
-			// l_qname is the length WITHOUT null terminator (bam_set1 adds it internally)
-			if (bam_set1(lstate.record.get(), read_id.length(), read_id.c_str(), flags, tid,
-			             static_cast<hts_pos_t>(position - 1), // Convert to 0-based
-			             mapq, lstate.cigar_buffer.size(), lstate.cigar_buffer.data(), mtid,
-			             static_cast<hts_pos_t>(mate_position - 1), // Convert to 0-based
-			             static_cast<hts_pos_t>(template_length), l_seq, final_seq, final_qual, 0) < 0) {
-				throw IOException("Failed to build BAM record for read: " + read_id);
-			}
-
-			// Add optional tags
-			AppendIntegerTag(lstate.record.get(), "AS", tag_as_ptr, tag_as_data, i, read_id);
-			AppendIntegerTag(lstate.record.get(), "XS", tag_xs_ptr, tag_xs_data, i, read_id);
-			AppendIntegerTag(lstate.record.get(), "YS", tag_ys_ptr, tag_ys_data, i, read_id);
-			AppendIntegerTag(lstate.record.get(), "XN", tag_xn_ptr, tag_xn_data, i, read_id);
-			AppendIntegerTag(lstate.record.get(), "XM", tag_xm_ptr, tag_xm_data, i, read_id);
-			AppendIntegerTag(lstate.record.get(), "XO", tag_xo_ptr, tag_xo_data, i, read_id);
-			AppendIntegerTag(lstate.record.get(), "XG", tag_xg_ptr, tag_xg_data, i, read_id);
-			AppendIntegerTag(lstate.record.get(), "NM", tag_nm_ptr, tag_nm_data, i, read_id);
-			AppendStringTag(lstate.record.get(), "YT", tag_yt_ptr, tag_yt_data, i, read_id);
-			AppendStringTag(lstate.record.get(), "MD", tag_md_ptr, tag_md_data, i, read_id);
-			AppendStringTag(lstate.record.get(), "SA", tag_sa_ptr, tag_sa_data, i, read_id);
-
-			// Write record
-			if (sam_write1(gstate.sam_file.get(), gstate.header.get(), lstate.record.get()) < 0) {
-				throw IOException("Failed to write SAM record for read: " + read_id);
-			}
-		}
+	if (fdata.format == SAMOutputFormat::BAM) {
+		CheckBAMLimits();
 	}
 }
 
+void SAMRecordEncoder::Encode(idx_t row, RecordBuffer &out) {
+	Build(row);
+	if (fdata.format == SAMOutputFormat::BAM) {
+		StoreBAMRecord(*record, out);
+		return;
+	}
+	// Headered output's header, or this encoder's own references for headerless SAM
+	const auto &header = shared_header ? *shared_header : references->Header();
+	if (sam_format1(&header, record.get(), &line) < 0) {
+		throw IOException("Failed to write SAM record for read: " + read_id);
+	}
+	auto data = out.Reserve(line.l + 1);
+	memcpy(data, line.s, line.l);
+	data[line.l] = '\n';
+}
+
 //===--------------------------------------------------------------------===//
-// Combine
+// Prepare and Flush (DuckDB's batch API)
 //===--------------------------------------------------------------------===//
-static void SAMCopyCombine(ExecutionContext &context, FunctionData &bind_data, GlobalFunctionData &gstate_p,
-                           LocalFunctionData &lstate_p) {
-	// HTSlib handles buffering internally, nothing to combine
+static unique_ptr<PreparedBatchData> SAMCopyPrepareBatch(ClientContext &context, FunctionData &bind_data,
+                                                         GlobalFunctionData &gstate_p,
+                                                         unique_ptr<ColumnDataCollection> rows) {
+	SAMRecordEncoder encoder(bind_data.Cast<SAMCopyBindData>(), gstate_p.Cast<SAMCopyGlobalState>());
+	return RecordPrepareBatch(context, encoder, std::move(rows));
+}
+
+// Writes one record as the matching sam_write1 call would: BAM through WriteBAMRecord; SAM text as unthreaded
+// sam_write1 writes a line, ending a gzip block before a line that does not fit. So the bytes are those of writing each
+// record with sam_write1, whatever the batches. Caller holds gstate.lock.
+static void WriteSAMRecord(const SAMCopyBindData &fdata, SAMCopyGlobalState &gstate, const_data_ptr_t data,
+                           idx_t size) {
+	auto fp = gstate.sam_file.get();
+	if (fdata.format == SAMOutputFormat::BAM) {
+		WriteBAMRecord(fp, gstate.header.get(), data, size, SAMFormatName(fdata.format), gstate.file_path);
+		return;
+	}
+	errno = 0;
+	if (fdata.use_gzip) {
+		auto bgzf = fp->fp.bgzf;
+		if (bgzf_flush_try(bgzf, NumericCast<ssize_t>(size)) < 0 ||
+		    bgzf_write(bgzf, data, size) != NumericCast<ssize_t>(size)) {
+			ThrowCopyWriteFailed(SAMFormatName(fdata.format), gstate.file_path, "bgzf_write");
+		}
+	} else if (hwrite(fp->fp.hfile, data, size) != NumericCast<ssize_t>(size)) {
+		ThrowCopyWriteFailed(SAMFormatName(fdata.format), gstate.file_path, "hwrite");
+	}
+}
+
+// DuckDB calls flush_batch for one batch at a time per file, in input order when order is kept.
+static void SAMCopyFlushBatch(ClientContext &context, FunctionData &bind_data, GlobalFunctionData &gstate_p,
+                              PreparedBatchData &batch_p) {
+	auto &fdata = bind_data.Cast<SAMCopyBindData>();
+	auto &gstate = gstate_p.Cast<SAMCopyGlobalState>();
+	auto &batch = batch_p.Cast<RecordBatchData>();
+	lock_guard<mutex> glock(gstate.lock);
+	RecordFlushBatch(
+	    context, batch, [&]() { return SAMRecordEncoder(fdata, gstate); },
+	    [&](const_data_ptr_t data, idx_t size) { WriteSAMRecord(fdata, gstate, data, size); });
 }
 
 //===--------------------------------------------------------------------===//
@@ -1006,20 +1125,18 @@ static void SAMCopyCombine(ExecutionContext &context, FunctionData &bind_data, G
 static void SAMCopyFinalize(ClientContext &context, FunctionData &bind_data, GlobalFunctionData &gstate_p) {
 	auto &fdata = bind_data.Cast<SAMCopyBindData>();
 	auto &gstate = gstate_p.Cast<SAMCopyGlobalState>();
-
-	// Write header if we haven't written anything yet (empty file with header)
-	if (!gstate.header_written.load() && fdata.include_header) {
-		if (sam_hdr_write(gstate.sam_file.get(), gstate.header.get()) < 0) {
-			throw IOException("Failed to write SAM header for empty file");
-		}
-	}
-
-	// File is closed automatically by smart pointer destructor
+	lock_guard<mutex> glock(gstate.lock);
+	CloseSAMCopyFile(gstate.sam_file.release(), SAMFormatName(fdata.format), gstate.file_path);
 }
 
 //===--------------------------------------------------------------------===//
 // Function Definition
 //===--------------------------------------------------------------------===//
+// FORMAT SAM and BAM are two registrations each: the public one ("sam") declares the options, the extension and a plan
+// callback, which rebinds the statement as the writer ("_miint_sam"). See SequenceCopyPlan.
+static constexpr const char *SAM_WRITER_FORMAT = "_miint_sam";
+static constexpr const char *BAM_WRITER_FORMAT = "_miint_bam";
+
 static void SAMCopyOptions(ClientContext &context, CopyOptionsInput &input) {
 	DeclareCopyOption(input, "include_header", LogicalType::BOOLEAN);
 	DeclareCopyOption(input, "compression", LogicalType::VARCHAR);
@@ -1028,37 +1145,49 @@ static void SAMCopyOptions(ClientContext &context, CopyOptionsInput &input) {
 	DeclareCopyOption(input, "sequence_data", LogicalType::VARCHAR);
 }
 
+static BoundStatement SAMCopyPlan(Binder &binder, CopyStatement &stmt) {
+	return SequenceCopyPlan(binder, stmt, SAM_WRITER_FORMAT);
+}
+
+static BoundStatement BAMCopyPlan(Binder &binder, CopyStatement &stmt) {
+	return SequenceCopyPlan(binder, stmt, BAM_WRITER_FORMAT);
+}
+
 CopyFunction CopySAMFunction::GetFunction() {
 	CopyFunction function("sam");
 	function.copy_options = SAMCopyOptions;
-	function.copy_to_bind = SAMCopyBind;
-	function.copy_to_initialize_global = SAMCopyInitializeGlobal;
-	function.copy_to_initialize_local = SAMCopyInitializeLocal;
-	function.copy_to_sink = SAMCopySink;
-	function.copy_to_combine = SAMCopyCombine;
-	function.copy_to_finalize = SAMCopyFinalize;
+	function.plan = SAMCopyPlan;
 	function.extension = "sam";
-
 	return function;
 }
 
 CopyFunction CopySAMFunction::GetBAMFunction() {
 	CopyFunction function("bam");
 	function.copy_options = SAMCopyOptions;
-	function.copy_to_bind = BAMCopyBind;
-	function.copy_to_initialize_global = SAMCopyInitializeGlobal;
-	function.copy_to_initialize_local = SAMCopyInitializeLocal;
-	function.copy_to_sink = SAMCopySink;
-	function.copy_to_combine = SAMCopyCombine;
-	function.copy_to_finalize = SAMCopyFinalize;
+	function.plan = BAMCopyPlan;
 	function.extension = "bam";
+	return function;
+}
 
+// FORMAT _miint_sam / _miint_bam: the writers. Named directly, they write without the default batch cap.
+static CopyFunction GetWriterFunction(const char *name, copy_to_bind_t bind, const char *extension) {
+	CopyFunction function(name);
+	function.copy_options = SAMCopyOptions;
+	function.copy_to_bind = bind;
+	function.copy_to_initialize_global = SAMCopyInitializeGlobal;
+	function.copy_to_finalize = SAMCopyFinalize;
+	function.execution_mode = SequenceCopyExecutionMode;
+	function.prepare_batch = SAMCopyPrepareBatch;
+	function.flush_batch = SAMCopyFlushBatch;
+	function.extension = extension;
 	return function;
 }
 
 void CopySAMFunction::Register(ExtensionLoader &loader) {
 	loader.RegisterFunction(GetFunction());
 	loader.RegisterFunction(GetBAMFunction());
+	loader.RegisterFunction(GetWriterFunction(SAM_WRITER_FORMAT, SAMCopyBind, "sam"));
+	loader.RegisterFunction(GetWriterFunction(BAM_WRITER_FORMAT, BAMCopyBind, "bam"));
 }
 
 } // namespace duckdb

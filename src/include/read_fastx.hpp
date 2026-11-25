@@ -2,6 +2,7 @@
 #include "SequenceReader.hpp"
 #include "duckdb_seq_stream.hpp"
 #include "remote_file_helper.hpp"
+#include "scan_batch_index.hpp"
 #include "table_function_common.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_open_flags.hpp"
@@ -59,6 +60,8 @@ public:
 		bool read_ahead;
 		std::vector<uint64_t>
 		    file_sequence_counters; // Per-file sequence counters (no atomic needed - file access is exclusive)
+		// Chunks per file with a batch index of their own (ScanBatchIndex).
+		idx_t batch_stride;
 		FileSystem &fs;
 
 		// A file, or a pair of files, is read by one thread at a time, so a scan can use one thread
@@ -76,7 +79,8 @@ public:
 		GlobalState(FileSystem &fs, const std::vector<std::string> &sequence1_paths,
 		            const std::optional<std::vector<std::string>> &sequence2_paths, bool stdin_used, bool allow_empty_p,
 		            bool read_ahead)
-		    : next_file_idx(0), uses_stdin(stdin_used), allow_empty(allow_empty_p), read_ahead(read_ahead), fs(fs) {
+		    : next_file_idx(0), uses_stdin(stdin_used), allow_empty(allow_empty_p), read_ahead(read_ahead),
+		      batch_stride(ScanBatchIndex::Stride(sequence1_paths.size())), fs(fs) {
 			sequence1_filepaths = sequence1_paths;
 			if (sequence2_paths.has_value()) {
 				sequence2_filepaths = sequence2_paths.value();
@@ -119,8 +123,11 @@ public:
 	struct LocalState : public LocalTableFunctionState {
 		size_t current_file_idx;
 		bool has_file;
+		// Chunks emitted from the current file, and the batch index of the last chunk emitted.
+		idx_t file_chunks;
+		idx_t batch_index;
 
-		LocalState() : current_file_idx(0), has_file(false) {
+		LocalState() : current_file_idx(0), has_file(false), file_chunks(0), batch_index(0) {
 		}
 	};
 
@@ -133,6 +140,8 @@ public:
 	                                                     GlobalTableFunctionState *global_state);
 
 	static void Execute(ClientContext &context, TableFunctionInput &data_p, DataChunk &output);
+
+	static OperatorPartitionData GetPartitionData(ClientContext &context, TableFunctionGetPartitionInput &input);
 
 	static TableFunction GetFunction();
 	static void Register(ExtensionLoader &loader);

@@ -736,3 +736,39 @@ DROP TABLE valid_placements;
 
 statement ok
 DROP TABLE single_placement;
+
+# =============================================================================
+# Labels. With PLACEMENTS, the tree's `label` column is written as the Newick label of a node
+# with no name, as without placements; the nodes the placements create have none.
+# =============================================================================
+
+statement ok
+CREATE TABLE label_placements AS
+SELECT * FROM (VALUES
+    ('frag1', 0::BIGINT, 0.95::DOUBLE, 0.05::DOUBLE, 0.001::DOUBLE)
+) AS t(fragment_id, edge_id, like_weight_ratio, distal_length, pendant_length);
+
+statement ok
+COPY (SELECT *, CASE WHEN NOT is_tip THEN 'n' || node_index END AS label
+      FROM read_newick('data/newick/with_edge_ids.nwk'))
+TO '{TEST_DIR}/placements_labels.nwk' (FORMAT NEWICK, PLACEMENTS 'label_placements');
+
+query T
+SELECT name FROM read_newick('{TEST_DIR}/placements_labels.nwk') WHERE NOT is_tip AND name <> '' ORDER BY name;
+----
+n2
+n4
+
+query I
+SELECT count(*) FROM read_newick('{TEST_DIR}/placements_labels.nwk') WHERE NOT is_tip AND name = '';
+----
+1
+
+# The labels sit on their own nodes: the root is n4.
+query T
+SELECT name FROM read_newick('{TEST_DIR}/placements_labels.nwk') WHERE parent_index IS NULL;
+----
+n4
+
+statement ok
+DROP TABLE label_placements;

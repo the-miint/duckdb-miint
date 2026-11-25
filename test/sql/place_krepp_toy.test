@@ -83,8 +83,10 @@ SELECT count(*) FROM (
 # as a branch, and a negative branch cannot be represented there. Before
 # 31205033 krepp computed it as the Jukes-Cantor distance minus half the edge,
 # and on this index 270 of 404 rows came out negative, down to -0.14971. krepp
-# now floors it at 0 in make_placement (ext/krepp/src/query.cpp). Over the older
-# krepp's output on this index, this clause matches those 270 rows.
+# now replaces a negative value with the Jukes-Cantor distance to the nearest
+# matched leaf below the edge, or 0 without one (compute_branch_lengths,
+# ext/krepp/src/query.hpp). Over the older krepp's output on this index, this
+# clause matches those 270 rows.
 query I
 SELECT count(*)
 FROM place_krepp(query_table='toy_reads', index_path='{MIINT_KREPP_TOY_INDEX}')
@@ -207,33 +209,37 @@ SELECT count(*) FROM place_krepp(
 ----
 0
 
-# Compared on the set of placed fragments and the row count, not on the
-# measures. like_weight_ratio is not reproducible run to run - krepp normalizes
-# it over a hash map keyed by node pointer, so the accumulation order moves with
-# the heap. Measured on this index: 28 to 102 of 404 rows differ between two calls in
-# one process, by up to 2.5e-4 absolute (3.9e-3 relative), while likelihood,
-# distance, distal_length and pendant_length are bit-identical. krepp's own CLI
-# is less stable still - across processes it varies which edges appear at all.
+# RNA and DNA input return the same rows, in every column.
 query I
 WITH rna AS (
-    SELECT DISTINCT fragment
-    FROM place_krepp(query_table='toy_reads_rna', index_path='{MIINT_KREPP_TOY_INDEX}')
+    SELECT * FROM place_krepp(query_table='toy_reads_rna', index_path='{MIINT_KREPP_TOY_INDEX}')
 ), dna AS (
-    SELECT DISTINCT fragment
-    FROM place_krepp(query_table='toy_reads', index_path='{MIINT_KREPP_TOY_INDEX}')
+    SELECT * FROM place_krepp(query_table='toy_reads', index_path='{MIINT_KREPP_TOY_INDEX}')
 )
-SELECT (SELECT count(*) FROM (SELECT * FROM rna EXCEPT SELECT * FROM dna))
-     + (SELECT count(*) FROM (SELECT * FROM dna EXCEPT SELECT * FROM rna));
+SELECT (SELECT count(*) FROM (SELECT * FROM rna EXCEPT ALL SELECT * FROM dna))
+     + (SELECT count(*) FROM (SELECT * FROM dna EXCEPT ALL SELECT * FROM rna));
 ----
 0
 
 query I
-SELECT (SELECT count(*) FROM place_krepp(query_table='toy_reads_rna',
-                                         index_path='{MIINT_KREPP_TOY_INDEX}'))
-     = (SELECT count(*) FROM place_krepp(query_table='toy_reads',
-                                         index_path='{MIINT_KREPP_TOY_INDEX}'));
+SELECT count(*) > 0 FROM place_krepp(query_table='toy_reads_rna', index_path='{MIINT_KREPP_TOY_INDEX}');
 ----
 true
+
+# Two calls return the same rows in every column, like_weight_ratio included,
+# with multi on and off (the krepp code behind it is listed in
+# docs/internals/embedded-tools.md).
+query I
+SELECT count(*) FROM (
+    (SELECT * FROM place_krepp(query_table='toy_reads', index_path='{MIINT_KREPP_TOY_INDEX}')
+     EXCEPT ALL
+     SELECT * FROM place_krepp(query_table='toy_reads', index_path='{MIINT_KREPP_TOY_INDEX}'))
+    UNION ALL
+    (SELECT * FROM place_krepp(query_table='toy_reads', index_path='{MIINT_KREPP_TOY_INDEX}', multi=false)
+     EXCEPT ALL
+     SELECT * FROM place_krepp(query_table='toy_reads', index_path='{MIINT_KREPP_TOY_INDEX}', multi=false)));
+----
+0
 
 # --- reads shorter than k ---------------------------------------------------
 #
@@ -333,8 +339,8 @@ SELECT (SELECT count(*) FROM (SELECT * FROM mixed EXCEPT SELECT * FROM expected)
 # --- non-nucleotide input raises -------------------------------------------
 #
 # A byte outside the IUPAC alphabet means the column does not hold what the
-# caller thinks it holds - a gapped alignment column, or protein. krepp indexes
-# a 128-entry table with a plain char, so a byte above 127 reads out of bounds.
+# caller thinks it holds - a gapped alignment column, or protein. krepp reads
+# any byte outside ACGT (either case) as N, so it would place such input as ambiguous bases.
 # Raising beats placing garbage.
 
 statement ok
@@ -457,7 +463,7 @@ contains whitespace outside a quoted label
 # accumulating (ext/krepp/src/phytree.cpp:141-143); otherwise the space falls
 # through into the buffer and becomes part of the NEXT label, so the tip is
 # named ' B'. map_to_qtree then looks that up, misses, and skips it - its only
-# diagnostic for the miss is commented out (phytree.cpp:500-506). Nothing is
+# diagnostic for the miss is commented out (phytree.cpp:519-525). Nothing is
 # reported at any layer, so rejecting here is the one place a caller finds out.
 # (Mechanism read from krepp's source, not observed end to end: the CLI takes a
 # backbone only at index time, so there is no way to run the corrupted tree
@@ -495,9 +501,8 @@ true
 # the IBatch constructor. Replace either with a literal in KreppPlacer and no
 # other assertion in this suite moves.
 #
-# Which edge multi=false picks is not reproducible (see the Reproducibility
-# table in docs/phylogeny.md), but the cardinality is: at most one row per
-# fragment, and never more rows than the multi-on run.
+# multi=false returns at most one row per fragment, and never more rows than
+# the multi-on run.
 
 query I
 SELECT count(*) = count(DISTINCT fragment)
@@ -528,7 +533,7 @@ true
 # A larger chisq cutoff admits more candidate edges. Strict `>`, not `>=`: with
 # chisq hardcoded inside KreppPlacer both sides would be the same query and
 # `>=` would hold trivially, which is the mutation this is meant to catch.
-# Measured on this index: chisq 0.001/2.706/10.0/100.0 give 264/404/514/872 rows.
+# Measured on this index: chisq 0.001/2.706/10.0/100.0 give 264/403/508/869 rows.
 query I
 SELECT (SELECT count(*) FROM place_krepp(query_table='toy_reads',
             index_path='{MIINT_KREPP_TOY_INDEX}', chisq=10.0))
@@ -548,8 +553,8 @@ true
 #
 # There is an oracle-free property that separates them. distal_length locates
 # the attachment point ON the edge, so it never exceeds the edge's branch length:
-# make_placement clamps it inside the edge, or takes min(t/2, d_c)
-# (ext/krepp/src/query.cpp:218-242). pendant_length is the length of a new branch
+# compute_branch_lengths takes it as a fraction in [0, 1] of the edge
+# (ext/krepp/src/query.hpp). pendant_length is the length of a new branch
 # hanging off that point and has no such bound. Swap the two and the bound check
 # below fails; the query after it shows the swap would have something to trip on.
 #
@@ -588,7 +593,7 @@ WHERE p.distal_length > coalesce(b.branch_length, 0.0);
 0
 
 # Anti-vacuity, and the other half of the discriminator: some pendant_length
-# exceeds its edge's branch length (105 of 404 rows, measured on this index), so
+# exceeds its edge's branch length (161 of 403 rows, measured on this index), so
 # a swap moves those values into distal_length and the query above fails.
 query I
 SELECT count(*) > 0
@@ -597,17 +602,24 @@ WHERE p.pendant_length > coalesce(b.branch_length, 0.0);
 ----
 true
 
-# pendant_length against distance and distal_length, the other two small doubles
-# on that scale. krepp floors pendant_length at 0 (make_placement,
-# ext/krepp/src/query.cpp:230, :233): on this index 205 of 404 rows sit on that
-# floor, and distance and distal_length are positive on every row. Reading
-# either of them into pendant_length leaves no row like that.
+# pendant_length against distance, the other small double on that scale.
+# compute_branch_lengths (ext/krepp/src/query.hpp) takes pendant_length as at
+# least d_x - distal_length, where d_x is the Jukes-Cantor distance krepp derives
+# from distance: -0.75 * ln(1 - 4/3 * distance) (Minfo::jukes_cantor_dist, CJC).
+# So pendant_length + distal_length >= d_x on every row except one whose pendant
+# fell back to a leaf distance; on this index that is every one of the 403 rows.
+# Swapping pendant_length with distance breaks it on 129 rows, reading distance
+# into pendant_length on 20, and reading distal_length into it on 168. The sum is
+# symmetric in pendant_length and distal_length, so it cannot see that swap; the
+# branch-length bound above does. Some rows sit exactly on the bound (pendant is
+# d_x - distal), so the comparison allows 1e-12 for rounding; the counts above
+# are measured with it.
 query I
-SELECT count(*) > 0
+SELECT count(*)
 FROM distal_bound_placements
-WHERE pendant_length = 0 AND distance > 0 AND distal_length > 0;
+WHERE pendant_length + distal_length < -0.75 * ln(1 - 4.0 / 3.0 * distance) - 1e-12;
 ----
-true
+0
 
 # --- jplace {N} edge decorations -------------------------------------------
 #
@@ -680,7 +692,8 @@ could not be parsed
 # likelihood landscape both ways depending on the data. What IS being asserted
 # is that the parameter arrives at all.
 #
-# Measured on this index: hdist_th 1/2/4/8/20 give 405/406/404/319/229 rows.
+# Measured on this index: hdist_th 1/2/4/8/20 give 407/402/403/318/235 rows
+# (tau 1 at hdist_th 1, tau 2 otherwise).
 query I
 SELECT (SELECT count(*) FROM place_krepp(query_table='toy_reads',
             index_path='{MIINT_KREPP_TOY_INDEX}', hdist_th=2, tau=2))
@@ -689,9 +702,9 @@ SELECT (SELECT count(*) FROM place_krepp(query_table='toy_reads',
 ----
 true
 
-# tau gates the placement filter (ext/krepp/src/query.cpp:247, :295: a
+# tau gates the placement filter (ext/krepp/src/query.cpp:343, :396: a
 # candidate survives when the k-mers within tau of it weigh more than 1). It is
-# inert at the default hdist_th on this corpus - 404 rows at tau 0, 1, 2 and 4
+# inert at the default hdist_th on this corpus - 403 rows at tau 0, 1, 2 and 4
 # alike - because every surviving candidate already clears the bar at tau=0.
 # Widening hdist_th surfaces the marginal candidates it is meant to judge:
 # measured 229 rows at tau=0 against 522 at tau=20.
@@ -725,23 +738,20 @@ SELECT count(*) > 0 FROM place_krepp(query_table='toy_reads',
 ----
 true
 
-# Same placements, not merely a similar number of them. Measured: the
-# (fragment, edge_num) sets are identical and likelihood, distal_length,
-# pendant_length and distance agree exactly; only like_weight_ratio moves,
-# which docs/phylogeny.md already records as not reproducible.
+# Same rows in every column, not merely a similar number of them.
 query II
 SELECT
   (SELECT count(*) FROM (
-     SELECT fragment, edge_num FROM place_krepp(query_table='toy_reads',
+     SELECT * FROM place_krepp(query_table='toy_reads',
          index_path='{MIINT_KREPP_TOY_INDEX}')
-     EXCEPT
-     SELECT fragment, edge_num FROM place_krepp(query_table='toy_reads',
+     EXCEPT ALL
+     SELECT * FROM place_krepp(query_table='toy_reads',
          index_path='{MIINT_KREPP_TOY_INDEX}', newick_path='ext/krepp/test/tree_toy.nwk'))),
   (SELECT count(*) FROM (
-     SELECT fragment, edge_num FROM place_krepp(query_table='toy_reads',
+     SELECT * FROM place_krepp(query_table='toy_reads',
          index_path='{MIINT_KREPP_TOY_INDEX}', newick_path='ext/krepp/test/tree_toy.nwk')
-     EXCEPT
-     SELECT fragment, edge_num FROM place_krepp(query_table='toy_reads',
+     EXCEPT ALL
+     SELECT * FROM place_krepp(query_table='toy_reads',
          index_path='{MIINT_KREPP_TOY_INDEX}')));
 ----
 0	0
@@ -749,7 +759,7 @@ SELECT
 # --- a backbone whose labels are not the index's ---------------------------
 #
 # krepp's map_to_qtree skips a backbone leaf it cannot find in the index and
-# says nothing (its diagnostic is commented out, phytree.cpp:500-506). Every
+# says nothing (its diagnostic is commented out, phytree.cpp:519-525). Every
 # skipped leaf leaves eff_nchildren at 0 and collect_placements then rejects
 # every candidate, so the whole call returns zero rows - indistinguishable from
 # "these reads placed nowhere". Measured before the guard existed: one read
@@ -768,7 +778,7 @@ shares no tip labels
 # matches nothing either, but `backbone_tips_total == 0` is also how "no
 # newick_path was given" is represented internally, so it needs its own branch.
 # Verified reachable - miint's parser accepts empty tip labels, and krepp's
-# check_unique_labels skips unlabeled nodes (phytree.cpp:456) rather than
+# check_unique_labels skips unlabeled nodes (phytree.cpp:473) rather than
 # exiting, so nothing rejects this tree before the check runs.
 statement ok
 COPY (SELECT '(:1,:1):0;') TO '{TEST_DIR}/unlabeled.nwk'
@@ -812,7 +822,7 @@ WHERE message LIKE '%backbone tree tips are present in the index%';
 # --- {N} outside the range krepp represents --------------------------------
 #
 # miint's parser reads the decoration as int64; krepp narrows it to uint32 with
-# static_cast<se_t>(std::atol(...)) (phytree.cpp:232). Unbounded, {-5} would be
+# static_cast<se_t>(std::atol(...)) (phytree.cpp:236). Unbounded, {-5} would be
 # reported back as 4294967291 - breaking the promise that these numbers are
 # echoed verbatim - and {-1} would collide with {4294967295} inside krepp while
 # looking distinct to the uniqueness check, reaching an error_exit. Both are

@@ -62,11 +62,7 @@ void ReadRelation(ClientContext &context, const char *fn, const std::string &rel
 	}
 	auto &types = stream->GetTypes();
 	for (size_t i = 0; i < columns.size(); ++i) {
-		if (types[i] != columns[i].second) {
-			throw InvalidInputException(
-			    "%s: column '%s' of '%s' is %s now but was %s when the statement was bound; run or prepare it again",
-			    fn, columns[i].first, relation, types[i].ToString(), columns[i].second.ToString());
-		}
+		CheckBoundType(fn, "'" + relation + "'", columns[i].first, types[i], columns[i].second);
 	}
 	while (auto chunk = stream->Fetch()) {
 		if (chunk->size() == 0) {
